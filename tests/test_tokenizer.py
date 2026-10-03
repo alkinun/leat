@@ -8,7 +8,7 @@ from leat.gguf import GGUF
 from leat.tokenizer import _BYTE_CHAR, CONTROL, NORMAL, USER_DEFINED, Tokenizer
 
 
-def tiny_tokenizer(**overrides) -> Tokenizer:
+def tiny_metadata(**overrides) -> dict:
     tokens = [*_BYTE_CHAR.values(), "bc", "ab", "he", "ll", "hell", "<s>", "<|eot|>", "<user>"]
     types = [NORMAL] * (len(tokens) - 3) + [CONTROL, CONTROL, USER_DEFINED]
     metadata = {
@@ -20,7 +20,11 @@ def tiny_tokenizer(**overrides) -> Tokenizer:
         "tokenizer.ggml.bos_token_id": tokens.index("<s>"),
         "tokenizer.ggml.eos_token_id": tokens.index("<|eot|>"),
     }
-    return Tokenizer(metadata | overrides)
+    return metadata | overrides
+
+
+def tiny_tokenizer(**overrides) -> Tokenizer:
+    return Tokenizer(tiny_metadata(**overrides))
 
 
 def ids(tok: Tokenizer, *pieces: str) -> list[int]:

@@ -6,6 +6,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
+  "jinja2>=3.1.6",
   # tinygrad's custom-kernel and HCQ APIs move fast: pin a commit and bump it deliberately.
   "tinygrad @ git+https://github.com/tinygrad/tinygrad.git@9d7054488aee0e455e226514ba4b8b2f32329c29",
 ]
