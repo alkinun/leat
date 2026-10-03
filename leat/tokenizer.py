@@ -1,6 +1,8 @@
-"""Byte-level BPE tokenizer built from GGUF metadata, matching llama.cpp's llama-vocab.cpp."""
+"""BPE tokenizers built from GGUF metadata, matching llama.cpp's llama-vocab.cpp: byte-level, as
+GPT-2's, or SentencePiece-style over characters, as Gemma 4's."""
 
 import codecs
+import heapq
 import itertools
 import re
 import unicodedata
@@ -13,9 +15,11 @@ _UNPRINTABLE = [b for b in range(256) if b not in _PRINTABLE]
 _BYTE_CHAR = {b: chr(b) for b in _PRINTABLE} | {b: chr(256 + i) for i, b in enumerate(_UNPRINTABLE)}
 _CHAR_BYTE = {c: b for b, c in _BYTE_CHAR.items()}
 
-NORMAL, UNKNOWN, CONTROL, USER_DEFINED = 1, 2, 3, 4
+NORMAL, UNKNOWN, CONTROL, USER_DEFINED, UNUSED, BYTE = 1, 2, 3, 4, 5, 6
 # llama.cpp treats these as end of generation in addition to the eos/eot/eom ids
-_EOG_TEXT = {"<|eot_id|>", "<|eom_id|>", "<|end_of_text|>", "<|im_end|>", "<|endoftext|>"}
+_EOG_TEXT = {"<|eot_id|>", "<|eom_id|>", "<|end_of_text|>", "<|im_end|>", "<|endoftext|>",
+             "<eos>", "<turn|>", "<|tool_response>"}  # fmt: skip
+SPACE = "\u2581"  # how SentencePiece spells a space
 
 
 def _category_classes() -> dict[str, str]:
@@ -65,26 +69,30 @@ class Tokenizer:
     """
 
     def __init__(self, metadata: dict[str, Any]):
-        if (model := metadata.get("tokenizer.ggml.model")) != "gpt2":
-            raise NotImplementedError(f"tokenizer model {model!r} is not supported")
-        if (pre := metadata.get("tokenizer.ggml.pre")) not in _PRE_TOKENIZERS:
-            raise NotImplementedError(f"pre-tokenizer {pre!r} is not supported")
+        model, pre = metadata.get("tokenizer.ggml.model"), metadata.get("tokenizer.ggml.pre")
+        if model == "gemma4":  # spaces as SPACE, whole lines as words, and no byte-level mapping
+            self._pattern, self._byte_level = re.compile(r"[^\n]+|\n+"), False
+        elif model == "gpt2" and pre in _PRE_TOKENIZERS:
+            self._pattern, self._byte_level = _pattern(_PRE_TOKENIZERS[pre]), True
+        else:
+            raise NotImplementedError(
+                f"tokenizer {model!r} with pre-tokenizer {pre!r} is not supported"
+            )
         tokens: list[str] = metadata["tokenizer.ggml.tokens"]
         types: list[int] = metadata.get("tokenizer.ggml.token_type", [NORMAL] * len(tokens))
-        self._pattern = _pattern(_PRE_TOKENIZERS[pre])
         self._vocab = {
             t: i for i, t in enumerate(tokens) if types[i] not in (CONTROL, USER_DEFINED)
         }
-        if missing := [c for c in _BYTE_CHAR.values() if c not in self._vocab]:
+        if self._byte_level and (
+            missing := [c for c in _BYTE_CHAR.values() if c not in self._vocab]
+        ):
             raise ValueError(f"vocab lacks {len(missing)} byte tokens, it is not byte-level BPE")
         merges = metadata.get("tokenizer.ggml.merges", [])
-        self._ranks = {tuple(m.split(" ", 1)): r for r, m in enumerate(merges)}
+        self._ranks = {_pair(m): r for r, m in enumerate(merges)}
         self._ignore_merges = pre == "llama-bpe"  # whole-word vocab hits skip BPE, as in tiktoken
         self._cache: dict[str, tuple[int, ...]] = {}
 
-        self._bytes = [
-            b"" if ty == CONTROL else _spell(t, ty) for t, ty in zip(tokens, types, strict=True)
-        ]
+        self._bytes = [_spell(t, ty, self._byte_level) for t, ty in zip(tokens, types, strict=True)]
         special = {t: i for i, t in enumerate(tokens) if types[i] in (CONTROL, USER_DEFINED)}
         user = {t: i for t, i in special.items() if types[i] == USER_DEFINED}
         self._special, self._user = special, user
@@ -128,31 +136,77 @@ class Tokenizer:
 
     def _encode_ordinary(self, text: str) -> list[int]:
         out: list[int] = []
-        for word in self._pattern.findall(text):
-            out += self._bpe("".join(_BYTE_CHAR[b] for b in word.encode()))
+        for word in self._pattern.findall(text if self._byte_level else text.replace(" ", SPACE)):
+            out += self._bpe(
+                "".join(_BYTE_CHAR[b] for b in word.encode()) if self._byte_level else word
+            )
         return out
 
     def _bpe(self, word: str) -> tuple[int, ...]:
         if (cached := self._cache.get(word)) is not None:
             return cached
-        if self._ignore_merges and word in self._vocab:
+        # whole-word vocab hits skip merging with llama-bpe, and runs of newlines with gemma4
+        if word in self._vocab and (self._ignore_merges or not word.strip("\n")):
             return (self._vocab[word],)
-        parts, never = list(word), len(self._ranks)
-        while len(parts) > 1:
-            pairs = enumerate(itertools.pairwise(parts))
-            rank, i = min((self._ranks.get(pair, never), i) for i, pair in pairs)
-            if rank == never:
-                break
-            parts[i : i + 2] = [parts[i] + parts[i + 1]]
+        ids = tuple(i for part in _merge(word, self._ranks) for i in self._ids(part))
         if len(self._cache) > 1 << 16:
             self._cache.clear()
-        ids = self._cache[word] = tuple(self._vocab[p] for p in parts)
+        self._cache[word] = ids
         return ids
 
+    def _ids(self, part: str) -> list[int]:
+        # a merged part's token, or else its bytes': as <0xXX> tokens where they are not byte-level
+        if part in self._vocab:
+            return [self._vocab[part]]
+        if self._byte_level:
+            return [self._vocab[c] for c in part]
+        return [self._vocab[f"<0x{b:02X}>"] for b in part.encode()]
 
-def _spell(token: str, ttype: int) -> bytes:
+
+def _pair(merge: str) -> tuple[str, str]:
+    # the two parts of a merge, split at its first space after the first character, as llama.cpp
+    i = merge.index(" ", 1)
+    return merge[:i], merge[i + 1 :]
+
+
+def _merge(word: str, ranks: dict[tuple[str, str], int]) -> list[str]:
+    # BPE: merges the adjacent pair of lowest rank, the leftmost on ties, until no pair has one.
+    # A heap of candidate pairs, as in llama.cpp, keeps long words fast: Gemma's are whole lines.
+    parts, after = list(word), [*range(1, len(word)), -1]
+    before, heap = [*range(-1, len(word) - 1)], list[tuple[int, int, int, str]]()
+
+    def push(i: int) -> None:
+        if (
+            i >= 0
+            and (j := after[i]) >= 0
+            and (rank := ranks.get((parts[i], parts[j]))) is not None
+        ):
+            heapq.heappush(heap, (rank, i, j, parts[i] + parts[j]))
+
+    for i in range(len(parts) - 1):
+        push(i)
+    while heap:
+        _, i, j, merged = heapq.heappop(heap)
+        if after[i] != j or parts[i] + parts[j] != merged:  # a stale pair
+            continue
+        parts[i], parts[j], after[i] = merged, "", after[j]
+        if after[j] >= 0:
+            before[after[j]] = i
+        push(before[i])
+        push(i)
+    return [p for p in parts if p]
+
+
+def _spell(token: str, ttype: int, byte_level: bool) -> bytes:
+    # the bytes a token decodes to: none for control and unused tokens, as in llama.cpp
+    if ttype in (CONTROL, UNUSED):
+        return b""
     if ttype == USER_DEFINED:
         return token.encode()
+    if ttype == BYTE:
+        return bytes([int(token[3:5], 16)])  # <0xXX>
+    if not byte_level:
+        return token.replace(SPACE, " ").encode()
     try:
         return bytes(_CHAR_BYTE[c] for c in token)
     except KeyError:

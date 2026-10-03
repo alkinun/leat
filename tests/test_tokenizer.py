@@ -5,7 +5,7 @@ import subprocess
 import pytest
 
 from leat.gguf import GGUF
-from leat.tokenizer import Tokenizer
+from leat.tokenizer import BYTE, CONTROL, NORMAL, Tokenizer
 from tests.helpers import ids, tiny_metadata
 
 
@@ -47,6 +47,33 @@ def test_stream_holds_partial_utf8():
     assert [step(i) for i in tok.encode("é🚀", bos=False)] == ["", "é", "", "", "", "🚀"]
     cut = tok.encode("🚀", bos=False)[:2]  # an incomplete character ends as decode() ends it
     assert [step(i) for i in cut] + [step(None)] == ["", "", tok.decode(cut)]
+
+
+def test_sentencepiece_style():
+    # Gemma 4: BPE over characters with spaces as U+2581, whole lines as words, and byte tokens
+    # for characters the vocab lacks
+    tokens = [f"<0x{b:02X}>" for b in range(256)] + [
+        "\u2581",
+        "a",
+        "b",
+        "\u2581a",
+        "ab",
+        "\n",
+        "\n\n",
+    ]
+    tokens += ["<bos>", "<turn|>"]
+    types = [BYTE] * 256 + [NORMAL] * 7 + [CONTROL] * 2
+    tok = Tokenizer(
+        {"tokenizer.ggml.model": "gemma4", "tokenizer.ggml.tokens": tokens,
+         "tokenizer.ggml.token_type": types, "tokenizer.ggml.merges": ["\u2581 a", "a b"],
+         "tokenizer.ggml.bos_token_id": tokens.index("<bos>")}
+    )  # fmt: skip
+    text = "ab a\n\né"
+    assert tok.encode(text, bos=False) == [tokens.index(t) for t in ["ab", "\u2581a", "\n\n"]] + [
+        0xC3,
+        0xA9,
+    ]
+    assert tok.decode(tok.encode(text)) == text and tok.eog_ids == {tokens.index("<turn|>")}
 
 
 def test_unsupported():
