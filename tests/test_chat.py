@@ -124,6 +124,8 @@ def test_no_template():
 @pytest.mark.model
 def test_llama3(model_path):
     metadata = GGUF.open(model_path).metadata
+    if metadata["general.architecture"] != "llama":
+        pytest.skip("checks Llama 3's template")
     c = ChatTemplate(metadata, Tokenizer(metadata))
     text = c.render([{"role": "system", "content": "Be brief."}, {"role": "user", "content": "Hi"}])
     assert text == (

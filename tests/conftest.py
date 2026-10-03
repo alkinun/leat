@@ -1,3 +1,4 @@
+import gc
 import os
 from collections.abc import Callable
 from pathlib import Path
@@ -8,6 +9,14 @@ import pytest
 # It reads DEV when imported, so this comes first.
 os.environ.setdefault("DEV", "CPU")
 GPU_BACKENDS = {"NV", "CUDA", "AMD"}
+
+
+@pytest.fixture(autouse=True)
+def _collect(request):
+    # a real model fills most of a GPU: free one test's before the next test loads another
+    yield
+    if request.node.get_closest_marker("model"):
+        gc.collect()
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
