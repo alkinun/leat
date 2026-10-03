@@ -126,7 +126,7 @@ def quantize_q8(
     q = Tensor.empty(count * n // 4, dtype=dtypes.int32, device=x.device)
     d = Tensor.empty(count * n // GROUP, dtype=dtypes.float32, device=x.device)
     s = Tensor.empty(count * n // GROUP, dtype=dtypes.float32, device=x.device)
-    x, rows = _with_count(x.float().contiguous(), count if rows is None else rows)
+    x, rows = _carry(x.float().contiguous(), count if rows is None else rows)
     if norm is None:
         fxn = functools.partial(_quantize_q8_kernel, rows=rows)
         out = Tensor.custom_kernel(q, d, s, x, fxn=fxn)
@@ -136,11 +136,11 @@ def quantize_q8(
     return out[0], out[1], out[2]
 
 
-def _with_count(t: Tensor, count: int | UOp) -> tuple[Tensor, int | UOp]:
-    # a bound count rides on one of the kernel's buffers, so the kernel's own copy stays unbound
-    if isinstance(count, UOp):
-        return Tensor(t.uop.after(count)), count.unbind_all()[0]
-    return t, count
+def _carry(t: Tensor, value: int | UOp) -> tuple[Tensor, int | UOp]:
+    # a bound variable rides on one of the kernel's buffers, so the kernel's own copy stays unbound
+    if isinstance(value, UOp):
+        return Tensor(t.uop.after(value)), value.unbind_all()[0]
+    return t, value
 
 
 def _k_scale_min(w: UOp, base: UOp, sub: UOp) -> tuple[UOp, UOp]:
@@ -516,7 +516,7 @@ def _matmuls(
     tokens, cols = x.shape[-2], x.shape[-1]
     count = -(-x.max_shape[-2] // TILE_TOKENS) * TILE_TOKENS
     xq, xd, xs = quantize_q8(x.reshape(tokens, cols).pad_to((count, cols)), norm, rows=tokens)
-    xq, bound = _with_count(xq, tokens)
+    xq, bound = _carry(xq, tokens)
     res: tuple[Tensor, ...] = ()
     if residual is not None:
         res = (residual.reshape(tokens, -1).float().pad_to((count, ws[0].shape[0])).contiguous(),)
@@ -700,7 +700,7 @@ def supports_attention(q: Tensor, cache: Tensor) -> bool:
 
 def attention(q: Tensor, cache: Tensor, length: int | UOp) -> Tensor:
     """Attention of one query token (1, H, 1, D) over the first `length` cached positions."""
-    cache, length = _with_count(cache, length)
+    cache, length = _carry(cache, length)
     heads, dim, group = q.shape[1], cache.shape[4], q.shape[1] // cache.shape[2]
     waves = 16
     while waves * ((group * dim + PAD) * 2 + group * 8) > SHARED:
@@ -716,6 +716,182 @@ def attention(q: Tensor, cache: Tensor, length: int | UOp) -> Tensor:
     out = Tensor.empty(1, heads, 1, dim, dtype=dtypes.float32, device=q.device)
     fxn = functools.partial(_attention_combine_kernel, live=live)
     return Tensor.custom_kernel(out, partial, stats, fxn=fxn)[0]
+
+
+# ******** attention: a chunk of query tokens against the KV cache ********
+# FlashAttention-2 on f16 tensor cores. A block takes 16 query tokens and one kv head, with a warp
+# for each query head of the GQA group; the warps share tiles of 64 keys and values in shared
+# memory, and each keeps its rows' scores, softmax statistics and outputs in registers.
+
+QUERIES, KEY_TILE = 16, 64
+
+# mma.sync on f16 with f32 accumulation: c (4 f32) + a 16 x 16 tile times a 16 x 8 tile, from the
+# lane's 4 and 2 words of f16 pairs; results return as in _MMA
+_MMA_F16 = (
+    '[&]{{ float d0, d1, d2, d3; asm("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 '
+    '{{%0,%1,%2,%3}}, {{%4,%5,%6,%7}}, {{%8,%9}}, {{%10,%11,%12,%13}};" '
+    ': "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3) '
+    ': "r"({1}), "r"({2}), "r"({3}), "r"({4}), "r"({5}), "r"({6}), '
+    '"f"({7}), "f"({8}), "f"({9}), "f"({10})); '
+    "{0}[1] = d1; {0}[2] = d2; {0}[3] = d3; return d0; }}()"
+)
+
+
+def _mma_f16(a: list[UOp], b: list[UOp], c: list[UOp]) -> list[UOp]:
+    d = UOp.alloc((4,), dtypes.float32, addrspace=AddrSpace.REG)
+    product = UOp(Ops.CUSTOM, src=(d[0], *a, *b, *c), arg=(_MMA_F16, dtypes.float32))
+    d = d.after(d[0].store(product))
+    return [d[i].load() for i in range(4)]
+
+
+def _f16_pair(lo: UOp, hi: UOp) -> UOp:
+    # two f32 as one word of f16, lo in the low half; cvt puts its first source in the high half
+    code = (
+        '[&]{{ unsigned r; asm("cvt.rn.f16x2.f32 %0, %1, %2;" : "=r"(r) : "f"({1}), "f"({0})); '
+        "return r; }}()"
+    )
+    return UOp(Ops.CUSTOM, src=(lo, hi), arg=(code, dtypes.uint32))
+
+
+def _halves_word(lo: UOp, hi: UOp) -> UOp:
+    return lo.bitcast(dtypes.uint16).cast(dtypes.uint32) | (
+        hi.bitcast(dtypes.uint16).cast(dtypes.uint32) << 16
+    )
+
+
+def _quad(value: UOp, op: Callable[[UOp, UOp], UOp]) -> UOp:
+    # reduces over the 4 lanes that hold a row of an mma result
+    for mask in (1, 2):
+        value = op(value, _shfl_xor(value, mask))
+    return value
+
+
+@functools.cache
+def _flash_attention_kernel(
+    out: UOp, q: UOp, cache: UOp, start: int | UOp, tokens: int | UOp
+) -> UOp:
+    # q (heads, count, dim) in f16, scaled so that exp2 gives the softmax, and the f16 cache, read
+    # as words of f16 pairs; query i is at position start + i and sees positions up to it
+    heads, dim = int(q.shape[0]), int(q.shape[2])
+    kv_heads, words = int(cache.shape[2]), dim // 2
+    cache = cache.flatten().bitcast(dtypes.uint32).reshape(2, kv_heads, int(cache.shape[3]), words)
+    group = heads // kv_heads
+    threads = group * WARP
+    tile = UOp.range((tokens + QUERIES - 1) // QUERIES, 0, AxisType.GLOBAL)
+    kv_head = UOp.range(kv_heads, 1, AxisType.GLOBAL)
+    lane, warp = _lane(), UOp.range(group, 2, AxisType.LOCAL)
+    head, tid, g, t = kv_head * group + warp, warp * WARP + lane, lane // 4, lane % 4
+    rows = (tile * QUERIES + g, tile * QUERIES + g + 8)  # the lane's rows of each mma result
+    # queries as A fragments of 16 dimensions
+    queries = [
+        [
+            _halves_word(*(q[head, r, 16 * k + 8 * h + 2 * t + i].load() for i in (0, 1)))
+            for h in (0, 1)
+            for r in rows
+        ]
+        for k in range(dim // 16)
+    ]
+    # the keys and values up to the tile's last query, KEY_TILE at a time: keys as they are in
+    # the cache, values transposed so that B fragments of keys are words
+    end = start + (tile * QUERIES + QUERIES).minimum(tokens)
+    kt = UOp.range((end + KEY_TILE - 1) // KEY_TILE, 3, AxisType.LOOP)
+    keys = UOp.alloc((KEY_TILE, words + 4), dtypes.uint32, addrspace=AddrSpace.LOCAL)
+    values = UOp.alloc((dim, KEY_TILE // 2 + 4), dtypes.uint32, addrspace=AddrSpace.LOCAL)
+    stores = []
+    for i in range(KEY_TILE * words // threads):
+        key, w = (i * threads + tid) // words, (i * threads + tid) % words
+        stores.append(keys[key, w].store(cache[0, kv_head, kt * KEY_TILE + key, w].load()))
+    for i in range(KEY_TILE // 2 * words // threads):
+        pair, w = (i * threads + tid) % (KEY_TILE // 2), (i * threads + tid) // (KEY_TILE // 2)
+        a, b = (cache[1, kv_head, kt * KEY_TILE + 2 * pair + j, w].load() for j in (0, 1))
+        stores.append(values[2 * w, pair].store((a & 0xFFFF) | (b << 16)))
+        stores.append(values[2 * w + 1, pair].store((a >> 16) | (b & 0xFFFF0000)))
+    keys, values = keys.after(*stores), values.after(*stores)
+
+    # a finite initial max keeps exp2 from seeing -inf - -inf
+    acc, mx, total = (_register((dim // 2,), 0.0), _register((2,), -1e30), _register((2,), 0.0))
+    prev_acc, prev_max, prev_total = acc.after(kt), mx.after(kt), total.after(kt)
+    zero = UOp.const(0.0, dtypes.float32)
+    scores = []  # 8 tiles of 8 keys, masked to the positions each row sees
+    for j in range(KEY_TILE // 8):
+        c = [zero] * 4
+        for k in range(dim // 16):
+            c = _mma_f16(queries[k], [keys[8 * j + g, 8 * k + 4 * h + t].load() for h in (0, 1)], c)
+        position = kt * KEY_TILE + 8 * j + 2 * t
+        scores.append(
+            [(position + e % 2 <= start + rows[e // 2]).where(c[e], -math.inf) for e in range(4)]
+        )
+    row_max = [
+        _quad(
+            functools.reduce(UOp.maximum, (s[e] for s in scores for e in (2 * r, 2 * r + 1))),
+            UOp.maximum,
+        )
+        for r in (0, 1)
+    ]
+    new_max = [prev_max[r].load().maximum(row_max[r]) for r in (0, 1)]
+    rescale = [(prev_max[r].load() - new_max[r]).exp2() for r in (0, 1)]
+    p = [[(s[e] - new_max[e // 2]).exp2() for e in range(4)] for s in scores]
+    sums = [
+        _quad(sum((x[e] for x in p for e in (2 * r, 2 * r + 1)), zero), UOp.__add__) for r in (0, 1)
+    ]
+    # the weights as A fragments: the results of two 8-key tiles make one of 16 keys
+    weights = [
+        [_f16_pair(*p[2 * k + i][2 * r : 2 * r + 2]) for i in (0, 1) for r in (0, 1)]
+        for k in range(KEY_TILE // 16)
+    ]
+    outs: list[UOp] = []
+    for n in range(dim // 8):
+        c = [prev_acc[4 * n + e].load() * rescale[e // 2] for e in range(4)]
+        for k in range(KEY_TILE // 16):
+            c = _mma_f16(
+                weights[k], [values[8 * n + g, 8 * k + 4 * h + t].load() for h in (0, 1)], c
+            )
+        outs += c
+    update = UOp.group(
+        acc.store(UOp.stack(*outs)),
+        mx.store(UOp.stack(*new_max)),
+        total.store(UOp.stack(*(prev_total[r].load() * rescale[r] + sums[r] for r in (0, 1)))),
+    ).end(kt)
+    acc, total = acc.after(update), total.after(update)
+    results = [
+        out[rows[e // 2], head * dim + 8 * n + 2 * t + e % 2].store(
+            acc[4 * n + e].load() / total[e // 2].load()
+        )
+        for n in range(dim // 8)
+        for e in range(4)
+    ]
+    info = KernelInfo(name="flash_attention", opts_to_apply=())
+    return UOp.group(*results).end(tile, kv_head, lane, warp).sink(arg=info)
+
+
+def supports_flash_attention(q: Tensor, cache: Tensor) -> bool:
+    if not isinstance(q.device, str) or q.device.split(":")[0] not in ("NV", "CUDA"):
+        return False
+    shape = (*cache.shape[1:], q.shape[0], q.shape[1])
+    if not all(isinstance(x, int) for x in shape):
+        return False
+    batch, kv_heads, n, dim, q_batch, heads = (int(x) for x in shape)
+    threads, words = heads // kv_heads * WARP, dim // 2
+    shared = 4 * (KEY_TILE * (words + 4) + dim * (KEY_TILE // 2 + 4))
+    whole = KEY_TILE * words % threads == 0 and KEY_TILE // 2 * words % threads == 0
+    return (
+        batch == q_batch == 1 and dim % 16 == 0 and n % KEY_TILE == 0 and shared <= SHARED and whole
+    )
+
+
+def flash_attention(q: Tensor, cache: Tensor, start_pos: int | UOp) -> Tensor:
+    """Causal attention of query tokens (1, H, T, D) at positions start_pos.. over the cache, which
+    already holds their keys and values. Returns (1, T, H * D)."""
+    _, heads, tokens, dim = q.shape
+    count = -(-q.max_shape[2] // QUERIES) * QUERIES
+    q = (q.reshape(heads, tokens, dim).float() * (LOG2E / math.sqrt(dim))).half()
+    q = q.pad_to((heads, count, dim)).contiguous()
+    q, start = _carry(q, start_pos)
+    cache, length = _carry(cache, tokens)
+    out = Tensor.empty(count, heads * dim, dtype=dtypes.float32, device=q.device)
+    fxn = functools.partial(_flash_attention_kernel, start=start, tokens=length)
+    out = Tensor.custom_kernel(out, q, cache, fxn=fxn)[0]
+    return out[:tokens].reshape(1, tokens, heads * dim)
 
 
 # ******** argmax over a row of logits ********

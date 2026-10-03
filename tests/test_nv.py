@@ -212,6 +212,32 @@ def test_attention(n, length, symbolic):
         np.testing.assert_allclose(got[0, h, 0], expected, rtol=2e-3, atol=2e-3)
 
 
+@pytest.mark.parametrize("tokens, start", [(37, 0), (64, 0), (100, 300), (512, 3584)])
+@pytest.mark.parametrize("symbolic", [False, True])
+def test_flash_attention(tokens, start, symbolic):
+    rng = np.random.default_rng(tokens + start)
+    heads, kv_heads, dim, n = 32, 8, 128, 4096
+    cache = rng.standard_normal((2, 1, kv_heads, n, dim)).astype(np.float16)
+    q = rng.standard_normal((1, heads, 512, dim)).astype(np.float32)
+    q_t, cache_t = Tensor(q).realize(), Tensor(cache).realize()
+    if symbolic:  # as while prefilling: a bound start and number of tokens
+        pos = UOp.variable("start_pos", 0, n - 1).bind(start)
+        q_t = q_t[:, :, : UOp.variable("chunk_len", 1, 512).bind(tokens)]
+    else:
+        pos, q_t = start, q_t[:, :, :tokens]
+    assert nv.supports_flash_attention(q_t, cache_t)
+    got = nv.flash_attention(q_t, cache_t, pos).pad_to((1, 512, heads * dim)).numpy()
+    got = got[0, :tokens].reshape(tokens, heads, dim)
+    k, v = (cache[i, 0, :, : start + tokens].astype(np.float64) for i in range(2))
+    causal = np.arange(start + tokens) > start + np.arange(tokens)[:, None]
+    for h in range(heads):
+        scores = q[0, h, :tokens] @ k[h // (heads // kv_heads)].T / np.sqrt(dim)
+        p = np.exp(np.where(causal, -np.inf, scores - scores.max(-1, keepdims=True)))
+        expected = (p / p.sum(-1, keepdims=True)) @ v[h // (heads // kv_heads)]
+        # queries and weights are rounded to f16 for the tensor cores
+        np.testing.assert_allclose(got[:, h], expected, rtol=3e-3, atol=3e-3)
+
+
 @pytest.mark.parametrize("rows, n", [(1, 128256), (3, 1000), (2, 33), (1, 1)])
 def test_argmax(rows, n):
     rng = np.random.default_rng(n)

@@ -71,6 +71,8 @@ def attention(q: Tensor, cache: Tensor, start_pos: int | UOp) -> Tensor:
     if _fast() and nv.supports_attention(q, cache):
         # one token: the heads already follow each other; a transpose here would cost a copy
         return nv.attention(q, cache, start_pos + T).reshape(B, T, H * D)
+    if _fast() and nv.supports_flash_attention(q, cache):
+        return nv.flash_attention(q, cache, start_pos)
     k, v = (
         cache[0, :, :, : start_pos + T].cast(q.dtype),
         cache[1, :, :, : start_pos + T].cast(q.dtype),
