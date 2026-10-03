@@ -8,6 +8,7 @@ from tinygrad import Tensor, UOp, dtypes
 from leat import ops
 from leat.quant import QTensor
 
+CACHE_TILE = 256  # positions
 _LAYER = ("attn_norm", "attn_q", "attn_k", "attn_v", "attn_output",
           "ffn_norm", "ffn_gate", "ffn_up", "ffn_down")  # fmt: skip
 
@@ -71,7 +72,9 @@ class Transformer:
             None if "rope_freqs.weight" not in weights else weights["rope_freqs.weight"].dequant()
         )
         self.cos, self.sin = _rope_table(config, max_context, factors)
-        shape = (2, 1, config.n_kv_heads, max_context, config.head_dim)
+        # whole tiles of positions, which the attention kernels need; the rest stay unused
+        positions = -(-max_context // CACHE_TILE) * CACHE_TILE
+        shape = (2, 1, config.n_kv_heads, positions, config.head_dim)
         self.cache = [
             Tensor.zeros(shape, dtype=dtypes.half).contiguous().realize()
             for _ in range(config.n_layers)

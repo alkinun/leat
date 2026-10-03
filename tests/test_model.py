@@ -7,7 +7,7 @@ from tinygrad import Tensor, dtypes
 from leat import bench
 from leat.engine import Engine
 from leat.gguf import GGUF
-from leat.model import Config, Transformer
+from leat.model import CACHE_TILE, Config, Transformer
 from tests.helpers import CONTEXT, reference_logits
 
 PROMPT = [5, 77, 120, 3, 299, 42, 8, 150, 61, 200, 9, 33]
@@ -27,6 +27,14 @@ def test_forward_matches_reference(tiny_model):
     tokens = Tensor([PROMPT], dtype=dtypes.int32)
     logits = model.logits(model(tokens, 0)).numpy()[0]
     np.testing.assert_allclose(logits, reference_logits(weights, PROMPT), rtol=2e-3, atol=2e-3)
+
+
+def test_cache_whole_tiles(tiny_model):
+    # attention kernels take caches of whole tiles; generation still stops at max_context
+    path, _ = tiny_model
+    f = GGUF.open(path)
+    model = Transformer(Config.from_gguf(f.metadata), f.load(), 50)
+    assert model.cache[0].shape[3] == CACHE_TILE and model.max_context == 50
 
 
 @pytest.mark.usefixtures("reference_ops")
