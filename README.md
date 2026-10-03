@@ -4,7 +4,7 @@ A minimal, fast LLM inference engine built on [tinygrad](https://github.com/tiny
 
 leat runs GGUF models with their weights kept in the quantized storage format. The goal is single-stream decode limited by memory bandwidth, not by the engine. It targets NVIDIA RTX 30-series GPUs first, then AMD Strix Halo.
 
-> Status: on NVIDIA, decoding runs on hand-written kernels and outpaces llama.cpp. Prompt processing still runs the reference ops, plain tinygrad code that every kernel is tested against; `LEAT_KERNELS=ref` runs everything that way.
+> Status: on NVIDIA, hand-written kernels run decoding faster than llama.cpp and prompt processing at 0.8x its speed. Every kernel is tested against the reference ops, plain tinygrad code that runs on any device; `LEAT_KERNELS=ref` runs everything that way.
 
 ## Quickstart
 
@@ -38,20 +38,20 @@ RTX 3090, Meta-Llama-3.1-8B-Instruct Q4_K_M, one sequence.
 
 | | pp512 (tok/s) | tg128 (tok/s) | tg128 after 8192 tokens |
 |---|---:|---:|---:|
-| llama.cpp b11372, CUDA | 5336 | 147.0 | 124.8 |
-| leat | 18.1 | 149.6 | 121.5 |
+| llama.cpp b11372, CUDA | 5417 | 147.6 | 125.0 |
+| leat | 4384 | 151.0 | 122.3 |
 
-leat's tg128 includes sampling on the device and reading the token back.
+leat's numbers include sampling on the device and reading the token back: after the prompt for pp512, after every token for tg128.
 
-Quality against llama.cpp on the same file (wikitext-2, chunks of 512 tokens), with leat scoring prompt tokens through the reference ops and generated tokens through the decode kernels and their int8 activations:
+Quality against llama.cpp on the same file (wikitext-2, chunks of 512 tokens with the second half of each scored). leat's prompt path runs each chunk as one prompt; its decode path runs the first half as a prompt and the second one token at a time. Both quantize activations to int8, as llama.cpp does:
 
 | | perplexity, 20 chunks | mean KL divergence | same top token |
 |---|---:|---:|---:|
 | llama.cpp | 8.3870 | | |
-| leat, prompt path | 8.3759 | 0.0010 | 98.4% |
-| leat, decode path (2 chunks) | | 0.0011 | 98.6% |
+| leat, prompt path | 8.3757 | 0.0012 | 98.3% |
+| leat, decode path (2 chunks) | | 0.0013 | 98.4% |
 
-For scale, ignoring Llama 3.1's RoPE frequency factors, a subtle bug, raises the KL from 0.0010 to 0.0026 on the first 5 chunks.
+For scale, ignoring Llama 3.1's RoPE frequency factors, a subtle bug, raises the KL from 0.0010 to 0.0026 on the first 5 chunks with the reference ops.
 
 ## Requirements
 
