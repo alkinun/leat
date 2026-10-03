@@ -45,6 +45,9 @@ def main(argv: list[str] | None = None) -> None:
         "--ctx", type=int, default=512, help="chunk size, as in llama-perplexity -c"
     )
     quality.add_argument("--chunks", type=int, help="score only the first N chunks")
+    quality.add_argument(
+        "--decode", action="store_true", help="score one token at a time, as generation runs"
+    )
     quality.add_argument("--json", action="store_true", help="print one JSON object")
 
     args = parser.parse_args(argv)
@@ -97,9 +100,9 @@ def _bench(args: argparse.Namespace) -> None:
 def _perplexity(args: argparse.Namespace) -> None:
     engine = Engine(args.model, max_context=args.ctx)
     if args.kl_base:
-        result = bench.kl_divergence(engine, args.kl_base, args.chunks)
+        result = bench.kl_divergence(engine, args.kl_base, args.chunks, args.decode)
     else:
-        result = bench.perplexity(engine, args.text.read_text(), args.ctx, args.chunks)
+        result = bench.perplexity(engine, args.text.read_text(), args.ctx, args.chunks, args.decode)
     if args.json:
         print(json.dumps({"model": args.model.name} | asdict(result)))
         return

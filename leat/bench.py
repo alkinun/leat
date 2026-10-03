@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
-from tinygrad import Tensor, dtypes
+from tinygrad import Tensor, TinyJit, UOp, dtypes
 
 from leat.engine import Engine
 
@@ -56,7 +56,9 @@ def speed(engine: Engine, prompt_tokens: int = 512, gen_tokens: int = 128, reps:
     return Speed(statistics.median(prefill[2:]), tg, streamed * tg / 1e9)
 
 
-def perplexity(engine: Engine, text: str, ctx: int = 512, chunks: int | None = None) -> Quality:
+def perplexity(
+    engine: Engine, text: str, ctx: int = 512, chunks: int | None = None, decode: bool = False
+) -> Quality:
     tokens = engine.tokenizer.encode(text)
     n = min(len(tokens) // ctx, chunks or len(tokens))
     if n < 1:
@@ -64,11 +66,13 @@ def perplexity(engine: Engine, text: str, ctx: int = 512, chunks: int | None = N
     nll = 0.0
     for i in range(n):
         chunk = tokens[i * ctx : (i + 1) * ctx]
-        nll += _nll(_logprobs(engine, chunk), chunk)
+        nll += _nll(_logprobs(engine, chunk, decode), chunk)
     return Quality(math.exp(nll / (n * (ctx - 1 - ctx // 2))))
 
 
-def kl_divergence(engine: Engine, base: Path, chunks: int | None = None) -> Quality:
+def kl_divergence(
+    engine: Engine, base: Path, chunks: int | None = None, decode: bool = False
+) -> Quality:
     """Compares against logits saved by `llama-perplexity --kl-divergence-base`."""
     with open(base, "rb") as f:
         magic, ctx, vocab, n_chunks = struct.unpack("<8s3i", f.read(20))
@@ -85,7 +89,7 @@ def kl_divergence(engine: Engine, base: Path, chunks: int | None = None) -> Qual
         nll, same, kls = 0.0, 0, list[float]()
         for i in range(min(n_chunks, chunks or n_chunks)):
             chunk = tokens[i * ctx : (i + 1) * ctx]
-            lp = _logprobs(engine, chunk)
+            lp = _logprobs(engine, chunk, decode)
             stored = Tensor(f.read(2 * row * (ctx - 1 - first))).bitcast(dtypes.uint16)
             stored = stored.reshape(-1, row)
             scale, low = stored[:, :4].bitcast(dtypes.float32).chunk(2, dim=1)  # per position
@@ -100,12 +104,27 @@ def kl_divergence(engine: Engine, base: Path, chunks: int | None = None) -> Qual
     return Quality(math.exp(nll / n), sum(kls) / n, kls[int(0.99 * (n - 1))], kls[-1], same / n)
 
 
-def _logprobs(engine: Engine, chunk: list[int]) -> Tensor:
-    # log-probabilities at positions ctx/2 .. ctx-2, each predicting the next token
-    ctx, first = len(chunk), len(chunk) // 2
+def _logprobs(engine: Engine, chunk: list[int], decode: bool) -> Tensor:
+    # log-probabilities at positions ctx/2 .. ctx-2, each predicting the next token. With decode,
+    # those positions run one token at a time, through the kernels generation uses.
+    ctx, first, model = len(chunk), len(chunk) // 2, engine.model
     tokens = chunk if engine.tokenizer.bos_id is None else [engine.tokenizer.bos_id] + chunk[1:]
-    hidden = engine.model(Tensor([tokens], dtype=dtypes.int32), 0)[:, first : ctx - 1]
-    return engine.model.logits(hidden)[0].log_softmax(-1)
+    if not decode:
+        hidden = model(Tensor([tokens], dtype=dtypes.int32), 0)[:, first : ctx - 1]
+        return model.logits(hidden)[0].log_softmax(-1)
+    model(Tensor([tokens[:first]], dtype=dtypes.int32), 0).realize()
+    rows = Tensor.zeros(ctx - 1 - first, engine.config.vocab_size).contiguous().realize()
+
+    def step(token: Tensor, pos: UOp) -> None:
+        rows[pos - first : pos - first + 1].assign(
+            model.logits(model(token, pos))[0].log_softmax(-1)
+        )
+        rows.realize()
+
+    jit, pos = TinyJit(step), UOp.variable("start_pos", 0, engine.max_context - 1)
+    for i in range(first, ctx - 1):
+        jit(Tensor([[tokens[i]]], dtype=dtypes.int32), pos.bind(i))
+    return rows
 
 
 def _nll(logprobs: Tensor, chunk: list[int]) -> float:

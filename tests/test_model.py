@@ -51,11 +51,13 @@ def test_generate_fills_context(tiny_model):
 
 @pytest.mark.gpu
 @pytest.mark.model
-def test_matches_llama_cpp(model_path, llama_cpp, wikitext, tmp_path):
+@pytest.mark.parametrize("decode", [False, True], ids=["prefill", "decode"])
+def test_matches_llama_cpp(model_path, llama_cpp, wikitext, tmp_path, decode):
     args = ["-m", model_path, "-f", wikitext, "-c", "512", "--chunks", "4"]
     args += ["--kl-divergence-base", base := tmp_path / "base.kld"]
     subprocess.run([llama_cpp / "llama-perplexity", *args], check=True, capture_output=True)
-    quality = bench.kl_divergence(Engine(model_path, max_context=512), base)
-    # about 0.001 today; dropping llama 3.1's rope frequency factors, a subtle bug, scores 0.0026
+    quality = bench.kl_divergence(Engine(model_path, max_context=512), base, decode=decode)
+    # 0.0011 for prefill and 0.0013 for decode, whose int8 activations add noise as in llama.cpp;
+    # dropping llama 3.1's rope frequency factors, a subtle bug, scores 0.0026
     assert quality.kl_mean is not None and quality.kl_mean < 0.0015
     assert quality.top1 is not None and quality.top1 > 0.98

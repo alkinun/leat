@@ -50,10 +50,11 @@ def test_bench(tiny_model, capsys):
     assert result["prefill"] > 0 and result["decode"] > 0 and result["weight_gbs"] > 0
 
 
-def test_perplexity(tiny_model, tmp_path, capsys):
+@pytest.mark.parametrize("mode", [[], ["--decode"]])
+def test_perplexity(tiny_model, tmp_path, capsys, mode):
     path, weights = tiny_model
     (text := tmp_path / "text.txt").write_text(TEXT)
-    result = run_json(capsys, "perplexity", path, "--text", text, "--ctx", CTX)
+    result = run_json(capsys, "perplexity", path, "--text", text, "--ctx", CTX, *mode)
     scored = np.concatenate(
         [
             reference_logprobs(weights, c)[np.arange(CTX - 1 - FIRST), c[FIRST + 1 :]]
@@ -63,11 +64,12 @@ def test_perplexity(tiny_model, tmp_path, capsys):
     assert result["perplexity"] == pytest.approx(np.exp(-scored.mean()), rel=1e-3)
 
 
-def test_kl_divergence(tiny_model, tmp_path, capsys):
+@pytest.mark.parametrize("mode", [[], ["--decode"]])
+def test_kl_divergence(tiny_model, tmp_path, capsys, mode):
     path, weights = tiny_model
     vocab = weights["output.weight"].shape[0]
     write_kl_base(base := tmp_path / "base.kld", weights, chunks(path), vocab)
-    result = run_json(capsys, "perplexity", path, "--kl-base", base, "--ctx", CTX)
+    result = run_json(capsys, "perplexity", path, "--kl-base", base, "--ctx", CTX, *mode)
     assert result["kl_mean"] < 1e-4 and result["top1"] == 1.0
 
 
