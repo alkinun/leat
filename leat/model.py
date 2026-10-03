@@ -93,10 +93,12 @@ class Transformer:
     def logits(self, hidden: Tensor) -> Tensor:
         return ops.linear(hidden, self.output)
 
-    def copy(self, source: int | UOp, slot: int | UOp, length: int | UOp) -> None:
-        """Copies the first `length` cached positions of slot `source` to slot `slot`."""
+    def copy(self, source: int | UOp, slot: int | UOp) -> None:
+        """Copies the cache of slot `source` to slot `slot`."""
+        # Whole slots, as tinygrad runs a copy of a bound number of positions on few threads: for
+        # Llama 3.1 8B on the 3090, 2130 positions took 12.3 ms, whole slots of 4096 3.1 ms.
         for cache in self.cache:
-            cache[:, slot : slot + 1, :, :length].assign(cache[:, source : source + 1, :, :length])
+            cache[:, slot : slot + 1].assign(cache[:, source : source + 1])
         Tensor.realize(*self.cache)
 
     def _block(self, i: int, x: Tensor, start_pos: int | UOp, slot: int | UOp) -> Tensor:

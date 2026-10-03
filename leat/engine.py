@@ -37,7 +37,6 @@ class Engine:
         self._len = UOp.variable("chunk_len", 1, prefill_chunk)
         self._slot = UOp.variable("slot", 0, slots - 1)
         self._source = UOp.variable("source", 0, slots - 1)
-        self._prefix = UOp.variable("prefix", 1, max_context - 1)
         # TinyJit runs a function once as is, then captures it on the second call: capture on the
         # first, a fresh process's slow call for each graph
         self._prefill, self._decode = TinyJit(self._step), TinyJit(self._step)
@@ -113,7 +112,7 @@ class Engine:
         source = max(slots, key=lambda s: shared[s])
         if (prefix := shared[source]) > shared[slot]:
             self._cached[slot] = []  # while the copy overwrites it
-            self._copy(self._source.bind(source), self._slot.bind(slot), self._prefix.bind(prefix))
+            self._copy(self._source.bind(source), self._slot.bind(slot))
         self._cached[slot] = prompt[:prefix]  # what stays valid if prefill is interrupted
         self._used[slot] = next(self._clock)
         return slot
