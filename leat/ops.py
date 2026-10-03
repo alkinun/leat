@@ -54,12 +54,17 @@ def feed_forward(
 
 
 def embedding(tokens: Tensor, w: QTensor) -> Tensor:
-    # gathers whole rows of storage, then decodes only those; tinygrad lowers the gather to a load
+    # Gathers whole rows of storage, then decodes only those; tinygrad lowers the gather to a load.
+    # A bound number of tokens gathers as many as there may be: tinygrad leaves a copy along a
+    # symbolic axis to one thread per block.
     vocab, dim = w.shape
+    shape, tokens = tokens.shape, tokens.pad_to(tokens.max_shape)
     rows = w.data.reshape(vocab, -1)[tokens.flatten()]
     if w.type in NATIVE:
-        return rows.reshape(*tokens.shape, dim).float()
-    return QTensor(rows.reshape(-1, w.data.shape[1]), w.type, (*tokens.shape, dim)).dequant()
+        out = rows.reshape(*tokens.shape, dim).float()
+    else:
+        out = QTensor(rows.reshape(-1, w.data.shape[1]), w.type, (*tokens.shape, dim)).dequant()
+    return out.shrink_to((*shape, dim))
 
 
 def rms_norm(x: Tensor, weight: Tensor, eps: float) -> Tensor:
