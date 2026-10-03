@@ -18,6 +18,7 @@ from leat.nv.common import (
     lane_range,
     load_vector,
     on_nvidia,
+    opaque,
     register,
     shfl_xor,
     warp_sum,
@@ -92,8 +93,10 @@ def _attention_partial_kernel(
     # merge the warps through shared memory: each writes its output normalized to f16 (sum >= 1
     # unless empty), as [head, dimension within lane, lane] plus PAD, then its max and sum.
     # tinygrad's codegen declares an index at its first use in the rounds loop and reuses it after
-    # the loop, out of scope, if the same expression recurs there: this layout repeats neither the
-    # lane offset of the cache loads nor, thanks to PAD, their stride per warp.
+    # the loop, out of scope, if the same expression recurs there: indices from here on are made
+    # of opaque copies of the block's and thread's coordinates, which it cannot match.
+    ranges = (lane, wave, block, head)
+    lane, wave, block, head = (opaque(u) for u in ranges)
     width = group * dim + PAD
     shared = UOp.alloc((waves, width), dtypes.half, addrspace=AddrSpace.LOCAL)
     stat = UOp.alloc((waves, group, 2), dtypes.float32, addrspace=AddrSpace.LOCAL)
@@ -113,12 +116,12 @@ def _attention_partial_kernel(
     thread, results = wave * WARP + lane, []
     for i in range(-(-group * dim // (waves * WARP))):
         flat = thread + i * waves * WARP
-        h, d = flat // dim, flat % dim
-        top = functools.reduce(UOp.maximum, (stat[w, h, 0].load() for w in range(waves)))
-        val = sum((((stat[w, h, 0].load() - top) * LOG2E).exp2() * stat[w, h, 1].load()
-                   * shared[w, (h * per_lane + d % per_lane) * WARP + d // per_lane].load().float()
+        hq, d = flat // dim, flat % dim  # a query head of the block, and a dimension
+        top = functools.reduce(UOp.maximum, (stat[w, hq, 0].load() for w in range(waves)))
+        val = sum((((stat[w, hq, 0].load() - top) * LOG2E).exp2() * stat[w, hq, 1].load()
+                   * shared[w, (hq * per_lane + d % per_lane) * WARP + d // per_lane].load().float()
                    for w in range(waves)), zero)  # fmt: skip
-        live = head * group + h
+        live = head * group + hq
         if group * dim % (waves * WARP):
             live = live.valid(flat < group * dim)
         results.append(out[live, block, d].store(val))
@@ -128,7 +131,7 @@ def _attention_partial_kernel(
     qh = (head * group + thread).valid(thread < group)
     results += [stats[qh, block, 0].store(top), stats[qh, block, 1].store(weights)]
     info = KernelInfo(name="attention_partial", opts_to_apply=())
-    return UOp.group(*results).end(lane, wave, block, head).sink(arg=info)
+    return UOp.group(*results).end(*ranges).sink(arg=info)
 
 
 @functools.cache

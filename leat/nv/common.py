@@ -98,6 +98,12 @@ def register(shape: tuple[int, ...], value: float) -> UOp:
     return reg.after(reg.store(reg.const_like(value)))
 
 
+def opaque(x: UOp) -> UOp:
+    # x, as an expression tinygrad's codegen cannot match with another: it declares an index at
+    # its first use inside a loop and reuses it after the loop, out of scope, where it recurs
+    return UOp(Ops.CUSTOMI, src=(x.cast(dtypes.int32),), arg=("{0}", dtypes.int32))
+
+
 def at_most(a: int | UOp, b: int) -> int | UOp:
     return a.minimum(b) if isinstance(a, UOp) else min(a, b)
 

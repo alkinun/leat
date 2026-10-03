@@ -404,15 +404,16 @@ def test_flash_attention(tokens, start, symbolic):
     np.testing.assert_allclose(got.reshape(expected.shape), expected, rtol=3e-3, atol=3e-3)
 
 
-# Gemma 4's shapes: sliding-window layers of 8 kv heads of 256, the others of 2 kv heads of 512
+# Gemma 4's shapes: sliding-window layers of 8 kv heads of 256, the others of 2 kv heads of 512;
+# caches of 2048 positions tripped the codegen bug that attention.PAD avoids
 @pytest.mark.parametrize("kv_heads, dim, window", [(8, 256, 1024), (2, 512, 0), (8, 128, 100)])
-@pytest.mark.parametrize("length", [70, 1100, 3079])
+@pytest.mark.parametrize("n, length", [(4096, 70), (4096, 1100), (4096, 3079), (2048, 1500)])
 @pytest.mark.parametrize("symbolic", [False, True])
-def test_attention_window(kv_heads, dim, window, length, symbolic):
+def test_attention_window(kv_heads, dim, window, n, length, symbolic):
     rng = np.random.default_rng(length + dim)
-    cache = rng.standard_normal((2, SLOTS, kv_heads, 4096, dim)).astype(np.float16)
+    cache = rng.standard_normal((2, SLOTS, kv_heads, n, dim)).astype(np.float16)
     q = rng.standard_normal((1, 16, 1, dim)).astype(np.float32) * 0.2
-    valid = UOp.variable("start_pos", 0, 4095).bind(length - 1) + 1 if symbolic else length
+    valid = UOp.variable("start_pos", 0, n - 1).bind(length - 1) + 1 if symbolic else length
     q_t, cache_t = Tensor(q).realize(), Tensor(cache).realize()
     assert nv.supports_attention(q_t, cache_t)
     got = nv.attention(q_t, cache_t, slot(symbolic), valid, 1.0, window).numpy()[0, :, 0]
