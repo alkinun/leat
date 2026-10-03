@@ -53,13 +53,9 @@ def _half(bits: UOp) -> UOp:
     return (bits & 0xFFFF).cast(dtypes.uint16).bitcast(dtypes.float16).float()
 
 
-@functools.cache
-def _quantize_q8_kernel(q: UOp, d: UOp, s: UOp, x: UOp) -> UOp:
-    # one warp per group of 32: d = max|x| / 127, q = round(x / d), s = d * sum(q), with q packed
-    # four per int32 word so matrix kernels read it without a copy
-    group = UOp.range(x.shape[0] // GROUP, 0, AxisType.GLOBAL)
-    lane = _lane()
-    value = x[group * GROUP + lane].load()
+def _quantize_group(q: UOp, d: UOp, s: UOp, group: UOp, lane: UOp, value: UOp) -> list[UOp]:
+    # one warp quantizes a group of 32 values, one per lane: d = max|x| / 127, q = round(x / d),
+    # s = d * sum(q), with q packed four per int32 word so matrix kernels read it without a copy
     # custom expressions keep both divisions exact: tinygrad would multiply by a reciprocal
     amax = _warp_max(value.maximum(-value))
     scale = UOp(Ops.CUSTOMI, src=(amax,), arg=("({}/127.0f)", dtypes.float32))
@@ -71,20 +67,52 @@ def _quantize_q8_kernel(q: UOp, d: UOp, s: UOp, x: UOp) -> UOp:
     for mask in (1, 2):
         word = word | _shfl_xor(word, mask)
     word_index = group * (GROUP // 4) + (lane // 4).valid((lane % 4).eq(0))
-    stores = (
+    return [
         q[word_index].store(word.bitcast(dtypes.int32)),
         d[group.valid(lane.eq(0))].store(scale),
         s[group.valid(lane.eq(0))].store(scale * total.float()),
-    )
-    return (
-        UOp.group(*stores)
-        .end(group, lane)
-        .sink(arg=KernelInfo(name="quantize_q8", opts_to_apply=()))
-    )
+    ]
 
 
-def quantize_q8(x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-    """Quantizes a vector to int8 in groups of 32.
+@functools.cache
+def _quantize_q8_kernel(q: UOp, d: UOp, s: UOp, x: UOp) -> UOp:
+    group, lane = UOp.range(int(x.shape[0]) // GROUP, 0, AxisType.GLOBAL), _lane()
+    stores = _quantize_group(q, d, s, group, lane, x[group * GROUP + lane].load())
+    info = KernelInfo(name="quantize_q8", opts_to_apply=())
+    return UOp.group(*stores).end(group, lane).sink(arg=info)
+
+
+NORM_THREADS = 1024  # one block normalizes the whole vector
+
+
+@functools.cache
+def _norm_quantize_q8_kernel(q: UOp, d: UOp, s: UOp, x: UOp, weight: UOp, eps: float) -> UOp:
+    # RMSNorm, then quantization, in one block: the warps' sums of squares meet in shared memory,
+    # then each warp normalizes and quantizes every (NORM_THREADS / 32)-th group
+    n, warps = int(x.shape[0]), NORM_THREADS // WARP
+    lane, wave = _lane(), UOp.range(warps, 1, AxisType.LOCAL)
+    thread, per_thread = wave * WARP + lane, n // NORM_THREADS
+    squares = sum(
+        (x[thread * per_thread + i].load() ** 2 for i in range(per_thread)),
+        UOp.const(0.0, dtypes.float32),
+    )
+    partial = UOp.alloc((warps,), dtypes.float32, addrspace=AddrSpace.LOCAL)
+    partial = partial.after(partial[wave.valid(lane.eq(0))].store(_warp_sum(squares)))
+    total = sum((partial[w].load() for w in range(warps)), UOp.const(0.0, dtypes.float32))
+    inv = (total / n + eps).rsqrt()
+    stores = []
+    for k in range(n // GROUP // warps):
+        group = wave + k * warps
+        at = group * GROUP + lane
+        stores += _quantize_group(q, d, s, group, lane, x[at].load() * inv * weight[at].load())
+    info = KernelInfo(name="norm_quantize_q8", opts_to_apply=())
+    return UOp.group(*stores).end(wave, lane).sink(arg=info)
+
+
+def quantize_q8(
+    x: Tensor, norm: tuple[Tensor, float] | None = None
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Quantizes a vector to int8 in groups of 32, after RMSNorm with `norm`'s weight and eps.
 
     Returns the values packed four per int32 word, the scales d and the sums d * sum(q).
     """
@@ -92,8 +120,13 @@ def quantize_q8(x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
     q = Tensor.empty(n // 4, dtype=dtypes.int32, device=x.device)
     d = Tensor.empty(n // GROUP, dtype=dtypes.float32, device=x.device)
     s = Tensor.empty(n // GROUP, dtype=dtypes.float32, device=x.device)
-    q, d, s = Tensor.custom_kernel(q, d, s, x.float().contiguous(), fxn=_quantize_q8_kernel)[:3]
-    return q, d, s
+    x = x.float().contiguous()
+    if norm is None:
+        out = Tensor.custom_kernel(q, d, s, x, fxn=_quantize_q8_kernel)
+    else:
+        fxn = functools.partial(_norm_quantize_q8_kernel, eps=norm[1])
+        out = Tensor.custom_kernel(q, d, s, x, norm[0].float().contiguous(), fxn=fxn)
+    return out[0], out[1], out[2]
 
 
 def _k_scale_min(w: UOp, base: UOp, sub: UOp) -> tuple[UOp, UOp]:
@@ -205,16 +238,16 @@ def supports(x: Tensor, w: QTensor) -> bool:
     single = isinstance(x.numel(), int) and x.numel() == cols
     fits = (
         isinstance(cols, int)
-        and cols % (64 * WARP) == 0
+        and cols % (64 * WARP) == 0  # also a multiple of NORM_THREADS
         and isinstance(rows, int)
         and rows % ROWS == 0
     )
     return w.type in _KERNELS and single and fits
 
 
-def linears(x: Tensor, *ws: QTensor) -> list[Tensor]:
+def linears(x: Tensor, *ws: QTensor, norm: tuple[Tensor, float] | None = None) -> list[Tensor]:
     """x @ w.T for one token and each w, with the activations quantized to int8 once."""
-    xq, xd, xs = quantize_q8(x.reshape(x.shape[-1]))
+    xq, xd, xs = quantize_q8(x.reshape(x.shape[-1]), norm)
     return [_matvec(w, xq, xd, xs).reshape(*x.shape[:-1], w.shape[0]) for w in ws]
 
 

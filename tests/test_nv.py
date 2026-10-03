@@ -40,6 +40,38 @@ def test_quantize_q8():
         np.testing.assert_array_equal(got, want)
 
 
+def rms_norm(x: np.ndarray, weight: np.ndarray, eps: float) -> np.ndarray:
+    x64 = x.astype(np.float64)
+    return (x64 / np.sqrt((x64 * x64).mean() + eps) * weight).astype(np.float32)
+
+
+def test_norm_quantize_q8():
+    rng = np.random.default_rng(4)
+    x = (rng.standard_normal(4096) * 3).astype(np.float32)
+    weight = rng.uniform(0.5, 1.5, 4096).astype(np.float32)
+    q, d, s = (t.numpy() for t in nv.quantize_q8(Tensor(x), (Tensor(weight), 1e-5)))
+    want_q, want_d, _ = quantize_q8(rms_norm(x, weight, 1e-5))
+    # normalizing in f32 rather than f64 may move a value across a rounding boundary
+    off = q.view(np.int8).astype(np.int32) - want_q
+    assert np.abs(off).max() <= 1 and np.count_nonzero(off) <= 4
+    np.testing.assert_allclose(d, want_d, rtol=1e-5)
+    sums = q.view(np.int8).reshape(-1, nv.GROUP).sum(-1, dtype=np.int32).astype(np.float32)
+    np.testing.assert_array_equal(s, (d * sums).astype(np.float32))
+
+
+def test_linear_after_norm():
+    rng = np.random.default_rng(5)
+    blocks = random_blocks(GGMLType.Q4_K, 64 * 4096 // 256, rng, scale=1e-3)
+    w = QTensor(Tensor(blocks), GGMLType.Q4_K, (64, 4096))
+    x = (rng.standard_normal((1, 1, 4096)) * 3).astype(np.float32)
+    weight = rng.uniform(0.5, 1.5, 4096).astype(np.float32)
+    got = ops.linears(Tensor(x), w, norm=(Tensor(weight), 1e-5))[0].numpy().ravel()
+    q, d, _ = quantize_q8(rms_norm(x.ravel(), weight, 1e-5))
+    weights = dequantize(blocks, gguf.GGMLQuantizationType.Q4_K).reshape(64, 4096)
+    expected = weights.astype(np.float64) @ (q.reshape(-1, nv.GROUP) * d[:, None]).ravel()
+    np.testing.assert_allclose(got, expected, rtol=1e-3, atol=1e-3 * np.abs(expected).max())
+
+
 @pytest.mark.parametrize("ggml_type", [GGMLType.Q4_K, GGMLType.Q6_K])
 @pytest.mark.parametrize("shape", [(64, 4096), (8, 14336)])
 def test_linear(ggml_type, shape):

@@ -90,8 +90,9 @@ class Transformer:
     def _block(self, i: int, x: Tensor, start_pos: int | UOp) -> Tensor:
         c, w, (attn_norm, ffn_norm) = self.config, self.layers[i], self.norms[i]
         B, T, _ = x.shape
-        h = ops.rms_norm(x, attn_norm, c.norm_eps)
-        q, k, v = ops.linears(h, w["attn_q"], w["attn_k"], w["attn_v"])
+        q, k, v = ops.linears(
+            x, w["attn_q"], w["attn_k"], w["attn_v"], norm=(attn_norm, c.norm_eps)
+        )
         q = q.reshape(B, T, c.n_heads, c.head_dim).transpose(1, 2)
         k = k.reshape(B, T, c.n_kv_heads, c.head_dim).transpose(1, 2)
         v = v.reshape(B, T, c.n_kv_heads, c.head_dim).transpose(1, 2)
@@ -103,8 +104,7 @@ class Transformer:
         attn = ops.attention(q, cache, start_pos).transpose(1, 2).reshape(B, T, -1)
         x = x + ops.linear(attn, w["attn_output"])
 
-        h = ops.rms_norm(x, ffn_norm, c.norm_eps)
-        gate, up = ops.linears(h, w["ffn_gate"], w["ffn_up"])
+        gate, up = ops.linears(x, w["ffn_gate"], w["ffn_up"], norm=(ffn_norm, c.norm_eps))
         return x + ops.linear(gate.silu() * up, w["ffn_down"])
 
 

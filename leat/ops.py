@@ -19,10 +19,12 @@ def _fast() -> bool:
     return os.environ.get("LEAT_KERNELS") != "ref"
 
 
-def linears(x: Tensor, *ws: QTensor) -> list[Tensor]:
-    # x @ w.T for each w; kernels share one quantization of the input
+def linears(x: Tensor, *ws: QTensor, norm: tuple[Tensor, float] | None = None) -> list[Tensor]:
+    # x @ w.T for each w, after rms_norm(x, *norm) if given; kernels share one quantization of x
     if _fast() and all(nv.supports(x, w) for w in ws):
-        return nv.linears(x, *ws)
+        return nv.linears(x, *ws, norm=norm)
+    if norm is not None:
+        x = rms_norm(x, *norm)
     return [x @ w.dequant(x.dtype).T for w in ws]
 
 
