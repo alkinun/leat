@@ -13,8 +13,11 @@ GROUP = 32  # activations per int8 scale
 LOG2E = math.log2(math.e)
 SHARED = 49152  # bytes of shared memory a block may use without opting in to more
 
-# the word type kernels read each storage type as: Q6_K blocks are only halfword aligned
-WORD_TYPE = {GGMLType.Q4_K: dtypes.uint32, GGMLType.Q6_K: dtypes.uint16}
+# the word type kernels read each storage type as: some blocks are only halfword aligned
+WORD_TYPE = {
+    GGMLType.Q4_K: dtypes.uint32, GGMLType.Q5_K: dtypes.uint32, GGMLType.Q6_K: dtypes.uint16,
+    GGMLType.Q8_0: dtypes.uint16,
+}  # fmt: skip
 
 
 def on_nvidia(t: Tensor) -> bool:

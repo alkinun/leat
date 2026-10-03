@@ -17,7 +17,6 @@ from tinygrad.uop.ops import AxisType, KernelInfo, Ops
 from leat.nv.common import (
     GROUP,
     WARP,
-    WORD_TYPE,
     carry,
     f16,
     lane_range,
@@ -370,7 +369,7 @@ def supports_matmul(x: Tensor, w: QTensor) -> bool:
     # tokens of one sequence, whole tiles of rows, and whole steps along a row
     rows, cols = w.shape
     single = all(isinstance(b, int) and b == 1 for b in x.shape[:-2])
-    return on_nvidia(x) and single and w.type in WORD_TYPE and rows % 128 == 0 and cols % 256 == 0
+    return on_nvidia(x) and single and w.type in _TILES and rows % 128 == 0 and cols % 256 == 0
 
 
 def matmuls(

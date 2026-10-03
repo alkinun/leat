@@ -9,7 +9,6 @@ from tinygrad.uop.ops import AxisType, KernelInfo
 
 from leat.nv.common import (
     WARP,
-    WORD_TYPE,
     dp4a,
     f16,
     lane_range,
@@ -23,20 +22,29 @@ from leat.nv.common import (
 from leat.nv.quantize import quantize_q8
 from leat.quant import GGMLType, QTensor
 
-Dot = Callable[[UOp, UOp], UOp]  # (row, unit) -> a unit's share of one row's dot product
+Dot = Callable[[UOp, UOp, UOp | int], UOp]  # (row, unit, x) -> a unit's share of row . x
 
 
-def _rows(out: UOp, cols: int, name: str, dots: list[Dot], combine: Callable[..., UOp]) -> UOp:
-    # one block of one warp per output row: lanes take units of 64 weights in turn, the warp sums
-    # each dot product, and out[row] = combine(row, *sums). Grouping rows into wider blocks
-    # measured slower on the 3090, by up to a quarter for Q6_K.
+def _rows(out: UOp, units: int, name: str, dots: list[Callable[[UOp, UOp], UOp]],
+          combine: Callable[..., UOp]) -> UOp:  # fmt: skip
+    # one block of one warp per output row: lanes take the row's `units` in turn, the warp sums
+    # each dot product, and out[row] = combine(row, *sums). Where a last turn has fewer units than
+    # lanes, the others repeat the last unit, whose loads hit in cache, and drop its share.
+    # Grouping rows into wider blocks measured slower on the 3090, by up to a quarter for Q6_K.
     rows = out.shape[0]
     row, lane = UOp.range(rows, 0, AxisType.GLOBAL), lane_range()
-    units = range(cols // 64 // WARP)
     zero = UOp.const(0.0, dtypes.float32)
-    sums = [warp_sum(sum((dot(row, it * WARP + lane) for it in units), zero)) for dot in dots]
+
+    def share(dot: Callable[[UOp, UOp], UOp], turn: int) -> UOp:
+        unit = turn * WARP + lane
+        if (turn + 1) * WARP <= units:
+            return dot(row, unit)
+        return (unit < units).where(dot(row, unit.minimum(units - 1)), zero)
+
+    turns = range(-(-units // WARP))
+    sums = [warp_sum(sum((share(dot, t) for t in turns), zero)) for dot in dots]
     store = out[row.valid(lane.eq(0))].store(combine(row, *sums))
-    info = KernelInfo(name=f"{name}_{rows}_{cols}", opts_to_apply=())
+    info = KernelInfo(name=f"{name}_{rows}_{units}", opts_to_apply=())
     return store.end(row, lane).sink(arg=info)
 
 
@@ -52,23 +60,27 @@ def _k_scale_min(w: UOp, base: UOp, sub: UOp) -> tuple[UOp, UOp]:
     return sc.float(), mn.float()
 
 
-def _q4_k_dot(w: UOp, xq: UOp, xd: UOp, xs: UOp) -> Dot:
+def _k_dot(w: UOp, xq: UOp, xd: UOp, xs: UOp, cols: int, high: bool) -> Dot:
     # Q4_K block, 36 words: d and dmin as f16, 12 bytes of 6-bit scales and mins, then 32 words of
     # nibbles. Sub-blocks 2j and 2j+1 are the low and high nibbles of words 4+8j .. 11+8j, so a
-    # unit is such a pair: 64 weights against 16 words of activations.
-    cols = 4 * int(xq.shape[0])
+    # unit is such a pair: 64 weights against 16 words of activations. Q5_K, 44 words, has 8
+    # words of high bits before the nibbles: bit s of byte l is bit 4 of value l of sub-block s.
+    words, nibbles = (44, 12) if high else (36, 4)
 
-    def dot(row: UOp, pair: UOp) -> UOp:
+    def dot(row: UOp, pair: UOp, x: UOp | int) -> UOp:
         block, j = pair // 4, pair % 4
-        base = (row * (cols // 256) + block) * 36
+        base = (row * (cols // 256) + block) * words
         dm = w[base].load()
-        g = block * 8 + 2 * j  # activation group of the low sub-block; g + 1 is the high one
+        g = x * (cols // 32) + block * 8 + 2 * j  # activation group of the low sub-block
         dots = [UOp.const(0, dtypes.int32), UOp.const(0, dtypes.int32)]
         for k in range(8):
-            word = w[base + 4 + 8 * j + k].load()
+            word = w[base + nibbles + 8 * j + k].load()
             for h in range(2):
-                weights = ((word >> (4 * h)) & 0x0F0F0F0F).bitcast(dtypes.int32)
-                dots[h] = dp4a(weights, xq[(g + h) * 8 + k].load(), dots[h])
+                weights = (word >> (4 * h)) & 0x0F0F0F0F
+                if high:
+                    bits = w[base + 4 + k].load() >> (2 * j + h).cast(dtypes.uint32)
+                    weights = weights | ((bits & 0x01010101) << 4)
+                dots[h] = dp4a(weights.bitcast(dtypes.int32), xq[(g + h) * 8 + k].load(), dots[h])
         (sc0, m0), (sc1, m1) = _k_scale_min(w, base, 2 * j), _k_scale_min(w, base, 2 * j + 1)
         scaled = sc0 * xd[g].load() * dots[0].float() + sc1 * xd[g + 1].load() * dots[1].float()
         mins = m0 * xs[g].load() + m1 * xs[g + 1].load()
@@ -77,17 +89,15 @@ def _q4_k_dot(w: UOp, xq: UOp, xd: UOp, xs: UOp) -> Dot:
     return dot
 
 
-def _q6_k_dot(w: UOp, xq: UOp, xd: UOp, xs: UOp) -> Dot:
+def _q6_k_dot(w: UOp, xq: UOp, xd: UOp, xs: UOp, cols: int) -> Dot:
     # Q6_K block, 105 halfwords: ql[128] low nibbles, qh[64] high 2-bit pairs, 16 int8 scales and d
     # as f16. Each half n of 128 weights is 4 rows of 32: row k takes nibble k // 2 of
     # ql[64n + 32(k % 2):][:32] and bits 2k of qh[32n:][:32], minus 32, with a scale per 16. A unit
     # is rows k and k + 2 of a half, which share their ql bytes: 64 weights, as for Q4_K.
-    cols = 4 * int(xq.shape[0])
-
-    def dot(row: UOp, unit: UOp) -> UOp:
+    def dot(row: UOp, unit: UOp, x: UOp | int) -> UOp:
         block, n, k = unit // 4, unit % 4 // 2, unit % 2
         base = (row * (cols // 256) + block) * 105
-        g = block * 8 + 4 * n + k  # activation group of row k; row k + 2 is group g + 2
+        g = x * (cols // 32) + block * 8 + 4 * n + k  # group of row k; row k + 2 is group g + 2
         dots = [[UOp.const(0, dtypes.int32)] * 2 for _ in range(2)]  # [row k, k + 2][16 weights]
         for m in range(8):
             ql = word16(w, base + 32 * n + 16 * k + 2 * m)
@@ -107,7 +117,32 @@ def _q6_k_dot(w: UOp, xq: UOp, xd: UOp, xs: UOp) -> Dot:
     return dot
 
 
-_DOTS = {GGMLType.Q4_K: _q4_k_dot, GGMLType.Q6_K: _q6_k_dot}
+def _q8_0_dot(w: UOp, xq: UOp, xd: UOp, xs: UOp, cols: int) -> Dot:
+    # Q8_0 block, 17 halfwords: d as f16, then 32 int8 weights, the activation groups' size; a
+    # unit is two blocks
+    def dot(row: UOp, unit: UOp, x: UOp | int) -> UOp:
+        total = UOp.const(0.0, dtypes.float32)
+        for b in range(2):
+            block = unit * 2 + b
+            base, g = (row * (cols // 32) + block) * 17, x * (cols // 32) + block
+            acc = UOp.const(0, dtypes.int32)
+            for m in range(8):
+                acc = dp4a(
+                    word16(w, base + 1 + 2 * m).bitcast(dtypes.int32), xq[g * 8 + m].load(), acc
+                )
+            d = f16(w[base].load().cast(dtypes.uint32))
+            total = total + d * xd[g].load() * acc.float()
+        return total
+
+    return dot
+
+
+_DOTS: dict[GGMLType, Callable[[UOp, UOp, UOp, UOp, int], Dot]] = {
+    GGMLType.Q4_K: functools.partial(_k_dot, high=False),
+    GGMLType.Q5_K: functools.partial(_k_dot, high=True),
+    GGMLType.Q6_K: _q6_k_dot,
+    GGMLType.Q8_0: _q8_0_dot,
+}
 
 
 @functools.cache
@@ -117,8 +152,8 @@ def _matvec_kernel(
     def combine(row: UOp, total: UOp) -> UOp:
         return total + residual[0][row].load() if residual else total
 
-    dot = _DOTS[ggml_type](w, xq, xd, xs)
-    return _rows(out, 4 * int(xq.shape[0]), ggml_type.name.lower(), [dot], combine)
+    dot = _DOTS[ggml_type](w, xq, xd, xs, cols := 4 * int(xq.shape[0]))
+    return _rows(out, cols // 64, ggml_type.name.lower(), [_shared_x(dot)], combine)
 
 
 @functools.cache
@@ -128,14 +163,19 @@ def _swiglu_kernel(
     def combine(row: UOp, g: UOp, u: UOp) -> UOp:
         return silu(g) * u
 
-    dots = [_DOTS[ggml_type](w, xq, xd, xs) for w in (gate, up)]
-    return _rows(out, 4 * int(xq.shape[0]), f"swiglu_{ggml_type.name.lower()}", dots, combine)
+    cols = 4 * int(xq.shape[0])
+    dots = [_shared_x(_DOTS[ggml_type](w, xq, xd, xs, cols)) for w in (gate, up)]
+    return _rows(out, cols // 64, f"swiglu_{ggml_type.name.lower()}", dots, combine)
+
+
+def _shared_x(dot: Dot) -> Callable[[UOp, UOp], UOp]:
+    return lambda row, unit: dot(row, unit, 0)
 
 
 def supports_matvec(x: Tensor, w: QTensor) -> bool:
-    # one token, and whole warps: each lane takes pairs of sub-blocks, 32 lanes per row
+    # one token, and whole units of 64 weights
     one = isinstance(x.numel(), int) and x.numel() == x.shape[-1]
-    return on_nvidia(x) and one and w.type in WORD_TYPE and w.shape[1] % (64 * WARP) == 0
+    return on_nvidia(x) and one and w.type in _DOTS and w.shape[1] % 64 == 0
 
 
 def matvecs(

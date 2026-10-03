@@ -7,7 +7,7 @@ from gguf.quants import dequantize
 from tinygrad import Tensor, UOp
 
 from leat import nv, ops
-from leat.quant import GGMLType, QTensor
+from leat.quant import BLOCK, GGMLType, QTensor
 from tests.helpers import random_blocks
 
 pytestmark = [
@@ -16,7 +16,7 @@ pytestmark = [
         os.environ.get("DEV", "").split(":")[0] not in ("NV", "CUDA"), reason="needs DEV=NV or CUDA"
     ),
 ]
-Q4_K, Q6_K = GGMLType.Q4_K, GGMLType.Q6_K
+Q4_K, Q5_K, Q6_K, Q8_0 = GGMLType.Q4_K, GGMLType.Q5_K, GGMLType.Q6_K, GGMLType.Q8_0
 
 
 def quantize_q8(x: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -38,7 +38,7 @@ def rms_norm(x: np.ndarray, weight: np.ndarray, eps: float) -> np.ndarray:
 def random_matrix(
     ggml_type: GGMLType, rows: int, cols: int, rng: np.random.Generator
 ) -> tuple[QTensor, np.ndarray]:
-    blocks = random_blocks(ggml_type, rows * cols // 256, rng, 1e-3)
+    blocks = random_blocks(ggml_type, rows * cols // BLOCK[ggml_type][0], rng, 1e-3)
     return QTensor(Tensor(blocks), ggml_type, (rows, cols)), blocks
 
 
@@ -89,8 +89,9 @@ def test_norm_quantize_q8():
 # ******** one token ********
 
 
-@pytest.mark.parametrize("ggml_type", [Q4_K, Q6_K])
-@pytest.mark.parametrize("shape", [(64, 4096), (8, 14336)])
+# rows of 768 weights leave lanes idle, and of 2816 some in a second turn
+@pytest.mark.parametrize("ggml_type", [Q4_K, Q5_K, Q6_K, Q8_0])
+@pytest.mark.parametrize("shape", [(64, 4096), (8, 14336), (16, 768), (24, 2816)])
 def test_matvec(ggml_type, shape):
     rng = np.random.default_rng(1)
     w, blocks = random_matrix(ggml_type, *shape, rng)
