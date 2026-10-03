@@ -80,6 +80,7 @@ def _run(args: argparse.Namespace) -> None:
                 print(step(t), end="", flush=True)
         except KeyboardInterrupt:
             pass
+        print(step(None), end="")
         rate = len(reply) / (time.perf_counter() - start)
         print(f"\n\033[2m[{len(reply)} tokens, {rate:.1f} tok/s]\033[0m")
         messages.append({"role": "assistant", "content": tok.decode(reply)})

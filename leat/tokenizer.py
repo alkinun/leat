@@ -119,10 +119,11 @@ class Tokenizer:
     def decode(self, ids: list[int]) -> str:
         return b"".join(self._bytes[i] for i in ids).decode("utf-8", errors="replace")
 
-    def stream(self) -> Callable[[int], str]:
-        """Returns a decoder that maps one id at a time to the text it completes."""
+    def stream(self) -> Callable[[int | None], str]:
+        """Returns a decoder that maps one id at a time to the text it completes. None ends the
+        text, flushing an incomplete character as decode() would."""
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-        return lambda i: decoder.decode(self._bytes[i])
+        return lambda i: decoder.decode(b"" if i is None else self._bytes[i], final=i is None)
 
     def _encode_ordinary(self, text: str) -> list[int]:
         out: list[int] = []

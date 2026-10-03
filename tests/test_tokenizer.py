@@ -45,6 +45,8 @@ def test_stream_holds_partial_utf8():
     tok = tiny_tokenizer()
     step = tok.stream()
     assert [step(i) for i in tok.encode("é🚀", bos=False)] == ["", "é", "", "", "", "🚀"]
+    cut = tok.encode("🚀", bos=False)[:2]  # an incomplete character ends as decode() ends it
+    assert [step(i) for i in cut] + [step(None)] == ["", "", tok.decode(cut)]
 
 
 def test_unsupported():
