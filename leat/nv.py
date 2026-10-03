@@ -1,0 +1,155 @@
+"""NVIDIA kernels for DEV=NV and DEV=CUDA, written in tinygrad's UOp DSL and rendered as CUDA C.
+
+Decode-time linear layers follow llama.cpp's matrix-vector scheme: the activation vector is
+quantized to int8 in groups of 32, then each warp computes one output row with __dp4a over the
+weights in their storage format.
+"""
+
+import functools
+
+from tinygrad import Tensor, UOp, dtypes
+from tinygrad.uop.ops import AxisType, KernelInfo, Ops
+
+from leat.quant import GGMLType, QTensor
+
+WARP = 32
+ROWS = 4  # output rows per block, one warp each
+GROUP = 32  # activations per int8 scale
+
+
+def _dp4a(a: UOp, b: UOp, acc: UOp) -> UOp:
+    # acc + dot product of the four signed bytes of a and b
+    return UOp(Ops.CUSTOMI, src=(a, b, acc), arg=("__dp4a({}, {}, {})", dtypes.int32))
+
+
+def _shfl_xor(value: UOp, mask: int) -> UOp:
+    # a statement, not an inline expression: every lane of the warp must execute it
+    fmt = f"__shfl_xor_sync(0xffffffffu, {{0}}, {mask})"
+    return UOp(Ops.CUSTOM, src=(value,), arg=(fmt, value.dtype))
+
+
+def _warp_sum(value: UOp) -> UOp:
+    for mask in (16, 8, 4, 2, 1):
+        value = value + _shfl_xor(value, mask)
+    return value
+
+
+def _warp_max(value: UOp) -> UOp:
+    for mask in (16, 8, 4, 2, 1):
+        value = value.maximum(_shfl_xor(value, mask))
+    return value
+
+
+def _half(bits: UOp) -> UOp:
+    # the low 16 bits of a word as an f16, widened to f32
+    return (bits & 0xFFFF).cast(dtypes.uint16).bitcast(dtypes.float16).float()
+
+
+@functools.cache
+def _quantize_q8_kernel(q: UOp, d: UOp, s: UOp, x: UOp) -> UOp:
+    # one warp per group of 32: d = max|x| / 127, q = round(x / d), s = d * sum(q)
+    group = UOp.range(x.shape[0] // GROUP, 0, AxisType.GLOBAL)
+    lane = UOp.range(WARP, 1, AxisType.LOCAL)
+    value = x[group * GROUP + lane].load()
+    # custom expressions keep both divisions exact: tinygrad would multiply by a reciprocal
+    amax = _warp_max(value.maximum(-value))
+    scale = UOp(Ops.CUSTOMI, src=(amax,), arg=("({}/127.0f)", dtypes.float32))
+    rounded = UOp(Ops.CUSTOMI, src=(value, scale), arg=("roundf({}/{})", dtypes.float32))
+    quant = (scale > 0).where(rounded, 0.0).cast(dtypes.int32)
+    total = _warp_sum(quant)
+    stores = (
+        q[group * GROUP + lane].store(quant.cast(dtypes.int8)),
+        d[group.valid(lane.eq(0))].store(scale),
+        s[group.valid(lane.eq(0))].store(scale * total.float()),
+    )
+    return (
+        UOp.group(*stores)
+        .end(group, lane)
+        .sink(arg=KernelInfo(name="quantize_q8", opts_to_apply=()))
+    )
+
+
+def quantize_q8(x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    """Quantizes a vector to int8 in groups of 32: values, scales d and sums d * sum(q)."""
+    n = x.shape[0]
+    q = Tensor.empty(n, dtype=dtypes.int8, device=x.device)
+    d = Tensor.empty(n // GROUP, dtype=dtypes.float32, device=x.device)
+    s = Tensor.empty(n // GROUP, dtype=dtypes.float32, device=x.device)
+    q, d, s = Tensor.custom_kernel(q, d, s, x.float().contiguous(), fxn=_quantize_q8_kernel)[:3]
+    return q, d, s
+
+
+def _k_scale_min(w: UOp, base: UOp, sub: UOp) -> tuple[UOp, UOp]:
+    # ggml's get_scale_min_k4 over the 12 bytes after a K-quant block's d and dmin.
+    # sub ^ 4 is sub - 4 where that branch is taken, and stays in range where it is not.
+    def byte(i: UOp) -> UOp:
+        return (w[base + 1 + i // 4].load() >> ((i % 4) * 8).cast(dtypes.uint32)) & 0xFF
+
+    low = sub < 4
+    sc = low.where(byte(sub) & 63, (byte(sub + 4) & 15) | ((byte(sub ^ 4) >> 6) << 4))
+    mn = low.where(byte(sub + 4) & 63, (byte(sub + 4) >> 4) | ((byte(sub) >> 6) << 4))
+    return sc.float(), mn.float()
+
+
+@functools.cache
+def _q4_k_kernel(out: UOp, w: UOp, xq: UOp, xd: UOp, xs: UOp) -> UOp:
+    # Q4_K block, 36 words: d and dmin as f16, 12 bytes of 6-bit scales and mins, then 32 words of
+    # nibbles. Sub-blocks 2j and 2j+1 are the low and high nibbles of words 4+8j .. 11+8j, so each
+    # lane takes such a pair: 64 weights against 16 words of activations.
+    rows, cols = out.shape[0], xq.shape[0] * 4
+    blocks, pairs = cols // 256, cols // 64
+    blk = UOp.range(rows // ROWS, 0, AxisType.GLOBAL)
+    lane = UOp.range(WARP, 1, AxisType.LOCAL)  # lowest local axis, so lanes form a warp
+    wave = UOp.range(ROWS, 2, AxisType.LOCAL)
+    row = blk * ROWS + wave
+    acc = UOp.const(0.0, dtypes.float32)
+    for it in range(pairs // WARP):
+        pair = it * WARP + lane
+        block, j = pair // 4, pair % 4
+        base = (row * blocks + block) * 36
+        dm = w[base].load()
+        g = block * 8 + 2 * j  # activation group of the low sub-block; g + 1 is the high one
+        dots = [UOp.const(0, dtypes.int32), UOp.const(0, dtypes.int32)]
+        for k in range(8):
+            word = w[base + 4 + 8 * j + k].load()
+            for h in range(2):
+                weights = ((word >> (4 * h)) & 0x0F0F0F0F).bitcast(dtypes.int32)
+                dots[h] = _dp4a(weights, xq[(g + h) * 8 + k].load(), dots[h])
+        (sc0, m0), (sc1, m1) = _k_scale_min(w, base, 2 * j), _k_scale_min(w, base, 2 * j + 1)
+        dot = sc0 * xd[g].load() * dots[0].float() + sc1 * xd[g + 1].load() * dots[1].float()
+        mins = m0 * xs[g].load() + m1 * xs[g + 1].load()
+        acc = acc + _half(dm) * dot - _half(dm >> 16) * mins
+    store = out[row.valid(lane.eq(0))].store(_warp_sum(acc))
+    return store.end(blk, wave, lane).sink(
+        arg=KernelInfo(name=f"q4_k_{rows}_{cols}", opts_to_apply=())
+    )
+
+
+_KERNELS = {GGMLType.Q4_K: _q4_k_kernel}
+
+
+def supports(x: Tensor, w: QTensor) -> bool:
+    if not isinstance(x.device, str) or x.device.split(":")[0] not in ("NV", "CUDA"):
+        return False
+    # one token, and whole warps: each lane takes pairs of sub-blocks, 32 lanes per row
+    rows, cols = w.shape
+    single = isinstance(x.numel(), int) and x.numel() == cols
+    fits = (
+        isinstance(cols, int)
+        and cols % (64 * WARP) == 0
+        and isinstance(rows, int)
+        and rows % ROWS == 0
+    )
+    return w.type in _KERNELS and single and fits
+
+
+def linear(x: Tensor, w: QTensor) -> Tensor:
+    """x @ w.T for one token, with the activations quantized to int8."""
+    rows, cols = w.shape
+    xq, xd, xs = quantize_q8(x.reshape(cols))
+    out = Tensor.empty(rows, dtype=dtypes.float32, device=x.device)
+    words = w.data.flatten().bitcast(dtypes.uint32)
+    out = Tensor.custom_kernel(out, words, xq.bitcast(dtypes.int32), xd, xs, fxn=_KERNELS[w.type])[
+        0
+    ]
+    return out.reshape(*x.shape[:-1], rows)

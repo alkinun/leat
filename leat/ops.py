@@ -1,11 +1,19 @@
-"""Model math in plain tinygrad ops: the reference every fast kernel is tested against."""
+"""Model math in plain tinygrad ops, the reference every fast kernel is tested against.
+
+Ops dispatch to hand-written kernels where one applies; LEAT_KERNELS=ref turns them off.
+"""
+
+import os
 
 from tinygrad import Tensor, UOp
 
+from leat import nv
 from leat.quant import NATIVE, QTensor
 
 
 def linear(x: Tensor, w: QTensor) -> Tensor:
+    if os.environ.get("LEAT_KERNELS") != "ref" and nv.supports(x, w):
+        return nv.linear(x, w)
     return x @ w.dequant(x.dtype).T
 
 
