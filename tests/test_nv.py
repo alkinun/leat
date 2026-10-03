@@ -106,3 +106,12 @@ def test_attention(n, length, symbolic):
         p = np.exp(scores - scores.max())
         expected = (p / p.sum()) @ v[h // (heads // kv_heads)]
         np.testing.assert_allclose(got[0, h, 0], expected, rtol=2e-3, atol=2e-3)
+
+
+@pytest.mark.parametrize("rows, n", [(1, 128256), (3, 1000), (2, 33), (1, 1)])
+def test_argmax(rows, n):
+    rng = np.random.default_rng(n)
+    x = rng.integers(-50, 50, (rows, n)).astype(np.float32)  # many ties: the first one must win
+    x[:, ::7] = -np.inf
+    assert nv.supports_argmax(Tensor(x))
+    np.testing.assert_array_equal(ops.argmax(Tensor(x)).numpy(), x.argmax(-1, keepdims=True))

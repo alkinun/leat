@@ -5,7 +5,7 @@ Ops dispatch to hand-written kernels where one applies; LEAT_KERNELS=ref turns t
 
 import os
 
-from tinygrad import Tensor, UOp
+from tinygrad import Tensor, UOp, dtypes
 
 from leat import nv
 from leat.quant import NATIVE, QTensor
@@ -60,3 +60,10 @@ def attention(q: Tensor, cache: Tensor, start_pos: int | UOp) -> Tensor:
     if not (isinstance(T, int) and T == 1):
         mask = Tensor.full((1, 1, T, k.shape[2]), float("-inf"), dtype=q.dtype).triu(start_pos + 1)
     return q.scaled_dot_product_attention(k, v, mask, enable_gqa=True)
+
+
+def argmax(x: Tensor) -> Tensor:
+    # index of each row's largest value, the first on ties: (B, V) -> (B, 1) int32
+    if _fast() and nv.supports_argmax(x):
+        return nv.argmax(x)
+    return x.argmax(-1, keepdim=True).cast(dtypes.int32)
