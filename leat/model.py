@@ -100,8 +100,7 @@ class Transformer:
 
         cache = self.cache[i]
         cache[:, :, :, start_pos : start_pos + T].assign(Tensor.stack(k, v).cast(cache.dtype))
-        keys, values = cache[0, :, :, : start_pos + T], cache[1, :, :, : start_pos + T]
-        attn = ops.attention(q, keys, values, start_pos).transpose(1, 2).reshape(B, T, -1)
+        attn = ops.attention(q, cache, start_pos).transpose(1, 2).reshape(B, T, -1)
         x = x + ops.linear(attn, w["attn_output"])
 
         h = ops.rms_norm(x, ffn_norm, c.norm_eps)

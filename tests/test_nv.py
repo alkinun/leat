@@ -4,7 +4,7 @@ import gguf
 import numpy as np
 import pytest
 from gguf.quants import dequantize
-from tinygrad import Tensor
+from tinygrad import Tensor, UOp
 
 from leat import nv, ops
 from leat.quant import BLOCK, GGMLType, QTensor
@@ -74,3 +74,35 @@ def test_reference_switch(monkeypatch):
     x = Tensor(rng.standard_normal((1, 1, 2048)).astype(np.float32))
     monkeypatch.setenv("LEAT_KERNELS", "ref")
     np.testing.assert_array_equal(ops.linear(x, w).numpy(), (x @ w.dequant().T).numpy())
+
+
+# cache sizes matter too: some strides trip a tinygrad codegen bug with symbolic lengths (nv.PAD)
+@pytest.mark.parametrize(
+    "n, length",
+    [
+        (64, 1),
+        (64, 64),
+        (1024, 63),
+        (1024, 65),
+        (1024, 1000),
+        (3072, 3072),
+        (4096, 3079),
+        (4096, 4096),
+    ],  # fmt: skip
+)
+@pytest.mark.parametrize("symbolic", [False, True])
+def test_attention(n, length, symbolic):
+    rng = np.random.default_rng(length)
+    heads, kv_heads, dim = 32, 8, 128
+    cache = rng.standard_normal((2, 1, kv_heads, n, dim)).astype(np.float16)
+    q = rng.standard_normal((1, heads, 1, dim)).astype(np.float32)
+    valid = UOp.variable("start_pos", 0, n - 1).bind(length - 1) + 1 if symbolic else length
+    q_t, cache_t = Tensor(q).realize(), Tensor(cache).realize()  # the model's cache is a buffer
+    assert nv.supports_attention(q_t, cache_t)
+    got = nv.attention(q_t, cache_t, valid).numpy()
+    k, v = (cache[i, 0, :, :length].astype(np.float64) for i in range(2))
+    for h in range(heads):
+        scores = k[h // (heads // kv_heads)] @ q[0, h, 0] / np.sqrt(dim)
+        p = np.exp(scores - scores.max())
+        expected = (p / p.sum()) @ v[h // (heads // kv_heads)]
+        np.testing.assert_allclose(got[0, h, 0], expected, rtol=2e-3, atol=2e-3)

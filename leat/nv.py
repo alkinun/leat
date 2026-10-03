@@ -6,9 +6,11 @@ weights in their storage format.
 """
 
 import functools
+import math
 from collections.abc import Callable
 
 from tinygrad import Tensor, UOp, dtypes
+from tinygrad.dtype import AddrSpace
 from tinygrad.uop.ops import AxisType, KernelInfo, Ops
 
 from leat.quant import GGMLType, QTensor
@@ -20,7 +22,7 @@ GROUP = 32  # activations per int8 scale
 
 def _lane() -> UOp:
     # tinygrad never splits a WARP axis and maps it to threadIdx.x, so lane i is hardware lane i
-    return UOp.range(WARP, 1, AxisType.WARP)
+    return UOp.range(WARP, -1, AxisType.WARP)
 
 
 def _dp4a(a: UOp, b: UOp, acc: UOp) -> UOp:
@@ -222,3 +224,195 @@ def _matvec(w: QTensor, xq: Tensor, xd: Tensor, xs: Tensor) -> Tensor:
     # .contiguous() on a bitcast of contiguous storage is a view; without it tinygrad copies
     words = w.data.flatten().bitcast(word).contiguous()
     return Tensor.custom_kernel(out, words, xq, xd, xs, fxn=kernel)[0]
+
+
+# ******** attention: one query token against the KV cache ********
+# FlashDecoding, adapted from tinygrad/llm/kernels/amd.py: the cache is cut into chunks of KEYS
+# keys, blocks reduce chunks with an online softmax, and a second kernel combines their partials.
+
+KEYS = 64  # keys per chunk
+PARTIALS = 48  # most blocks per kv head; longer caches loop over several chunks per block
+SHARED = 49152  # bytes of shared memory a block may use without opting in to more
+PAD = 8  # halves of shared memory after each warp's outputs, see _attention_partial_kernel
+LOG2E = math.log2(math.e)
+
+
+def _vector(ptr: UOp, lanes: int) -> tuple[UOp, ...]:
+    # `lanes` consecutive values from an index, as one vector load, widened to f32
+    buf, coords = ptr.src[0], ptr.src[1:]
+    start = sum((c * math.prod(buf.shape[i + 1 :]) for i, c in enumerate(coords)), UOp.const(0))
+    vec = UOp(Ops.SHRINK, src=(buf.flatten(), start, UOp.const(lanes))).load()
+    return tuple(vec[i].float() for i in range(lanes))
+
+
+def _min(a: int | UOp, b: int) -> int | UOp:
+    return a.minimum(b) if isinstance(a, UOp) else min(a, b)
+
+
+def _register(shape: tuple[int, ...], value: float) -> UOp:
+    reg = UOp.alloc(shape, dtypes.float32, addrspace=AddrSpace.REG)
+    return reg.after(reg.store(reg.const_like(value)))
+
+
+@functools.cache
+def _attention_partial_kernel(
+    out: UOp, stats: UOp, q: UOp, cache: UOp, length: int | UOp, waves: int
+) -> UOp:
+    # A block takes one kv head and every PARTIALS-th chunk of its keys, for all query heads of
+    # the GQA group. Each of `waves` warps scores KEYS / waves keys of a chunk; lanes hold
+    # dim / 32 dimensions. The warps then merge through shared memory into one partial per block:
+    # the unnormalized output, its running max and its sum of weights.
+    kv_heads, dim = int(cache.shape[2]), int(cache.shape[4])
+    group, per_lane, partials = int(q.shape[1]) // kv_heads, dim // WARP, int(out.shape[1])
+    per_wave, zero = KEYS // waves, UOp.const(0.0, dtypes.float32)
+    chunks = (length + KEYS - 1) // KEYS
+    head = UOp.range(kv_heads, 0, AxisType.GLOBAL)
+    block = UOp.range(_min(chunks, partials), 1, AxisType.GLOBAL)
+    lane, wave = _lane(), UOp.range(waves, 3, AxisType.LOCAL)
+    qs = [_vector(q[0, head * group + h, 0, lane * per_lane], per_lane) for h in range(group)]
+    rounds = UOp.range((chunks - 1 - block) // partials + 1, 4, AxisType.LOOP)
+    chunk = block + rounds * partials
+    valid, scores, values = [], [], []
+    for j in range(per_wave):
+        key = chunk * KEYS + wave * per_wave + j
+        valid.append(key < length)
+        k = _vector(cache[0, 0, head, key, lane * per_lane], per_lane)
+        # values load during scoring, so both streams are in flight together
+        values.append(
+            [
+                valid[j].where(v, zero)
+                for v in _vector(cache[1, 0, head, key, lane * per_lane], per_lane)
+            ]
+        )
+        dots = [_warp_sum(sum((a * b for a, b in zip(qh, k, strict=True)), zero)) for qh in qs]
+        scores.append([valid[j].where(d / math.sqrt(dim), -1e30) for d in dots])
+    # a finite initial max keeps fully masked warps from computing exp(-inf - -inf)
+    acc, mx, total = (
+        _register((group, per_lane), 0.0),
+        _register((group,), -1e30),
+        _register((group,), 0.0),
+    )
+    prev_acc, prev_max, prev_sum = acc.after(rounds), mx.after(rounds), total.after(rounds)
+    new_max = [
+        functools.reduce(UOp.maximum, (sc[h] for sc in scores), prev_max[h].load())
+        for h in range(group)
+    ]
+    scale = [((prev_max[h].load() - new_max[h]) * LOG2E).exp2() for h in range(group)]
+    accs = [[scale[h] * prev_acc[h, i].load() for i in range(per_lane)] for h in range(group)]
+    sums = [scale[h] * prev_sum[h].load() for h in range(group)]
+    for j in range(per_wave):
+        for h in range(group):
+            weight = valid[j].where(((scores[j][h] - new_max[h]) * LOG2E).exp2(), zero)
+            accs[h] = [a + weight * v for a, v in zip(accs[h], values[j], strict=True)]
+            sums[h] = sums[h] + weight
+    update = UOp.group(
+        acc.store(UOp.stack(*(x for a in accs for x in a)).reshape(group, per_lane)),
+        mx.store(UOp.stack(*new_max)),
+        total.store(UOp.stack(*sums)),
+    ).end(rounds)
+    acc, mx, total = acc.after(update), mx.after(update), total.after(update)
+
+    # merge the warps through shared memory: each writes its output normalized to f16 (sum >= 1
+    # unless empty), as [head, dimension within lane, lane] plus PAD, then its max and sum.
+    # tinygrad's codegen declares an index at its first use in the rounds loop and reuses it after
+    # the loop, out of scope, if the same expression recurs there: this layout repeats neither the
+    # lane offset of the cache loads nor, thanks to PAD, their stride per warp.
+    width = group * dim + PAD
+    shared = UOp.alloc((waves, width), dtypes.half, addrspace=AddrSpace.LOCAL)
+    stat = UOp.alloc((waves, group, 2), dtypes.float32, addrspace=AddrSpace.LOCAL)
+    stores = [
+        shared[wave, (h * per_lane + i) * WARP + lane].store(
+            (acc[h, i].load() / total[h].load().maximum(1)).cast(dtypes.half)
+        )
+        for h in range(group)
+        for i in range(per_lane)
+    ]
+    stores += [
+        stat[wave, h, i].store(x)
+        for h in range(group)
+        for i, x in enumerate((mx[h].load(), total[h].load()))
+    ]
+    shared, stat = shared.after(*stores), stat.after(*stores)
+    thread, results = wave * WARP + lane, []
+    for i in range(-(-group * dim // (waves * WARP))):
+        flat = thread + i * waves * WARP
+        h, d = flat // dim, flat % dim
+        top = functools.reduce(UOp.maximum, (stat[w, h, 0].load() for w in range(waves)))
+        val = sum((((stat[w, h, 0].load() - top) * LOG2E).exp2() * stat[w, h, 1].load()
+                   * shared[w, (h * per_lane + d % per_lane) * WARP + d // per_lane].load().float()
+                   for w in range(waves)), zero)  # fmt: skip
+        live = (
+            (head * group + h).valid(flat < group * dim)
+            if group * dim % (waves * WARP)
+            else head * group + h
+        )
+        results.append(out[live, block, d].store(val))
+    top = functools.reduce(UOp.maximum, (stat[w, thread, 0].load() for w in range(waves)))
+    weights = sum((((stat[w, thread, 0].load() - top) * LOG2E).exp2() * stat[w, thread, 1].load()
+                   for w in range(waves)), zero)  # fmt: skip
+    qh = (head * group + thread).valid(thread < group)
+    results += [stats[qh, block, 0].store(top), stats[qh, block, 1].store(weights)]
+    info = KernelInfo(name="attention_partial", opts_to_apply=())
+    return UOp.group(*results).end(lane, wave, block, head).sink(arg=info)
+
+
+@functools.cache
+def _attention_combine_kernel(o: UOp, partial: UOp, stats: UOp, live: int | UOp) -> UOp:
+    # one warp per query head and 64 dimensions: weights each block's partial by exp(max - max)
+    heads, _, dim = partial.shape
+    tile, per_lane = 64, 64 // WARP
+    head, part = UOp.range(heads, 0, AxisType.GLOBAL), UOp.range(dim // tile, 1, AxisType.GLOBAL)
+    lane = _lane()
+    dims = [part * tile + lane * per_lane + i for i in range(per_lane)]
+    c1 = UOp.range(live, 100, AxisType.LOOP)
+    top = UOp.alloc((1,), dtypes.float32, addrspace=AddrSpace.REG)
+    top = top.after(top.store(top.const_like(-math.inf)))
+    top = top.after(top.store(top.after(c1).maximum(stats[head, c1, 0].load())).end(c1))
+    c2 = UOp.range(live, 101, AxisType.LOOP)
+    acc, total = _register((per_lane,), 0.0), _register((1,), 0.0)
+    weight = ((stats[head, c2, 0].load() - top) * LOG2E).exp2()
+    update = UOp.group(
+        *[
+            acc[i].store(acc.after(c2)[i].load() + weight * partial[head, c2, d].load())
+            for i, d in enumerate(dims)
+        ],
+        total[0].store(total.after(c2)[0].load() + weight * stats[head, c2, 1].load()),
+    ).end(c2)
+    acc, total = acc.after(update), total.after(update)
+    stores = [o[0, head, 0, d].store(acc[i].load() / total[0].load()) for i, d in enumerate(dims)]
+    info = KernelInfo(name="attention_combine", opts_to_apply=())
+    return UOp.group(*stores).end(lane, part, head).sink(arg=info)
+
+
+def supports_attention(q: Tensor, cache: Tensor) -> bool:
+    if not isinstance(q.device, str) or q.device.split(":")[0] not in ("NV", "CUDA"):
+        return False
+    shape = (*cache.shape[1:], *q.shape[1:3])
+    if not all(isinstance(x, int) for x in shape):
+        return False
+    batch, kv_heads, n, dim, heads, tokens = (int(x) for x in shape)
+    group = heads // kv_heads
+    fits = (group * dim + PAD) * 2 + group * 8 <= SHARED  # one warp's share of shared memory
+    return batch == 1 and tokens == 1 and dim % 64 == 0 and n % KEYS == 0 and fits
+
+
+def attention(q: Tensor, cache: Tensor, length: int | UOp) -> Tensor:
+    """Attention of one query token (1, H, 1, D) over the first `length` cached positions."""
+    # a bound length rides on the cache, so the kernels' own copy can stay unbound
+    if isinstance(length, UOp):
+        cache, length = Tensor(cache.uop.after(length)), length.unbind_all()[0]
+    heads, dim, group = q.shape[1], cache.shape[4], q.shape[1] // cache.shape[2]
+    waves = 16
+    while waves * ((group * dim + PAD) * 2 + group * 8) > SHARED:
+        waves //= 2
+    chunks = min(PARTIALS, int(cache.shape[3]) // KEYS)
+    partial = Tensor.empty(heads, chunks, dim, dtype=dtypes.float32, device=q.device)
+    stats = Tensor.empty(heads, chunks, 2, dtype=dtypes.float32, device=q.device)
+    fxn = functools.partial(_attention_partial_kernel, length=length, waves=waves)
+    partial, stats = Tensor.custom_kernel(partial, stats, q.float().contiguous(), cache, fxn=fxn)[
+        :2
+    ]
+    live = _min((length + KEYS - 1) // KEYS, chunks)
+    out = Tensor.empty(1, heads, 1, dim, dtype=dtypes.float32, device=q.device)
+    fxn = functools.partial(_attention_combine_kernel, live=live)
+    return Tensor.custom_kernel(out, partial, stats, fxn=fxn)[0]

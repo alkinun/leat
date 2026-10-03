@@ -15,9 +15,13 @@ def linear(x: Tensor, w: QTensor) -> Tensor:
     return linears(x, w)[0]
 
 
+def _fast() -> bool:
+    return os.environ.get("LEAT_KERNELS") != "ref"
+
+
 def linears(x: Tensor, *ws: QTensor) -> list[Tensor]:
     # x @ w.T for each w; kernels share one quantization of the input
-    if os.environ.get("LEAT_KERNELS") != "ref" and all(nv.supports(x, w) for w in ws):
+    if _fast() and all(nv.supports(x, w) for w in ws):
         return nv.linears(x, *ws)
     return [x @ w.dequant(x.dtype).T for w in ws]
 
@@ -43,10 +47,16 @@ def rope(x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
     return Tensor.stack(x0 * cos - x1 * sin, x0 * sin + x1 * cos, dim=-1).flatten(-2)
 
 
-def attention(q: Tensor, k: Tensor, v: Tensor, start_pos: int | UOp) -> Tensor:
-    # q: (B, H, T, D); k, v: (B, KV_H, start_pos + T, D), causal from the end
-    T, S = q.shape[2], k.shape[2]
+def attention(q: Tensor, cache: Tensor, start_pos: int | UOp) -> Tensor:
+    # q: (B, H, T, D) at positions start_pos.. ; cache: (2, B, KV_H, max_context, D), causal
+    T = q.shape[2]
+    if _fast() and nv.supports_attention(q, cache):
+        return nv.attention(q, cache, start_pos + T)
+    k, v = (
+        cache[0, :, :, : start_pos + T].cast(q.dtype),
+        cache[1, :, :, : start_pos + T].cast(q.dtype),
+    )
     mask = None
     if not (isinstance(T, int) and T == 1):
-        mask = Tensor.full((1, 1, T, S), float("-inf"), dtype=q.dtype).triu(start_pos + 1)
-    return q.scaled_dot_product_attention(k.cast(q.dtype), v.cast(q.dtype), mask, enable_gqa=True)
+        mask = Tensor.full((1, 1, T, k.shape[2]), float("-inf"), dtype=q.dtype).triu(start_pos + 1)
+    return q.scaled_dot_product_attention(k, v, mask, enable_gqa=True)
