@@ -29,31 +29,33 @@ def quantize_q8(x: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return q.ravel(), d[:, 0], s
 
 
-def test_quantize_q8():
+@pytest.mark.parametrize("rows", [None, 5, UOp.variable("rows", 1, 8).bind(3)])
+def test_quantize_q8(rows):
     rng = np.random.default_rng(0)
-    x = (rng.standard_normal(4096) * rng.uniform(0.01, 10, 4096)).astype(np.float32)
-    x[64:96] = 0  # an all-zero group must give d = 0, not nan
-    q, d, s = nv.quantize_q8(Tensor(x))
-    for got, want in zip(
-        (q.numpy().view(np.int8), d.numpy(), s.numpy()), quantize_q8(x), strict=True
-    ):
+    x = (rng.standard_normal((8, 4096)) * rng.uniform(0.01, 10, (8, 4096))).astype(np.float32)
+    x[:, 64:96] = 0  # an all-zero group must give d = 0, not nan
+    q, d, s = nv.quantize_q8(Tensor(x), rows=rows)
+    Tensor.realize(q, d, s)  # in one schedule, as in the model: each alone would lose rows
+    n = 8 if rows is None else rows if isinstance(rows, int) else rows.unbind()[1]
+    outs = (q.numpy().view(np.int8)[: n * 4096], d.numpy()[: n * 128], s.numpy()[: n * 128])
+    for got, want in zip(outs, quantize_q8(x[:n]), strict=True):
         np.testing.assert_array_equal(got, want)
 
 
 def rms_norm(x: np.ndarray, weight: np.ndarray, eps: float) -> np.ndarray:
     x64 = x.astype(np.float64)
-    return (x64 / np.sqrt((x64 * x64).mean() + eps) * weight).astype(np.float32)
+    return (x64 / np.sqrt((x64 * x64).mean(-1, keepdims=True) + eps) * weight).astype(np.float32)
 
 
 def test_norm_quantize_q8():
     rng = np.random.default_rng(4)
-    x = (rng.standard_normal(4096) * 3).astype(np.float32)
+    x = (rng.standard_normal((3, 4096)) * rng.uniform(1, 5, (3, 1))).astype(np.float32)
     weight = rng.uniform(0.5, 1.5, 4096).astype(np.float32)
     q, d, s = (t.numpy() for t in nv.quantize_q8(Tensor(x), (Tensor(weight), 1e-5)))
     want_q, want_d, _ = quantize_q8(rms_norm(x, weight, 1e-5))
     # normalizing in f32 rather than f64 may move a value across a rounding boundary
     off = q.view(np.int8).astype(np.int32) - want_q
-    assert np.abs(off).max() <= 1 and np.count_nonzero(off) <= 4
+    assert np.abs(off).max() <= 1 and np.count_nonzero(off) <= 4 * len(x)
     np.testing.assert_allclose(d, want_d, rtol=1e-5)
     sums = q.view(np.int8).reshape(-1, nv.GROUP).sum(-1, dtype=np.int32).astype(np.float32)
     np.testing.assert_array_equal(s, (d * sums).astype(np.float32))

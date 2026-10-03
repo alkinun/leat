@@ -75,55 +75,72 @@ def _quantize_group(q: UOp, d: UOp, s: UOp, group: UOp, lane: UOp, value: UOp) -
 
 
 @functools.cache
-def _quantize_q8_kernel(q: UOp, d: UOp, s: UOp, x: UOp) -> UOp:
-    group, lane = UOp.range(int(x.shape[0]) // GROUP, 0, AxisType.GLOBAL), _lane()
-    stores = _quantize_group(q, d, s, group, lane, x[group * GROUP + lane].load())
+def _quantize_q8_kernel(q: UOp, d: UOp, s: UOp, x: UOp, rows: int | UOp) -> UOp:
+    groups = int(x.shape[1]) // GROUP
+    row, group = UOp.range(rows, 0, AxisType.GLOBAL), UOp.range(groups, 1, AxisType.GLOBAL)
+    lane = _lane()
+    value = x[row, group * GROUP + lane].load()
+    stores = _quantize_group(q, d, s, row * groups + group, lane, value)
     info = KernelInfo(name="quantize_q8", opts_to_apply=())
-    return UOp.group(*stores).end(group, lane).sink(arg=info)
+    return UOp.group(*stores).end(row, group, lane).sink(arg=info)
 
 
 NORM_WARPS = 8  # per block of the fused RMSNorm and quantization: one group each
 
 
 @functools.cache
-def _norm_quantize_q8_kernel(q: UOp, d: UOp, s: UOp, x: UOp, weight: UOp, eps: float) -> UOp:
-    # RMSNorm, then quantization. Every block sums the squares of the whole vector, from L2 after
+def _norm_quantize_q8_kernel(
+    q: UOp, d: UOp, s: UOp, x: UOp, weight: UOp, rows: int | UOp, eps: float
+) -> UOp:
+    # RMSNorm, then quantization. Every block sums the squares of its whole row, from L2 after
     # the first, with its warps meeting in shared memory; then each warp quantizes one group.
     # On the 3090 this takes 3 us for 4096 values, against 5 us for one block doing every group.
-    n, warps = int(x.shape[0]), NORM_WARPS
-    block = UOp.range(n // (GROUP * warps), 0, AxisType.GLOBAL)
-    lane, wave = _lane(), UOp.range(warps, 1, AxisType.LOCAL)
+    n, warps = int(x.shape[1]), NORM_WARPS
+    row = UOp.range(rows, 0, AxisType.GLOBAL)
+    block = UOp.range(n // (GROUP * warps), 1, AxisType.GLOBAL)
+    lane, wave = _lane(), UOp.range(warps, 2, AxisType.LOCAL)
     thread, threads = wave * WARP + lane, warps * WARP
     zero = UOp.const(0.0, dtypes.float32)
-    squares = sum((x[i * threads + thread].load() ** 2 for i in range(n // threads)), zero)
+    squares = sum((x[row, i * threads + thread].load() ** 2 for i in range(n // threads)), zero)
     partial = UOp.alloc((warps,), dtypes.float32, addrspace=AddrSpace.LOCAL)
     partial = partial.after(partial[wave.valid(lane.eq(0))].store(_warp_sum(squares)))
     inv = (sum((partial[w].load() for w in range(warps)), zero) / n + eps).rsqrt()
     group = block * warps + wave
     at = group * GROUP + lane
-    stores = _quantize_group(q, d, s, group, lane, x[at].load() * inv * weight[at].load())
+    value = x[row, at].load() * inv * weight[at].load()
+    stores = _quantize_group(q, d, s, row * (n // GROUP) + group, lane, value)
     info = KernelInfo(name="norm_quantize_q8", opts_to_apply=())
-    return UOp.group(*stores).end(block, wave, lane).sink(arg=info)
+    return UOp.group(*stores).end(row, block, wave, lane).sink(arg=info)
 
 
 def quantize_q8(
-    x: Tensor, norm: tuple[Tensor, float] | None = None
+    x: Tensor, norm: tuple[Tensor, float] | None = None, rows: int | UOp | None = None
 ) -> tuple[Tensor, Tensor, Tensor]:
-    """Quantizes a vector to int8 in groups of 32, after RMSNorm with `norm`'s weight and eps.
+    """Quantizes the rows of x (R, n) to int8 in groups of 32, after RMSNorm with `norm`'s weight
+    and eps; only the first `rows` if given, which may be a bound variable.
 
-    Returns the values packed four per int32 word, the scales d and the sums d * sum(q).
+    Returns the values packed four per int32 word, the scales d and the sums d * sum(q), each
+    flattened row after row.
     """
-    n = x.shape[0]
-    q = Tensor.empty(n // 4, dtype=dtypes.int32, device=x.device)
-    d = Tensor.empty(n // GROUP, dtype=dtypes.float32, device=x.device)
-    s = Tensor.empty(n // GROUP, dtype=dtypes.float32, device=x.device)
-    x = x.float().contiguous()
+    count, n = x.shape
+    q = Tensor.empty(count * n // 4, dtype=dtypes.int32, device=x.device)
+    d = Tensor.empty(count * n // GROUP, dtype=dtypes.float32, device=x.device)
+    s = Tensor.empty(count * n // GROUP, dtype=dtypes.float32, device=x.device)
+    x, rows = _with_count(x.float().contiguous(), count if rows is None else rows)
     if norm is None:
-        out = Tensor.custom_kernel(q, d, s, x, fxn=_quantize_q8_kernel)
+        fxn = functools.partial(_quantize_q8_kernel, rows=rows)
+        out = Tensor.custom_kernel(q, d, s, x, fxn=fxn)
     else:
-        fxn = functools.partial(_norm_quantize_q8_kernel, eps=norm[1])
+        fxn = functools.partial(_norm_quantize_q8_kernel, rows=rows, eps=norm[1])
         out = Tensor.custom_kernel(q, d, s, x, norm[0].float().contiguous(), fxn=fxn)
     return out[0], out[1], out[2]
+
+
+def _with_count(t: Tensor, count: int | UOp) -> tuple[Tensor, int | UOp]:
+    # a bound count rides on one of the kernel's buffers, so the kernel's own copy stays unbound
+    if isinstance(count, UOp):
+        return Tensor(t.uop.after(count)), count.unbind_all()[0]
+    return t, count
 
 
 def _k_scale_min(w: UOp, base: UOp, sub: UOp) -> tuple[UOp, UOp]:
@@ -271,7 +288,7 @@ def linears(
     `residual` is added to the result inside the kernel; it needs a single w.
     """
     assert residual is None or len(ws) == 1, "a residual goes with one matrix"
-    xq, xd, xs = quantize_q8(x.reshape(x.shape[-1]), norm)
+    xq, xd, xs = quantize_q8(x.reshape(1, x.shape[-1]), norm)
     res = () if residual is None else (residual.reshape(ws[0].shape[0]).float().contiguous(),)
     outs = []
     for w in ws:
@@ -286,7 +303,7 @@ def swiglu(
     x: Tensor, gate: QTensor, up: QTensor, norm: tuple[Tensor, float] | None = None
 ) -> Tensor:
     """silu(x @ gate.T) * (x @ up.T) for one token, both matrices in one kernel."""
-    xq, xd, xs = quantize_q8(x.reshape(x.shape[-1]), norm)
+    xq, xd, xs = quantize_q8(x.reshape(1, x.shape[-1]), norm)
     out = Tensor.empty(gate.shape[0], dtype=dtypes.float32, device=x.device)
     fxn = functools.partial(_swiglu_kernel, ggml_type=gate.type)
     out = Tensor.custom_kernel(out, _words(gate), _words(up), xq, xd, xs, fxn=fxn)[0]
@@ -469,9 +486,7 @@ def supports_attention(q: Tensor, cache: Tensor) -> bool:
 
 def attention(q: Tensor, cache: Tensor, length: int | UOp) -> Tensor:
     """Attention of one query token (1, H, 1, D) over the first `length` cached positions."""
-    # a bound length rides on the cache, so the kernels' own copy can stay unbound
-    if isinstance(length, UOp):
-        cache, length = Tensor(cache.uop.after(length)), length.unbind_all()[0]
+    cache, length = _with_count(cache, length)
     heads, dim, group = q.shape[1], cache.shape[4], q.shape[1] // cache.shape[2]
     waves = 16
     while waves * ((group * dim + PAD) * 2 + group * 8) > SHARED:
