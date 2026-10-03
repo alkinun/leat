@@ -1,0 +1,89 @@
+"""Activations to int8 in groups of 32, as llama.cpp's q8_1, after RMSNorm when given its weight."""
+
+import functools
+import math
+
+from tinygrad import Tensor, UOp, dtypes
+from tinygrad.dtype import AddrSpace
+from tinygrad.uop.ops import AxisType, KernelInfo, Ops
+
+from leat.nv.common import GROUP, WARP, carry, lane_range, load_vector, warp_max, warp_sum
+
+WARPS = 8  # per block
+
+
+def _quantize_group(q: UOp, d: UOp, s: UOp, group: UOp, part: UOp, values: list[UOp]) -> list[UOp]:
+    # 8 lanes quantize a group of 32 values, 4 consecutive ones each, the lane's `part` of the
+    # group: d = max|x| / 127, q = round(x / d), s = d * sum(q), with q packed four per int32 word
+    # so matrix kernels read it without a copy. Custom expressions keep both divisions exact:
+    # tinygrad would multiply by a reciprocal.
+    amax = warp_max(functools.reduce(UOp.maximum, (v.maximum(-v) for v in values)), 8)
+    scale = UOp(Ops.CUSTOMI, src=(amax,), arg=("({}/127.0f)", dtypes.float32))
+    quants = []
+    for v in values:
+        rounded = UOp(Ops.CUSTOMI, src=(v, scale), arg=("roundf({}/{})", dtypes.float32))
+        quants.append((scale > 0).where(rounded, 0.0).cast(dtypes.int32))
+    word = functools.reduce(
+        UOp.__or__, ((x & 0xFF).cast(dtypes.uint32) << (8 * i) for i, x in enumerate(quants))
+    )
+    total = warp_sum(sum(quants[1:], quants[0]), 8)
+    first = group.valid(part.eq(0))
+    return [
+        q[group * (GROUP // 4) + part].store(word.bitcast(dtypes.int32)),
+        d[first].store(scale),
+        s[first].store(scale * total.float()),
+    ]
+
+
+@functools.cache
+def _quantize_q8_kernel(
+    q: UOp, d: UOp, s: UOp, x: UOp, *weight: UOp, rows: int | UOp, eps: float
+) -> UOp:
+    # Each row takes a block, whose threads quantize 4 consecutive values at a time. A single row,
+    # the vector of a decode step, spreads over blocks instead, though each block then sums the
+    # squares of the whole row, from L2 after the first.
+    n, spread = int(x.shape[1]), isinstance(rows, int) and rows == 1
+    warps = math.gcd(WARPS, n // (4 * WARP))
+    threads = warps * WARP
+    row = UOp.range(rows, 0, AxisType.GLOBAL)
+    lane, wave = lane_range(), UOp.range(warps, 2, AxisType.LOCAL)
+    turn = UOp.range(n // (4 * threads), 1, AxisType.GLOBAL if spread else AxisType.LOOP)
+    thread = wave * WARP + lane
+    at = (turn * threads + thread) * 4  # the thread's first value
+    values = list(load_vector(x[row, at], 4))
+    if weight:
+        zero = UOp.const(0.0, dtypes.float32)
+        chunks = (
+            load_vector(x[row, (i * threads + thread) * 4], 4) for i in range(n // (4 * threads))
+        )
+        squares = sum((v * v for chunk in chunks for v in chunk), zero)
+        partial = UOp.alloc((warps,), dtypes.float32, addrspace=AddrSpace.LOCAL)
+        partial = partial.after(partial[wave.valid(lane.eq(0))].store(warp_sum(squares)))
+        inv = (sum((partial[w].load() for w in range(warps)), zero) / n + eps).rsqrt()
+        values = [v * inv * w for v, w in zip(values, load_vector(weight[0][at], 4), strict=True)]
+    group = row * (n // GROUP) + at // GROUP
+    stores = UOp.group(*_quantize_group(q, d, s, group, lane % 8, values))
+    if not spread:
+        stores = stores.end(turn)
+    info = KernelInfo(name="norm_quantize_q8" if weight else "quantize_q8", opts_to_apply=())
+    return stores.end(*(row, turn) if spread else (row,), wave, lane).sink(arg=info)
+
+
+def quantize_q8(
+    x: Tensor, norm: tuple[Tensor, float] | None = None, rows: int | UOp | None = None
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Quantizes the rows of x (R, n) to int8 in groups of 32, after RMSNorm with `norm`'s weight
+    and eps; only the first `rows` if given, which may be a bound variable.
+
+    Returns the values packed four per int32 word, the scales d and the sums d * sum(q), each
+    flattened row after row.
+    """
+    count, n = x.shape
+    q = Tensor.empty(count * n // 4, dtype=dtypes.int32, device=x.device)
+    d = Tensor.empty(count * n // GROUP, dtype=dtypes.float32, device=x.device)
+    s = Tensor.empty(count * n // GROUP, dtype=dtypes.float32, device=x.device)
+    x, rows = carry(x.float().contiguous(), count if rows is None else rows)
+    weight = () if norm is None else (norm[0].float().contiguous(),)
+    fxn = functools.partial(_quantize_q8_kernel, rows=rows, eps=0.0 if norm is None else norm[1])
+    out = Tensor.custom_kernel(q, d, s, x, *weight, fxn=fxn)
+    return out[0], out[1], out[2]

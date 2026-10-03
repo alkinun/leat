@@ -1,0 +1,405 @@
+"""Linear layers for several tokens on int8 tensor cores, llama.cpp's MMQ.
+
+The activations are quantized as for one token. A block stages a tile of weights, unpacked to
+int8, and 64 tokens in shared memory, half a weight block per step, while it fetches the next step
+into registers. Each of its warps multiplies 32 rows by the 64 tokens on tensor cores and scales
+every group of 32 in f32. Tiles of 256 rows reach 68 to 79 TOPS on 512 tokens, against 47 to 61
+for 128; matrices with few rows take 128, to occupy more SMs.
+"""
+
+import functools
+import itertools
+
+from tinygrad import Tensor, UOp, dtypes
+from tinygrad.dtype import AddrSpace
+from tinygrad.uop.ops import AxisType, KernelInfo, Ops
+
+from leat.nv.common import (
+    GROUP,
+    WARP,
+    WORD_TYPE,
+    carry,
+    f16,
+    lane_range,
+    minus_32,
+    on_nvidia,
+    register,
+    silu,
+    storage_words,
+)
+from leat.nv.quantize import quantize_q8
+from leat.quant import GGMLType, QTensor
+
+TILE_TOKENS = 64
+WARP_ROWS = 32  # a warp per 32 rows of the tile, and a thread per row to load its scales
+STEP = 128  # weights per row per step
+SUBTILES_M, SUBTILES_N = WARP_ROWS // 16, TILE_TOKENS // 8  # of 16 x 8 per warp
+
+# mma.sync on int8: a 16 x k tile of weights times a k x 8 tile of activations, for k = 32 or 16.
+# {0} points at 4 int32 registers for the lane's share of the result, then come the lane's 4 or 2
+# words of weights and its 2 or 1 of activations. A CUSTOM op has one value, so the statement
+# returns the first result and writes the other three through the pointer.
+_MMA = {
+    32: '[&]{{ int c0, c1, c2, c3; asm("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 '
+    '{{%0,%1,%2,%3}}, {{%4,%5,%6,%7}}, {{%8,%9}}, {{%10,%10,%10,%10}};" '
+    ': "=r"(c0), "=r"(c1), "=r"(c2), "=r"(c3) '
+    ': "r"({1}), "r"({2}), "r"({3}), "r"({4}), "r"({5}), "r"({6}), "r"(0)); '
+    "{0}[1] = c1; {0}[2] = c2; {0}[3] = c3; return c0; }}()",
+    16: '[&]{{ int c0, c1, c2, c3; asm("mma.sync.aligned.m16n8k16.row.col.s32.s8.s8.s32 '
+    '{{%0,%1,%2,%3}}, {{%4,%5}}, {{%6}}, {{%7,%7,%7,%7}};" '
+    ': "=r"(c0), "=r"(c1), "=r"(c2), "=r"(c3) '
+    ': "r"({1}), "r"({2}), "r"({3}), "r"(0)); '
+    "{0}[1] = c1; {0}[2] = c2; {0}[3] = c3; return c0; }}()",
+}
+
+
+def _mma(a: list[UOp], b: list[UOp]) -> list[UOp]:
+    # lane 4g + t gets the results for rows g and g + 8 by tokens 2t and 2t + 1
+    c = UOp.alloc((4,), dtypes.int32, addrspace=AddrSpace.REG)
+    product = UOp(Ops.CUSTOM, src=(c[0], *a, *b), arg=(_MMA[8 * len(a)], dtypes.int32))
+    c = c.after(c[0].store(product))
+    return [c[i].load() for i in range(4)]
+
+
+class _Stack:
+    """Weight matrices of one type and width stacked by rows, as one: a tile of rows lies within
+    one of them, which `load` reads with each matrix's load predicated on holding the tile. Paired,
+    a tile holds the same rows of two matrices instead, in its first and second half."""
+
+    def __init__(
+        self, ws: tuple[UOp, ...], tiles: tuple[int, ...], tile: UOp, rows: int, paired: bool
+    ):
+        self.row_words = int(ws[0].shape[0]) // (tiles[0] * rows)
+        self.half, first = rows // 2 if paired else 0, 0
+        self.parts: list[tuple[UOp, UOp, UOp | None]] = []
+        for w, n in zip(ws, tiles, strict=True):
+            if paired:  # a matrix's rows from tile * half on are the tile's rows from first on
+                self.parts.append((w, tile * self.half - first, None))
+                first += self.half
+                continue
+            mine = None if len(ws) == 1 else (tile >= first) & (tile < first + n)
+            self.parts.append((w, (tile - first) * rows, mine))
+            first += n
+
+    def load(self, row: UOp, at: UOp | int) -> UOp:
+        # word `at` of the tile's row `row`
+        words = []
+        for i, (w, row0, mine) in enumerate(self.parts):
+            if self.half:
+                mine = (row < self.half) if i == 0 else (row >= self.half)
+            index = (row0 + row) * self.row_words + at
+            words.append(w[index if mine is None else index.valid(mine)].load())
+        return functools.reduce(UOp.__or__, words)
+
+    def word16(self, row: UOp, at: UOp | int) -> UOp:
+        # four bytes from halfword `at` on, as common.word16
+        low, high = (self.load(row, at + i).cast(dtypes.uint32) for i in (0, 1))
+        return low | (high << 16)
+
+
+# A weight type's part of the kernel: its shared buffers, `fetch` of a step's words into
+# registers and `put` of them into the buffers, and `products` of group s. Those take the
+# buffers, s, the lane's rows (r, r + 8) in the tile and t4, its activation words, and its two
+# tokens' d and d * sum(q); they return the 4 f32 results.
+
+
+class _Q4KTile:
+    """Q4_K weights, half a block per step: 16 words of nibbles per row, and its 4 groups' scales
+    and mins, which get_scale_min_k4 takes from the block's 12 scale bytes."""
+
+    def __init__(self, stack: _Stack, rows: int, tid: UOp):
+        self.stack, self.rows, self.tid = stack, rows, tid
+        self.quants = UOp.alloc((rows, 16 + 4), dtypes.uint32, addrspace=AddrSpace.LOCAL)
+        self.scales = UOp.alloc((2, 4, rows), dtypes.float32, addrspace=AddrSpace.LOCAL)
+
+    def shared(self) -> list[UOp]:
+        return [self.quants, self.scales]
+
+    def fetch(self, step: UOp) -> list[UOp]:
+        # the thread's words of the step: nibbles, then d and dmin and the scale bytes of its row
+        words, block = [], step // 2 * 36
+        for i in range(16):
+            row, word = (i * self.rows + self.tid) // 16, (i * self.rows + self.tid) % 16
+            words.append(self.stack.load(row, block + 4 + 16 * (step % 2) + word))
+        return words + [self.stack.load(self.tid, block + i) for i in range(4)]
+
+    def put(self, bufs: list[UOp], step: UOp, words: list[UOp]) -> list[UOp]:
+        quants, scales = bufs
+        stores = []
+        for i, word in enumerate(words[:-4]):
+            row, at = (i * self.rows + self.tid) // 16, (i * self.rows + self.tid) % 16
+            stores.append(quants[row, at].store(word))
+        dm, *packed = words[-4:]
+
+        def byte(i: int) -> UOp:
+            return (packed[i // 4] >> (8 * (i % 4))) & 0xFF
+
+        first = (step % 2).eq(0)  # groups 0..3 of the block, else 4..7
+        for g in range(4):
+            sc = first.where(byte(g) & 63, (byte(g + 8) & 15) | ((byte(g) >> 6) << 4))
+            mn = first.where(byte(g + 4) & 63, (byte(g + 8) >> 4) | ((byte(g + 4) >> 6) << 4))
+            stores.append(scales[0, g, self.tid].store(f16(dm) * sc.float()))
+            stores.append(scales[1, g, self.tid].store(f16(dm >> 16) * mn.float()))
+        return stores
+
+    @staticmethod
+    def products(bufs, s, rows, t4, b, xd, xs) -> list[UOp]:
+        # groups 2j and 2j + 1 are the low and high nibbles of words 8j .. 8j + 7
+        quants, scales = bufs
+        shift = (4 * (s % 2)).cast(dtypes.uint32)
+        words = [quants[r, s // 2 * 8 + 4 * h + t4].load() for h in range(2) for r in rows]
+        c = _mma([((x >> shift) & 0x0F0F0F0F).bitcast(dtypes.int32) for x in words], b)
+        return [
+            c[e].float() * (scales[0, s, rows[e // 2]].load() * xd[e % 2])
+            - scales[1, s, rows[e // 2]].load() * xs[e % 2]
+            for e in range(4)
+        ]
+
+
+class _Q6KTile:
+    """Q6_K weights, half a block per step, unpacked to int8 as in matvec's _q6_k_dot: 4 groups of
+    32 per row, its 8 scales and d. Rows have no padding, to fit in shared memory; XOR-ing words
+    with the row instead keeps a fragment's 8 rows in different banks."""
+
+    def __init__(self, stack: _Stack, rows: int, tid: UOp):
+        self.stack, self.rows, self.tid = stack, rows, tid
+        self.quants = UOp.alloc((rows, 32), dtypes.int32, addrspace=AddrSpace.LOCAL)
+        self.scales = UOp.alloc((2, rows), dtypes.uint32, addrspace=AddrSpace.LOCAL)
+        self.d = UOp.alloc((rows,), dtypes.float32, addrspace=AddrSpace.LOCAL)
+
+    def shared(self) -> list[UOp]:
+        return [self.quants, self.scales, self.d]
+
+    def fetch(self, step: UOp) -> list[UOp]:
+        # for each of the thread's (row, word) pairs, the words of low and high bits behind it;
+        # then the 8 scale bytes and d of its row
+        words, block, half = [], step // 2 * 105, 32 * (step % 2)
+        for i in range(8):
+            row, m = (i * self.rows + self.tid) // 8, (i * self.rows + self.tid) % 8
+            for at in (half + 2 * m, half + 16 + 2 * m, 64 + half // 2 + 2 * m):
+                words.append(self.stack.word16(row, block + at))
+        words += [self.stack.word16(self.tid, block + 96 + half // 8 + 2 * j) for j in range(2)]
+        return words + [self.stack.load(self.tid, block + 104).cast(dtypes.uint32)]
+
+    def put(self, bufs: list[UOp], step: UOp, words: list[UOp]) -> list[UOp]:
+        quants, scales, d = bufs
+        stores = []
+        for i in range(8):
+            row, m = (i * self.rows + self.tid) // 8, (i * self.rows + self.tid) % 8
+            ql, qh = words[3 * i : 3 * i + 2], words[3 * i + 2]
+            for k in range(4):
+                low = (ql[k % 2] >> (4 * (k // 2))) & 0x0F0F0F0F
+                high = ((qh >> (2 * k)) & 0x03030303) << 4
+                stores.append(quants[row, _swizzle(row, 8 * k + m)].store(minus_32(low | high)))
+        stores += [scales[j, self.tid].store(words[-3 + j]) for j in range(2)]
+        return stores + [d[self.tid].store(f16(words[-1]))]
+
+    @staticmethod
+    def products(bufs, s, rows, t4, b, xd, xs) -> list[UOp]:
+        # a scale per 16 weights: two k = 16 products, combined in int32
+        quants, scales, d = bufs
+        a = [quants[r, _swizzle(r, 8 * s + 4 * h + t4)].load() for h in range(2) for r in rows]
+        c = [_mma(a[2 * h : 2 * h + 2], [b[h]]) for h in range(2)]
+        dots = []
+        for e in range(4):
+            packed = scales[s // 2, rows[e // 2]].load()  # the scales of groups 2s and 2s + 1
+            sc = [_signed_byte(packed, 16 * (s % 2) + 8 * h) for h in range(2)]
+            dots.append(c[0][e] * sc[0] + c[1][e] * sc[1])
+        return [dots[e].float() * (d[rows[e // 2]].load() * xd[e % 2]) for e in range(4)]
+
+
+def _swizzle(row: UOp, word: UOp | int) -> UOp:
+    return (row % 8 * 4) ^ word
+
+
+def _signed_byte(word: UOp, shift: UOp) -> UOp:
+    byte = ((word >> shift.cast(dtypes.uint32)) & 0xFF).cast(dtypes.uint8)
+    return byte.bitcast(dtypes.int8).cast(dtypes.int32)
+
+
+_TILES: dict[GGMLType, type[_Q4KTile] | type[_Q6KTile]] = {
+    GGMLType.Q4_K: _Q4KTile,
+    GGMLType.Q6_K: _Q6KTile,
+}
+
+
+@functools.cache
+def _matmul_kernel(
+    out: UOp, *srcs: UOp, tokens: int | UOp, ggml_type: GGMLType, rows: int, tiles: tuple[int, ...],
+    gated: bool,
+) -> UOp:  # fmt: skip
+    # srcs: the stacked matrices, tiles of `rows` rows of each, then xq, xd, xs and a residual; a
+    # block per tile of `rows` rows by TILE_TOKENS tokens. Gated, the matrices are gate and up,
+    # a tile holds rows of both, each warp the same 16 of either, and out is silu(gate) * up.
+    ws, (xq, xd, xs, *residual) = srcs[: len(tiles)], srcs[len(tiles) :]
+    count, n = (int(x) for x in out.shape)
+    cols, threads, out_rows = 4 * int(xq.shape[0]) // count, rows, rows // 2 if gated else rows
+    steps = cols // STEP
+    tile_tokens = UOp.range((tokens + TILE_TOKENS - 1) // TILE_TOKENS, 0, AxisType.GLOBAL)
+    tile_rows = UOp.range(n // out_rows, 1, AxisType.GLOBAL)
+    lane, warp = lane_range(), UOp.range(rows // WARP_ROWS, 2, AxisType.LOCAL)
+    tid, g, t4 = warp * WARP + lane, lane // 4, lane % 4
+    row0, token0 = tile_rows * out_rows, tile_tokens * TILE_TOKENS
+    weights = _TILES[ggml_type](_Stack(ws, tiles, tile_rows, rows, gated), rows, tid)
+    # the first rows of the warp's two subtiles of 16 rows, within the tile
+    firsts = [warp * 16 + mi * out_rows if gated else warp * WARP_ROWS + mi * 16 for mi in (0, 1)]
+    # the tile's tokens for a step: 32 words each, and the d and d * sum(q) of 4 groups
+    act = UOp.alloc((TILE_TOKENS, 32 + 4), dtypes.int32, addrspace=AddrSpace.LOCAL)
+    act_scales = UOp.alloc((2, 4, TILE_TOKENS), dtypes.float32, addrspace=AddrSpace.LOCAL)
+    pairs = [_split(i * threads + tid, 32) for i in range(32 * TILE_TOKENS // threads)]
+    groups = [_split(i * threads + tid, TILE_TOKENS) for i in range(4 * TILE_TOKENS // threads)]
+
+    def fetch(step: UOp) -> list[UOp]:
+        words = weights.fetch(step)
+        for tok, word in pairs:
+            at = (token0 + tok) * (cols // 4) + step * 32 + word
+            words.append(xq[at].load().bitcast(dtypes.uint32))
+        for grp, tok in groups:
+            at = (token0 + tok) * (cols // GROUP) + step * 4 + grp
+            words += [xd[at].load().bitcast(dtypes.uint32), xs[at].load().bitcast(dtypes.uint32)]
+        return words
+
+    def put(bufs: list[UOp], step: UOp, words: list[UOp]) -> list[UOp]:
+        *mine, act, act_scales = bufs
+        theirs = len(words) - len(pairs) - 2 * len(groups)
+        stores = weights.put(mine, step, words[:theirs])
+        quants, scales = words[theirs : theirs + len(pairs)], words[theirs + len(pairs) :]
+        for (tok, word), value in zip(pairs, quants, strict=True):
+            stores.append(act[tok, word].store(value.bitcast(dtypes.int32)))
+        for i, (grp, tok) in enumerate(groups):
+            for j in (0, 1):
+                value = scales[2 * i + j].bitcast(dtypes.float32)
+                stores.append(act_scales[j, grp, tok].store(value))
+        return stores
+
+    # step 0 before the loop; in step i, the fetch of step i + 1 is staged in registers before
+    # the products, so that its loads are in flight meanwhile, and stored after them. tinygrad
+    # orders operations by their dependencies alone, so the products depend on the staging.
+    bufs = [*weights.shared(), act, act_scales]
+    first = put(bufs, UOp.const(0, dtypes.weakint), fetch(UOp.const(0, dtypes.weakint)))
+    step = UOp.range(steps, 3, AxisType.LOOP)
+    following = fetch((step + 1).minimum(steps - 1))
+    stage = UOp.alloc((len(following),), dtypes.uint32, addrspace=AddrSpace.REG)
+    staged = UOp.group(*(stage[i].store(v) for i, v in enumerate(following)))
+    bufs = [buf.after(*first).after(step).after(staged) for buf in bufs]
+    *mine, act, act_scales = bufs
+
+    acc = register((SUBTILES_M * SUBTILES_N * 4,), 0.0)
+    s = UOp.range(STEP // GROUP, 4, AxisType.LOOP)
+    prev, vals = acc.after(step, s), list[UOp]()
+    for mi in range(SUBTILES_M):
+        r = firsts[mi] + g
+        for ni in range(SUBTILES_N):
+            tok = ni * 8
+            b = [act[tok + g, 8 * s + 4 * h + t4].load() for h in range(2)]
+            xd_, xs_ = ([act_scales[i, s, tok + 2 * t4 + j].load() for j in (0, 1)] for i in (0, 1))
+            for inc in weights.products(mine, s, (r, r + 8), t4, b, xd_, xs_):
+                vals.append(prev[len(vals)].load() + inc)
+    computed = acc.store(UOp.stack(*vals)).end(s)
+    # every warp is done with this step's tiles before they are overwritten
+    done = UOp(Ops.BARRIER, src=(computed,))
+    staged_words = [stage.after(staged)[i].load() for i in range(len(following))]
+    later = put([buf.after(done) for buf in bufs], step + 1, staged_words)
+    acc = acc.after(UOp.group(computed, *later).end(step))
+
+    results = []
+    for mi in range(1 if gated else SUBTILES_M):
+        for ni in range(SUBTILES_N):
+            for e in range(4):
+                row = row0 + firsts[mi] + g + 8 * (e // 2)
+                tok = token0 + ni * 8 + 2 * t4 + e % 2
+                value = acc[(mi * SUBTILES_N + ni) * 4 + e].load()
+                if gated:
+                    value = silu(value) * acc[(SUBTILES_N + ni) * 4 + e].load()
+                if residual:
+                    value = value + residual[0][tok, row].load()
+                results.append(out[tok, row].store(value))
+    info = KernelInfo(name=f"matmul_{ggml_type.name.lower()}_{n}_{cols}", opts_to_apply=())
+    return UOp.group(*results).end(tile_tokens, tile_rows, lane, warp).sink(arg=info)
+
+
+def _split(a: UOp, b: int) -> tuple[UOp, UOp]:
+    return a // b, a % b
+
+
+def _tiled(x: Tensor) -> Tensor:
+    # Several tokens, while prefilling a bound count of them: buffers hold the most there may be,
+    # rounded up to whole tiles, and the kernels stop after the tiles holding actual tokens. The
+    # first rows of a kernel's output of that many rows are that output, whose other rows nobody
+    # reads; anything else is padded, a copy.
+    count, n = -(-x.max_shape[-2] // TILE_TOKENS) * TILE_TOKENS, x.shape[-1]
+    view = x.uop
+    while view.op is Ops.RESHAPE:
+        view = view.src[0]
+    if view.op is Ops.SHRINK and view.src[0].shape == (count, n) and x.dtype == dtypes.float32:
+        starts, sizes = view.src[1].src, view.src[2].src
+        if all(s.op is Ops.CONST and s.arg == 0 for s in starts) and sizes[1].arg == n:
+            return Tensor(view.src[0])
+    return x.reshape(x.shape[-2], n).float().pad_to((count, n)).contiguous()
+
+
+def _products(
+    q8: tuple[Tensor, Tensor, Tensor], tokens: int | UOp, ws: tuple[QTensor, ...],
+    residual: Tensor | None, gated: bool = False,
+) -> list[tuple[Tensor, list[int]]]:  # fmt: skip
+    # the products of the quantized activations and each matrix, with consecutive matrices of one
+    # type stacked in one kernel, as few rows leave SMs idle: each kernel's output and heights.
+    # Gated, ws are gate and up, and the one output is silu(gate) * up.
+    xq, xd, xs = q8
+    count = int(xd.shape[0]) * GROUP // ws[0].shape[1]
+    xq, bound = carry(xq, tokens)
+    res = () if residual is None else (_tiled(residual),)
+    outs = []
+    for _, group in itertools.groupby(ws, key=lambda w: w.type):
+        stack = tuple(group)
+        heights = [int(w.shape[0]) for w in stack]
+        tile = 256 if sum(heights) >= 4096 and all(h % 256 == 0 for h in heights) else 128
+        width = heights[0] if gated else sum(heights)
+        out = Tensor.empty(count, width, dtype=dtypes.float32, device=xq.device)
+        fxn = functools.partial(
+            _matmul_kernel, tokens=bound, ggml_type=stack[0].type, rows=tile,
+            tiles=tuple(h // tile for h in heights), gated=gated,
+        )  # fmt: skip
+        words = map(storage_words, stack)
+        out = Tensor.custom_kernel(out, *words, xq, xd, xs, *res, fxn=fxn)[0]
+        outs.append((out, [width] if gated else heights))
+    return outs
+
+
+def supports_matmul(x: Tensor, w: QTensor) -> bool:
+    # tokens of one sequence, whole tiles of rows, and whole steps along a row
+    rows, cols = w.shape
+    single = all(isinstance(b, int) and b == 1 for b in x.shape[:-2])
+    fits = isinstance(rows, int) and rows % 128 == 0 and isinstance(cols, int) and cols % 256 == 0
+    return on_nvidia(x) and single and w.type in WORD_TYPE and fits
+
+
+def matmuls(
+    x: Tensor,
+    *ws: QTensor,
+    norm: tuple[Tensor, float] | None = None,
+    residual: Tensor | None = None,
+) -> list[Tensor]:
+    """x @ w.T for tokens x (1, T, n) and each w, with the activations quantized to int8 once,
+    after rms_norm(x, *norm) if given. `residual` is added inside the kernel; it needs a single w.
+    """
+    assert residual is None or len(ws) == 1, "a residual goes with one matrix"
+    tokens = x.shape[-2]
+    q8 = quantize_q8(_tiled(x), norm, rows=tokens)
+    outs = []
+    for out, heights in _products(q8, tokens, ws, residual):
+        for start, h in zip(itertools.accumulate([0, *heights]), heights, strict=False):
+            outs.append(out[:tokens, start : start + h].reshape(*x.shape[:-1], h))
+    return outs
+
+
+def feed_forward(
+    x: Tensor, gate: QTensor, up: QTensor, down: QTensor, norm: tuple[Tensor, float]
+) -> Tensor:
+    """x + silu(n @ gate.T) * (n @ up.T) @ down.T for tokens x and n = rms_norm(x, *norm), with
+    gate and up, which share a type and shape, in one kernel that also applies silu."""
+    tokens = x.shape[-2]
+    q8 = quantize_q8(_tiled(x), norm, rows=tokens)
+    ((hidden, _),) = _products(q8, tokens, (gate, up), None, gated=True)
+    ((out, _),) = _products(quantize_q8(hidden, rows=tokens), tokens, (down,), x)
+    return out[:tokens].reshape(*x.shape[:-1], down.shape[0])

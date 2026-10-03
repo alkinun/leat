@@ -13,44 +13,46 @@ from leat.quant import NATIVE, QTensor
 
 def linear(x: Tensor, w: QTensor, residual: Tensor | None = None) -> Tensor:
     # residual + x @ w.T, with the addition inside the matrix kernel where there is one
-    if _fast() and nv.supports(x, w):
-        return nv.linears(x, w, residual=residual)[0]
-    out = x @ w.dequant(x.dtype).T
-    return out if residual is None else residual + out
+    return linears(x, w, residual=residual)[0]
 
 
-def _fast() -> bool:
-    return os.environ.get("LEAT_KERNELS") != "ref"
-
-
-def linears(x: Tensor, *ws: QTensor, norm: tuple[Tensor, float] | None = None) -> list[Tensor]:
-    # x @ w.T for each w, after rms_norm(x, *norm) if given; kernels share one quantization of x
-    if _fast() and all(nv.supports(x, w) for w in ws):
-        return nv.linears(x, *ws, norm=norm)
+def linears(
+    x: Tensor,
+    *ws: QTensor,
+    norm: tuple[Tensor, float] | None = None,
+    residual: Tensor | None = None,
+) -> list[Tensor]:
+    # x @ w.T for each w, after rms_norm(x, *norm) if given and plus a residual with one w;
+    # kernels share one quantization of x
+    if _fast() and all(nv.supports_matvec(x, w) for w in ws):
+        return nv.matvecs(x, *ws, norm=norm, residual=residual)
+    if _fast() and all(nv.supports_matmul(x, w) for w in ws):
+        return nv.matmuls(x, *ws, norm=norm, residual=residual)
     if norm is not None:
         x = rms_norm(x, *norm)
-    return [x @ w.dequant(x.dtype).T for w in ws]
-
-
-def swiglu(
-    x: Tensor, gate: QTensor, up: QTensor, norm: tuple[Tensor, float] | None = None
-) -> Tensor:
-    # silu(x @ gate.T) * (x @ up.T), after rms_norm(x, *norm) if given
-    same = gate.type == up.type and gate.shape == up.shape
-    if _fast() and same and nv.supports(x, gate) and nv.supports(x, up):
-        return nv.swiglu(x, gate, up, norm)
-    g, u = linears(x, gate, up, norm=norm)
-    return g.silu() * u
+    outs = [x @ w.dequant(x.dtype).T for w in ws]
+    return outs if residual is None else [residual + out for out in outs]
 
 
 def feed_forward(
     x: Tensor, gate: QTensor, up: QTensor, down: QTensor, norm: tuple[Tensor, float]
 ) -> Tensor:
-    # x + swiglu(x, gate, up, norm) @ down.T: llama's MLP with its residual
-    fits = gate.type == up.type and gate.shape == up.shape
-    if _fast() and fits and all(nv.supports(x, w) for w in (gate, up, down)):
+    # x + (silu(n @ gate.T) * (n @ up.T)) @ down.T for n = rms_norm(x, *norm): llama's MLP with
+    # its residual. Kernels take gate and up together where they share a type and shape; one
+    # token takes the matrix-vector kernels, though the matrix kernels would also accept it.
+    paired = gate.type == up.type and gate.shape == up.shape
+    if _fast() and paired and nv.supports_matvec(x, gate):
+        hidden = nv.swiglu(x, gate, up, norm)
+    elif _fast() and paired and all(nv.supports_matmul(x, w) for w in (gate, up, down)):
         return nv.feed_forward(x, gate, up, down, norm)
-    return linear(swiglu(x, gate, up, norm), down, residual=x)
+    else:
+        g, u = linears(x, gate, up, norm=norm)
+        hidden = g.silu() * u
+    return linear(hidden, down, residual=x)
+
+
+def _fast() -> bool:
+    return os.environ.get("LEAT_KERNELS") != "ref"
 
 
 def embedding(tokens: Tensor, w: QTensor) -> Tensor:
