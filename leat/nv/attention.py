@@ -30,24 +30,27 @@ from leat.nv.common import (
 KEYS = 64  # keys per chunk
 PARTIALS = 48  # most blocks per kv head; longer caches loop over several chunks per block
 PAD = 8  # halves of shared memory after each warp's outputs, see _attention_partial_kernel
+GROUP_SPLIT = 4  # query heads per block at most: a block's time grows with them, 5.7 us for 4
+# and 10 us for 8 at short context, while reading keys and values once per block costs little
 
 
 @functools.cache
 def _attention_partial_kernel(
     out: UOp, stats: UOp, q: UOp, cache: UOp, slot: int | UOp, length: int | UOp, waves: int,
-    scale: float, window: int,
+    scale: float, window: int, split: int,
 ) -> UOp:  # fmt: skip
-    # A block takes one kv head of the slot and every PARTIALS-th chunk of its keys, for all query
-    # heads of the GQA group, from the chunk of the first key the window holds. Each of `waves`
-    # warps scores KEYS / waves keys of a chunk; lanes hold dim / 32 dimensions. The warps then
-    # merge through shared memory into one partial per block: the unnormalized output, its running
-    # max and its sum of weights.
+    # A block takes one kv head of the slot and every PARTIALS-th chunk of its keys, for a
+    # `split`-th of the query heads of its GQA group, from the chunk of the first key the window
+    # holds. Each of `waves` warps scores KEYS / waves keys of a chunk; lanes hold dim / 32
+    # dimensions. The warps then merge through shared memory into one partial per block: the
+    # unnormalized output, its running max and its sum of weights.
     kv_heads, dim = int(cache.shape[2]), int(cache.shape[4])
-    group, per_lane, partials = int(q.shape[1]) // kv_heads, dim // WARP, int(out.shape[1])
+    group, per_lane = int(q.shape[1]) // kv_heads // split, dim // WARP  # query heads per block
+    partials = int(out.shape[1])
     per_wave, zero = KEYS // waves, UOp.const(0.0, dtypes.float32)
     since = _since(length, window)
     chunks = (length + KEYS - 1) // KEYS - since // KEYS
-    head = UOp.range(kv_heads, 0, AxisType.GLOBAL)
+    head = UOp.range(kv_heads * split, 0, AxisType.GLOBAL)  # query heads from head * group
     block = UOp.range(at_most(chunks, partials), 1, AxisType.GLOBAL)
     lane, wave = lane_range(), UOp.range(waves, 3, AxisType.LOCAL)
     qs = [load_vector(q[0, head * group + h, 0, lane * per_lane], per_lane) for h in range(group)]
@@ -57,9 +60,9 @@ def _attention_partial_kernel(
     for j in range(per_wave):
         key = chunk * KEYS + wave * per_wave + j
         valid.append((key < length) & (key >= since) if window else key < length)
-        k = load_vector(cache[0, slot, head, key, lane * per_lane], per_lane)
+        k = load_vector(cache[0, slot, head // split, key, lane * per_lane], per_lane)
         # values load during scoring, so both streams are in flight together
-        v = load_vector(cache[1, slot, head, key, lane * per_lane], per_lane)
+        v = load_vector(cache[1, slot, head // split, key, lane * per_lane], per_lane)
         values.append([valid[j].where(x, zero) for x in v])
         dots = [warp_sum(sum((a * b for a, b in zip(qh, k, strict=True)), zero)) for qh in qs]
         scores.append([valid[j].where(d * scale, -1e30) for d in dots])
@@ -168,7 +171,7 @@ def supports_attention(q: Tensor, cache: Tensor) -> bool:
     if not on_nvidia(q) or not all(isinstance(x, int) for x in shape):
         return False
     kv_heads, n, dim, batch, heads, tokens = (int(x) for x in shape)
-    group = heads // kv_heads
+    group = min(heads // kv_heads, GROUP_SPLIT)  # query heads per block
     fits = (group * dim + PAD) * 2 + group * 8 <= SHARED  # one warp's share of shared memory
     return batch == 1 and tokens == 1 and dim % 64 == 0 and n % KEYS == 0 and fits
 
@@ -179,7 +182,9 @@ def attention(
     """Attention of one query token (1, H, 1, D) over the first `length` positions of a slot of
     the cache (2, slots, KV_H, positions, D), or the last `window` of them, with scores
     q.k * scale."""
-    heads, dim, group = q.shape[1], cache.shape[4], q.shape[1] // cache.shape[2]
+    heads, dim = q.shape[1], cache.shape[4]
+    split = max(heads // cache.shape[2] // GROUP_SPLIT, 1)
+    group = heads // cache.shape[2] // split  # query heads per block
     q, slot = carry(q.float().contiguous(), slot)
     cache, length = carry(cache, length)
     waves = 16
@@ -190,7 +195,7 @@ def attention(
     stats = Tensor.empty(heads, chunks, 2, dtype=dtypes.float32, device=q.device)
     fxn = functools.partial(
         _attention_partial_kernel, slot=slot, length=length, waves=waves, scale=scale,
-        window=window,
+        window=window, split=split,
     )  # fmt: skip
     outs = Tensor.custom_kernel(partial, stats, q, cache, fxn=fxn)
     live = at_most((length + KEYS - 1) // KEYS - _since(length, window) // KEYS, chunks)
