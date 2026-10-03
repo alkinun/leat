@@ -4,9 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from tests.helpers import write_tiny_model
-
-# tinygrad would pick a GPU when it finds one: the default run stays on the CPU on any machine
+# tinygrad would pick a GPU when it finds one: the default run stays on the CPU on any machine.
+# It reads DEV when imported, so this comes first.
 os.environ.setdefault("DEV", "CPU")
 GPU_BACKENDS = {"NV", "CUDA", "AMD"}
 
@@ -26,6 +25,8 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 def tiny(tmp_path_factory) -> Callable[[str], tuple[Path, dict]]:
     # tiny(arch): a random GGUF of an architecture and its weights decoded independently by
     # gguf-py, written once per session
+    from tests.helpers import write_tiny_model
+
     made: dict[str, tuple[Path, dict]] = {}
 
     def model(arch: str) -> tuple[Path, dict]:
