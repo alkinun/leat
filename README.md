@@ -4,7 +4,7 @@ A minimal, fast LLM inference engine built on [tinygrad](https://github.com/tiny
 
 leat runs GGUF models with their weights kept in the quantized storage format. The goal is single-stream decode limited by memory bandwidth, not by the engine. It targets NVIDIA RTX 30-series GPUs first, then AMD Strix Halo.
 
-> Status: correct, not yet fast. Every op runs as plain tinygrad code: the reference that hand-written kernels are tested against.
+> Status: on NVIDIA, decoding runs on hand-written kernels and outpaces llama.cpp. Prompt processing still runs the reference ops, plain tinygrad code that every kernel is tested against; `LEAT_KERNELS=ref` runs everything that way.
 
 ## Quickstart
 
@@ -36,12 +36,22 @@ print(engine.tokenizer.decode(list(engine.generate(prompt, max_tokens=256))))
 
 RTX 3090, Meta-Llama-3.1-8B-Instruct Q4_K_M, one sequence.
 
-| | pp512 (tok/s) | tg128 (tok/s) |
-|---|---:|---:|
-| llama.cpp b11372, CUDA | 5399 | 148.1 |
-| leat, reference ops | 18.1 | 4.1 |
+| | pp512 (tok/s) | tg128 (tok/s) | tg128 after 8192 tokens |
+|---|---:|---:|---:|
+| llama.cpp b11372, CUDA | 5336 | 147.0 | 124.8 |
+| leat | 18.1 | 149.6 | 121.5 |
 
-Quality against llama.cpp on the same file (wikitext-2, 20 chunks of 512 tokens): perplexity 8.3759 against llama.cpp's 8.3870, mean KL divergence 0.0010, and the same top token at 98.4% of positions. For scale, ignoring Llama 3.1's RoPE frequency factors, a subtle bug, raises the KL from 0.0010 to 0.0026 on the first 5 chunks.
+leat's tg128 includes sampling on the device and reading the token back.
+
+Quality against llama.cpp on the same file (wikitext-2, chunks of 512 tokens), with leat scoring prompt tokens through the reference ops and generated tokens through the decode kernels and their int8 activations:
+
+| | perplexity, 20 chunks | mean KL divergence | same top token |
+|---|---:|---:|---:|
+| llama.cpp | 8.3870 | | |
+| leat, prompt path | 8.3759 | 0.0010 | 98.4% |
+| leat, decode path (2 chunks) | | 0.0011 | 98.6% |
+
+For scale, ignoring Llama 3.1's RoPE frequency factors, a subtle bug, raises the KL from 0.0010 to 0.0026 on the first 5 chunks.
 
 ## Requirements
 
