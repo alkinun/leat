@@ -5,6 +5,8 @@ import pytest
 
 from tests.helpers import write_tiny_llama
 
+# tinygrad would pick a GPU when it finds one: the default run stays on the CPU on any machine
+os.environ.setdefault("DEV", "CPU")
 GPU_BACKENDS = {"NV", "CUDA", "AMD"}
 
 

@@ -13,6 +13,13 @@ from tests.helpers import CONTEXT, reference_logits
 PROMPT = [5, 77, 120, 3, 299, 42, 8, 150, 61, 200, 9, 33]
 
 
+@pytest.fixture
+def reference_ops(monkeypatch):
+    # exact comparisons with the f64 reference: fast kernels quantize activations to int8
+    monkeypatch.setenv("LEAT_KERNELS", "ref")
+
+
+@pytest.mark.usefixtures("reference_ops")
 def test_forward_matches_reference(tiny_model):
     path, weights = tiny_model
     f = GGUF.open(path)
@@ -22,6 +29,7 @@ def test_forward_matches_reference(tiny_model):
     np.testing.assert_allclose(logits, reference_logits(weights, PROMPT), rtol=2e-3, atol=2e-3)
 
 
+@pytest.mark.usefixtures("reference_ops")
 def test_generate_matches_reference(tiny_model):
     path, weights = tiny_model
     engine = Engine(path, max_context=CONTEXT, prefill_chunk=5)  # chunks of 5, 5 and 2
@@ -36,6 +44,7 @@ def test_generate_matches_reference(tiny_model):
     assert again == list(Engine(path, max_context=CONTEXT, prefill_chunk=5).generate(longer, 4))
 
 
+@pytest.mark.usefixtures("reference_ops")
 def test_generate_fills_context(tiny_model):
     # one capture of the decode graph replays correctly at every position up to the last
     path, weights = tiny_model
@@ -61,3 +70,16 @@ def test_matches_llama_cpp(model_path, llama_cpp, wikitext, tmp_path, decode):
     # dropping llama 3.1's rope frequency factors, a subtle bug, scores 0.0026
     assert quality.kl_mean is not None and quality.kl_mean < 0.0015
     assert quality.top1 is not None and quality.top1 > 0.98
+
+
+@pytest.mark.gpu
+@pytest.mark.model
+def test_chunked_prefill(model_path):
+    # prefilling in chunks of a bound length, through the kernels' symbolic paths, leaves the cache
+    # and the next token of one pass over the whole prompt
+    prompt = [128000] + [(i * 7919) % 128000 for i in range(299)]
+    whole, chunked = (Engine(model_path, max_context=512, prefill_chunk=n) for n in (512, 128))
+    assert next(whole.generate(prompt, 1)) == next(chunked.generate(prompt, 1))
+    for i in (0, 31):
+        got, want = (e.model.cache[i][:, :, :, : len(prompt)].numpy() for e in (chunked, whole))
+        np.testing.assert_allclose(got.astype(np.float32), want, rtol=1e-2, atol=1e-2)

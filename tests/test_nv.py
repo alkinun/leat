@@ -128,6 +128,49 @@ def test_residual(ggml_type):
     np.testing.assert_array_equal(got, (ops.linear(x, w) + r).numpy())
 
 
+def reference_matmul(x: np.ndarray, blocks: np.ndarray, ggml_type: GGMLType) -> np.ndarray:
+    # x (T, cols) quantized per row as the kernels do, times the decoded weights, in f64
+    q, d, _ = quantize_q8(x)
+    xq = (q.reshape(-1, nv.GROUP) * d[:, None]).reshape(x.shape)
+    weights = dequantize(blocks, gguf.GGMLQuantizationType(ggml_type)).reshape(-1, x.shape[1])
+    return xq.astype(np.float64) @ weights.astype(np.float64).T
+
+
+@pytest.mark.parametrize("ggml_type", [GGMLType.Q4_K, GGMLType.Q6_K])
+@pytest.mark.parametrize("tokens", [64, 100, UOp.variable("tokens", 1, 128).bind(70)])
+def test_matmul(ggml_type, tokens):
+    rng = np.random.default_rng(8)
+    rows, cols = 256, 2048
+    blocks = random_blocks(ggml_type, rows * cols // 256, rng, 1e-3)
+    w = QTensor(Tensor(blocks), ggml_type, (rows, cols))
+    if isinstance(tokens, int):
+        x = rng.standard_normal((1, tokens, cols)).astype(np.float32)
+        x_t, n = Tensor(x), tokens
+    else:  # while prefilling, a bound number of tokens out of the most there may be
+        x = rng.standard_normal((1, 128, cols)).astype(np.float32)
+        x_t, n = Tensor(x)[:, :tokens], tokens.unbind()[1]
+    assert nv.supports(x_t, w)
+    got = ops.linear(x_t, w).pad_to((1, x.shape[1], rows)).numpy()[0, :n]
+    expected = reference_matmul(x[0, :n], blocks, ggml_type)
+    np.testing.assert_allclose(got, expected, rtol=1e-4, atol=1e-4 * np.abs(expected).max())
+
+
+def test_matmul_norm_residual():
+    rng = np.random.default_rng(9)
+    rows, cols, n = 128, 4096, 80
+    blocks = random_blocks(GGMLType.Q4_K, rows * cols // 256, rng, 1e-3)
+    w = QTensor(Tensor(blocks), GGMLType.Q4_K, (rows, cols))
+    x = (rng.standard_normal((1, n, cols)) * 3).astype(np.float32)
+    weight = rng.uniform(0.5, 1.5, cols).astype(np.float32)
+    r = rng.standard_normal((1, n, rows)).astype(np.float32)
+    normed = ops.linears(Tensor(x), w, norm=(Tensor(weight), 1e-5))[0].numpy()[0]
+    expected = reference_matmul(rms_norm(x[0], weight, 1e-5), blocks, GGMLType.Q4_K)
+    # normalizing in f32 may round a few activations differently, as in test_norm_quantize_q8
+    np.testing.assert_allclose(normed, expected, rtol=1e-3, atol=1e-3 * np.abs(expected).max())
+    got = ops.linear(Tensor(x), w, residual=Tensor(r)).numpy()
+    np.testing.assert_array_equal(got, (ops.linear(Tensor(x), w) + Tensor(r)).numpy())
+
+
 def test_reference_switch(monkeypatch):
     rng = np.random.default_rng(2)
     blocks = random_blocks(GGMLType.Q4_K, 16 * 2048 // 256, rng, scale=1e-3)
