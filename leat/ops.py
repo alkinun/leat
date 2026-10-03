@@ -11,8 +11,12 @@ from leat import nv
 from leat.quant import NATIVE, QTensor
 
 
-def linear(x: Tensor, w: QTensor) -> Tensor:
-    return linears(x, w)[0]
+def linear(x: Tensor, w: QTensor, residual: Tensor | None = None) -> Tensor:
+    # residual + x @ w.T, with the addition inside the matrix kernel where there is one
+    if _fast() and nv.supports(x, w):
+        return nv.linears(x, w, residual=residual)[0]
+    out = x @ w.dequant(x.dtype).T
+    return out if residual is None else residual + out
 
 
 def _fast() -> bool:

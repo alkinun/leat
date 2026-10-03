@@ -140,20 +140,25 @@ def _k_scale_min(w: UOp, base: UOp, sub: UOp) -> tuple[UOp, UOp]:
     return sc.float(), mn.float()
 
 
-def _rows(out: UOp, cols: int, name: str, dot: Callable[[UOp, UOp], UOp]) -> UOp:
+def _rows(
+    out: UOp, cols: int, name: str, dot: Callable[[UOp, UOp], UOp], residual: tuple[UOp, ...]
+) -> UOp:
     # one block of one warp per output row: lanes take units of 64 weights in turn, dot(row, unit)
-    # gives a unit's contribution, and the warp sums them. Grouping rows into wider blocks measured
-    # slower on the 3090, by up to a quarter for Q6_K.
+    # gives a unit's contribution, and the warp sums them, plus residual[row] if given. Grouping
+    # rows into wider blocks measured slower on the 3090, by up to a quarter for Q6_K.
     rows = out.shape[0]
     row, lane = UOp.range(rows, 0, AxisType.GLOBAL), _lane()
     units = (dot(row, it * WARP + lane) for it in range(cols // 64 // WARP))
-    store = out[row.valid(lane.eq(0))].store(_warp_sum(sum(units, UOp.const(0.0, dtypes.float32))))
+    total = _warp_sum(sum(units, UOp.const(0.0, dtypes.float32)))
+    if residual:
+        total = total + residual[0][row].load()
+    store = out[row.valid(lane.eq(0))].store(total)
     info = KernelInfo(name=f"{name}_{rows}_{cols}", opts_to_apply=())
     return store.end(row, lane).sink(arg=info)
 
 
 @functools.cache
-def _q4_k_kernel(out: UOp, w: UOp, xq: UOp, xd: UOp, xs: UOp) -> UOp:
+def _q4_k_kernel(out: UOp, w: UOp, xq: UOp, xd: UOp, xs: UOp, *residual: UOp) -> UOp:
     # Q4_K block, 36 words: d and dmin as f16, 12 bytes of 6-bit scales and mins, then 32 words of
     # nibbles. Sub-blocks 2j and 2j+1 are the low and high nibbles of words 4+8j .. 11+8j, so a
     # unit is such a pair: 64 weights against 16 words of activations.
@@ -175,7 +180,7 @@ def _q4_k_kernel(out: UOp, w: UOp, xq: UOp, xd: UOp, xs: UOp) -> UOp:
         mins = m0 * xs[g].load() + m1 * xs[g + 1].load()
         return _half(dm) * scaled - _half(dm >> 16) * mins
 
-    return _rows(out, cols, "q4_k", dot)
+    return _rows(out, cols, "q4_k", dot, residual)
 
 
 def _word16(w: UOp, i: UOp) -> UOp:
@@ -190,7 +195,7 @@ def _minus_32(q: UOp) -> UOp:
 
 
 @functools.cache
-def _q6_k_kernel(out: UOp, w: UOp, xq: UOp, xd: UOp, xs: UOp) -> UOp:
+def _q6_k_kernel(out: UOp, w: UOp, xq: UOp, xd: UOp, xs: UOp, *residual: UOp) -> UOp:
     # Q6_K block, 105 halfwords: ql[128] low nibbles, qh[64] high 2-bit pairs, 16 int8 scales and d
     # as f16. Each half n of 128 weights is 4 rows of 32: row k takes nibble k // 2 of
     # ql[64n + 32(k % 2):][:32] and bits 2k of qh[32n:][:32], minus 32, with a scale per 16. A unit
@@ -217,7 +222,7 @@ def _q6_k_kernel(out: UOp, w: UOp, xq: UOp, xd: UOp, xs: UOp) -> UOp:
                 total = total + xd[g + 2 * r].load() * sc * dots[r][h].float()
         return _half(w[base + 104].load().cast(dtypes.uint32)) * total
 
-    return _rows(out, cols, "q6_k", dot)
+    return _rows(out, cols, "q6_k", dot, residual)
 
 
 # each kernel, and the word type it reads the weights as
@@ -237,18 +242,28 @@ def supports(x: Tensor, w: QTensor) -> bool:
     return w.type in _KERNELS and single and fits
 
 
-def linears(x: Tensor, *ws: QTensor, norm: tuple[Tensor, float] | None = None) -> list[Tensor]:
-    """x @ w.T for one token and each w, with the activations quantized to int8 once."""
+def linears(
+    x: Tensor,
+    *ws: QTensor,
+    norm: tuple[Tensor, float] | None = None,
+    residual: Tensor | None = None,
+) -> list[Tensor]:
+    """x @ w.T for one token and each w, with the activations quantized to int8 once.
+
+    `residual` is added to the result inside the kernel; it needs a single w.
+    """
+    assert residual is None or len(ws) == 1, "a residual goes with one matrix"
     xq, xd, xs = quantize_q8(x.reshape(x.shape[-1]), norm)
-    return [_matvec(w, xq, xd, xs).reshape(*x.shape[:-1], w.shape[0]) for w in ws]
+    res = () if residual is None else (residual.reshape(ws[0].shape[0]).float().contiguous(),)
+    return [_matvec(w, xq, xd, xs, *res).reshape(*x.shape[:-1], w.shape[0]) for w in ws]
 
 
-def _matvec(w: QTensor, xq: Tensor, xd: Tensor, xs: Tensor) -> Tensor:
+def _matvec(w: QTensor, xq: Tensor, xd: Tensor, xs: Tensor, *residual: Tensor) -> Tensor:
     out = Tensor.empty(w.shape[0], dtype=dtypes.float32, device=xq.device)
     kernel, word = _KERNELS[w.type]
     # .contiguous() on a bitcast of contiguous storage is a view; without it tinygrad copies
     words = w.data.flatten().bitcast(word).contiguous()
-    return Tensor.custom_kernel(out, words, xq, xd, xs, fxn=kernel)[0]
+    return Tensor.custom_kernel(out, words, xq, xd, xs, *residual, fxn=kernel)[0]
 
 
 # ******** attention: one query token against the KV cache ********

@@ -99,6 +99,16 @@ def test_shared_input():
         np.testing.assert_array_equal(got.numpy(), ops.linear(x, w).numpy())
 
 
+@pytest.mark.parametrize("ggml_type", [GGMLType.Q4_K, GGMLType.Q6_K])
+def test_residual(ggml_type):
+    rng = np.random.default_rng(6)
+    w = QTensor(Tensor(random_blocks(ggml_type, 8 * 2048 // 256, rng, 1e-3)), ggml_type, (8, 2048))
+    x = Tensor(rng.standard_normal((1, 1, 2048)).astype(np.float32))
+    r = Tensor(rng.standard_normal((1, 1, 8)).astype(np.float32))
+    got = ops.linear(x, w, residual=r).numpy()
+    np.testing.assert_array_equal(got, (ops.linear(x, w) + r).numpy())
+
+
 def test_reference_switch(monkeypatch):
     rng = np.random.default_rng(2)
     blocks = random_blocks(GGMLType.Q4_K, 16 * 2048 // 256, rng, scale=1e-3)

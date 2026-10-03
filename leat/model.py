@@ -101,10 +101,10 @@ class Transformer:
 
         cache = self.cache[i]
         cache[:, :, :, start_pos : start_pos + T].assign(Tensor.stack(k, v).cast(cache.dtype))
-        x = x + ops.linear(ops.attention(q, cache, start_pos), w["attn_output"])
+        x = ops.linear(ops.attention(q, cache, start_pos), w["attn_output"], residual=x)
 
         gate, up = ops.linears(x, w["ffn_gate"], w["ffn_up"], norm=(ffn_norm, c.norm_eps))
-        return x + ops.linear(gate.silu() * up, w["ffn_down"])
+        return ops.linear(gate.silu() * up, w["ffn_down"], residual=x)
 
 
 def _rope_table(config: Config, length: int, factors: Tensor | None) -> tuple[Tensor, Tensor]:
