@@ -156,6 +156,24 @@ def test_matmul(ggml_type, tokens, shape):
     np.testing.assert_allclose(got, expected, rtol=1e-4, atol=1e-4 * np.abs(expected).max())
 
 
+@pytest.mark.parametrize("heights", [(256, 128, 128), (4096, 1024, 1024)])  # tiles of 128, 256
+def test_matmul_stacked(heights):
+    # consecutive matrices of one type share a kernel: here the first two, as q and k
+    rng = np.random.default_rng(10)
+    cols, n = 512, 70
+    types = (GGMLType.Q4_K, GGMLType.Q4_K, GGMLType.Q6_K)
+    blocks = [
+        random_blocks(t, h * cols // 256, rng, 1e-3) for t, h in zip(types, heights, strict=True)
+    ]
+    ws = [QTensor(Tensor(b), t, (h, cols)) for b, t, h in zip(blocks, types, heights, strict=True)]
+    x = rng.standard_normal((1, n, cols)).astype(np.float32)
+    for got, b, t in zip(ops.linears(Tensor(x), *ws), blocks, types, strict=True):
+        expected = reference_matmul(x[0], b, t)
+        np.testing.assert_allclose(
+            got.numpy()[0], expected, rtol=1e-4, atol=1e-4 * np.abs(expected).max()
+        )
+
+
 def test_matmul_norm_residual():
     rng = np.random.default_rng(9)
     rows, cols, n = 256, 4096, 80

@@ -6,6 +6,7 @@ weights in their storage format.
 """
 
 import functools
+import itertools
 import math
 from collections.abc import Callable
 
@@ -359,12 +360,38 @@ def _mma(a: list[UOp], b: list[UOp]) -> list[UOp]:
     return [c[i].load() for i in range(4)]
 
 
+class _Stack:
+    """Weight matrices of one type and width stacked by rows, as one: a tile of rows lies within
+    one of them, which `load` reads with each matrix's load predicated on holding the tile."""
+
+    def __init__(self, ws: tuple[UOp, ...], tiles: tuple[int, ...], tile: UOp, rows: int):
+        self.row_words = int(ws[0].shape[0]) // (tiles[0] * rows)
+        self.parts, first = [], 0
+        for w, n in zip(ws, tiles, strict=True):
+            mine = None if len(ws) == 1 else (tile >= first) & (tile < first + n)
+            self.parts.append((w, (tile - first) * rows, mine))
+            first += n
+
+    def load(self, row: UOp, at: UOp | int) -> UOp:
+        # word `at` of the tile's row `row`
+        words = []
+        for w, row0, mine in self.parts:
+            index = (row0 + row) * self.row_words + at
+            words.append(w[index if mine is None else index.valid(mine)].load())
+        return functools.reduce(UOp.__or__, words)
+
+    def word16(self, row: UOp, at: UOp | int) -> UOp:
+        # four bytes from halfword `at` on, as _word16
+        low, high = (self.load(row, at + i).cast(dtypes.uint32) for i in (0, 1))
+        return low | (high << 16)
+
+
 class _Q4KTile:
     """Q4_K weights, half a block per step: 16 words of nibbles per row, and its 4 groups' scales
     and mins, which get_scale_min_k4 takes from the block's 12 scale bytes."""
 
-    def __init__(self, w: UOp, cols: int, rows: int, row0: UOp, tid: UOp):
-        self.w, self.blocks, self.rows, self.row0, self.tid = w, cols // 256, rows, row0, tid
+    def __init__(self, stack: _Stack, rows: int, tid: UOp):
+        self.stack, self.rows, self.tid = stack, rows, tid
         self.quants = UOp.alloc((rows, 16 + 4), dtypes.uint32, addrspace=AddrSpace.LOCAL)
         self.scales = UOp.alloc((2, 4, rows), dtypes.float32, addrspace=AddrSpace.LOCAL)
 
@@ -373,13 +400,11 @@ class _Q4KTile:
 
     def fetch(self, step: UOp) -> list[UOp]:
         # the thread's words of the step: nibbles, then d and dmin and the scale bytes of its row
-        words = []
+        words, block = [], step // 2 * 36
         for i in range(16):
             row, word = (i * self.rows + self.tid) // 16, (i * self.rows + self.tid) % 16
-            at = ((self.row0 + row) * self.blocks + step // 2) * 36 + 4 + 16 * (step % 2) + word
-            words.append(self.w[at].load())
-        base = ((self.row0 + self.tid) * self.blocks + step // 2) * 36
-        return words + [self.w[base + i].load() for i in range(4)]
+            words.append(self.stack.load(row, block + 4 + 16 * (step % 2) + word))
+        return words + [self.stack.load(self.tid, block + i) for i in range(4)]
 
     def put(self, bufs: list[UOp], step: UOp, words: list[UOp]) -> list[UOp]:
         quants, scales = bufs
@@ -419,8 +444,8 @@ class _Q6KTile:
     row, its 8 scales and d. Rows have no padding, to fit in shared memory; XOR-ing words with the
     row instead keeps a fragment's 8 rows in different banks."""
 
-    def __init__(self, w: UOp, cols: int, rows: int, row0: UOp, tid: UOp):
-        self.w, self.blocks, self.rows, self.row0, self.tid = w, cols // 256, rows, row0, tid
+    def __init__(self, stack: _Stack, rows: int, tid: UOp):
+        self.stack, self.rows, self.tid = stack, rows, tid
         self.quants = UOp.alloc((rows, 32), dtypes.int32, addrspace=AddrSpace.LOCAL)
         self.scales = UOp.alloc((2, rows), dtypes.uint32, addrspace=AddrSpace.LOCAL)
         self.d = UOp.alloc((rows,), dtypes.float32, addrspace=AddrSpace.LOCAL)
@@ -431,15 +456,13 @@ class _Q6KTile:
     def fetch(self, step: UOp) -> list[UOp]:
         # for each of the thread's (row, word) pairs, the words of low and high bits behind it;
         # then the 8 scale bytes and d of its row
-        words = []
+        words, block, half = [], step // 2 * 105, 32 * (step % 2)
         for i in range(8):
             row, m = (i * self.rows + self.tid) // 8, (i * self.rows + self.tid) % 8
-            base = ((self.row0 + row) * self.blocks + step // 2) * 105 + 32 * (step % 2)
-            words += [_word16(self.w, base + 16 * j + 2 * m) for j in range(2)]
-            words.append(_word16(self.w, base + 64 - 16 * (step % 2) + 2 * m))
-        base = ((self.row0 + self.tid) * self.blocks + step // 2) * 105
-        words += [_word16(self.w, base + 96 + 4 * (step % 2) + 2 * j) for j in range(2)]
-        return words + [self.w[base + 104].load().cast(dtypes.uint32)]
+            for at in (half + 2 * m, half + 16 + 2 * m, 64 + half // 2 + 2 * m):
+                words.append(self.stack.word16(row, block + at))
+        words += [self.stack.word16(self.tid, block + 96 + half // 8 + 2 * j) for j in range(2)]
+        return words + [self.stack.load(self.tid, block + 104).cast(dtypes.uint32)]
 
     def put(self, bufs: list[UOp], step: UOp, words: list[UOp]) -> list[UOp]:
         quants, scales, d = bufs
@@ -489,10 +512,11 @@ _TILES: dict[GGMLType, type[_Q4KTile] | type[_Q6KTile]] = {
 
 @functools.cache
 def _matmul_kernel(
-    out: UOp, w: UOp, xq: UOp, xd: UOp, xs: UOp, *residual: UOp, tokens: int | UOp,
-    ggml_type: GGMLType, rows: int,
-) -> UOp:  # fmt: skip
-    # a block per tile of `rows` rows and TILE_TOKENS tokens
+    out: UOp, *srcs: UOp, tokens: int | UOp, ggml_type: GGMLType, rows: int, tiles: tuple[int, ...]
+) -> UOp:
+    # srcs: the stacked matrices, tiles of `rows` rows of each, then xq, xd, xs and a residual; a
+    # block per tile of `rows` rows by TILE_TOKENS tokens
+    ws, (xq, xd, xs, *residual) = srcs[: len(tiles)], srcs[len(tiles) :]
     count, n = (int(x) for x in out.shape)
     cols, threads = 4 * int(xq.shape[0]) // count, rows
     steps = cols // STEP
@@ -501,7 +525,7 @@ def _matmul_kernel(
     lane, warp = _lane(), UOp.range(rows // WARP_ROWS, 2, AxisType.LOCAL)
     tid, g, t4 = warp * WARP + lane, lane // 4, lane % 4
     row0, token0 = tile_rows * rows, tile_tokens * TILE_TOKENS
-    weights = _TILES[ggml_type](w, cols, rows, row0, tid)
+    weights = _TILES[ggml_type](_Stack(ws, tiles, tile_rows, rows), rows, tid)
     # the tile's tokens for a step: 32 words each, and the d and d * sum(q) of 4 groups
     act = UOp.alloc((TILE_TOKENS, 32 + 4), dtypes.int32, addrspace=AddrSpace.LOCAL)
     act_scales = UOp.alloc((2, 4, TILE_TOKENS), dtypes.float32, addrspace=AddrSpace.LOCAL)
@@ -591,6 +615,7 @@ def _matmuls(
 ) -> list[Tensor]:
     # Several tokens, while prefilling a bound count of them. Buffers hold the most there may be,
     # rounded up to whole tiles, and the kernels stop after the tiles holding actual tokens.
+    # Consecutive matrices of one type share a kernel: few rows leave SMs idle.
     tokens, cols = x.shape[-2], x.shape[-1]
     count = -(-x.max_shape[-2] // TILE_TOKENS) * TILE_TOKENS
     xq, xd, xs = quantize_q8(x.reshape(tokens, cols).pad_to((count, cols)), norm, rows=tokens)
@@ -599,12 +624,18 @@ def _matmuls(
     if residual is not None:
         res = (residual.reshape(tokens, -1).float().pad_to((count, ws[0].shape[0])).contiguous(),)
     outs = []
-    for w in ws:
-        out = Tensor.empty(count, w.shape[0], dtype=dtypes.float32, device=x.device)
-        tile = 256 if w.shape[0] >= 4096 and w.shape[0] % 256 == 0 else 128
-        fxn = functools.partial(_matmul_kernel, tokens=bound, ggml_type=w.type, rows=tile)
-        out = Tensor.custom_kernel(out, _words(w), xq, xd, xs, *res, fxn=fxn)[0]
-        outs.append(out[:tokens].reshape(*x.shape[:-1], w.shape[0]))
+    for _, group in itertools.groupby(ws, key=lambda w: w.type):
+        stack = tuple(group)
+        heights = [int(w.shape[0]) for w in stack]
+        tile = 256 if sum(heights) >= 4096 and all(h % 256 == 0 for h in heights) else 128
+        out = Tensor.empty(count, sum(heights), dtype=dtypes.float32, device=x.device)
+        fxn = functools.partial(
+            _matmul_kernel, tokens=bound, ggml_type=stack[0].type, rows=tile,
+            tiles=tuple(h // tile for h in heights),
+        )  # fmt: skip
+        out = Tensor.custom_kernel(out, *map(_words, stack), xq, xd, xs, *res, fxn=fxn)[0]
+        for start, h in zip(itertools.accumulate([0, *heights]), heights, strict=False):
+            outs.append(out[:tokens, start : start + h].reshape(*x.shape[:-1], h))
     return outs
 
 
