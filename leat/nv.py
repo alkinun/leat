@@ -213,13 +213,15 @@ def supports(x: Tensor, w: QTensor) -> bool:
     return w.type in _KERNELS and single and fits
 
 
-def linear(x: Tensor, w: QTensor) -> Tensor:
-    """x @ w.T for one token, with the activations quantized to int8."""
-    rows, cols = w.shape
-    xq, xd, xs = quantize_q8(x.reshape(cols))
-    out = Tensor.empty(rows, dtype=dtypes.float32, device=x.device)
+def linears(x: Tensor, *ws: QTensor) -> list[Tensor]:
+    """x @ w.T for one token and each w, with the activations quantized to int8 once."""
+    xq, xd, xs = quantize_q8(x.reshape(x.shape[-1]))
+    return [_matvec(w, xq, xd, xs).reshape(*x.shape[:-1], w.shape[0]) for w in ws]
+
+
+def _matvec(w: QTensor, xq: Tensor, xd: Tensor, xs: Tensor) -> Tensor:
+    out = Tensor.empty(w.shape[0], dtype=dtypes.float32, device=xq.device)
     kernel, word = _KERNELS[w.type]
     # .contiguous() on a bitcast of contiguous storage is a view; without it tinygrad copies
     words = w.data.flatten().bitcast(word).contiguous()
-    out = Tensor.custom_kernel(out, words, xq, xd, xs, fxn=kernel)[0]
-    return out.reshape(*x.shape[:-1], rows)
+    return Tensor.custom_kernel(out, words, xq, xd, xs, fxn=kernel)[0]

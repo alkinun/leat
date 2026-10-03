@@ -91,9 +91,10 @@ class Transformer:
         c, w, (attn_norm, ffn_norm) = self.config, self.layers[i], self.norms[i]
         B, T, _ = x.shape
         h = ops.rms_norm(x, attn_norm, c.norm_eps)
-        q = ops.linear(h, w["attn_q"]).reshape(B, T, c.n_heads, c.head_dim).transpose(1, 2)
-        k = ops.linear(h, w["attn_k"]).reshape(B, T, c.n_kv_heads, c.head_dim).transpose(1, 2)
-        v = ops.linear(h, w["attn_v"]).reshape(B, T, c.n_kv_heads, c.head_dim).transpose(1, 2)
+        q, k, v = ops.linears(h, w["attn_q"], w["attn_k"], w["attn_v"])
+        q = q.reshape(B, T, c.n_heads, c.head_dim).transpose(1, 2)
+        k = k.reshape(B, T, c.n_kv_heads, c.head_dim).transpose(1, 2)
+        v = v.reshape(B, T, c.n_kv_heads, c.head_dim).transpose(1, 2)
         cos, sin = self.cos[start_pos : start_pos + T], self.sin[start_pos : start_pos + T]
         q, k = ops.rope(q, cos, sin), ops.rope(k, cos, sin)
 
@@ -104,7 +105,7 @@ class Transformer:
         x = x + ops.linear(attn, w["attn_output"])
 
         h = ops.rms_norm(x, ffn_norm, c.norm_eps)
-        gate, up = ops.linear(h, w["ffn_gate"]), ops.linear(h, w["ffn_up"])
+        gate, up = ops.linears(h, w["ffn_gate"], w["ffn_up"])
         return x + ops.linear(gate.silu() * up, w["ffn_down"])
 
 

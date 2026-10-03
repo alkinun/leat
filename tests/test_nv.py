@@ -57,6 +57,16 @@ def test_linear(ggml_type, shape):
     np.testing.assert_allclose(got.ravel(), expected, rtol=1e-4, atol=1e-4 * np.abs(expected).max())
 
 
+def test_shared_input():
+    rng = np.random.default_rng(3)
+    ws = []
+    for t in (GGMLType.Q4_K, GGMLType.Q6_K):
+        ws.append(QTensor(Tensor(random_blocks(t, 8 * 2048 // 256, rng, 1e-3)), t, (8, 2048)))
+    x = Tensor(rng.standard_normal((1, 1, 2048)).astype(np.float32))
+    for got, w in zip(ops.linears(x, *ws), ws, strict=True):
+        np.testing.assert_array_equal(got.numpy(), ops.linear(x, w).numpy())
+
+
 def test_reference_switch(monkeypatch):
     rng = np.random.default_rng(2)
     blocks = random_blocks(GGMLType.Q4_K, 16 * 2048 // 256, rng, scale=1e-3)

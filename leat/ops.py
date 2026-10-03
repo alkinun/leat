@@ -12,9 +12,14 @@ from leat.quant import NATIVE, QTensor
 
 
 def linear(x: Tensor, w: QTensor) -> Tensor:
-    if os.environ.get("LEAT_KERNELS") != "ref" and nv.supports(x, w):
-        return nv.linear(x, w)
-    return x @ w.dequant(x.dtype).T
+    return linears(x, w)[0]
+
+
+def linears(x: Tensor, *ws: QTensor) -> list[Tensor]:
+    # x @ w.T for each w; kernels share one quantization of the input
+    if os.environ.get("LEAT_KERNELS") != "ref" and all(nv.supports(x, w) for w in ws):
+        return nv.linears(x, *ws)
+    return [x @ w.dequant(x.dtype).T for w in ws]
 
 
 def embedding(tokens: Tensor, w: QTensor) -> Tensor:
