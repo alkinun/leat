@@ -1,9 +1,10 @@
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
-from tests.helpers import write_tiny_llama
+from tests.helpers import write_tiny_model
 
 # tinygrad would pick a GPU when it finds one: the default run stays on the CPU on any machine
 os.environ.setdefault("DEV", "CPU")
@@ -22,10 +23,23 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
 
 @pytest.fixture(scope="session")
-def tiny_model(tmp_path_factory) -> tuple[Path, dict]:
-    # a random llama GGUF and its weights decoded independently by gguf-py
-    path = tmp_path_factory.mktemp("model") / "tiny.gguf"
-    return path, write_tiny_llama(path)
+def tiny(tmp_path_factory) -> Callable[[str], tuple[Path, dict]]:
+    # tiny(arch): a random GGUF of an architecture and its weights decoded independently by
+    # gguf-py, written once per session
+    made: dict[str, tuple[Path, dict]] = {}
+
+    def model(arch: str) -> tuple[Path, dict]:
+        if arch not in made:
+            path = tmp_path_factory.mktemp(arch) / "tiny.gguf"
+            made[arch] = path, write_tiny_model(path, arch)
+        return made[arch]
+
+    return model
+
+
+@pytest.fixture(scope="session")
+def tiny_model(tiny) -> tuple[Path, dict]:
+    return tiny("llama")
 
 
 @pytest.fixture(scope="session")

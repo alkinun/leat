@@ -39,21 +39,22 @@ def _range(run: list[int]) -> str:
     return lo if len(run) == 1 else f"{lo}-{hi}"
 
 
-def _llama3_pattern() -> re.Pattern[str]:
-    # llama.cpp LLAMA_VOCAB_PRE_TYPE_LLAMA3, with contractions spelled out in ASCII: Python's (?i)
-    # would also fold characters like U+017F into 's'.
+def _pattern(digits: str) -> re.Pattern[str]:
+    # llama.cpp's LLAMA3 pre-tokenizer, or QWEN2's, which splits numbers into single digits rather
+    # than runs of up to 3; contractions are spelled out in ASCII, as Python's (?i) would also fold
+    # characters like U+017F into 's'.
     # (?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|
     # \s*[\r\n]+|\s+(?!\S)|\s+
     c = _category_classes()
     L, N, S = c["L"], c["N"], r"\t\n\x0b\x0c\r\x85" + c["Z"]
     contractions = "'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD]"
     return re.compile(
-        rf"{contractions}|[^\r\n{L}{N}]?[{L}]+|[{N}]{{1,3}}| ?[^{S}{L}{N}]+[\r\n]*"
+        rf"{contractions}|[^\r\n{L}{N}]?[{L}]+|[{N}]{digits}| ?[^{S}{L}{N}]+[\r\n]*"
         rf"|[{S}]*[\r\n]+|[{S}]+(?![^{S}])|[{S}]+"
     )
 
 
-_PRE_TOKENIZERS = {"llama-bpe": _llama3_pattern}
+_PRE_TOKENIZERS = {"llama-bpe": "{1,3}", "qwen2": ""}  # digits per number piece
 
 
 class Tokenizer:
@@ -70,7 +71,7 @@ class Tokenizer:
             raise NotImplementedError(f"pre-tokenizer {pre!r} is not supported")
         tokens: list[str] = metadata["tokenizer.ggml.tokens"]
         types: list[int] = metadata.get("tokenizer.ggml.token_type", [NORMAL] * len(tokens))
-        self._pattern = _PRE_TOKENIZERS[pre]()
+        self._pattern = _pattern(_PRE_TOKENIZERS[pre])
         self._vocab = {
             t: i for i, t in enumerate(tokens) if types[i] not in (CONTROL, USER_DEFINED)
         }

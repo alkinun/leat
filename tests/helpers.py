@@ -1,4 +1,4 @@
-# Test data shared across test files: quantized blocks, tokenizer metadata and a tiny llama.
+# Test data shared across test files: quantized blocks, tokenizer metadata and tiny models.
 
 from pathlib import Path
 
@@ -49,6 +49,7 @@ def ids(tok: Tokenizer, *pieces: str) -> list[int]:
 
 V, D, HIDDEN, HEADS, KV_HEADS, LAYERS, CONTEXT = 300, 256, 512, 4, 2, 2, 64
 HEAD_DIM = D // HEADS
+EXPERTS, USED, EXPERT_HIDDEN = 4, 2, 256  # qwen3moe's MLPs
 # (shape, storage type, scale of the block f16 fields) chosen so activations stay O(1)
 TENSORS = {
     "token_embd.weight": ((V, D), GGMLType.Q4_K, 2e-4),
@@ -60,20 +61,33 @@ TENSORS = {
     "ffn_gate": ((HIDDEN, D), GGMLType.Q4_K, 2e-4),
     "ffn_up": ((HIDDEN, D), GGMLType.Q5_K, 2e-4),
     "ffn_down": ((D, HIDDEN), GGMLType.Q6_K, 5e-5),
+    "ffn_gate_inp": ((EXPERTS, D), GGMLType.F32, 0.05),
+    "ffn_gate_exps": ((EXPERTS, EXPERT_HIDDEN, D), GGMLType.Q4_K, 2e-4),
+    "ffn_up_exps": ((EXPERTS, EXPERT_HIDDEN, D), GGMLType.Q5_K, 2e-4),
+    "ffn_down_exps": ((EXPERTS, D, EXPERT_HIDDEN), GGMLType.Q6_K, 5e-5),
 }
+ATTENTION = ("attn_q", "attn_k", "attn_v", "attn_output")
+MLP = ("ffn_gate", "ffn_up", "ffn_down")
+MOE = ("ffn_gate_inp", "ffn_gate_exps", "ffn_up_exps", "ffn_down_exps")
 
 
-def write_tiny_llama(path: Path) -> dict[str, np.ndarray]:
-    # a random llama GGUF; returns its weights as decoded independently by gguf-py
+def write_tiny_model(path: Path, arch: str = "llama") -> dict[str, np.ndarray]:
+    # a random GGUF of a supported architecture; returns its weights as decoded independently by
+    # gguf-py. llama has rope frequency factors, qwen3 RMSNorms of q and k, and qwen3moe also
+    # a mixture of experts for MLP.
     rng = np.random.default_rng(0)
-    w = gguf.GGUFWriter(path, arch="llama")
+    w = gguf.GGUFWriter(path, arch=arch)
     for key, value in [("block_count", LAYERS), ("context_length", CONTEXT),
                        ("embedding_length", D), ("feed_forward_length", HIDDEN),
                        ("attention.head_count", HEADS), ("attention.head_count_kv", KV_HEADS),
                        ("rope.dimension_count", HEAD_DIM)]:  # fmt: skip
-        w.add_uint32(f"llama.{key}", value)
-    w.add_float32("llama.attention.layer_norm_rms_epsilon", 1e-5)
-    w.add_float32("llama.rope.freq_base", 10000.0)
+        w.add_uint32(f"{arch}.{key}", value)
+    w.add_float32(f"{arch}.attention.layer_norm_rms_epsilon", 1e-5)
+    w.add_float32(f"{arch}.rope.freq_base", 10000.0)
+    if arch == "qwen3moe":
+        w.add_uint32(f"{arch}.expert_count", EXPERTS)
+        w.add_uint32(f"{arch}.expert_used_count", USED)
+        w.add_uint32(f"{arch}.expert_feed_forward_length", EXPERT_HIDDEN)
     w.add_string("tokenizer.ggml.model", "gpt2")
     w.add_string("tokenizer.ggml.pre", "llama-bpe")
     w.add_array("tokenizer.ggml.tokens", [*_BYTE_CHAR.values()] + [f"t{i}" for i in range(V - 256)])
@@ -87,17 +101,21 @@ def write_tiny_llama(path: Path) -> dict[str, np.ndarray]:
         if ggml_type == GGMLType.F32:
             weights[name] = (rng.standard_normal(shape) * scale).astype(np.float32)
             return w.add_tensor(name, weights[name])
-        blocks = random_blocks(ggml_type, shape[0] * shape[1] // BLOCK[ggml_type][0], rng, scale)
-        blocks = blocks.reshape(shape[0], -1)
+        blocks = random_blocks(ggml_type, np.prod(shape) // BLOCK[ggml_type][0], rng, scale)
+        blocks = blocks.reshape(*shape[:-1], -1)
         weights[name] = dequantize(blocks, gguf.GGMLQuantizationType(ggml_type)).reshape(shape)
         w.add_tensor(name, blocks, raw_dtype=gguf.GGMLQuantizationType(ggml_type))
 
     add("token_embd.weight", *TENSORS["token_embd.weight"])
     add("output.weight", *TENSORS["output.weight"])
-    norms = {"output_norm.weight": D, "rope_freqs.weight": HEAD_DIM // 2}
+    norms = {"output_norm.weight": D}
+    if arch == "llama":
+        norms["rope_freqs.weight"] = HEAD_DIM // 2
     for i in range(LAYERS):
         norms |= {f"blk.{i}.attn_norm.weight": D, f"blk.{i}.ffn_norm.weight": D}
-        for name in ("attn_q", "attn_k", "attn_v", "attn_output", "ffn_gate", "ffn_up", "ffn_down"):
+        if arch != "llama":
+            norms |= {f"blk.{i}.attn_{x}_norm.weight": HEAD_DIM for x in "qk"}
+        for name in ATTENTION + (MOE if arch == "qwen3moe" else MLP):
             add(f"blk.{i}.{name}.weight", *TENSORS[name])
     for name, n in norms.items():
         weights[name] = rng.uniform(1.0, 4.0 if "rope" in name else 1.5, n).astype(np.float32)
@@ -109,29 +127,53 @@ def write_tiny_llama(path: Path) -> dict[str, np.ndarray]:
     return weights
 
 
-def reference_logits(w: dict[str, np.ndarray], tokens: list[int]) -> np.ndarray:
-    # an independent float64 llama, with keys and values rounded to f16 like leat's cache
+def reference_logits(
+    w: dict[str, np.ndarray], tokens: list[int], arch: str = "llama"
+) -> np.ndarray:
+    # an independent float64 model, with keys and values rounded to f16 like leat's cache
     def norm(x, weight):
         return x / np.sqrt((x * x).mean(-1, keepdims=True) + 1e-5) * weight
 
     T = len(tokens)
-    freqs = 10000.0 ** (-np.arange(0, HEAD_DIM, 2) / HEAD_DIM) / w["rope_freqs.weight"]
+    freqs = 10000.0 ** (-np.arange(0, HEAD_DIM, 2) / HEAD_DIM) / w.get("rope_freqs.weight", 1.0)
     angles = np.arange(T)[:, None, None] * freqs
     cos, sin = np.cos(angles), np.sin(angles)
 
+    # llama rotates adjacent pairs of dimensions, qwen3 dimension i with i + HEAD_DIM / 2
+    half = HEAD_DIM // 2
+    first, second = (np.s_[0::2], np.s_[1::2]) if arch == "llama" else (np.s_[:half], np.s_[half:])
+
     def rope(z):
         out = np.empty_like(z)
-        out[..., 0::2] = z[..., 0::2] * cos - z[..., 1::2] * sin
-        out[..., 1::2] = z[..., 0::2] * sin + z[..., 1::2] * cos
+        out[..., first] = z[..., first] * cos - z[..., second] * sin
+        out[..., second] = z[..., first] * sin + z[..., second] * cos
+        return out
+
+    def mlp(h, gate, up, down):
+        g = h @ gate.T
+        return (g / (1 + np.exp(-g)) * (h @ up.T)) @ down.T
+
+    def mixture(h, router, gate, up, down):
+        # each token's USED best scoring experts, weighted by the softmax of their scores
+        out = np.zeros_like(h)
+        for t, scores in enumerate(h @ router.T):
+            best = np.argsort(-scores)[:USED]
+            p = np.exp(scores[best] - scores[best].max())
+            for e, weight in zip(best, p / p.sum(), strict=True):
+                out[t] += weight * mlp(h[t], gate[e], up[e], down[e])
         return out
 
     x = w["token_embd.weight"][tokens].astype(np.float64)
     causal = np.triu(np.full((T, T), -np.inf), 1)
     for i in range(LAYERS):
-        lw = {n: w[f"blk.{i}.{n}.weight"] for n in TENSORS if not n.endswith(".weight")}
+        lw = {n: w[f"blk.{i}.{n}.weight"] for n in ATTENTION + (MOE if arch == "qwen3moe" else MLP)}
         h = norm(x, w[f"blk.{i}.attn_norm.weight"])
-        q = rope((h @ lw["attn_q"].T).reshape(T, HEADS, HEAD_DIM))
-        k = rope((h @ lw["attn_k"].T).reshape(T, KV_HEADS, HEAD_DIM)).astype(np.float16)
+        q = (h @ lw["attn_q"].T).reshape(T, HEADS, HEAD_DIM)
+        k = (h @ lw["attn_k"].T).reshape(T, KV_HEADS, HEAD_DIM)
+        if arch != "llama":
+            q = norm(q, w[f"blk.{i}.attn_q_norm.weight"])
+            k = norm(k, w[f"blk.{i}.attn_k_norm.weight"])
+        q, k = rope(q), rope(k).astype(np.float16)
         v = (h @ lw["attn_v"].T).reshape(T, KV_HEADS, HEAD_DIM).astype(np.float16)
         heads = []
         for hd in range(HEADS):
@@ -141,6 +183,5 @@ def reference_logits(w: dict[str, np.ndarray], tokens: list[int]) -> np.ndarray:
             heads.append((p / p.sum(-1, keepdims=True)) @ v[:, kv].astype(np.float64))
         x = x + np.concatenate(heads, -1) @ lw["attn_output"].T
         h = norm(x, w[f"blk.{i}.ffn_norm.weight"])
-        gate = h @ lw["ffn_gate"].T
-        x = x + (gate / (1 + np.exp(-gate)) * (h @ lw["ffn_up"].T)) @ lw["ffn_down"].T
+        x = x + (mixture if arch == "qwen3moe" else mlp)(h, *(lw[n] for n in lw if "ffn" in n))
     return norm(x, w["output_norm.weight"]) @ w["output.weight"].T

@@ -51,6 +51,31 @@ def feed_forward(
     return linear(hidden, down, residual=x)
 
 
+def mixture(
+    x: Tensor, router: QTensor, gate: QTensor, up: QTensor, down: QTensor, used: int,
+    norm: tuple[Tensor, float],
+) -> Tensor:  # fmt: skip
+    # x + a mixture of experts for n = rms_norm(x, *norm): each token takes the `used` experts
+    # whose MLPs the router scores highest, weighted by the softmax of their scores. Experts are
+    # stacked matrices (experts, rows, cols); only the chosen ones are read.
+    n = rms_norm(x, *norm)
+    scores, experts = linear(n, router).topk(used)
+    B, T, dim = x.shape
+    ids = experts.flatten()
+    n = n.unsqueeze(2).expand(B, T, used, dim).reshape(-1, 1, dim)
+    g, u = (n @ _take(w, ids).dequant().transpose(1, 2) for w in (gate, up))
+    out = (g.silu() * u) @ _take(down, ids).dequant().transpose(1, 2)
+    weights = scores.softmax(-1).reshape(B, T, used, 1)
+    return x + (out.reshape(B, T, used, dim) * weights).sum(2)
+
+
+def _take(w: QTensor, index: Tensor) -> QTensor:
+    # the matrices w[index] of a stack of them, still in storage
+    rest = w.data.shape[1:]
+    data = w.data.reshape(w.shape[0], -1, *rest)[index]
+    return QTensor(data.reshape(-1, *rest), w.type, (-1, *w.shape[1:]))
+
+
 def _fast() -> bool:
     return os.environ.get("LEAT_KERNELS") != "ref"
 
@@ -73,9 +98,12 @@ def rms_norm(x: Tensor, weight: Tensor, eps: float) -> Tensor:
     return x * (x.square().mean(-1, keepdim=True) + eps).rsqrt() * weight
 
 
-def rope(x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
-    # rotates adjacent pairs, ggml's "normal" mode, which is how GGUF lays out llama's q and k.
+def rope(x: Tensor, cos: Tensor, sin: Tensor, halves: bool = False) -> Tensor:
+    # rotates adjacent pairs of dimensions, or with halves dimension i with i + D/2.
     # x: (B, H, T, D); cos, sin: (T, D/2)
+    if halves:
+        x0, x1 = x.chunk(2, dim=-1)
+        return (x0 * cos - x1 * sin).cat(x0 * sin + x1 * cos, dim=-1)
     pairs = x.reshape(*x.shape[:-1], -1, 2)
     x0, x1 = pairs[..., 0], pairs[..., 1]
     return Tensor.stack(x0 * cos - x1 * sin, x0 * sin + x1 * cos, dim=-1).flatten(-2)

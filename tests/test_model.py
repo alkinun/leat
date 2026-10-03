@@ -11,6 +11,7 @@ from leat.model import CACHE_TILE, Config, Transformer
 from tests.helpers import CONTEXT, reference_logits
 
 PROMPT = [5, 77, 120, 3, 299, 42, 8, 150, 61, 200, 9, 33]
+ARCHS = ["llama", "qwen3", "qwen3moe"]
 
 
 @pytest.fixture
@@ -20,13 +21,15 @@ def reference_ops(monkeypatch):
 
 
 @pytest.mark.usefixtures("reference_ops")
-def test_forward_matches_reference(tiny_model):
-    path, weights = tiny_model
+@pytest.mark.parametrize("arch", ARCHS)
+def test_forward_matches_reference(tiny, arch):
+    path, weights = tiny(arch)
     f = GGUF.open(path)
     model = Transformer(Config.from_gguf(f.metadata), f.load(), CONTEXT)
     tokens = Tensor([PROMPT], dtype=dtypes.int32)
     logits = model.logits(model(tokens, 0)).numpy()[0]
-    np.testing.assert_allclose(logits, reference_logits(weights, PROMPT), rtol=2e-3, atol=2e-3)
+    expected = reference_logits(weights, PROMPT, arch)
+    np.testing.assert_allclose(logits, expected, rtol=2e-3, atol=2e-3)
 
 
 def test_cache_whole_tiles(tiny_model):
@@ -38,12 +41,13 @@ def test_cache_whole_tiles(tiny_model):
 
 
 @pytest.mark.usefixtures("reference_ops")
-def test_generate_matches_reference(tiny_model):
-    path, weights = tiny_model
+@pytest.mark.parametrize("arch", ARCHS)
+def test_generate_matches_reference(tiny, arch):
+    path, weights = tiny(arch)
     engine = Engine(path, max_context=CONTEXT, prefill_chunk=5)  # chunks of 5, 5 and 2
     out = list(engine.generate(PROMPT, 8))
     # every generated token is the reference argmax given all tokens before it
-    expected = reference_logits(weights, PROMPT + out)[len(PROMPT) - 1 :].argmax(-1)
+    expected = reference_logits(weights, PROMPT + out, arch)[len(PROMPT) - 1 :].argmax(-1)
     assert out == expected[: len(out)].tolist()
 
     # a prompt that extends the previous one reuses the cache: only the new tokens are prefilled
@@ -137,6 +141,13 @@ def test_seeded_sampling(tiny_model):
     assert len({tuple(engine.generate(PROMPT, 8, temperature=1.0)) for _ in range(3)}) == 3
 
 
+# the most mean KL divergence from llama.cpp and the least agreement on the top token each
+# architecture allows. Both paths score about 0.0012 and 98% on Llama 3.1 8B, int8 activations
+# adding noise as in llama.cpp; for scale, dropping its rope frequency factors, a subtle bug, scored
+# 0.0026 on the reference ops. Qwen3 8B, more sensitive, scores 0.0025 and 98% on those too.
+LIMITS = {"llama": (0.0015, 0.98), "qwen3": (0.0035, 0.97)}
+
+
 @pytest.mark.gpu
 @pytest.mark.model
 @pytest.mark.parametrize("decode", [False, True], ids=["prefill", "decode"])
@@ -144,11 +155,11 @@ def test_matches_llama_cpp(model_path, llama_cpp, wikitext, tmp_path, decode):
     args = ["-m", model_path, "-f", wikitext, "-c", "512", "--chunks", "4"]
     args += ["--kl-divergence-base", base := tmp_path / "base.kld"]
     subprocess.run([llama_cpp / "llama-perplexity", *args], check=True, capture_output=True)
-    quality = bench.kl_divergence(Engine(model_path, max_context=512), base, decode=decode)
-    # both paths score about 0.0012, int8 activations adding noise as in llama.cpp; for scale,
-    # dropping llama 3.1's rope frequency factors, a subtle bug, scored 0.0026 on the reference ops
-    assert quality.kl_mean is not None and quality.kl_mean < 0.0015
-    assert quality.top1 is not None and quality.top1 > 0.98
+    engine = Engine(model_path, max_context=512)
+    quality = bench.kl_divergence(engine, base, decode=decode)
+    kl, top1 = LIMITS[engine.gguf.metadata["general.architecture"]]
+    assert quality.kl_mean is not None and quality.kl_mean < kl
+    assert quality.top1 is not None and quality.top1 > top1
 
 
 @pytest.mark.gpu
