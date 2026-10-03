@@ -61,6 +61,22 @@ def test_norm_quantize_q8():
     np.testing.assert_array_equal(s, (d * sums).astype(np.float32))
 
 
+def test_quantize_q8_gated():
+    rng = np.random.default_rng(11)
+    gate, up = (
+        (rng.standard_normal((3, 2048)) * 3).astype(np.float32),
+        rng.standard_normal((3, 2048)),
+    )
+    x = np.concatenate([gate, up.astype(np.float32)], -1)
+    q, d, _ = (t.numpy() for t in nv.quantize_q8(Tensor(x), gated=True))
+    silu = gate.astype(np.float64) / (1 + np.exp(-gate.astype(np.float64)))
+    want_q, want_d, _ = quantize_q8((silu * up).astype(np.float32))
+    # silu in f32 may round a few values differently, as normalizing does
+    off = q.view(np.int8).astype(np.int32) - want_q
+    assert np.abs(off).max() <= 1 and np.count_nonzero(off) <= 4 * len(x)
+    np.testing.assert_allclose(d, want_d, rtol=1e-5)
+
+
 def test_linear_after_norm():
     rng = np.random.default_rng(5)
     blocks = random_blocks(GGMLType.Q4_K, 64 * 4096 // 256, rng, scale=1e-3)
@@ -188,6 +204,30 @@ def test_matmul_norm_residual():
     np.testing.assert_allclose(normed, expected, rtol=1e-3, atol=1e-3 * np.abs(expected).max())
     got = ops.linear(Tensor(x), w, residual=Tensor(r)).numpy()
     np.testing.assert_array_equal(got, (ops.linear(Tensor(x), w) + Tensor(r)).numpy())
+
+
+@pytest.mark.parametrize("tokens", [1, 70])
+def test_feed_forward(tokens):
+    rng = np.random.default_rng(12)
+    dim, hidden = 2048, 4096
+    shapes = {GGMLType.Q4_K: (hidden, dim), GGMLType.Q6_K: (dim, hidden)}
+    gate, up, down = (
+        random_blocks(t, shapes[t][0] * shapes[t][1] // 256, rng, 1e-3)
+        for t in (GGMLType.Q4_K, GGMLType.Q4_K, GGMLType.Q6_K)
+    )
+    ws = [
+        QTensor(Tensor(b), t, shapes[t])
+        for b, t in zip((gate, up, down), (GGMLType.Q4_K,) * 2 + (GGMLType.Q6_K,), strict=True)
+    ]
+    x = (rng.standard_normal((1, tokens, dim)) * 3).astype(np.float32)
+    weight = rng.uniform(0.5, 1.5, dim).astype(np.float32)
+    got = ops.feed_forward(Tensor(x), *ws, norm=(Tensor(weight), 1e-5)).numpy()[0]
+    normed = rms_norm(x[0], weight, 1e-5)
+    g, u = (reference_matmul(normed, b, GGMLType.Q4_K) for b in (gate, up))
+    h = (g / (1 + np.exp(-g)) * u).astype(np.float32)
+    expected = x[0] + reference_matmul(h, down, GGMLType.Q6_K)
+    # f32 rounding inside the kernels may move a few activations across a quantization step
+    np.testing.assert_allclose(got, expected, rtol=1e-3, atol=2e-3 * np.abs(expected).max())
 
 
 def test_reference_switch(monkeypatch):

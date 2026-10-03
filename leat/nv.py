@@ -49,6 +49,10 @@ def _warp_max(value: UOp) -> UOp:
     return value
 
 
+def _silu(x: UOp) -> UOp:
+    return x * (1 + (x * -LOG2E).exp2()).reciprocal()  # as tinygrad's silu
+
+
 def _half(bits: UOp) -> UOp:
     # the low 16 bits of a word as an f16, widened to f32
     return (bits & 0xFFFF).cast(dtypes.uint16).bitcast(dtypes.float16).float()
@@ -80,13 +84,14 @@ QUANT_WARPS = 8  # per block of the quantization kernel, each quantizing a group
 
 @functools.cache
 def _quantize_q8_kernel(
-    q: UOp, d: UOp, s: UOp, x: UOp, *weight: UOp, rows: int | UOp, eps: float
+    q: UOp, d: UOp, s: UOp, x: UOp, *weight: UOp, rows: int | UOp, eps: float, gated: bool
 ) -> UOp:
-    # Quantization, after RMSNorm when given its weight. Each row takes a block, whose warps
-    # quantize one group after another. A single row, the vector of a decode step, spreads over
-    # blocks of a group per warp instead: on the 3090 that takes 3 us for 4096 values against 5 us
-    # for one block, though each block sums the squares of the whole row, from L2 after the first.
-    n, warps = int(x.shape[1]), QUANT_WARPS
+    # Quantization, after RMSNorm when given its weight, or of silu(gate) * up from rows holding
+    # gate then up when gated. Each row takes a block, whose warps quantize one group after another.
+    # A single row, the vector of a decode step, spreads over blocks of a group per warp instead:
+    # on the 3090 that takes 3 us for 4096 values against 5 us for one block, though each block
+    # sums the squares of the whole row, from L2 after the first.
+    n, warps = int(x.shape[1]) // (2 if gated else 1), QUANT_WARPS
     groups = n // GROUP
     spread = isinstance(rows, int) and rows == 1
     row = UOp.range(rows, 0, AxisType.GLOBAL)
@@ -102,6 +107,8 @@ def _quantize_q8_kernel(
     group = turn * warps + wave
     at = group * GROUP + lane
     value = x[row, at].load() * scale * (weight[0][at].load() if weight else 1.0)
+    if gated:
+        value = _silu(value) * x[row, n + at].load()
     stores = UOp.group(*_quantize_group(q, d, s, row * groups + group, lane, value))
     if not spread:
         stores = stores.end(turn)
@@ -110,21 +117,26 @@ def _quantize_q8_kernel(
 
 
 def quantize_q8(
-    x: Tensor, norm: tuple[Tensor, float] | None = None, rows: int | UOp | None = None
+    x: Tensor,
+    norm: tuple[Tensor, float] | None = None,
+    rows: int | UOp | None = None,
+    gated: bool = False,
 ) -> tuple[Tensor, Tensor, Tensor]:
     """Quantizes the rows of x (R, n) to int8 in groups of 32, after RMSNorm with `norm`'s weight
-    and eps; only the first `rows` if given, which may be a bound variable.
+    and eps; only the first `rows` if given, which may be a bound variable. With `gated`, rows
+    hold gate then up, and silu(gate) * up is quantized.
 
     Returns the values packed four per int32 word, the scales d and the sums d * sum(q), each
     flattened row after row.
     """
-    count, n = x.shape
+    count, n = x.shape[0], x.shape[1] // (2 if gated else 1)
     q = Tensor.empty(count * n // 4, dtype=dtypes.int32, device=x.device)
     d = Tensor.empty(count * n // GROUP, dtype=dtypes.float32, device=x.device)
     s = Tensor.empty(count * n // GROUP, dtype=dtypes.float32, device=x.device)
     x, rows = _carry(x.float().contiguous(), count if rows is None else rows)
     weight = () if norm is None else (norm[0].float().contiguous(),)
-    fxn = functools.partial(_quantize_q8_kernel, rows=rows, eps=0.0 if norm is None else norm[1])
+    eps = 0.0 if norm is None else norm[1]
+    fxn = functools.partial(_quantize_q8_kernel, rows=rows, eps=eps, gated=gated)
     out = Tensor.custom_kernel(q, d, s, x, *weight, fxn=fxn)
     return out[0], out[1], out[2]
 
@@ -254,7 +266,7 @@ def _swiglu_kernel(
     out: UOp, gate: UOp, up: UOp, xq: UOp, xd: UOp, xs: UOp, ggml_type: GGMLType
 ) -> UOp:
     def combine(row: UOp, g: UOp, u: UOp) -> UOp:
-        return g * (1 + (g * -LOG2E).exp2()).reciprocal() * u  # silu(g) * u, as tinygrad's silu
+        return _silu(g) * u
 
     dots = [_DOTS[ggml_type][0](w, xq, xd, xs) for w in (gate, up)]
     return _rows(out, 4 * int(xq.shape[0]), f"swiglu_{ggml_type.name.lower()}", dots, combine)
@@ -613,30 +625,60 @@ def _matmul_kernel(
 def _matmuls(
     x: Tensor, ws: tuple[QTensor, ...], norm: tuple[Tensor, float] | None, residual: Tensor | None
 ) -> list[Tensor]:
-    # Several tokens, while prefilling a bound count of them. Buffers hold the most there may be,
-    # rounded up to whole tiles, and the kernels stop after the tiles holding actual tokens.
-    # Consecutive matrices of one type share a kernel: few rows leave SMs idle.
-    tokens, cols = x.shape[-2], x.shape[-1]
+    tokens = x.shape[-2]
+    q8 = quantize_q8(_tiled(x), norm, rows=tokens)
+    outs = []
+    for out, heights in _products(q8, tokens, ws, residual):
+        for start, h in zip(itertools.accumulate([0, *heights]), heights, strict=False):
+            outs.append(out[:tokens, start : start + h].reshape(*x.shape[:-1], h))
+    return outs
+
+
+def _tiled(x: Tensor) -> Tensor:
+    # Several tokens, while prefilling a bound count of them: buffers hold the most there may be,
+    # rounded up to whole tiles, and the kernels stop after the tiles holding actual tokens
     count = -(-x.max_shape[-2] // TILE_TOKENS) * TILE_TOKENS
-    xq, xd, xs = quantize_q8(x.reshape(tokens, cols).pad_to((count, cols)), norm, rows=tokens)
+    return x.reshape(x.shape[-2], x.shape[-1]).float().pad_to((count, x.shape[-1])).contiguous()
+
+
+def _products(
+    q8: tuple[Tensor, Tensor, Tensor], tokens: int | UOp, ws: tuple[QTensor, ...],
+    residual: Tensor | None,
+) -> list[tuple[Tensor, list[int]]]:  # fmt: skip
+    # the products of the quantized activations and each matrix, with consecutive matrices of one
+    # type stacked in one kernel, as few rows leave SMs idle: each kernel's output and heights
+    xq, xd, xs = q8
+    count = int(xd.shape[0]) * GROUP // ws[0].shape[1]
     xq, bound = _carry(xq, tokens)
-    res: tuple[Tensor, ...] = ()
-    if residual is not None:
-        res = (residual.reshape(tokens, -1).float().pad_to((count, ws[0].shape[0])).contiguous(),)
+    res = () if residual is None else (_tiled(residual),)
     outs = []
     for _, group in itertools.groupby(ws, key=lambda w: w.type):
         stack = tuple(group)
         heights = [int(w.shape[0]) for w in stack]
         tile = 256 if sum(heights) >= 4096 and all(h % 256 == 0 for h in heights) else 128
-        out = Tensor.empty(count, sum(heights), dtype=dtypes.float32, device=x.device)
+        out = Tensor.empty(count, sum(heights), dtype=dtypes.float32, device=xq.device)
         fxn = functools.partial(
             _matmul_kernel, tokens=bound, ggml_type=stack[0].type, rows=tile,
             tiles=tuple(h // tile for h in heights),
         )  # fmt: skip
         out = Tensor.custom_kernel(out, *map(_words, stack), xq, xd, xs, *res, fxn=fxn)[0]
-        for start, h in zip(itertools.accumulate([0, *heights]), heights, strict=False):
-            outs.append(out[:tokens, start : start + h].reshape(*x.shape[:-1], h))
+        outs.append((out, heights))
     return outs
+
+
+def feed_forward(
+    x: Tensor, gate: QTensor, up: QTensor, down: QTensor, norm: tuple[Tensor, float]
+) -> Tensor:
+    """x + silu(n @ gate.T) * (n @ up.T) @ down.T for n = rms_norm(x, *norm). For several tokens,
+    the activations between the matrices go from the gate and up kernel to quantization unwritten
+    in between."""
+    if _one_token(x):
+        return linears(swiglu(x, gate, up, norm), down, residual=x)[0]
+    tokens = x.shape[-2]
+    ((both, _),) = _products(quantize_q8(_tiled(x), norm, rows=tokens), tokens, (gate, up), None)
+    q8 = quantize_q8(both, rows=tokens, gated=True)
+    ((out, _),) = _products(q8, tokens, (down,), x)
+    return out[:tokens].reshape(*x.shape[:-1], down.shape[0])
 
 
 # ******** attention: one query token against the KV cache ********

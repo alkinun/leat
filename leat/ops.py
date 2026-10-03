@@ -43,6 +43,16 @@ def swiglu(
     return g.silu() * u
 
 
+def feed_forward(
+    x: Tensor, gate: QTensor, up: QTensor, down: QTensor, norm: tuple[Tensor, float]
+) -> Tensor:
+    # x + swiglu(x, gate, up, norm) @ down.T: llama's MLP with its residual
+    fits = gate.type == up.type and gate.shape == up.shape
+    if _fast() and fits and all(nv.supports(x, w) for w in (gate, up, down)):
+        return nv.feed_forward(x, gate, up, down, norm)
+    return linear(swiglu(x, gate, up, norm), down, residual=x)
+
+
 def embedding(tokens: Tensor, w: QTensor) -> Tensor:
     # gathers whole rows of storage, then decodes only those; tinygrad lowers the gather to a load
     vocab, dim = w.shape
