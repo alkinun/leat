@@ -636,9 +636,18 @@ def _matmuls(
 
 def _tiled(x: Tensor) -> Tensor:
     # Several tokens, while prefilling a bound count of them: buffers hold the most there may be,
-    # rounded up to whole tiles, and the kernels stop after the tiles holding actual tokens
-    count = -(-x.max_shape[-2] // TILE_TOKENS) * TILE_TOKENS
-    return x.reshape(x.shape[-2], x.shape[-1]).float().pad_to((count, x.shape[-1])).contiguous()
+    # rounded up to whole tiles, and the kernels stop after the tiles holding actual tokens. The
+    # first rows of a kernel's output of that many rows are that output, whose other rows nobody
+    # reads; anything else is padded, a copy.
+    count, n = -(-x.max_shape[-2] // TILE_TOKENS) * TILE_TOKENS, x.shape[-1]
+    view = x.uop
+    while view.op is Ops.RESHAPE:
+        view = view.src[0]
+    if view.op is Ops.SHRINK and view.src[0].shape == (count, n) and x.dtype == dtypes.float32:
+        starts, sizes = view.src[1].src, view.src[2].src
+        if all(s.op is Ops.CONST and s.arg == 0 for s in starts) and sizes[1].arg == n:
+            return Tensor(view.src[0])
+    return x.reshape(x.shape[-2], n).float().pad_to((count, n)).contiguous()
 
 
 def _products(
