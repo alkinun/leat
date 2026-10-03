@@ -352,7 +352,7 @@ def _products(
     outs = []
     for _, group in itertools.groupby(ws, key=lambda w: w.type):
         stack = tuple(group)
-        heights = [int(w.shape[0]) for w in stack]
+        heights = [w.shape[0] for w in stack]
         tile = 256 if sum(heights) >= 4096 and all(h % 256 == 0 for h in heights) else 128
         width = heights[0] if gated else sum(heights)
         out = Tensor.empty(count, width, dtype=dtypes.float32, device=xq.device)
@@ -370,8 +370,7 @@ def supports_matmul(x: Tensor, w: QTensor) -> bool:
     # tokens of one sequence, whole tiles of rows, and whole steps along a row
     rows, cols = w.shape
     single = all(isinstance(b, int) and b == 1 for b in x.shape[:-2])
-    fits = isinstance(rows, int) and rows % 128 == 0 and isinstance(cols, int) and cols % 256 == 0
-    return on_nvidia(x) and single and w.type in WORD_TYPE and fits
+    return on_nvidia(x) and single and w.type in WORD_TYPE and rows % 128 == 0 and cols % 256 == 0
 
 
 def matmuls(

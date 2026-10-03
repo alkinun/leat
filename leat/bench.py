@@ -36,8 +36,8 @@ class Quality:
 
 
 def speed(engine: Engine, prompt_tokens: int = 512, gen_tokens: int = 128, reps: int = 3) -> Speed:
-    # as llama-bench: all prompt runs, then all generation runs, each after two that execute
-    # eagerly and capture the graphs
+    # as llama-bench: all prompt runs, then all generation runs, each after two warm-up runs, the
+    # first of which captures the graph
     rng = random.Random(0)
     prompt = [rng.randrange(engine.config.vocab_size) for _ in range(prompt_tokens)]
     prefill, decode = [], []

@@ -135,9 +135,7 @@ def _swiglu_kernel(
 def supports_matvec(x: Tensor, w: QTensor) -> bool:
     # one token, and whole warps: each lane takes pairs of sub-blocks, 32 lanes per row
     one = isinstance(x.numel(), int) and x.numel() == x.shape[-1]
-    cols = w.shape[1]
-    fits = isinstance(cols, int) and cols % (64 * WARP) == 0
-    return on_nvidia(x) and one and w.type in WORD_TYPE and fits
+    return on_nvidia(x) and one and w.type in WORD_TYPE and w.shape[1] % (64 * WARP) == 0
 
 
 def matvecs(

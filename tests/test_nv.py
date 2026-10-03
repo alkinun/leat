@@ -7,7 +7,7 @@ from gguf.quants import dequantize
 from tinygrad import Tensor, UOp
 
 from leat import nv, ops
-from leat.quant import BLOCK, GGMLType, QTensor
+from leat.quant import GGMLType, QTensor
 from tests.helpers import random_blocks
 
 pytestmark = [
@@ -16,6 +16,7 @@ pytestmark = [
         os.environ.get("DEV", "").split(":")[0] not in ("NV", "CUDA"), reason="needs DEV=NV or CUDA"
     ),
 ]
+Q4_K, Q6_K = GGMLType.Q4_K, GGMLType.Q6_K
 
 
 def quantize_q8(x: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -29,6 +30,35 @@ def quantize_q8(x: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return q.ravel(), d[:, 0], s
 
 
+def rms_norm(x: np.ndarray, weight: np.ndarray, eps: float) -> np.ndarray:
+    x64 = x.astype(np.float64)
+    return (x64 / np.sqrt((x64 * x64).mean(-1, keepdims=True) + eps) * weight).astype(np.float32)
+
+
+def random_matrix(
+    ggml_type: GGMLType, rows: int, cols: int, rng: np.random.Generator
+) -> tuple[QTensor, np.ndarray]:
+    blocks = random_blocks(ggml_type, rows * cols // 256, rng, 1e-3)
+    return QTensor(Tensor(blocks), ggml_type, (rows, cols)), blocks
+
+
+def reference_matmul(x: np.ndarray, blocks: np.ndarray, ggml_type: GGMLType) -> np.ndarray:
+    # x (T, cols) quantized per row as the kernels do, times the decoded weights, in f64
+    q, d, _ = quantize_q8(x)
+    xq = (q.reshape(-1, nv.GROUP) * d[:, None]).reshape(x.shape)
+    weights = dequantize(blocks, gguf.GGMLQuantizationType(ggml_type)).reshape(-1, x.shape[1])
+    return xq.astype(np.float64) @ weights.astype(np.float64).T
+
+
+def assert_close(got: np.ndarray, expected: np.ndarray, tolerance: float) -> None:
+    # relative to the largest value: products of random weights have many near zero
+    atol = tolerance * np.abs(expected).max()
+    np.testing.assert_allclose(got, expected, rtol=tolerance, atol=atol)
+
+
+# ******** quantization ********
+
+
 @pytest.mark.parametrize("rows", [None, 5, UOp.variable("rows", 1, 8).bind(3)])
 def test_quantize_q8(rows):
     rng = np.random.default_rng(0)
@@ -40,11 +70,6 @@ def test_quantize_q8(rows):
     outs = (q.numpy().view(np.int8)[: n * 4096], d.numpy()[: n * 128], s.numpy()[: n * 128])
     for got, want in zip(outs, quantize_q8(x[:n]), strict=True):
         np.testing.assert_array_equal(got, want)
-
-
-def rms_norm(x: np.ndarray, weight: np.ndarray, eps: float) -> np.ndarray:
-    x64 = x.astype(np.float64)
-    return (x64 / np.sqrt((x64 * x64).mean(-1, keepdims=True) + eps) * weight).astype(np.float32)
 
 
 def test_norm_quantize_q8():
@@ -61,132 +86,87 @@ def test_norm_quantize_q8():
     np.testing.assert_array_equal(s, (d * sums).astype(np.float32))
 
 
-def test_linear_after_norm():
-    rng = np.random.default_rng(5)
-    blocks = random_blocks(GGMLType.Q4_K, 64 * 4096 // 256, rng, scale=1e-3)
-    w = QTensor(Tensor(blocks), GGMLType.Q4_K, (64, 4096))
-    x = (rng.standard_normal((1, 1, 4096)) * 3).astype(np.float32)
-    weight = rng.uniform(0.5, 1.5, 4096).astype(np.float32)
-    got = ops.linears(Tensor(x), w, norm=(Tensor(weight), 1e-5))[0].numpy().ravel()
-    q, d, _ = quantize_q8(rms_norm(x.ravel(), weight, 1e-5))
-    weights = dequantize(blocks, gguf.GGMLQuantizationType.Q4_K).reshape(64, 4096)
-    expected = weights.astype(np.float64) @ (q.reshape(-1, nv.GROUP) * d[:, None]).ravel()
-    np.testing.assert_allclose(got, expected, rtol=1e-3, atol=1e-3 * np.abs(expected).max())
+# ******** one token ********
 
 
-@pytest.mark.parametrize("ggml_type", [GGMLType.Q4_K, GGMLType.Q6_K])
+@pytest.mark.parametrize("ggml_type", [Q4_K, Q6_K])
 @pytest.mark.parametrize("shape", [(64, 4096), (8, 14336)])
-def test_linear(ggml_type, shape):
+def test_matvec(ggml_type, shape):
     rng = np.random.default_rng(1)
-    rows, cols = shape
-    blocks = random_blocks(ggml_type, rows * cols // BLOCK[ggml_type][0], rng, scale=1e-3)
-    weights = dequantize(blocks, gguf.GGMLQuantizationType(ggml_type)).reshape(shape)
-    x = rng.standard_normal((1, 1, cols)).astype(np.float32)
-    w = QTensor(Tensor(blocks), ggml_type, shape)
+    w, blocks = random_matrix(ggml_type, *shape, rng)
+    x = rng.standard_normal((1, 1, shape[1])).astype(np.float32)
     assert nv.supports_matvec(Tensor(x), w)
-    q, d, _ = quantize_q8(x.ravel())
-    expected = weights.astype(np.float64) @ (q.reshape(-1, nv.GROUP) * d[:, None]).ravel()
     got = ops.linear(Tensor(x), w).numpy()
-    assert got.shape == (1, 1, rows)
-    np.testing.assert_allclose(got.ravel(), expected, rtol=1e-4, atol=1e-4 * np.abs(expected).max())
+    assert got.shape == (1, 1, shape[0])
+    assert_close(got[0], reference_matmul(x[0], blocks, ggml_type), 1e-4)
 
 
 def test_shared_input():
+    # matrices of different types share one quantization of x
     rng = np.random.default_rng(3)
-    ws = []
-    for t in (GGMLType.Q4_K, GGMLType.Q6_K):
-        ws.append(QTensor(Tensor(random_blocks(t, 8 * 2048 // 256, rng, 1e-3)), t, (8, 2048)))
+    ws = [random_matrix(t, 8, 2048, rng)[0] for t in (Q4_K, Q6_K)]
     x = Tensor(rng.standard_normal((1, 1, 2048)).astype(np.float32))
     for got, w in zip(ops.linears(x, *ws), ws, strict=True):
         np.testing.assert_array_equal(got.numpy(), ops.linear(x, w).numpy())
 
 
-@pytest.mark.parametrize("ggml_type", [GGMLType.Q4_K, GGMLType.Q6_K])
+@pytest.mark.parametrize("ggml_type", [Q4_K, Q6_K])
 def test_swiglu(ggml_type):
     rng = np.random.default_rng(7)
-    rows, cols = 16, 4096
-    blocks = [random_blocks(ggml_type, rows * cols // 256, rng, 1e-3) for _ in range(2)]
-    gate, up = (QTensor(Tensor(b), ggml_type, (rows, cols)) for b in blocks)
-    x = rng.standard_normal((1, 1, cols)).astype(np.float32)
-    q, d, _ = quantize_q8(x.ravel())
-    xq = (q.reshape(-1, nv.GROUP) * d[:, None]).ravel()
-    kind = gguf.GGMLQuantizationType(ggml_type)
-    g, u = (dequantize(b, kind).reshape(rows, cols).astype(np.float64) @ xq for b in blocks)
-    expected = g / (1 + np.exp(-g)) * u
-    got = nv.swiglu(Tensor(x), gate, up).numpy().ravel()
-    np.testing.assert_allclose(got, expected, rtol=1e-4, atol=1e-4 * np.abs(expected).max())
+    (gate, gate_blocks), (up, up_blocks) = (random_matrix(ggml_type, 16, 4096, rng) for _ in "gu")
+    x = rng.standard_normal((1, 1, 4096)).astype(np.float32)
+    g, u = (reference_matmul(x[0], b, ggml_type) for b in (gate_blocks, up_blocks))
+    got = nv.swiglu(Tensor(x), gate, up).numpy()[0]
+    assert_close(got, g / (1 + np.exp(-g)) * u, 1e-4)
 
 
-@pytest.mark.parametrize("ggml_type", [GGMLType.Q4_K, GGMLType.Q6_K])
-def test_residual(ggml_type):
-    rng = np.random.default_rng(6)
-    w = QTensor(Tensor(random_blocks(ggml_type, 8 * 2048 // 256, rng, 1e-3)), ggml_type, (8, 2048))
-    x = Tensor(rng.standard_normal((1, 1, 2048)).astype(np.float32))
-    r = Tensor(rng.standard_normal((1, 1, 8)).astype(np.float32))
-    got = ops.linear(x, w, residual=r).numpy()
-    np.testing.assert_array_equal(got, (ops.linear(x, w) + r).numpy())
+# ******** several tokens ********
 
 
-def reference_matmul(x: np.ndarray, blocks: np.ndarray, ggml_type: GGMLType) -> np.ndarray:
-    # x (T, cols) quantized per row as the kernels do, times the decoded weights, in f64
-    q, d, _ = quantize_q8(x)
-    xq = (q.reshape(-1, nv.GROUP) * d[:, None]).reshape(x.shape)
-    weights = dequantize(blocks, gguf.GGMLQuantizationType(ggml_type)).reshape(-1, x.shape[1])
-    return xq.astype(np.float64) @ weights.astype(np.float64).T
-
-
-@pytest.mark.parametrize("ggml_type", [GGMLType.Q4_K, GGMLType.Q6_K])
+@pytest.mark.parametrize("ggml_type", [Q4_K, Q6_K])
 @pytest.mark.parametrize("tokens", [64, 100, UOp.variable("tokens", 1, 128).bind(70)])
 @pytest.mark.parametrize("shape", [(256, 2048), (4096, 512)])  # tiles of 128 and 256 rows
 def test_matmul(ggml_type, tokens, shape):
     rng = np.random.default_rng(8)
-    rows, cols = shape
-    blocks = random_blocks(ggml_type, rows * cols // 256, rng, 1e-3)
-    w = QTensor(Tensor(blocks), ggml_type, (rows, cols))
+    w, blocks = random_matrix(ggml_type, *shape, rng)
     if isinstance(tokens, int):
-        x = rng.standard_normal((1, tokens, cols)).astype(np.float32)
+        x = rng.standard_normal((1, tokens, shape[1])).astype(np.float32)
         x_t, n = Tensor(x), tokens
     else:  # while prefilling, a bound number of tokens out of the most there may be
-        x = rng.standard_normal((1, 128, cols)).astype(np.float32)
+        x = rng.standard_normal((1, 128, shape[1])).astype(np.float32)
         x_t, n = Tensor(x)[:, :tokens], tokens.unbind()[1]
     assert nv.supports_matmul(x_t, w)
-    got = ops.linear(x_t, w).pad_to((1, x.shape[1], rows)).numpy()[0, :n]
-    expected = reference_matmul(x[0, :n], blocks, ggml_type)
-    np.testing.assert_allclose(got, expected, rtol=1e-4, atol=1e-4 * np.abs(expected).max())
+    got = ops.linear(x_t, w).pad_to((1, x.shape[1], shape[0])).numpy()[0, :n]
+    assert_close(got, reference_matmul(x[0, :n], blocks, ggml_type), 1e-4)
 
 
 @pytest.mark.parametrize("heights", [(256, 128, 128), (4096, 1024, 1024)])  # tiles of 128, 256
 def test_matmul_stacked(heights):
     # consecutive matrices of one type share a kernel: here the first two, as q and k
     rng = np.random.default_rng(10)
-    cols, n = 512, 70
-    types = (GGMLType.Q4_K, GGMLType.Q4_K, GGMLType.Q6_K)
-    blocks = [
-        random_blocks(t, h * cols // 256, rng, 1e-3) for t, h in zip(types, heights, strict=True)
-    ]
-    ws = [QTensor(Tensor(b), t, (h, cols)) for b, t, h in zip(blocks, types, heights, strict=True)]
-    x = rng.standard_normal((1, n, cols)).astype(np.float32)
+    types = (Q4_K, Q4_K, Q6_K)
+    matrices = [random_matrix(t, h, 512, rng) for t, h in zip(types, heights, strict=True)]
+    ws, blocks = zip(*matrices, strict=True)
+    x = rng.standard_normal((1, 70, 512)).astype(np.float32)
     for got, b, t in zip(ops.linears(Tensor(x), *ws), blocks, types, strict=True):
-        expected = reference_matmul(x[0], b, t)
-        np.testing.assert_allclose(
-            got.numpy()[0], expected, rtol=1e-4, atol=1e-4 * np.abs(expected).max()
-        )
+        assert_close(got.numpy()[0], reference_matmul(x[0], b, t), 1e-4)
 
 
-def test_matmul_norm_residual():
+# ******** ops on the kernels ********
+
+
+@pytest.mark.parametrize("tokens", [1, 80])
+def test_norm_and_residual(tokens):
     rng = np.random.default_rng(9)
-    rows, cols, n = 256, 4096, 80
-    blocks = random_blocks(GGMLType.Q4_K, rows * cols // 256, rng, 1e-3)
-    w = QTensor(Tensor(blocks), GGMLType.Q4_K, (rows, cols))
-    x = (rng.standard_normal((1, n, cols)) * 3).astype(np.float32)
-    weight = rng.uniform(0.5, 1.5, cols).astype(np.float32)
-    r = rng.standard_normal((1, n, rows)).astype(np.float32)
+    w, blocks = random_matrix(Q4_K, 256, 4096, rng)
+    x = (rng.standard_normal((1, tokens, 4096)) * 3).astype(np.float32)
+    weight = rng.uniform(0.5, 1.5, 4096).astype(np.float32)
+    r = Tensor(rng.standard_normal((1, tokens, 256)).astype(np.float32))
     normed = ops.linears(Tensor(x), w, norm=(Tensor(weight), 1e-5))[0].numpy()[0]
-    expected = reference_matmul(rms_norm(x[0], weight, 1e-5), blocks, GGMLType.Q4_K)
     # normalizing in f32 may round a few activations differently, as in test_norm_quantize_q8
-    np.testing.assert_allclose(normed, expected, rtol=1e-3, atol=1e-3 * np.abs(expected).max())
-    got = ops.linear(Tensor(x), w, residual=Tensor(r)).numpy()
-    np.testing.assert_array_equal(got, (ops.linear(Tensor(x), w) + Tensor(r)).numpy())
+    assert_close(normed, reference_matmul(rms_norm(x[0], weight, 1e-5), blocks, Q4_K), 1e-3)
+    got = ops.linear(Tensor(x), w, residual=r).numpy()
+    np.testing.assert_array_equal(got, (ops.linear(Tensor(x), w) + r).numpy())
 
 
 # one token takes the matrix-vector kernels where the matrices are wide enough, else as several
@@ -195,24 +175,16 @@ def test_matmul_norm_residual():
 def test_feed_forward(tokens, hidden):
     rng = np.random.default_rng(12)
     dim = 2048
-    shapes = {GGMLType.Q4_K: (hidden, dim), GGMLType.Q6_K: (dim, hidden)}
-    gate, up, down = (
-        random_blocks(t, shapes[t][0] * shapes[t][1] // 256, rng, 1e-3)
-        for t in (GGMLType.Q4_K, GGMLType.Q4_K, GGMLType.Q6_K)
-    )
-    ws = [
-        QTensor(Tensor(b), t, shapes[t])
-        for b, t in zip((gate, up, down), (GGMLType.Q4_K,) * 2 + (GGMLType.Q6_K,), strict=True)
-    ]
+    (gate, gate_blocks), (up, up_blocks) = (random_matrix(Q4_K, hidden, dim, rng) for _ in "gu")
+    down, down_blocks = random_matrix(Q6_K, dim, hidden, rng)
     x = (rng.standard_normal((1, tokens, dim)) * 3).astype(np.float32)
     weight = rng.uniform(0.5, 1.5, dim).astype(np.float32)
-    got = ops.feed_forward(Tensor(x), *ws, norm=(Tensor(weight), 1e-5)).numpy()[0]
+    got = ops.feed_forward(Tensor(x), gate, up, down, norm=(Tensor(weight), 1e-5)).numpy()[0]
     normed = rms_norm(x[0], weight, 1e-5)
-    g, u = (reference_matmul(normed, b, GGMLType.Q4_K) for b in (gate, up))
-    h = (g / (1 + np.exp(-g)) * u).astype(np.float32)
-    expected = x[0] + reference_matmul(h, down, GGMLType.Q6_K)
+    g, u = (reference_matmul(normed, b, Q4_K) for b in (gate_blocks, up_blocks))
+    hidden_ = (g / (1 + np.exp(-g)) * u).astype(np.float32)
     # f32 rounding inside the kernels may move a few activations across a quantization step
-    np.testing.assert_allclose(got, expected, rtol=1e-3, atol=2e-3 * np.abs(expected).max())
+    assert_close(got, x[0] + reference_matmul(hidden_, down_blocks, Q6_K), 2e-3)
 
 
 def test_one_token_takes_matvec(monkeypatch):
@@ -223,8 +195,7 @@ def test_one_token_takes_matvec(monkeypatch):
     monkeypatch.setattr(nv, "matmuls", fail)
     monkeypatch.setattr(nv, "feed_forward", fail)
     rng = np.random.default_rng(13)
-    ws = [QTensor(Tensor(random_blocks(GGMLType.Q4_K, 8 * 2048, rng, 1e-3)), GGMLType.Q4_K,
-                  (2048, 2048)) for _ in range(3)]  # fmt: skip
+    ws = [random_matrix(Q4_K, 2048, 2048, rng)[0] for _ in range(3)]
     x = Tensor(rng.standard_normal((1, 1, 2048)).astype(np.float32))
     norm = (Tensor.ones(2048), 1e-5)
     Tensor.realize(ops.linears(x, *ws, norm=norm)[0], ops.feed_forward(x, *ws, norm=norm))
@@ -232,70 +203,69 @@ def test_one_token_takes_matvec(monkeypatch):
 
 def test_reference_switch(monkeypatch):
     rng = np.random.default_rng(2)
-    blocks = random_blocks(GGMLType.Q4_K, 16 * 2048 // 256, rng, scale=1e-3)
-    w = QTensor(Tensor(blocks), GGMLType.Q4_K, (16, 2048))
+    w, _ = random_matrix(Q4_K, 16, 2048, rng)
     x = Tensor(rng.standard_normal((1, 1, 2048)).astype(np.float32))
     monkeypatch.setenv("LEAT_KERNELS", "ref")
     np.testing.assert_array_equal(ops.linear(x, w).numpy(), (x @ w.dequant().T).numpy())
 
 
-# cache sizes matter too: some strides trip a tinygrad codegen bug with symbolic lengths
-# (attention.PAD)
+# ******** attention ********
+
+
+def reference_attention(q: np.ndarray, cache: np.ndarray, start: int) -> np.ndarray:
+    # q (heads, T, dim) at positions start.. against the cache, causally, in f64: (T, heads, dim)
+    heads, tokens, dim = q.shape
+    group = heads // cache.shape[2]
+    k, v = (cache[i, 0, :, : start + tokens].astype(np.float64) for i in range(2))
+    causal = np.arange(start + tokens) > start + np.arange(tokens)[:, None]
+    out = np.empty((tokens, heads, dim))
+    for h in range(heads):
+        scores = q[h] @ k[h // group].T / np.sqrt(dim)
+        p = np.exp(np.where(causal, -np.inf, scores - scores.max(-1, keepdims=True)))
+        out[:, h] = (p / p.sum(-1, keepdims=True)) @ v[h // group]
+    return out
+
+
+# cache sizes matter too: some strides trip a tinygrad codegen bug with symbolic lengths, see
+# attention.PAD
 @pytest.mark.parametrize(
     "n, length",
-    [
-        (64, 1),
-        (64, 64),
-        (1024, 63),
-        (1024, 65),
-        (1024, 1000),
-        (3072, 3072),
-        (4096, 3079),
-        (4096, 4096),
-    ],  # fmt: skip
-)
+    [(64, 1), (64, 64), (1024, 63), (1024, 65), (1024, 1000), (3072, 3072), (4096, 3079),
+     (4096, 4096)],
+)  # fmt: skip
 @pytest.mark.parametrize("symbolic", [False, True])
 def test_attention(n, length, symbolic):
     rng = np.random.default_rng(length)
-    heads, kv_heads, dim = 32, 8, 128
-    cache = rng.standard_normal((2, 1, kv_heads, n, dim)).astype(np.float16)
-    q = rng.standard_normal((1, heads, 1, dim)).astype(np.float32)
+    cache = rng.standard_normal((2, 1, 8, n, 128)).astype(np.float16)
+    q = rng.standard_normal((1, 32, 1, 128)).astype(np.float32)
     valid = UOp.variable("start_pos", 0, n - 1).bind(length - 1) + 1 if symbolic else length
     q_t, cache_t = Tensor(q).realize(), Tensor(cache).realize()  # the model's cache is a buffer
     assert nv.supports_attention(q_t, cache_t)
-    got = nv.attention(q_t, cache_t, valid).numpy()
-    k, v = (cache[i, 0, :, :length].astype(np.float64) for i in range(2))
-    for h in range(heads):
-        scores = k[h // (heads // kv_heads)] @ q[0, h, 0] / np.sqrt(dim)
-        p = np.exp(scores - scores.max())
-        expected = (p / p.sum()) @ v[h // (heads // kv_heads)]
-        np.testing.assert_allclose(got[0, h, 0], expected, rtol=2e-3, atol=2e-3)
+    got = nv.attention(q_t, cache_t, valid).numpy()[0, :, 0]
+    expected = reference_attention(q[0], cache, length - 1)[0]
+    np.testing.assert_allclose(got, expected, rtol=2e-3, atol=2e-3)
 
 
 @pytest.mark.parametrize("tokens, start", [(37, 0), (64, 0), (100, 300), (512, 3584)])
 @pytest.mark.parametrize("symbolic", [False, True])
 def test_flash_attention(tokens, start, symbolic):
     rng = np.random.default_rng(tokens + start)
-    heads, kv_heads, dim, n = 32, 8, 128, 4096
-    cache = rng.standard_normal((2, 1, kv_heads, n, dim)).astype(np.float16)
-    q = rng.standard_normal((1, heads, 512, dim)).astype(np.float32)
+    cache = rng.standard_normal((2, 1, 8, 4096, 128)).astype(np.float16)
+    q = rng.standard_normal((1, 32, 512, 128)).astype(np.float32)
     q_t, cache_t = Tensor(q).realize(), Tensor(cache).realize()
     if symbolic:  # as while prefilling: a bound start and number of tokens
-        pos = UOp.variable("start_pos", 0, n - 1).bind(start)
+        pos = UOp.variable("start_pos", 0, 4095).bind(start)
         q_t = q_t[:, :, : UOp.variable("chunk_len", 1, 512).bind(tokens)]
     else:
         pos, q_t = start, q_t[:, :, :tokens]
     assert nv.supports_flash_attention(q_t, cache_t)
-    got = nv.flash_attention(q_t, cache_t, pos).pad_to((1, 512, heads * dim)).numpy()
-    got = got[0, :tokens].reshape(tokens, heads, dim)
-    k, v = (cache[i, 0, :, : start + tokens].astype(np.float64) for i in range(2))
-    causal = np.arange(start + tokens) > start + np.arange(tokens)[:, None]
-    for h in range(heads):
-        scores = q[0, h, :tokens] @ k[h // (heads // kv_heads)].T / np.sqrt(dim)
-        p = np.exp(np.where(causal, -np.inf, scores - scores.max(-1, keepdims=True)))
-        expected = (p / p.sum(-1, keepdims=True)) @ v[h // (heads // kv_heads)]
-        # queries and weights are rounded to f16 for the tensor cores
-        np.testing.assert_allclose(got[:, h], expected, rtol=3e-3, atol=3e-3)
+    got = nv.flash_attention(q_t, cache_t, pos).pad_to((1, 512, 32 * 128)).numpy()[0, :tokens]
+    expected = reference_attention(q[0, :, :tokens], cache, start)
+    # queries and weights are rounded to f16 for the tensor cores
+    np.testing.assert_allclose(got.reshape(expected.shape), expected, rtol=3e-3, atol=3e-3)
+
+
+# ******** argmax ********
 
 
 @pytest.mark.parametrize("rows, n", [(1, 128256), (3, 1000), (2, 33), (1, 1)])

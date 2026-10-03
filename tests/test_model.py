@@ -80,8 +80,8 @@ def test_matches_llama_cpp(model_path, llama_cpp, wikitext, tmp_path, decode):
     args += ["--kl-divergence-base", base := tmp_path / "base.kld"]
     subprocess.run([llama_cpp / "llama-perplexity", *args], check=True, capture_output=True)
     quality = bench.kl_divergence(Engine(model_path, max_context=512), base, decode=decode)
-    # 0.0011 for prefill and 0.0013 for decode, whose int8 activations add noise as in llama.cpp;
-    # dropping llama 3.1's rope frequency factors, a subtle bug, scores 0.0026
+    # both paths score about 0.0012, int8 activations adding noise as in llama.cpp; for scale,
+    # dropping llama 3.1's rope frequency factors, a subtle bug, scored 0.0026 on the reference ops
     assert quality.kl_mean is not None and quality.kl_mean < 0.0015
     assert quality.top1 is not None and quality.top1 > 0.98
 

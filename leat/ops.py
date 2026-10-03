@@ -60,12 +60,12 @@ def embedding(tokens: Tensor, w: QTensor) -> Tensor:
     # A bound number of tokens gathers as many as there may be: tinygrad leaves a copy along a
     # symbolic axis to one thread per block.
     vocab, dim = w.shape
-    shape, tokens = tokens.shape, tokens.pad_to(tokens.max_shape)
-    rows = w.data.reshape(vocab, -1)[tokens.flatten()]
+    shape, padded = tokens.shape, tokens.max_shape
+    rows = w.data.reshape(vocab, -1)[tokens.pad_to(padded).flatten()]
     if w.type in NATIVE:
-        out = rows.reshape(*tokens.shape, dim).float()
+        out = rows.reshape(*padded, dim).float()
     else:
-        out = QTensor(rows.reshape(-1, w.data.shape[1]), w.type, (*tokens.shape, dim)).dequant()
+        out = QTensor(rows.reshape(-1, w.data.shape[1]), w.type, (*padded, dim)).dequant()
     return out.shrink_to((*shape, dim))
 
 
