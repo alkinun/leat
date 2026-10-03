@@ -946,9 +946,9 @@ def _quad(value: UOp, op: Callable[[UOp, UOp], UOp]) -> UOp:
 def _flash_attention_kernel(
     out: UOp, q: UOp, cache: UOp, start: int | UOp, tokens: int | UOp
 ) -> UOp:
-    # q (heads, count, dim) in f16, scaled so that exp2 gives the softmax, and the f16 cache, read
+    # q (count, heads, dim) in f16, scaled so that exp2 gives the softmax, and the f16 cache, read
     # as words of f16 pairs; query i is at position start + i and sees positions up to it
-    heads, dim = int(q.shape[0]), int(q.shape[2])
+    heads, dim = int(q.shape[1]), int(q.shape[2])
     kv_heads, words = int(cache.shape[2]), dim // 2
     cache = cache.flatten().bitcast(dtypes.uint32).reshape(2, kv_heads, int(cache.shape[3]), words)
     group = heads // kv_heads
@@ -961,7 +961,7 @@ def _flash_attention_kernel(
     # queries as A fragments of 16 dimensions
     queries = [
         [
-            _halves_word(*(q[head, r, 16 * k + 8 * h + 2 * t + i].load() for i in (0, 1)))
+            _halves_word(*(q[r, head, 16 * k + 8 * h + 2 * t + i].load() for i in (0, 1)))
             for h in (0, 1)
             for r in rows
         ]
@@ -1060,8 +1060,9 @@ def flash_attention(q: Tensor, cache: Tensor, start_pos: int | UOp) -> Tensor:
     already holds their keys and values. Returns (1, T, H * D)."""
     _, heads, tokens, dim = q.shape
     count = -(-q.max_shape[2] // QUERIES) * QUERIES
-    q = (q.reshape(heads, tokens, dim).float() * (LOG2E / math.sqrt(dim))).half()
-    q = q.pad_to((heads, count, dim)).contiguous()
+    # in the layout of the projection that made q, where scaling and rounding it is a plain copy
+    q = (q.transpose(1, 2).reshape(tokens, heads, dim).float() * (LOG2E / math.sqrt(dim))).half()
+    q = q.pad_to((count, heads, dim)).contiguous()
     q, start = _carry(q, start_pos)
     cache, length = _carry(cache, tokens)
     out = Tensor.empty(count, heads * dim, dtype=dtypes.float32, device=q.device)
