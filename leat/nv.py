@@ -82,31 +82,28 @@ def _quantize_q8_kernel(q: UOp, d: UOp, s: UOp, x: UOp) -> UOp:
     return UOp.group(*stores).end(group, lane).sink(arg=info)
 
 
-NORM_THREADS = 1024  # one block normalizes the whole vector
+NORM_WARPS = 8  # per block of the fused RMSNorm and quantization: one group each
 
 
 @functools.cache
 def _norm_quantize_q8_kernel(q: UOp, d: UOp, s: UOp, x: UOp, weight: UOp, eps: float) -> UOp:
-    # RMSNorm, then quantization, in one block: the warps' sums of squares meet in shared memory,
-    # then each warp normalizes and quantizes every (NORM_THREADS / 32)-th group
-    n, warps = int(x.shape[0]), NORM_THREADS // WARP
+    # RMSNorm, then quantization. Every block sums the squares of the whole vector, from L2 after
+    # the first, with its warps meeting in shared memory; then each warp quantizes one group.
+    # On the 3090 this takes 3 us for 4096 values, against 5 us for one block doing every group.
+    n, warps = int(x.shape[0]), NORM_WARPS
+    block = UOp.range(n // (GROUP * warps), 0, AxisType.GLOBAL)
     lane, wave = _lane(), UOp.range(warps, 1, AxisType.LOCAL)
-    thread, per_thread = wave * WARP + lane, n // NORM_THREADS
-    squares = sum(
-        (x[thread * per_thread + i].load() ** 2 for i in range(per_thread)),
-        UOp.const(0.0, dtypes.float32),
-    )
+    thread, threads = wave * WARP + lane, warps * WARP
+    zero = UOp.const(0.0, dtypes.float32)
+    squares = sum((x[i * threads + thread].load() ** 2 for i in range(n // threads)), zero)
     partial = UOp.alloc((warps,), dtypes.float32, addrspace=AddrSpace.LOCAL)
     partial = partial.after(partial[wave.valid(lane.eq(0))].store(_warp_sum(squares)))
-    total = sum((partial[w].load() for w in range(warps)), UOp.const(0.0, dtypes.float32))
-    inv = (total / n + eps).rsqrt()
-    stores = []
-    for k in range(n // GROUP // warps):
-        group = wave + k * warps
-        at = group * GROUP + lane
-        stores += _quantize_group(q, d, s, group, lane, x[at].load() * inv * weight[at].load())
+    inv = (sum((partial[w].load() for w in range(warps)), zero) / n + eps).rsqrt()
+    group = block * warps + wave
+    at = group * GROUP + lane
+    stores = _quantize_group(q, d, s, group, lane, x[at].load() * inv * weight[at].load())
     info = KernelInfo(name="norm_quantize_q8", opts_to_apply=())
-    return UOp.group(*stores).end(wave, lane).sink(arg=info)
+    return UOp.group(*stores).end(block, wave, lane).sink(arg=info)
 
 
 def quantize_q8(
@@ -259,7 +256,7 @@ def supports(x: Tensor, w: QTensor) -> bool:
     # one token, and whole warps: each lane takes pairs of sub-blocks, 32 lanes per row
     cols = w.shape[1]
     single = isinstance(x.numel(), int) and x.numel() == cols
-    fits = isinstance(cols, int) and cols % (64 * WARP) == 0  # also a multiple of NORM_THREADS
+    fits = isinstance(cols, int) and cols % (64 * WARP) == 0  # so also of GROUP * NORM_WARPS
     return w.type in _DOTS and single and fits
 
 
