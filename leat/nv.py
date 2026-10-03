@@ -139,7 +139,63 @@ def _q4_k_kernel(out: UOp, w: UOp, xq: UOp, xd: UOp, xs: UOp) -> UOp:
     )
 
 
-_KERNELS = {GGMLType.Q4_K: _q4_k_kernel}
+def _word16(w: UOp, i: UOp) -> UOp:
+    # four bytes from a halfword-aligned buffer: 32-bit loads must be 4-byte aligned
+    return w[i].load().cast(dtypes.uint32) | (w[i + 1].load().cast(dtypes.uint32) << 16)
+
+
+def _minus_32(q: UOp) -> UOp:
+    # Q6_K's unsigned 0..63 to signed -32..31, in each byte of a word
+    centered = UOp(Ops.CUSTOMI, src=(q,), arg=("__vsubss4({}, 0x20202020u)", dtypes.uint32))
+    return centered.bitcast(dtypes.int32)
+
+
+@functools.cache
+def _q6_k_kernel(out: UOp, w: UOp, xq: UOp, xd: UOp, xs: UOp) -> UOp:
+    # Q6_K block, 105 halfwords: ql[128] low nibbles, qh[64] high 2-bit pairs, 16 int8 scales and d
+    # as f16. Each half n of 128 weights is 4 rows of 32: row k takes nibble k // 2 of
+    # ql[64n + 32(k % 2):][:32] and bits 2k of qh[32n:][:32], minus 32, with a scale per 16. A lane
+    # takes rows k and k + 2 of a half, which share their ql bytes: 64 weights, as for Q4_K.
+    rows, cols = out.shape[0], xq.shape[0] * 4
+    blocks, units = cols // 256, cols // 64
+    blk = UOp.range(rows // ROWS, 0, AxisType.GLOBAL)
+    lane = _lane()
+    wave = UOp.range(ROWS, 2, AxisType.LOCAL)
+    row = blk * ROWS + wave
+    acc = UOp.const(0.0, dtypes.float32)
+    for it in range(units // WARP):
+        unit = it * WARP + lane
+        block, n, k = unit // 4, unit % 4 // 2, unit % 2
+        base = (row * blocks + block) * 105
+        g = block * 8 + 4 * n + k  # activation group of row k; row k + 2 is group g + 2
+        dots = [[UOp.const(0, dtypes.int32)] * 2 for _ in range(2)]  # [row k, k + 2][16 weights]
+        for m in range(8):
+            ql = _word16(w, base + 32 * n + 16 * k + 2 * m)
+            qh = _word16(w, base + 64 + 16 * n + 2 * m)
+            for r in range(2):
+                high = (qh >> (2 * k + 4 * r).cast(dtypes.uint32)) & 0x03030303
+                q = ((ql >> (4 * r)) & 0x0F0F0F0F) | (high << 4)
+                dots[r][m // 4] = _dp4a(
+                    _minus_32(q), xq[(g + 2 * r) * 8 + m].load(), dots[r][m // 4]
+                )
+        total = UOp.const(0.0, dtypes.float32)
+        for r in range(2):
+            scales = w[base + 96 + 4 * n + k + 2 * r].load()  # both scales of row k + 2r
+            for h in range(2):
+                sc = ((scales >> (8 * h)) & 0xFF).cast(dtypes.uint8).bitcast(dtypes.int8).float()
+                total = total + xd[g + 2 * r].load() * sc * dots[r][h].float()
+        acc = acc + _half(w[base + 104].load().cast(dtypes.uint32)) * total
+    store = out[row.valid(lane.eq(0))].store(_warp_sum(acc))
+    return store.end(blk, wave, lane).sink(
+        arg=KernelInfo(name=f"q6_k_{rows}_{cols}", opts_to_apply=())
+    )
+
+
+# each kernel, and the word type it reads the weights as
+_KERNELS = {
+    GGMLType.Q4_K: (_q4_k_kernel, dtypes.uint32),
+    GGMLType.Q6_K: (_q6_k_kernel, dtypes.uint16),
+}
 
 
 def supports(x: Tensor, w: QTensor) -> bool:
@@ -162,7 +218,8 @@ def linear(x: Tensor, w: QTensor) -> Tensor:
     rows, cols = w.shape
     xq, xd, xs = quantize_q8(x.reshape(cols))
     out = Tensor.empty(rows, dtype=dtypes.float32, device=x.device)
+    kernel, word = _KERNELS[w.type]
     # .contiguous() on a bitcast of contiguous storage is a view; without it tinygrad copies
-    words = w.data.flatten().bitcast(dtypes.uint32).contiguous()
-    out = Tensor.custom_kernel(out, words, xq, xd, xs, fxn=_KERNELS[w.type])[0]
+    words = w.data.flatten().bitcast(word).contiguous()
+    out = Tensor.custom_kernel(out, words, xq, xd, xs, fxn=kernel)[0]
     return out.reshape(*x.shape[:-1], rows)

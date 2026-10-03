@@ -40,7 +40,7 @@ def test_quantize_q8():
         np.testing.assert_array_equal(got, want)
 
 
-@pytest.mark.parametrize("ggml_type", [GGMLType.Q4_K])
+@pytest.mark.parametrize("ggml_type", [GGMLType.Q4_K, GGMLType.Q6_K])
 @pytest.mark.parametrize("shape", [(64, 4096), (8, 14336)])
 def test_linear(ggml_type, shape):
     rng = np.random.default_rng(1)
