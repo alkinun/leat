@@ -53,9 +53,14 @@ def speed(engine: Engine, prompt_tokens: int = 512, gen_tokens: int = 128, reps:
         next(tokens)
         start = time.perf_counter()
         decode.append(sum(1 for _ in tokens) / (time.perf_counter() - start))
-    tensors = engine.gguf.tensors
-    tied = "output.weight" not in tensors  # then the embedding is read whole, as the output layer
-    streamed = sum(t.nbytes for n, t in tensors.items() if n != "token_embd.weight" or tied)
+    # the bytes a token reads: the embedding only where it is also the output layer, and of a
+    # mixture of experts, only the share each token uses
+    tensors, c = engine.gguf.tensors, engine.config
+    tied = "output.weight" not in tensors
+    share = {n: c.experts_used / c.experts if "_exps." in n else 1.0 for n in tensors}
+    streamed = sum(
+        t.nbytes * share[n] for n, t in tensors.items() if n != "token_embd.weight" or tied
+    )
     tg = statistics.median(decode[2:])
     return Speed(statistics.median(prefill[2:]), tg, streamed * tg / 1e9)
 
