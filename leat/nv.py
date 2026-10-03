@@ -6,6 +6,7 @@ weights in their storage format.
 """
 
 import functools
+from collections.abc import Callable
 
 from tinygrad import Tensor, UOp, dtypes
 from tinygrad.uop.ops import AxisType, KernelInfo, Ops
@@ -105,22 +106,30 @@ def _k_scale_min(w: UOp, base: UOp, sub: UOp) -> tuple[UOp, UOp]:
     return sc.float(), mn.float()
 
 
-@functools.cache
-def _q4_k_kernel(out: UOp, w: UOp, xq: UOp, xd: UOp, xs: UOp) -> UOp:
-    # Q4_K block, 36 words: d and dmin as f16, 12 bytes of 6-bit scales and mins, then 32 words of
-    # nibbles. Sub-blocks 2j and 2j+1 are the low and high nibbles of words 4+8j .. 11+8j, so each
-    # lane takes such a pair: 64 weights against 16 words of activations.
-    rows, cols = out.shape[0], xq.shape[0] * 4
-    blocks, pairs = cols // 256, cols // 64
+def _rows(out: UOp, cols: int, name: str, dot: Callable[[UOp, UOp], UOp]) -> UOp:
+    # one warp per output row, ROWS rows per block. Lanes take units of 64 weights in turn,
+    # dot(row, unit) gives a unit's contribution, and the warp sums them.
+    rows = out.shape[0]
     blk = UOp.range(rows // ROWS, 0, AxisType.GLOBAL)
     lane = _lane()
     wave = UOp.range(ROWS, 2, AxisType.LOCAL)
     row = blk * ROWS + wave
-    acc = UOp.const(0.0, dtypes.float32)
-    for it in range(pairs // WARP):
-        pair = it * WARP + lane
+    units = (dot(row, it * WARP + lane) for it in range(cols // 64 // WARP))
+    store = out[row.valid(lane.eq(0))].store(_warp_sum(sum(units, UOp.const(0.0, dtypes.float32))))
+    info = KernelInfo(name=f"{name}_{rows}_{cols}", opts_to_apply=())
+    return store.end(blk, wave, lane).sink(arg=info)
+
+
+@functools.cache
+def _q4_k_kernel(out: UOp, w: UOp, xq: UOp, xd: UOp, xs: UOp) -> UOp:
+    # Q4_K block, 36 words: d and dmin as f16, 12 bytes of 6-bit scales and mins, then 32 words of
+    # nibbles. Sub-blocks 2j and 2j+1 are the low and high nibbles of words 4+8j .. 11+8j, so a
+    # unit is such a pair: 64 weights against 16 words of activations.
+    cols = 4 * int(xq.shape[0])
+
+    def dot(row: UOp, pair: UOp) -> UOp:
         block, j = pair // 4, pair % 4
-        base = (row * blocks + block) * 36
+        base = (row * (cols // 256) + block) * 36
         dm = w[base].load()
         g = block * 8 + 2 * j  # activation group of the low sub-block; g + 1 is the high one
         dots = [UOp.const(0, dtypes.int32), UOp.const(0, dtypes.int32)]
@@ -130,13 +139,11 @@ def _q4_k_kernel(out: UOp, w: UOp, xq: UOp, xd: UOp, xs: UOp) -> UOp:
                 weights = ((word >> (4 * h)) & 0x0F0F0F0F).bitcast(dtypes.int32)
                 dots[h] = _dp4a(weights, xq[(g + h) * 8 + k].load(), dots[h])
         (sc0, m0), (sc1, m1) = _k_scale_min(w, base, 2 * j), _k_scale_min(w, base, 2 * j + 1)
-        dot = sc0 * xd[g].load() * dots[0].float() + sc1 * xd[g + 1].load() * dots[1].float()
+        scaled = sc0 * xd[g].load() * dots[0].float() + sc1 * xd[g + 1].load() * dots[1].float()
         mins = m0 * xs[g].load() + m1 * xs[g + 1].load()
-        acc = acc + _half(dm) * dot - _half(dm >> 16) * mins
-    store = out[row.valid(lane.eq(0))].store(_warp_sum(acc))
-    return store.end(blk, wave, lane).sink(
-        arg=KernelInfo(name=f"q4_k_{rows}_{cols}", opts_to_apply=())
-    )
+        return _half(dm) * scaled - _half(dm >> 16) * mins
+
+    return _rows(out, cols, "q4_k", dot)
 
 
 def _word16(w: UOp, i: UOp) -> UOp:
@@ -154,19 +161,13 @@ def _minus_32(q: UOp) -> UOp:
 def _q6_k_kernel(out: UOp, w: UOp, xq: UOp, xd: UOp, xs: UOp) -> UOp:
     # Q6_K block, 105 halfwords: ql[128] low nibbles, qh[64] high 2-bit pairs, 16 int8 scales and d
     # as f16. Each half n of 128 weights is 4 rows of 32: row k takes nibble k // 2 of
-    # ql[64n + 32(k % 2):][:32] and bits 2k of qh[32n:][:32], minus 32, with a scale per 16. A lane
-    # takes rows k and k + 2 of a half, which share their ql bytes: 64 weights, as for Q4_K.
-    rows, cols = out.shape[0], xq.shape[0] * 4
-    blocks, units = cols // 256, cols // 64
-    blk = UOp.range(rows // ROWS, 0, AxisType.GLOBAL)
-    lane = _lane()
-    wave = UOp.range(ROWS, 2, AxisType.LOCAL)
-    row = blk * ROWS + wave
-    acc = UOp.const(0.0, dtypes.float32)
-    for it in range(units // WARP):
-        unit = it * WARP + lane
+    # ql[64n + 32(k % 2):][:32] and bits 2k of qh[32n:][:32], minus 32, with a scale per 16. A unit
+    # is rows k and k + 2 of a half, which share their ql bytes: 64 weights, as for Q4_K.
+    cols = 4 * int(xq.shape[0])
+
+    def dot(row: UOp, unit: UOp) -> UOp:
         block, n, k = unit // 4, unit % 4 // 2, unit % 2
-        base = (row * blocks + block) * 105
+        base = (row * (cols // 256) + block) * 105
         g = block * 8 + 4 * n + k  # activation group of row k; row k + 2 is group g + 2
         dots = [[UOp.const(0, dtypes.int32)] * 2 for _ in range(2)]  # [row k, k + 2][16 weights]
         for m in range(8):
@@ -174,21 +175,17 @@ def _q6_k_kernel(out: UOp, w: UOp, xq: UOp, xd: UOp, xs: UOp) -> UOp:
             qh = _word16(w, base + 64 + 16 * n + 2 * m)
             for r in range(2):
                 high = (qh >> (2 * k + 4 * r).cast(dtypes.uint32)) & 0x03030303
-                q = ((ql >> (4 * r)) & 0x0F0F0F0F) | (high << 4)
-                dots[r][m // 4] = _dp4a(
-                    _minus_32(q), xq[(g + 2 * r) * 8 + m].load(), dots[r][m // 4]
-                )
+                q = _minus_32(((ql >> (4 * r)) & 0x0F0F0F0F) | (high << 4))
+                dots[r][m // 4] = _dp4a(q, xq[(g + 2 * r) * 8 + m].load(), dots[r][m // 4])
         total = UOp.const(0.0, dtypes.float32)
         for r in range(2):
             scales = w[base + 96 + 4 * n + k + 2 * r].load()  # both scales of row k + 2r
             for h in range(2):
                 sc = ((scales >> (8 * h)) & 0xFF).cast(dtypes.uint8).bitcast(dtypes.int8).float()
                 total = total + xd[g + 2 * r].load() * sc * dots[r][h].float()
-        acc = acc + _half(w[base + 104].load().cast(dtypes.uint32)) * total
-    store = out[row.valid(lane.eq(0))].store(_warp_sum(acc))
-    return store.end(blk, wave, lane).sink(
-        arg=KernelInfo(name=f"q6_k_{rows}_{cols}", opts_to_apply=())
-    )
+        return _half(w[base + 104].load().cast(dtypes.uint32)) * total
+
+    return _rows(out, cols, "q6_k", dot)
 
 
 # each kernel, and the word type it reads the weights as
