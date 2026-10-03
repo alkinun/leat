@@ -124,7 +124,7 @@ def test_swiglu(ggml_type):
 # ******** several tokens ********
 
 
-@pytest.mark.parametrize("ggml_type", [Q4_K, Q6_K])
+@pytest.mark.parametrize("ggml_type", [Q4_K, Q5_K, Q6_K, Q8_0])
 @pytest.mark.parametrize("tokens", [64, 100, UOp.variable("tokens", 1, 128).bind(70)])
 @pytest.mark.parametrize("shape", [(256, 2048), (4096, 512)])  # tiles of 128 and 256 rows
 def test_matmul(ggml_type, tokens, shape):

@@ -106,6 +106,8 @@ class _Q4KTile:
     """Q4_K weights, half a block per step: 16 words of nibbles per row, and its 4 groups' scales
     and mins, which get_scale_min_k4 takes from the block's 12 scale bytes."""
 
+    max_rows = 256  # per tile, for shared memory
+
     def __init__(self, stack: _Stack, rows: int, tid: UOp):
         self.stack, self.rows, self.tid = stack, rows, tid
         self.quants = UOp.alloc((rows, 16 + 4), dtypes.uint32, addrspace=AddrSpace.LOCAL)
@@ -128,12 +130,16 @@ class _Q4KTile:
         for i, word in enumerate(words[:-4]):
             row, at = (i * self.rows + self.tid) // 16, (i * self.rows + self.tid) % 16
             stores.append(quants[row, at].store(word))
-        dm, *packed = words[-4:]
+        return stores + self.put_scales(scales, step, words[-4:])
+
+    def put_scales(self, scales: UOp, step: UOp, words: list[UOp]) -> list[UOp]:
+        # d * scale and dmin * min of the thread's row, for the step's 4 groups
+        dm, *packed = words
 
         def byte(i: int) -> UOp:
             return (packed[i // 4] >> (8 * (i % 4))) & 0xFF
 
-        first = (step % 2).eq(0)  # groups 0..3 of the block, else 4..7
+        first, stores = (step % 2).eq(0), []  # groups 0..3 of the block, else 4..7
         for g in range(4):
             sc = first.where(byte(g) & 63, (byte(g + 8) & 15) | ((byte(g) >> 6) << 4))
             mn = first.where(byte(g + 4) & 63, (byte(g + 8) >> 4) | ((byte(g + 4) >> 6) << 4))
@@ -155,10 +161,60 @@ class _Q4KTile:
         ]
 
 
+class _Q5KTile(_Q4KTile):
+    """Q5_K weights: Q4_K's nibbles each with a fifth bit from the block's 8 words of high bits,
+    unpacked to int8 as Q6_K is: 4 groups of 32 per row, and their scales and mins."""
+
+    max_rows = 128
+
+    def __init__(self, stack: _Stack, rows: int, tid: UOp):
+        self.stack, self.rows, self.tid = stack, rows, tid
+        self.quants = UOp.alloc((rows, 32), dtypes.int32, addrspace=AddrSpace.LOCAL)
+        self.scales = UOp.alloc((2, 4, rows), dtypes.float32, addrspace=AddrSpace.LOCAL)
+
+    def fetch(self, step: UOp) -> list[UOp]:
+        # each of the thread's words of nibbles and the word of high bits behind it; then d and
+        # dmin and the scale bytes of its row
+        words, block = [], step // 2 * 44
+        for i in range(16):
+            row, word = (i * self.rows + self.tid) // 16, (i * self.rows + self.tid) % 16
+            words.append(self.stack.load(row, block + 12 + 16 * (step % 2) + word))
+            words.append(self.stack.load(row, block + 4 + word % 8))
+        return words + [self.stack.load(self.tid, block + i) for i in range(4)]
+
+    def put(self, bufs: list[UOp], step: UOp, words: list[UOp]) -> list[UOp]:
+        quants, scales = bufs
+        stores = []
+        for i in range(16):
+            row, at = (i * self.rows + self.tid) // 16, (i * self.rows + self.tid) % 16
+            word, high = words[2 * i : 2 * i + 2]
+            pair = 2 * (step % 2) + at // 8  # the word holds sub-blocks 2 * pair and 2 * pair + 1
+            for h in range(2):
+                bits = (high >> (2 * pair + h).cast(dtypes.uint32)) & 0x01010101
+                value = ((word >> (4 * h)) & 0x0F0F0F0F) | (bits << 4)
+                at_ = _swizzle(row, (2 * (at // 8) + h) * 8 + at % 8)
+                stores.append(quants[row, at_].store(value.bitcast(dtypes.int32)))
+        return stores + self.put_scales(scales, step, words[-4:])
+
+    @staticmethod
+    def products(bufs, s, rows, t4, b, xd, xs) -> list[UOp]:
+        quants, scales = bufs
+        c = _mma(
+            [quants[r, _swizzle(r, 8 * s + 4 * h + t4)].load() for h in range(2) for r in rows], b
+        )
+        return [
+            c[e].float() * (scales[0, s, rows[e // 2]].load() * xd[e % 2])
+            - scales[1, s, rows[e // 2]].load() * xs[e % 2]
+            for e in range(4)
+        ]
+
+
 class _Q6KTile:
     """Q6_K weights, half a block per step, unpacked to int8 as in matvec's _q6_k_dot: 4 groups of
     32 per row, its 8 scales and d. Rows have no padding, to fit in shared memory; XOR-ing words
     with the row instead keeps a fragment's 8 rows in different banks."""
+
+    max_rows = 256
 
     def __init__(self, stack: _Stack, rows: int, tid: UOp):
         self.stack, self.rows, self.tid = stack, rows, tid
@@ -207,6 +263,47 @@ class _Q6KTile:
         return [dots[e].float() * (d[rows[e // 2]].load() * xd[e % 2]) for e in range(4)]
 
 
+class _Q80Tile:
+    """Q8_0 weights, 4 blocks per step: 32 words of int8 per row, swizzled as for Q6_K, and the 4
+    blocks' d."""
+
+    max_rows = 256
+
+    def __init__(self, stack: _Stack, rows: int, tid: UOp):
+        self.stack, self.rows, self.tid = stack, rows, tid
+        self.quants = UOp.alloc((rows, 32), dtypes.int32, addrspace=AddrSpace.LOCAL)
+        self.d = UOp.alloc((4, rows), dtypes.float32, addrspace=AddrSpace.LOCAL)
+
+    def shared(self) -> list[UOp]:
+        return [self.quants, self.d]
+
+    def fetch(self, step: UOp) -> list[UOp]:
+        # the thread's words of the step's blocks of 17 halfwords, then the d of its row's 4
+        words, block = [], step * 4 * 17
+        for i in range(32):
+            row, at = (i * self.rows + self.tid) // 32, (i * self.rows + self.tid) % 32
+            words.append(self.stack.word16(row, block + at // 8 * 17 + 1 + 2 * (at % 8)))
+        return words + [
+            self.stack.load(self.tid, block + 17 * j).cast(dtypes.uint32) for j in range(4)
+        ]
+
+    def put(self, bufs: list[UOp], step: UOp, words: list[UOp]) -> list[UOp]:
+        quants, d = bufs
+        stores = []
+        for i, word in enumerate(words[:-4]):
+            row, at = (i * self.rows + self.tid) // 32, (i * self.rows + self.tid) % 32
+            stores.append(quants[row, _swizzle(row, at)].store(word.bitcast(dtypes.int32)))
+        return stores + [d[j, self.tid].store(f16(word)) for j, word in enumerate(words[-4:])]
+
+    @staticmethod
+    def products(bufs, s, rows, t4, b, xd, xs) -> list[UOp]:
+        quants, d = bufs
+        c = _mma(
+            [quants[r, _swizzle(r, 8 * s + 4 * h + t4)].load() for h in range(2) for r in rows], b
+        )
+        return [c[e].float() * (d[s, rows[e // 2]].load() * xd[e % 2]) for e in range(4)]
+
+
 def _swizzle(row: UOp, word: UOp | int) -> UOp:
     return (row % 8 * 4) ^ word
 
@@ -216,9 +313,11 @@ def _signed_byte(word: UOp, shift: UOp) -> UOp:
     return byte.bitcast(dtypes.int8).cast(dtypes.int32)
 
 
-_TILES: dict[GGMLType, type[_Q4KTile] | type[_Q6KTile]] = {
+_TILES: dict[GGMLType, type[_Q4KTile] | type[_Q6KTile] | type[_Q80Tile]] = {
     GGMLType.Q4_K: _Q4KTile,
+    GGMLType.Q5_K: _Q5KTile,
     GGMLType.Q6_K: _Q6KTile,
+    GGMLType.Q8_0: _Q80Tile,
 }
 
 
@@ -352,7 +451,8 @@ def _products(
     for _, group in itertools.groupby(ws, key=lambda w: w.type):
         stack = tuple(group)
         heights = [w.shape[0] for w in stack]
-        tile = 256 if sum(heights) >= 4096 and all(h % 256 == 0 for h in heights) else 128
+        big = sum(heights) >= 4096 and all(h % 256 == 0 for h in heights)
+        tile = 256 if big and _TILES[stack[0].type].max_rows == 256 else 128
         width = heights[0] if gated else sum(heights)
         out = Tensor.empty(count, width, dtype=dtypes.float32, device=xq.device)
         fxn = functools.partial(
