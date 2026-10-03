@@ -196,9 +196,9 @@ def _word16(w: UOp, i: UOp) -> UOp:
 
 
 def _minus_32(q: UOp) -> UOp:
-    # Q6_K's unsigned 0..63 to signed -32..31, in each byte of a word
-    centered = UOp(Ops.CUSTOMI, src=(q,), arg=("__vsubss4({}, 0x20202020u)", dtypes.uint32))
-    return centered.bitcast(dtypes.int32)
+    # Q6_K's unsigned 0..63 to signed -32..31, in each byte of a word: b + 96 stays in its byte,
+    # and flipping its top bit makes it b - 32 in two's complement
+    return ((q + 0x60606060) ^ 0x80808080).bitcast(dtypes.int32)
 
 
 def _q6_k_dot(w: UOp, xq: UOp, xd: UOp, xs: UOp) -> Dot:
