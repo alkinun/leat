@@ -138,9 +138,10 @@ def reference_matmul(x: np.ndarray, blocks: np.ndarray, ggml_type: GGMLType) -> 
 
 @pytest.mark.parametrize("ggml_type", [GGMLType.Q4_K, GGMLType.Q6_K])
 @pytest.mark.parametrize("tokens", [64, 100, UOp.variable("tokens", 1, 128).bind(70)])
-def test_matmul(ggml_type, tokens):
+@pytest.mark.parametrize("shape", [(256, 2048), (4096, 512)])  # tiles of 128 and 256 rows
+def test_matmul(ggml_type, tokens, shape):
     rng = np.random.default_rng(8)
-    rows, cols = 256, 2048
+    rows, cols = shape
     blocks = random_blocks(ggml_type, rows * cols // 256, rng, 1e-3)
     w = QTensor(Tensor(blocks), ggml_type, (rows, cols))
     if isinstance(tokens, int):
@@ -157,7 +158,7 @@ def test_matmul(ggml_type, tokens):
 
 def test_matmul_norm_residual():
     rng = np.random.default_rng(9)
-    rows, cols, n = 128, 4096, 80
+    rows, cols, n = 256, 4096, 80
     blocks = random_blocks(GGMLType.Q4_K, rows * cols // 256, rng, 1e-3)
     w = QTensor(Tensor(blocks), GGMLType.Q4_K, (rows, cols))
     x = (rng.standard_normal((1, n, cols)) * 3).astype(np.float32)

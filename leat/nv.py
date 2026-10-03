@@ -279,7 +279,7 @@ def supports(x: Tensor, w: QTensor) -> bool:
     # several tokens, in one sequence: whole tiles of rows, and whole steps along a row
     batch = x.shape[:-2]
     single = all(isinstance(b, int) and b == 1 for b in batch)
-    return single and rows % TILE_ROWS == 0 and cols % (GROUP * NORM_WARPS) == 0
+    return single and rows % 128 == 0 and cols % (GROUP * NORM_WARPS) == 0
 
 
 def linears(
@@ -330,15 +330,16 @@ def _words(w: QTensor) -> Tensor:
 
 
 # ******** matrix products: several tokens on int8 tensor cores ********
-# llama.cpp's MMQ scheme. The activations are quantized as for decode. A block stages 128 rows of
-# weights, unpacked to int8, and 64 tokens in shared memory, half a weight block at a time; its 4
-# warps multiply 64 rows by 32 tokens each on tensor cores and scale every group of 32 in f32.
+# llama.cpp's MMQ scheme. The activations are quantized as for decode. A block stages a tile of
+# weights, unpacked to int8, and 64 tokens in shared memory, half a weight block per step, while
+# it fetches the next step into registers. Each of its warps multiplies 32 rows by the 64 tokens
+# on tensor cores and scales every group of 32 in f32. Tiles of 256 rows reach 68 to 79 TOPS on
+# 512 tokens, against 47 to 61 for 128; matrices with few rows take 128, to occupy more SMs.
 
-TILE_ROWS, TILE_TOKENS = 128, 64
-WARPS_M, WARPS_N = 2, 2  # warps along rows and tokens
-THREADS = WARPS_M * WARPS_N * WARP  # as many as TILE_ROWS: each loads one row's scales
-STEP = 128  # weights per row per pass through shared memory
-SUBTILES_M, SUBTILES_N = TILE_ROWS // WARPS_M // 16, TILE_TOKENS // WARPS_N // 8
+TILE_TOKENS = 64
+WARP_ROWS = 32  # a warp per 32 rows of the tile, and a thread per row to load its scales
+STEP = 128  # weights per row per step
+SUBTILES_M, SUBTILES_N = WARP_ROWS // 16, TILE_TOKENS // 8  # of 16 x 8 per warp
 
 # mma.sync on int8: a 16 x k tile of weights times a k x 8 tile of activations, for k = 32 or 16.
 # {0} points at 4 int32 registers for the lane's share of the result, then come the lane's 4 or 2
@@ -366,30 +367,49 @@ def _mma(a: list[UOp], b: list[UOp]) -> list[UOp]:
     return [c[i].load() for i in range(4)]
 
 
-# A weight type's part of the kernel: its shared buffers, their stores for a step, and the
-# products of group s. Those take the buffers, s, the lane's rows (r, r + 8) in the tile and t4,
-# its activation words, and its two tokens' d and d * sum(q); they return the 4 f32 results.
-WeightTile = tuple[list[UOp], list[UOp], Callable[..., list[UOp]]]
+class _Q4KTile:
+    """Q4_K weights, half a block per step: 16 words of nibbles per row, and its 4 groups' scales
+    and mins, which get_scale_min_k4 takes from the block's 12 scale bytes."""
 
+    def __init__(self, w: UOp, cols: int, rows: int, row0: UOp, tid: UOp):
+        self.w, self.blocks, self.rows, self.row0, self.tid = w, cols // 256, rows, row0, tid
+        self.quants = UOp.alloc((rows, 16 + 4), dtypes.uint32, addrspace=AddrSpace.LOCAL)
+        self.scales = UOp.alloc((2, 4, rows), dtypes.float32, addrspace=AddrSpace.LOCAL)
 
-def _q4_k_tile(w: UOp, cols: int, row0: UOp, step: UOp, tid: UOp) -> WeightTile:
-    # the step's half of each row's block: 16 words of nibbles, and its 4 groups' scales and mins
-    blocks, half = cols // 256, step % 2
-    quants = UOp.alloc((TILE_ROWS, 16 + 4), dtypes.uint32, addrspace=AddrSpace.LOCAL)
-    scales = UOp.alloc((2, 4, TILE_ROWS), dtypes.float32, addrspace=AddrSpace.LOCAL)
-    stores = []
-    for i in range(16 * TILE_ROWS // THREADS):
-        row, word = (i * THREADS + tid) // 16, (i * THREADS + tid) % 16
-        at = ((row0 + row) * blocks + step // 2) * 36 + 4 + 16 * half + word
-        stores.append(quants[row, word].store(w[at].load()))
-    base = ((row0 + tid) * blocks + step // 2) * 36
-    dm = w[base].load()
-    for g in range(4):
-        sc, mn = _k_scale_min(w, base, 4 * half + g)
-        stores.append(scales[0, g, tid].store(_half(dm) * sc))
-        stores.append(scales[1, g, tid].store(_half(dm >> 16) * mn))
+    def shared(self) -> list[UOp]:
+        return [self.quants, self.scales]
 
-    def products(bufs, s, rows, t4, b, xd, xs):
+    def fetch(self, step: UOp) -> list[UOp]:
+        # the thread's words of the step: nibbles, then d and dmin and the scale bytes of its row
+        words = []
+        for i in range(16):
+            row, word = (i * self.rows + self.tid) // 16, (i * self.rows + self.tid) % 16
+            at = ((self.row0 + row) * self.blocks + step // 2) * 36 + 4 + 16 * (step % 2) + word
+            words.append(self.w[at].load())
+        base = ((self.row0 + self.tid) * self.blocks + step // 2) * 36
+        return words + [self.w[base + i].load() for i in range(4)]
+
+    def put(self, bufs: list[UOp], step: UOp, words: list[UOp]) -> list[UOp]:
+        quants, scales = bufs
+        stores = []
+        for i, word in enumerate(words[:-4]):
+            row, at = (i * self.rows + self.tid) // 16, (i * self.rows + self.tid) % 16
+            stores.append(quants[row, at].store(word))
+        dm, *packed = words[-4:]
+
+        def byte(i: int) -> UOp:
+            return (packed[i // 4] >> (8 * (i % 4))) & 0xFF
+
+        first = (step % 2).eq(0)  # groups 0..3 of the block, else 4..7
+        for g in range(4):
+            sc = first.where(byte(g) & 63, (byte(g + 8) & 15) | ((byte(g) >> 6) << 4))
+            mn = first.where(byte(g + 4) & 63, (byte(g + 8) >> 4) | ((byte(g + 4) >> 6) << 4))
+            stores.append(scales[0, g, self.tid].store(_half(dm) * sc.float()))
+            stores.append(scales[1, g, self.tid].store(_half(dm >> 16) * mn.float()))
+        return stores
+
+    @staticmethod
+    def products(bufs, s, rows, t4, b, xd, xs) -> list[UOp]:
         # groups 2j and 2j + 1 are the low and high nibbles of words 8j .. 8j + 7
         quants, scales = bufs
         shift = (4 * (s % 2)).cast(dtypes.uint32)
@@ -401,111 +421,177 @@ def _q4_k_tile(w: UOp, cols: int, row0: UOp, step: UOp, tid: UOp) -> WeightTile:
             for e in range(4)
         ]
 
-    return [quants, scales], stores, products
 
+class _Q6KTile:
+    """Q6_K weights, half a block per step, unpacked to int8 as in _q6_k_dot: 4 groups of 32 per
+    row, its 8 scales and d. Rows have no padding, to fit in shared memory; XOR-ing words with the
+    row instead keeps a fragment's 8 rows in different banks."""
 
-def _q6_k_tile(w: UOp, cols: int, row0: UOp, step: UOp, tid: UOp) -> WeightTile:
-    # the step's half of each row's block unpacked to int8, as in _q6_k_dot: 4 groups of 32
-    # weights, then the 8 scales and d
-    blocks, half = cols // 256, step % 2
-    quants = UOp.alloc((TILE_ROWS, 32 + 4), dtypes.int32, addrspace=AddrSpace.LOCAL)
-    scales = UOp.alloc((8, TILE_ROWS), dtypes.int32, addrspace=AddrSpace.LOCAL)
-    d = UOp.alloc((TILE_ROWS,), dtypes.float32, addrspace=AddrSpace.LOCAL)
-    stores = []
-    for i in range(8 * TILE_ROWS // THREADS):
-        row, m = (i * THREADS + tid) // 8, (i * THREADS + tid) % 8
-        base = ((row0 + row) * blocks + step // 2) * 105
-        ql = [_word16(w, base + 32 * half + 16 * j + 2 * m) for j in range(2)]
-        qh = _word16(w, base + 64 + 16 * half + 2 * m)
-        for k in range(4):
-            low = (ql[k % 2] >> (4 * (k // 2))) & 0x0F0F0F0F
-            high = ((qh >> (2 * k)) & 0x03030303) << 4
-            stores.append(quants[row, 8 * k + m].store(_minus_32(low | high)))
-    base = ((row0 + tid) * blocks + step // 2) * 105
-    for j in range(8):
-        byte = (w[base + 96 + 4 * half + j // 2].load() >> (8 * (j % 2))) & 0xFF
-        sc = byte.cast(dtypes.uint8).bitcast(dtypes.int8).cast(dtypes.int32)
-        stores.append(scales[j, tid].store(sc))
-    stores.append(d[tid].store(_half(w[base + 104].load().cast(dtypes.uint32))))
+    def __init__(self, w: UOp, cols: int, rows: int, row0: UOp, tid: UOp):
+        self.w, self.blocks, self.rows, self.row0, self.tid = w, cols // 256, rows, row0, tid
+        self.quants = UOp.alloc((rows, 32), dtypes.int32, addrspace=AddrSpace.LOCAL)
+        self.scales = UOp.alloc((2, rows), dtypes.uint32, addrspace=AddrSpace.LOCAL)
+        self.d = UOp.alloc((rows,), dtypes.float32, addrspace=AddrSpace.LOCAL)
 
-    def products(bufs, s, rows, t4, b, xd, xs):
+    def shared(self) -> list[UOp]:
+        return [self.quants, self.scales, self.d]
+
+    def fetch(self, step: UOp) -> list[UOp]:
+        # for each of the thread's (row, word) pairs, the words of low and high bits behind it;
+        # then the 8 scale bytes and d of its row
+        words = []
+        for i in range(8):
+            row, m = (i * self.rows + self.tid) // 8, (i * self.rows + self.tid) % 8
+            base = ((self.row0 + row) * self.blocks + step // 2) * 105 + 32 * (step % 2)
+            words += [_word16(self.w, base + 16 * j + 2 * m) for j in range(2)]
+            words.append(_word16(self.w, base + 64 - 16 * (step % 2) + 2 * m))
+        base = ((self.row0 + self.tid) * self.blocks + step // 2) * 105
+        words += [_word16(self.w, base + 96 + 4 * (step % 2) + 2 * j) for j in range(2)]
+        return words + [self.w[base + 104].load().cast(dtypes.uint32)]
+
+    def put(self, bufs: list[UOp], step: UOp, words: list[UOp]) -> list[UOp]:
+        quants, scales, d = bufs
+        stores = []
+        for i in range(8):
+            row, m = (i * self.rows + self.tid) // 8, (i * self.rows + self.tid) % 8
+            ql, qh = words[3 * i : 3 * i + 2], words[3 * i + 2]
+            for k in range(4):
+                low = (ql[k % 2] >> (4 * (k // 2))) & 0x0F0F0F0F
+                high = ((qh >> (2 * k)) & 0x03030303) << 4
+                stores.append(quants[row, _swizzle(row, 8 * k + m)].store(_minus_32(low | high)))
+        stores += [scales[j, self.tid].store(words[-3 + j]) for j in range(2)]
+        return stores + [d[self.tid].store(_half(words[-1]))]
+
+    @staticmethod
+    def products(bufs, s, rows, t4, b, xd, xs) -> list[UOp]:
         # a scale per 16 weights: two k = 16 products, combined in int32
         quants, scales, d = bufs
-        a = [quants[r, 8 * s + 4 * h + t4].load() for h in range(2) for r in rows]
+        a = [quants[r, _swizzle(r, 8 * s + 4 * h + t4)].load() for h in range(2) for r in rows]
         c = [_mma(a[2 * h : 2 * h + 2], [b[h]]) for h in range(2)]
-        dots = [
-            c[0][e] * scales[2 * s, rows[e // 2]].load()
-            + c[1][e] * scales[2 * s + 1, rows[e // 2]].load()
-            for e in range(4)
-        ]
+        dots = []
+        for e in range(4):
+            packed = scales[s // 2, rows[e // 2]].load()  # the scales of groups 2s and 2s + 1
+            sc = [_byte_i8(packed, 16 * (s % 2) + 8 * h) for h in range(2)]
+            dots.append(c[0][e] * sc[0] + c[1][e] * sc[1])
         return [dots[e].float() * (d[rows[e // 2]].load() * xd[e % 2]) for e in range(4)]
 
-    return [quants, scales, d], stores, products
+
+def _swizzle(row: UOp, word: UOp | int) -> UOp:
+    return (row % 8 * 4) ^ word
 
 
-_TILES = {GGMLType.Q4_K: _q4_k_tile, GGMLType.Q6_K: _q6_k_tile}
+def _byte_i8(word: UOp, shift: UOp) -> UOp:
+    return (
+        ((word >> shift.cast(dtypes.uint32)) & 0xFF)
+        .cast(dtypes.uint8)
+        .bitcast(dtypes.int8)
+        .cast(dtypes.int32)
+    )
+
+
+_TILES: dict[GGMLType, type[_Q4KTile] | type[_Q6KTile]] = {
+    GGMLType.Q4_K: _Q4KTile,
+    GGMLType.Q6_K: _Q6KTile,
+}
 
 
 @functools.cache
 def _matmul_kernel(
     out: UOp, w: UOp, xq: UOp, xd: UOp, xs: UOp, *residual: UOp, tokens: int | UOp,
-    ggml_type: GGMLType,
+    ggml_type: GGMLType, rows: int,
 ) -> UOp:  # fmt: skip
+    # a block per tile of `rows` rows and TILE_TOKENS tokens
     count, n = (int(x) for x in out.shape)
-    cols = 4 * int(xq.shape[0]) // count
+    cols, threads = 4 * int(xq.shape[0]) // count, rows
+    steps = cols // STEP
     tile_tokens = UOp.range((tokens + TILE_TOKENS - 1) // TILE_TOKENS, 0, AxisType.GLOBAL)
-    tile_rows = UOp.range(n // TILE_ROWS, 1, AxisType.GLOBAL)
-    lane, wm = _lane(), UOp.range(WARPS_M, 2, AxisType.LOCAL)
-    wn = UOp.range(WARPS_N, 3, AxisType.LOCAL)
-    tid, g, t4 = (wm * WARPS_N + wn) * WARP + lane, lane // 4, lane % 4
-    row0, token0 = tile_rows * TILE_ROWS, tile_tokens * TILE_TOKENS
-    step = UOp.range(cols // STEP, 4, AxisType.LOOP)
-    bufs, stores, products = _TILES[ggml_type](w, cols, row0, step, tid)
-    # the tile's tokens for the step: 32 words each, and the d and d * sum(q) of 4 groups
+    tile_rows = UOp.range(n // rows, 1, AxisType.GLOBAL)
+    lane, warp = _lane(), UOp.range(rows // WARP_ROWS, 2, AxisType.LOCAL)
+    tid, g, t4 = warp * WARP + lane, lane // 4, lane % 4
+    row0, token0 = tile_rows * rows, tile_tokens * TILE_TOKENS
+    weights = _TILES[ggml_type](w, cols, rows, row0, tid)
+    # the tile's tokens for a step: 32 words each, and the d and d * sum(q) of 4 groups
     act = UOp.alloc((TILE_TOKENS, 32 + 4), dtypes.int32, addrspace=AddrSpace.LOCAL)
     act_scales = UOp.alloc((2, 4, TILE_TOKENS), dtypes.float32, addrspace=AddrSpace.LOCAL)
-    for i in range(32 * TILE_TOKENS // THREADS):
-        tok, word = (i * THREADS + tid) // 32, (i * THREADS + tid) % 32
-        at = (token0 + tok) * (cols // 4) + step * 32 + word
-        stores.append(act[tok, word].store(xq[at].load()))
-    for i in range(4 * TILE_TOKENS // THREADS):
-        tok, grp = (i * THREADS + tid) % TILE_TOKENS, (i * THREADS + tid) // TILE_TOKENS
-        at = (token0 + tok) * (cols // GROUP) + step * 4 + grp
-        stores.append(act_scales[0, grp, tok].store(xd[at].load()))
-        stores.append(act_scales[1, grp, tok].store(xs[at].load()))
-    # one barrier for all of the step's stores
-    bufs = [buf.after(*stores) for buf in bufs]
-    act, act_scales = act.after(*stores), act_scales.after(*stores)
+    words_a = 32 * TILE_TOKENS // threads
+    pairs = [((i * threads + tid) // 32, (i * threads + tid) % 32) for i in range(words_a)]
+    groups = [
+        ((i * threads + tid) // TILE_TOKENS, (i * threads + tid) % TILE_TOKENS)
+        for i in range(4 * TILE_TOKENS // threads)
+    ]
 
-    # the warp's 64 rows by 32 tokens, as subtiles of 16 by 8
-    warp_rows, warp_tokens = wm * (TILE_ROWS // WARPS_M), wn * (TILE_TOKENS // WARPS_N)
+    def fetch(step: UOp) -> list[UOp]:
+        words = weights.fetch(step)
+        for tok, word in pairs:
+            words.append(
+                xq[(token0 + tok) * (cols // 4) + step * 32 + word].load().bitcast(dtypes.uint32)
+            )
+        for grp, tok in groups:
+            at = (token0 + tok) * (cols // GROUP) + step * 4 + grp
+            words += [xd[at].load().bitcast(dtypes.uint32), xs[at].load().bitcast(dtypes.uint32)]
+        return words
+
+    def put(bufs: list[UOp], step: UOp, words: list[UOp]) -> list[UOp]:
+        *mine, act, act_scales = bufs
+        n_act = words_a + 2 * len(groups)
+        stores = weights.put(mine, step, words[:-n_act])
+        words = words[-n_act:]
+        for (tok, word), value in zip(pairs, words[:words_a], strict=True):
+            stores.append(act[tok, word].store(value.bitcast(dtypes.int32)))
+        for i, (grp, tok) in enumerate(groups):
+            for j in (0, 1):
+                stores.append(
+                    act_scales[j, grp, tok].store(
+                        words[words_a + 2 * i + j].bitcast(dtypes.float32)
+                    )
+                )
+        return stores
+
+    # step 0 before the loop; in step i, the fetch of step i + 1 is staged in registers before
+    # the products, so that its loads are in flight meanwhile, and stored after them
+    bufs = [*weights.shared(), act, act_scales]
+    first = put(bufs, UOp.const(0, dtypes.weakint), fetch(UOp.const(0, dtypes.weakint)))
+    step = UOp.range(steps, 3, AxisType.LOOP)
+    following = fetch((step + 1).minimum(steps - 1))
+    stage = UOp.alloc((len(following),), dtypes.uint32, addrspace=AddrSpace.REG)
+    staged = UOp.group(*(stage[i].store(v) for i, v in enumerate(following)))
+    bufs = [buf.after(*first).after(step).after(staged) for buf in bufs]
+    *mine, act, act_scales = bufs
+
     acc = _register((SUBTILES_M * SUBTILES_N * 4,), 0.0)
-    s = UOp.range(STEP // GROUP, 5, AxisType.LOOP)
+    s = UOp.range(STEP // GROUP, 4, AxisType.LOOP)
     prev, vals = acc.after(step, s), list[UOp]()
     for mi in range(SUBTILES_M):
-        r = warp_rows + mi * 16 + g
+        r = warp * WARP_ROWS + mi * 16 + g
         for ni in range(SUBTILES_N):
-            tok = warp_tokens + ni * 8
+            tok = ni * 8
             b = [act[tok + g, 8 * s + 4 * h + t4].load() for h in range(2)]
-            xd_, xs_ = (
-                [act_scales[i, s, tok + 2 * t4 + j].load() for j in range(2)] for i in (0, 1)
-            )
-            for inc in products(bufs, s, (r, r + 8), t4, b, xd_, xs_):
+            xd_, xs_ = ([act_scales[i, s, tok + 2 * t4 + j].load() for j in (0, 1)] for i in (0, 1))
+            for inc in weights.products(mine, s, (r, r + 8), t4, b, xd_, xs_):
                 vals.append(prev[len(vals)].load() + inc)
-    acc = acc.after(acc.store(UOp.stack(*vals)).end(s).end(step))
+    computed = acc.store(UOp.stack(*vals)).end(s)
+    # every warp is done with this step's tiles before they are overwritten
+    done = UOp(Ops.BARRIER, src=(computed,))
+    stage = stage.after(staged)
+    later = put(
+        [buf.after(done) for buf in bufs],
+        step + 1,
+        [stage[i].load() for i in range(len(following))],
+    )
+    acc = acc.after(UOp.group(computed, *later).end(step))
 
     results = []
     for mi in range(SUBTILES_M):
         for ni in range(SUBTILES_N):
             for e in range(4):
-                row = row0 + warp_rows + mi * 16 + g + 8 * (e // 2)
-                tok = token0 + warp_tokens + ni * 8 + 2 * t4 + e % 2
+                row = row0 + warp * WARP_ROWS + mi * 16 + g + 8 * (e // 2)
+                tok = token0 + ni * 8 + 2 * t4 + e % 2
                 value = acc[(mi * SUBTILES_N + ni) * 4 + e].load()
                 if residual:
                     value = value + residual[0][tok, row].load()
                 results.append(out[tok, row].store(value))
     info = KernelInfo(name=f"matmul_{ggml_type.name.lower()}_{n}_{cols}", opts_to_apply=())
-    return UOp.group(*results).end(tile_tokens, tile_rows, lane, wm, wn).sink(arg=info)
+    return UOp.group(*results).end(tile_tokens, tile_rows, lane, warp).sink(arg=info)
 
 
 def _matmuls(
@@ -523,7 +609,8 @@ def _matmuls(
     outs = []
     for w in ws:
         out = Tensor.empty(count, w.shape[0], dtype=dtypes.float32, device=x.device)
-        fxn = functools.partial(_matmul_kernel, tokens=bound, ggml_type=w.type)
+        tile = 256 if w.shape[0] >= 4096 and w.shape[0] % 256 == 0 else 128
+        fxn = functools.partial(_matmul_kernel, tokens=bound, ggml_type=w.type, rows=tile)
         out = Tensor.custom_kernel(out, _words(w), xq, xd, xs, *res, fxn=fxn)[0]
         outs.append(out[:tokens].reshape(*x.shape[:-1], w.shape[0]))
     return outs
