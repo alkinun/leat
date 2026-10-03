@@ -56,6 +56,13 @@ def feed_forward(
     return linear(hidden, down, residual=x if residual else None)
 
 
+def router(x: Tensor, norm: tuple[Tensor, float], w: QTensor) -> Tensor:
+    # the scores a mixture of experts' router gives each expert: rms_norm(x, *norm) @ w.T
+    if _fast() and nv.supports_scores(x, w):
+        return nv.scores(x, norm, w)
+    return linear(rms_norm(x, *norm), w)
+
+
 def mixture(
     x: Tensor, scores: Tensor, gate: QTensor, up: QTensor | None, down: QTensor, used: int,
     norm: tuple[Tensor, float], gelu: bool = False, scales: Tensor | None = None,

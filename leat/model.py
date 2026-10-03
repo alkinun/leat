@@ -197,7 +197,7 @@ class Transformer:
             return x + ops.rms_norm(out, s["post_ffw_norm"], eps)
         # Gemma 4 routes from x normed with a weight of its own, over sqrt(dim)
         router = s["ffn_gate_inp.scale"] / math.sqrt(c.dim) if c.gemma else s["ffn_norm"]
-        scores = ops.linear(ops.rms_norm(x, router, eps), w["ffn_gate_inp"])
+        scores = ops.router(x, (router, eps), w["ffn_gate_inp"])
         # stacked gate and up matrices, or one stack of both, the gate's rows first
         gate, up = (w["ffn_gate_up_exps"], None) if "ffn_gate_up_exps" in w else (
             w["ffn_gate_exps"], w["ffn_up_exps"])  # fmt: skip

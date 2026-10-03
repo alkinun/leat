@@ -168,6 +168,27 @@ def test_matmul_stacked(heights):
 
 
 @pytest.mark.parametrize("tokens", [1, 7, UOp.variable("tokens", 1, 16).bind(5)])
+def test_scores(tokens):
+    rng = np.random.default_rng(17)
+    x = (rng.standard_normal((1, 16, 2048)) * 3).astype(np.float32)
+    weight = rng.uniform(0.5, 1.5, 2048).astype(np.float32)
+    router = QTensor(
+        Tensor(rng.standard_normal((128, 2048)).astype(np.float32)).flatten(),
+        GGMLType.F32,
+        (128, 2048),
+    )
+    n = tokens if isinstance(tokens, int) else tokens.unbind()[1]
+    x_t = Tensor(x)[:, :tokens]
+    assert nv.supports_scores(x_t, router)
+    got = nv.scores(x_t, (Tensor(weight), 1e-6), router).pad_to((1, 16, 128)).numpy()[0, :n]
+    expected = (
+        rms_norm(x[0, :n], weight, 1e-6).astype(np.float64)
+        @ router.data.numpy().reshape(128, 2048).T
+    )
+    np.testing.assert_allclose(got, expected, rtol=1e-4, atol=1e-4)
+
+
+@pytest.mark.parametrize("tokens", [1, 7, UOp.variable("tokens", 1, 16).bind(5)])
 def test_route(tokens):
     rng = np.random.default_rng(14)
     scores = rng.standard_normal((16, 128)).astype(np.float32)
@@ -202,9 +223,11 @@ def expected_mixture(normed: np.ndarray, scores: np.ndarray, used: int, expert) 
     return out
 
 
-# up to FEW tokens take the matrix-vector kernels, more the tensor cores
-@pytest.mark.parametrize("tokens", [1, 3, 70, UOp.variable("tokens", 1, 128).bind(37)])
-def test_mixture(tokens):
+# up to FEW tokens take the matrix-vector kernels, more the tensor cores; favored experts get
+# more than a tile of tokens
+@pytest.mark.parametrize("tokens", [1, 3, 70, UOp.variable("tokens", 1, 128).bind(37), 128])
+@pytest.mark.parametrize("favored", [0, 3])
+def test_mixture(tokens, favored):
     rng = np.random.default_rng(15)
     experts, used, dim, hidden = 32, 4, 512, 768
     (gate, gate_blocks), (up, up_blocks) = (
@@ -213,6 +236,7 @@ def test_mixture(tokens):
     down, down_blocks = random_experts(Q6_K, experts, dim, hidden, rng)
     x = (rng.standard_normal((1, 128, dim)) * 3).astype(np.float32)
     scores = rng.standard_normal((1, 128, experts)).astype(np.float32)
+    scores[..., :favored] += 4
     weight = rng.uniform(0.5, 1.5, dim).astype(np.float32)
     n = tokens if isinstance(tokens, int) else tokens.unbind()[1]
     x_t, scores_t = Tensor(x)[:, :tokens], Tensor(scores)[:, :tokens]
