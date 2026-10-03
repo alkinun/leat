@@ -33,8 +33,11 @@ def test_quantize_q8():
     rng = np.random.default_rng(0)
     x = (rng.standard_normal(4096) * rng.uniform(0.01, 10, 4096)).astype(np.float32)
     x[64:96] = 0  # an all-zero group must give d = 0, not nan
-    for got, want in zip(nv.quantize_q8(Tensor(x)), quantize_q8(x), strict=True):
-        np.testing.assert_array_equal(got.numpy(), want)
+    q, d, s = nv.quantize_q8(Tensor(x))
+    for got, want in zip(
+        (q.numpy().view(np.int8), d.numpy(), s.numpy()), quantize_q8(x), strict=True
+    ):
+        np.testing.assert_array_equal(got, want)
 
 
 @pytest.mark.parametrize("ggml_type", [GGMLType.Q4_K])

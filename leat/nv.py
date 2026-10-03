@@ -17,6 +17,11 @@ ROWS = 4  # output rows per block, one warp each
 GROUP = 32  # activations per int8 scale
 
 
+def _lane() -> UOp:
+    # tinygrad never splits a WARP axis and maps it to threadIdx.x, so lane i is hardware lane i
+    return UOp.range(WARP, 1, AxisType.WARP)
+
+
 def _dp4a(a: UOp, b: UOp, acc: UOp) -> UOp:
     # acc + dot product of the four signed bytes of a and b
     return UOp(Ops.CUSTOMI, src=(a, b, acc), arg=("__dp4a({}, {}, {})", dtypes.int32))
@@ -47,9 +52,10 @@ def _half(bits: UOp) -> UOp:
 
 @functools.cache
 def _quantize_q8_kernel(q: UOp, d: UOp, s: UOp, x: UOp) -> UOp:
-    # one warp per group of 32: d = max|x| / 127, q = round(x / d), s = d * sum(q)
+    # one warp per group of 32: d = max|x| / 127, q = round(x / d), s = d * sum(q), with q packed
+    # four per int32 word so matrix kernels read it without a copy
     group = UOp.range(x.shape[0] // GROUP, 0, AxisType.GLOBAL)
-    lane = UOp.range(WARP, 1, AxisType.LOCAL)
+    lane = _lane()
     value = x[group * GROUP + lane].load()
     # custom expressions keep both divisions exact: tinygrad would multiply by a reciprocal
     amax = _warp_max(value.maximum(-value))
@@ -57,8 +63,13 @@ def _quantize_q8_kernel(q: UOp, d: UOp, s: UOp, x: UOp) -> UOp:
     rounded = UOp(Ops.CUSTOMI, src=(value, scale), arg=("roundf({}/{})", dtypes.float32))
     quant = (scale > 0).where(rounded, 0.0).cast(dtypes.int32)
     total = _warp_sum(quant)
+    # each lane shifts its byte into place, then the four lanes of a word OR theirs together
+    word = (quant & 0xFF).cast(dtypes.uint32) << ((lane % 4) * 8).cast(dtypes.uint32)
+    for mask in (1, 2):
+        word = word | _shfl_xor(word, mask)
+    word_index = group * (GROUP // 4) + (lane // 4).valid((lane % 4).eq(0))
     stores = (
-        q[group * GROUP + lane].store(quant.cast(dtypes.int8)),
+        q[word_index].store(word.bitcast(dtypes.int32)),
         d[group.valid(lane.eq(0))].store(scale),
         s[group.valid(lane.eq(0))].store(scale * total.float()),
     )
@@ -70,9 +81,12 @@ def _quantize_q8_kernel(q: UOp, d: UOp, s: UOp, x: UOp) -> UOp:
 
 
 def quantize_q8(x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-    """Quantizes a vector to int8 in groups of 32: values, scales d and sums d * sum(q)."""
+    """Quantizes a vector to int8 in groups of 32.
+
+    Returns the values packed four per int32 word, the scales d and the sums d * sum(q).
+    """
     n = x.shape[0]
-    q = Tensor.empty(n, dtype=dtypes.int8, device=x.device)
+    q = Tensor.empty(n // 4, dtype=dtypes.int32, device=x.device)
     d = Tensor.empty(n // GROUP, dtype=dtypes.float32, device=x.device)
     s = Tensor.empty(n // GROUP, dtype=dtypes.float32, device=x.device)
     q, d, s = Tensor.custom_kernel(q, d, s, x.float().contiguous(), fxn=_quantize_q8_kernel)[:3]
@@ -99,7 +113,7 @@ def _q4_k_kernel(out: UOp, w: UOp, xq: UOp, xd: UOp, xs: UOp) -> UOp:
     rows, cols = out.shape[0], xq.shape[0] * 4
     blocks, pairs = cols // 256, cols // 64
     blk = UOp.range(rows // ROWS, 0, AxisType.GLOBAL)
-    lane = UOp.range(WARP, 1, AxisType.LOCAL)  # lowest local axis, so lanes form a warp
+    lane = _lane()
     wave = UOp.range(ROWS, 2, AxisType.LOCAL)
     row = blk * ROWS + wave
     acc = UOp.const(0.0, dtypes.float32)
@@ -148,8 +162,7 @@ def linear(x: Tensor, w: QTensor) -> Tensor:
     rows, cols = w.shape
     xq, xd, xs = quantize_q8(x.reshape(cols))
     out = Tensor.empty(rows, dtype=dtypes.float32, device=x.device)
-    words = w.data.flatten().bitcast(dtypes.uint32)
-    out = Tensor.custom_kernel(out, words, xq.bitcast(dtypes.int32), xd, xs, fxn=_KERNELS[w.type])[
-        0
-    ]
+    # .contiguous() on a bitcast of contiguous storage is a view; without it tinygrad copies
+    words = w.data.flatten().bitcast(dtypes.uint32).contiguous()
+    out = Tensor.custom_kernel(out, words, xq, xd, xs, fxn=_KERNELS[w.type])[0]
     return out.reshape(*x.shape[:-1], rows)
