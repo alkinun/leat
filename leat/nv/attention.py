@@ -34,10 +34,10 @@ PAD = 8  # halves of shared memory after each warp's outputs, see _attention_par
 
 @functools.cache
 def _attention_partial_kernel(
-    out: UOp, stats: UOp, q: UOp, cache: UOp, length: int | UOp, waves: int
+    out: UOp, stats: UOp, q: UOp, cache: UOp, slot: int | UOp, length: int | UOp, waves: int
 ) -> UOp:
-    # A block takes one kv head and every PARTIALS-th chunk of its keys, for all query heads of
-    # the GQA group. Each of `waves` warps scores KEYS / waves keys of a chunk; lanes hold
+    # A block takes one kv head of the slot and every PARTIALS-th chunk of its keys, for all query
+    # heads of the GQA group. Each of `waves` warps scores KEYS / waves keys of a chunk; lanes hold
     # dim / 32 dimensions. The warps then merge through shared memory into one partial per block:
     # the unnormalized output, its running max and its sum of weights.
     kv_heads, dim = int(cache.shape[2]), int(cache.shape[4])
@@ -54,9 +54,9 @@ def _attention_partial_kernel(
     for j in range(per_wave):
         key = chunk * KEYS + wave * per_wave + j
         valid.append(key < length)
-        k = load_vector(cache[0, 0, head, key, lane * per_lane], per_lane)
+        k = load_vector(cache[0, slot, head, key, lane * per_lane], per_lane)
         # values load during scoring, so both streams are in flight together
-        v = load_vector(cache[1, 0, head, key, lane * per_lane], per_lane)
+        v = load_vector(cache[1, slot, head, key, lane * per_lane], per_lane)
         values.append([valid[j].where(x, zero) for x in v])
         dots = [warp_sum(sum((a * b for a, b in zip(qh, k, strict=True)), zero)) for qh in qs]
         scores.append([valid[j].where(d / math.sqrt(dim), -1e30) for d in dots])
@@ -154,27 +154,29 @@ def _attention_combine_kernel(o: UOp, partial: UOp, stats: UOp, live: int | UOp)
 
 
 def supports_attention(q: Tensor, cache: Tensor) -> bool:
-    shape = (*cache.shape[1:], *q.shape[1:3])
+    shape = (*cache.shape[2:], *q.shape[:3])
     if not on_nvidia(q) or not all(isinstance(x, int) for x in shape):
         return False
-    batch, kv_heads, n, dim, heads, tokens = (int(x) for x in shape)
+    kv_heads, n, dim, batch, heads, tokens = (int(x) for x in shape)
     group = heads // kv_heads
     fits = (group * dim + PAD) * 2 + group * 8 <= SHARED  # one warp's share of shared memory
     return batch == 1 and tokens == 1 and dim % 64 == 0 and n % KEYS == 0 and fits
 
 
-def attention(q: Tensor, cache: Tensor, length: int | UOp) -> Tensor:
-    """Attention of one query token (1, H, 1, D) over the first `length` cached positions."""
-    cache, length = carry(cache, length)
+def attention(q: Tensor, cache: Tensor, slot: int | UOp, length: int | UOp) -> Tensor:
+    """Attention of one query token (1, H, 1, D) over the first `length` positions of a slot of
+    the cache (2, slots, KV_H, positions, D)."""
     heads, dim, group = q.shape[1], cache.shape[4], q.shape[1] // cache.shape[2]
+    q, slot = carry(q.float().contiguous(), slot)
+    cache, length = carry(cache, length)
     waves = 16
     while waves * ((group * dim + PAD) * 2 + group * 8) > SHARED:
         waves //= 2
     chunks = min(PARTIALS, int(cache.shape[3]) // KEYS)
     partial = Tensor.empty(heads, chunks, dim, dtype=dtypes.float32, device=q.device)
     stats = Tensor.empty(heads, chunks, 2, dtype=dtypes.float32, device=q.device)
-    fxn = functools.partial(_attention_partial_kernel, length=length, waves=waves)
-    outs = Tensor.custom_kernel(partial, stats, q.float().contiguous(), cache, fxn=fxn)
+    fxn = functools.partial(_attention_partial_kernel, slot=slot, length=length, waves=waves)
+    outs = Tensor.custom_kernel(partial, stats, q, cache, fxn=fxn)
     live = at_most((length + KEYS - 1) // KEYS, chunks)
     out = Tensor.empty(1, heads, 1, dim, dtype=dtypes.float32, device=q.device)
     fxn = functools.partial(_attention_combine_kernel, live=live)
@@ -231,13 +233,14 @@ def _quad(value: UOp, op: Callable[[UOp, UOp], UOp]) -> UOp:
 
 @functools.cache
 def _flash_attention_kernel(
-    out: UOp, q: UOp, cache: UOp, start: int | UOp, tokens: int | UOp
+    out: UOp, q: UOp, cache: UOp, slot: int | UOp, start: int | UOp, tokens: int | UOp
 ) -> UOp:
     # q (count, heads, dim) in f16, scaled so that exp2 gives the softmax, and the f16 cache, read
-    # as words of f16 pairs; query i is at position start + i and sees positions up to it
+    # as words of f16 pairs; query i is at position start + i and sees the slot's positions up to it
     heads, dim = int(q.shape[1]), int(q.shape[2])
-    kv_heads, words = int(cache.shape[2]), dim // 2
-    cache = cache.flatten().bitcast(dtypes.uint32).reshape(2, kv_heads, int(cache.shape[3]), words)
+    _, slots, kv_heads, positions, _ = (int(d) for d in cache.shape)
+    words = dim // 2
+    cache = cache.flatten().bitcast(dtypes.uint32).reshape(2, slots, kv_heads, positions, words)
     group = heads // kv_heads
     threads = group * WARP
     tile = UOp.range((tokens + QUERIES - 1) // QUERIES, 0, AxisType.GLOBAL)
@@ -263,10 +266,10 @@ def _flash_attention_kernel(
     stores = []
     for i in range(KEY_TILE * words // threads):
         key, w = (i * threads + tid) // words, (i * threads + tid) % words
-        stores.append(keys[key, w].store(cache[0, kv_head, kt * KEY_TILE + key, w].load()))
+        stores.append(keys[key, w].store(cache[0, slot, kv_head, kt * KEY_TILE + key, w].load()))
     for i in range(KEY_TILE // 2 * words // threads):
         pair, w = (i * threads + tid) % (KEY_TILE // 2), (i * threads + tid) // (KEY_TILE // 2)
-        a, b = (cache[1, kv_head, kt * KEY_TILE + 2 * pair + j, w].load() for j in (0, 1))
+        a, b = (cache[1, slot, kv_head, kt * KEY_TILE + 2 * pair + j, w].load() for j in (0, 1))
         stores.append(values[2 * w, pair].store((a & 0xFFFF) | (b << 16)))
         stores.append(values[2 * w + 1, pair].store((a >> 16) | (b & 0xFFFF0000)))
     keys, values = keys.after(*stores), values.after(*stores)
@@ -324,20 +327,20 @@ def _flash_attention_kernel(
 
 
 def supports_flash_attention(q: Tensor, cache: Tensor) -> bool:
-    shape = (*cache.shape[1:], q.shape[0], q.shape[1])
+    shape = (*cache.shape[2:], q.shape[0], q.shape[1])
     if not on_nvidia(q) or not all(isinstance(x, int) for x in shape):
         return False
-    batch, kv_heads, n, dim, q_batch, heads = (int(x) for x in shape)
+    kv_heads, n, dim, batch, heads = (int(x) for x in shape)
     threads, words = heads // kv_heads * WARP, dim // 2
     shared = 4 * (KEY_TILE * (words + 4) + dim * (KEY_TILE // 2 + 4))
     whole = KEY_TILE * words % threads == 0 and KEY_TILE // 2 * words % threads == 0
     fits = dim % 16 == 0 and n % KEY_TILE == 0 and shared <= SHARED and whole
-    return batch == q_batch == 1 and fits
+    return batch == 1 and fits
 
 
-def flash_attention(q: Tensor, cache: Tensor, start_pos: int | UOp) -> Tensor:
-    """Causal attention of query tokens (1, H, T, D) at positions start_pos.. over the cache, which
-    already holds their keys and values. Returns (1, T, H * D)."""
+def flash_attention(q: Tensor, cache: Tensor, slot: int | UOp, start_pos: int | UOp) -> Tensor:
+    """Causal attention of query tokens (1, H, T, D) at positions start_pos.. over a slot of the
+    cache, which already holds their keys and values. Returns (1, T, H * D)."""
     _, heads, tokens, dim = q.shape
     count = -(-q.max_shape[2] // QUERIES) * QUERIES
     # in the layout of the projection that made q, where scaling and rounding it is a plain copy
@@ -346,6 +349,7 @@ def flash_attention(q: Tensor, cache: Tensor, start_pos: int | UOp) -> Tensor:
     q, start = carry(q, start_pos)
     cache, length = carry(cache, tokens)
     out = Tensor.empty(count, heads * dim, dtype=dtypes.float32, device=q.device)
-    fxn = functools.partial(_flash_attention_kernel, start=start, tokens=length)
+    out, slot = carry(out, slot)
+    fxn = functools.partial(_flash_attention_kernel, slot=slot, start=start, tokens=length)
     out = Tensor.custom_kernel(out, q, cache, fxn=fxn)[0]
     return out[:tokens].reshape(1, tokens, heads * dim)

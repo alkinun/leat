@@ -50,9 +50,11 @@ class Config:
 
 
 class Transformer:
-    """Weights, RoPE tables and the KV cache for one sequence of up to `max_context` tokens."""
+    """Weights, RoPE tables and a KV cache of `slots` sequences of up to `max_context` tokens."""
 
-    def __init__(self, config: Config, weights: dict[str, QTensor], max_context: int):
+    def __init__(
+        self, config: Config, weights: dict[str, QTensor], max_context: int, slots: int = 1
+    ):
         if not 0 < max_context <= config.context_length:
             raise ValueError(f"max_context must be in [1, {config.context_length}]")
         self.config, self.max_context = config, max_context
@@ -74,23 +76,30 @@ class Transformer:
         self.cos, self.sin = _rope_table(config, max_context, factors)
         # whole tiles of positions, which the attention kernels need; the rest stay unused
         positions = -(-max_context // CACHE_TILE) * CACHE_TILE
-        shape = (2, 1, config.n_kv_heads, positions, config.head_dim)
+        shape = (2, slots, config.n_kv_heads, positions, config.head_dim)
         self.cache = [
             Tensor.zeros(shape, dtype=dtypes.half).contiguous().realize()
             for _ in range(config.n_layers)
         ]
 
-    def __call__(self, tokens: Tensor, start_pos: int | UOp) -> Tensor:
-        """Runs `tokens` (B, T) at positions `start_pos...` and returns normed hidden states."""
+    def __call__(self, tokens: Tensor, start_pos: int | UOp, slot: int | UOp = 0) -> Tensor:
+        """Runs `tokens` (1, T) at positions `start_pos...` of cache slot `slot` and returns normed
+        hidden states."""
         x = ops.embedding(tokens, self.embed)
         for i in range(self.config.n_layers):
-            x = self._block(i, x, start_pos)
+            x = self._block(i, x, start_pos, slot)
         return ops.rms_norm(x, self.output_norm, self.config.norm_eps)
 
     def logits(self, hidden: Tensor) -> Tensor:
         return ops.linear(hidden, self.output)
 
-    def _block(self, i: int, x: Tensor, start_pos: int | UOp) -> Tensor:
+    def copy(self, source: int | UOp, slot: int | UOp, length: int | UOp) -> None:
+        """Copies the first `length` cached positions of slot `source` to slot `slot`."""
+        for cache in self.cache:
+            cache[:, slot : slot + 1, :, :length].assign(cache[:, source : source + 1, :, :length])
+        Tensor.realize(*self.cache)
+
+    def _block(self, i: int, x: Tensor, start_pos: int | UOp, slot: int | UOp) -> Tensor:
         c, w, (attn_norm, ffn_norm) = self.config, self.layers[i], self.norms[i]
         B, T, _ = x.shape
         q, k, v = ops.linears(
@@ -103,8 +112,9 @@ class Transformer:
         q, k = ops.rope(q, cos, sin), ops.rope(k, cos, sin)
 
         cache = self.cache[i]
-        cache[:, :, :, start_pos : start_pos + T].assign(Tensor.stack(k, v).cast(cache.dtype))
-        x = ops.linear(ops.attention(q, cache, start_pos), w["attn_output"], residual=x)
+        new = Tensor.stack(k, v).cast(cache.dtype)
+        cache[:, slot : slot + 1, :, start_pos : start_pos + T].assign(new)
+        x = ops.linear(ops.attention(q, cache, slot, start_pos), w["attn_output"], residual=x)
 
         return ops.feed_forward(
             x, w["ffn_gate"], w["ffn_up"], w["ffn_down"], norm=(ffn_norm, c.norm_eps)

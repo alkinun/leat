@@ -66,6 +66,66 @@ def test_generate_fills_context(tiny_model):
     assert list(engine.generate(PROMPT, 1000)) == out and engine._decode.captured is captured
 
 
+def generated(path, prompt: list[int], n: int) -> list[int]:
+    # what an engine with nothing cached generates
+    return list(Engine(path, max_context=CONTEXT, prefill_chunk=8).generate(prompt, n))
+
+
+def prefill_starts(engine: Engine, monkeypatch) -> list[int]:
+    # records the first position of each prefilled chunk
+    starts, prefill = [], engine._prefill
+
+    def spy(tokens, slot, start_pos, *sampling):
+        starts.append(start_pos.unbind()[1])
+        return prefill(tokens, slot, start_pos, *sampling)
+
+    monkeypatch.setattr(engine, "_prefill", spy)
+    return starts
+
+
+@pytest.mark.usefixtures("reference_ops")
+def test_slots_keep_their_sequences(tiny_model, monkeypatch):
+    # a sequence in one slot leaves the keys and values of the others as they were
+    path, _ = tiny_model
+    engine = Engine(path, max_context=CONTEXT, prefill_chunk=8, slots=2)
+    out = list(engine.generate(PROMPT, 6))
+    held = len(PROMPT) + 5  # the last token was never run
+    before = engine.model.cache[0][:, 0, :, :held].numpy()
+    other = [9, 8, 7, 6, 5]
+    assert list(engine.generate(other, 6)) == generated(path, other, 6)  # in the other slot
+    np.testing.assert_array_equal(engine.model.cache[0][:, 0, :, :held].numpy(), before)
+
+    # the conversation continues in its slot, from where it was
+    starts, longer = prefill_starts(engine, monkeypatch), PROMPT + out + [7]
+    assert list(engine.generate(longer, 4)) == generated(path, longer, 4)
+    assert starts == [held]
+
+
+@pytest.mark.usefixtures("reference_ops")
+def test_shared_prefix_is_copied(tiny_model, monkeypatch):
+    # a prompt that leaves a slot's tokens takes another slot, starting from a copy of the prefix
+    path, _ = tiny_model
+    engine = Engine(path, max_context=CONTEXT, prefill_chunk=8, slots=2)
+    list(engine.generate(PROMPT, 4))
+    starts, branch = prefill_starts(engine, monkeypatch), PROMPT[:9] + [1, 2, 3]
+    assert list(engine.generate(branch, 6)) == generated(path, branch, 6)
+    assert starts == [9]
+    # and the first conversation's tokens are still cached
+    longer = PROMPT + [4]
+    assert list(engine.generate(longer, 4)) == generated(path, longer, 4)
+    assert starts == [9, len(PROMPT)]
+
+
+def test_one_generation_at_a_time(tiny_model):
+    engine = Engine(tiny_model[0], max_context=CONTEXT, prefill_chunk=8, slots=2)
+    tokens = engine.generate(PROMPT, 6)
+    next(tokens)
+    with pytest.raises(RuntimeError, match="unfinished"):
+        next(engine.generate(PROMPT, 6))
+    tokens.close()
+    next(engine.generate(PROMPT, 6))
+
+
 def test_sampling_varies(tiny_model):
     # each generation draws new random numbers, though the graphs are captured on their first call
     engine = Engine(tiny_model[0], max_context=CONTEXT, prefill_chunk=8)

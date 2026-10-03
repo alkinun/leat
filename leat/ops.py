@@ -81,19 +81,16 @@ def rope(x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
     return Tensor.stack(x0 * cos - x1 * sin, x0 * sin + x1 * cos, dim=-1).flatten(-2)
 
 
-def attention(q: Tensor, cache: Tensor, start_pos: int | UOp) -> Tensor:
-    # q: (B, H, T, D) at positions start_pos.. ; cache: (2, B, KV_H, max_context, D), causal.
-    # Returns (B, T, H * D), the layout the output projection reads.
+def attention(q: Tensor, cache: Tensor, slot: int | UOp, start_pos: int | UOp) -> Tensor:
+    # q: (1, H, T, D) at positions start_pos.. ; cache: (2, slots, KV_H, positions, D), causal
+    # over the slot's positions. Returns (1, T, H * D), the layout the output projection reads.
     B, H, T, D = q.shape
     if _fast() and nv.supports_attention(q, cache):
         # one token: the heads already follow each other; a transpose here would cost a copy
-        return nv.attention(q, cache, start_pos + T).reshape(B, T, H * D)
+        return nv.attention(q, cache, slot, start_pos + T).reshape(B, T, H * D)
     if _fast() and nv.supports_flash_attention(q, cache):
-        return nv.flash_attention(q, cache, start_pos)
-    k, v = (
-        cache[0, :, :, : start_pos + T].cast(q.dtype),
-        cache[1, :, :, : start_pos + T].cast(q.dtype),
-    )
+        return nv.flash_attention(q, cache, slot, start_pos)
+    k, v = (cache[i, slot : slot + 1, :, : start_pos + T].cast(q.dtype) for i in (0, 1))
     mask = None
     if not (isinstance(T, int) and T == 1):
         mask = Tensor.full((1, 1, T, k.shape[2]), float("-inf"), dtype=q.dtype).triu(start_pos + 1)

@@ -211,12 +211,18 @@ def test_reference_switch(monkeypatch):
 
 # ******** attention ********
 
+SLOTS, SLOT = 3, 1  # the kernels read one slot of a cache of several
+
+
+def slot(symbolic: bool) -> int | UOp:
+    return UOp.variable("slot", 0, SLOTS - 1).bind(SLOT) if symbolic else SLOT
+
 
 def reference_attention(q: np.ndarray, cache: np.ndarray, start: int) -> np.ndarray:
-    # q (heads, T, dim) at positions start.. against the cache, causally, in f64: (T, heads, dim)
+    # q (heads, T, dim) at positions start.. against slot SLOT, causally, in f64: (T, heads, dim)
     heads, tokens, dim = q.shape
     group = heads // cache.shape[2]
-    k, v = (cache[i, 0, :, : start + tokens].astype(np.float64) for i in range(2))
+    k, v = (cache[i, SLOT, :, : start + tokens].astype(np.float64) for i in range(2))
     causal = np.arange(start + tokens) > start + np.arange(tokens)[:, None]
     out = np.empty((tokens, heads, dim))
     for h in range(heads):
@@ -236,12 +242,12 @@ def reference_attention(q: np.ndarray, cache: np.ndarray, start: int) -> np.ndar
 @pytest.mark.parametrize("symbolic", [False, True])
 def test_attention(n, length, symbolic):
     rng = np.random.default_rng(length)
-    cache = rng.standard_normal((2, 1, 8, n, 128)).astype(np.float16)
+    cache = rng.standard_normal((2, SLOTS, 8, n, 128)).astype(np.float16)
     q = rng.standard_normal((1, 32, 1, 128)).astype(np.float32)
     valid = UOp.variable("start_pos", 0, n - 1).bind(length - 1) + 1 if symbolic else length
     q_t, cache_t = Tensor(q).realize(), Tensor(cache).realize()  # the model's cache is a buffer
     assert nv.supports_attention(q_t, cache_t)
-    got = nv.attention(q_t, cache_t, valid).numpy()[0, :, 0]
+    got = nv.attention(q_t, cache_t, slot(symbolic), valid).numpy()[0, :, 0]
     expected = reference_attention(q[0], cache, length - 1)[0]
     np.testing.assert_allclose(got, expected, rtol=2e-3, atol=2e-3)
 
@@ -250,7 +256,7 @@ def test_attention(n, length, symbolic):
 @pytest.mark.parametrize("symbolic", [False, True])
 def test_flash_attention(tokens, start, symbolic):
     rng = np.random.default_rng(tokens + start)
-    cache = rng.standard_normal((2, 1, 8, 4096, 128)).astype(np.float16)
+    cache = rng.standard_normal((2, SLOTS, 8, 4096, 128)).astype(np.float16)
     q = rng.standard_normal((1, 32, 512, 128)).astype(np.float32)
     q_t, cache_t = Tensor(q).realize(), Tensor(cache).realize()
     if symbolic:  # as while prefilling: a bound start and number of tokens
@@ -259,7 +265,8 @@ def test_flash_attention(tokens, start, symbolic):
     else:
         pos, q_t = start, q_t[:, :, :tokens]
     assert nv.supports_flash_attention(q_t, cache_t)
-    got = nv.flash_attention(q_t, cache_t, pos).pad_to((1, 512, 32 * 128)).numpy()[0, :tokens]
+    got = nv.flash_attention(q_t, cache_t, slot(symbolic), pos)
+    got = got.pad_to((1, 512, 32 * 128)).numpy()[0, :tokens]
     expected = reference_attention(q[0, :, :tokens], cache, start)
     # queries and weights are rounded to f16 for the tensor cores
     np.testing.assert_allclose(got.reshape(expected.shape), expected, rtol=3e-3, atol=3e-3)
