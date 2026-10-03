@@ -74,43 +74,38 @@ def _quantize_group(q: UOp, d: UOp, s: UOp, group: UOp, lane: UOp, value: UOp) -
     ]
 
 
-@functools.cache
-def _quantize_q8_kernel(q: UOp, d: UOp, s: UOp, x: UOp, rows: int | UOp) -> UOp:
-    groups = int(x.shape[1]) // GROUP
-    row, group = UOp.range(rows, 0, AxisType.GLOBAL), UOp.range(groups, 1, AxisType.GLOBAL)
-    lane = _lane()
-    value = x[row, group * GROUP + lane].load()
-    stores = _quantize_group(q, d, s, row * groups + group, lane, value)
-    info = KernelInfo(name="quantize_q8", opts_to_apply=())
-    return UOp.group(*stores).end(row, group, lane).sink(arg=info)
-
-
-NORM_WARPS = 8  # per block of the fused RMSNorm and quantization: one group each
+QUANT_WARPS = 8  # per block of the quantization kernel, each quantizing a group at a time
 
 
 @functools.cache
-def _norm_quantize_q8_kernel(
-    q: UOp, d: UOp, s: UOp, x: UOp, weight: UOp, rows: int | UOp, eps: float
+def _quantize_q8_kernel(
+    q: UOp, d: UOp, s: UOp, x: UOp, *weight: UOp, rows: int | UOp, eps: float
 ) -> UOp:
-    # RMSNorm, then quantization. Every block sums the squares of its whole row, from L2 after
-    # the first, with its warps meeting in shared memory; then each warp quantizes one group.
-    # On the 3090 this takes 3 us for 4096 values, against 5 us for one block doing every group.
-    n, warps = int(x.shape[1]), NORM_WARPS
+    # Quantization, after RMSNorm when given its weight. Each row takes a block, whose warps
+    # quantize one group after another. A single row, the vector of a decode step, spreads over
+    # blocks of a group per warp instead: on the 3090 that takes 3 us for 4096 values against 5 us
+    # for one block, though each block sums the squares of the whole row, from L2 after the first.
+    n, warps = int(x.shape[1]), QUANT_WARPS
+    groups = n // GROUP
+    spread = isinstance(rows, int) and rows == 1
     row = UOp.range(rows, 0, AxisType.GLOBAL)
-    block = UOp.range(n // (GROUP * warps), 1, AxisType.GLOBAL)
     lane, wave = _lane(), UOp.range(warps, 2, AxisType.LOCAL)
-    thread, threads = wave * WARP + lane, warps * WARP
-    zero = UOp.const(0.0, dtypes.float32)
-    squares = sum((x[row, i * threads + thread].load() ** 2 for i in range(n // threads)), zero)
-    partial = UOp.alloc((warps,), dtypes.float32, addrspace=AddrSpace.LOCAL)
-    partial = partial.after(partial[wave.valid(lane.eq(0))].store(_warp_sum(squares)))
-    inv = (sum((partial[w].load() for w in range(warps)), zero) / n + eps).rsqrt()
-    group = block * warps + wave
+    turn = UOp.range(groups // warps, 1, AxisType.GLOBAL if spread else AxisType.LOOP)
+    scale = UOp.const(1.0, dtypes.float32)
+    if weight:
+        thread, threads, zero = wave * WARP + lane, warps * WARP, UOp.const(0.0, dtypes.float32)
+        squares = sum((x[row, i * threads + thread].load() ** 2 for i in range(n // threads)), zero)
+        partial = UOp.alloc((warps,), dtypes.float32, addrspace=AddrSpace.LOCAL)
+        partial = partial.after(partial[wave.valid(lane.eq(0))].store(_warp_sum(squares)))
+        scale = (sum((partial[w].load() for w in range(warps)), zero) / n + eps).rsqrt()
+    group = turn * warps + wave
     at = group * GROUP + lane
-    value = x[row, at].load() * inv * weight[at].load()
-    stores = _quantize_group(q, d, s, row * (n // GROUP) + group, lane, value)
-    info = KernelInfo(name="norm_quantize_q8", opts_to_apply=())
-    return UOp.group(*stores).end(row, block, wave, lane).sink(arg=info)
+    value = x[row, at].load() * scale * (weight[0][at].load() if weight else 1.0)
+    stores = UOp.group(*_quantize_group(q, d, s, row * groups + group, lane, value))
+    if not spread:
+        stores = stores.end(turn)
+    info = KernelInfo(name="norm_quantize_q8" if weight else "quantize_q8", opts_to_apply=())
+    return stores.end(*(row, turn) if spread else (row,), wave, lane).sink(arg=info)
 
 
 def quantize_q8(
@@ -127,12 +122,9 @@ def quantize_q8(
     d = Tensor.empty(count * n // GROUP, dtype=dtypes.float32, device=x.device)
     s = Tensor.empty(count * n // GROUP, dtype=dtypes.float32, device=x.device)
     x, rows = _carry(x.float().contiguous(), count if rows is None else rows)
-    if norm is None:
-        fxn = functools.partial(_quantize_q8_kernel, rows=rows)
-        out = Tensor.custom_kernel(q, d, s, x, fxn=fxn)
-    else:
-        fxn = functools.partial(_norm_quantize_q8_kernel, rows=rows, eps=norm[1])
-        out = Tensor.custom_kernel(q, d, s, x, norm[0].float().contiguous(), fxn=fxn)
+    weight = () if norm is None else (norm[0].float().contiguous(),)
+    fxn = functools.partial(_quantize_q8_kernel, rows=rows, eps=0.0 if norm is None else norm[1])
+    out = Tensor.custom_kernel(q, d, s, x, *weight, fxn=fxn)
     return out[0], out[1], out[2]
 
 
@@ -275,11 +267,11 @@ def supports(x: Tensor, w: QTensor) -> bool:
         return False
     if _one_token(x):
         # one token, and whole warps: each lane takes pairs of sub-blocks, 32 lanes per row
-        return cols % (64 * WARP) == 0  # so also of GROUP * NORM_WARPS
+        return cols % (64 * WARP) == 0  # so also of GROUP * QUANT_WARPS
     # several tokens, in one sequence: whole tiles of rows, and whole steps along a row
     batch = x.shape[:-2]
     single = all(isinstance(b, int) and b == 1 for b in batch)
-    return single and rows % 128 == 0 and cols % (GROUP * NORM_WARPS) == 0
+    return single and rows % 128 == 0 and cols % (GROUP * QUANT_WARPS) == 0
 
 
 def linears(
