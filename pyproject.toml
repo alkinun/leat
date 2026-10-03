@@ -1,0 +1,43 @@
+[project]
+name = "leat"
+version = "0.0.1"
+description = "A minimal, fast LLM inference engine built on tinygrad."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+  # tinygrad's custom-kernel and HCQ APIs move fast: pin a commit and bump it deliberately.
+  "tinygrad @ git+https://github.com/tinygrad/tinygrad.git@9d7054488aee0e455e226514ba4b8b2f32329c29",
+]
+
+[dependency-groups]
+dev = ["mypy", "numpy", "pytest", "ruff"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM"]
+
+[tool.mypy]
+files = ["leat"]
+python_version = "3.12"
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+  "gpu: needs a GPU backend (DEV=NV, CUDA or AMD)",
+  "model: needs a real GGUF model (LEAT_MODEL=path.gguf)",
+]
