@@ -1,4 +1,5 @@
 import contextlib
+import json
 import statistics
 import threading
 import time
@@ -10,6 +11,15 @@ import pytest
 from leat.engine import Engine
 from leat.server import Server
 from tests.helpers import CONTEXT
+
+WEATHER = {
+    "type": "function",
+    "function": {
+        "name": "weather",
+        "description": "The weather in a city now",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+    },
+}
 
 
 @contextlib.contextmanager
@@ -100,6 +110,48 @@ def test_cached_tokens(client):
     assert response.usage.prompt_tokens_details.cached_tokens == len("a shared start, then ")
 
 
+@pytest.fixture
+def replies_with(engine, monkeypatch):
+    # makes the engine reply with the given text, which the tiny model would never write
+    def reply_with(text: str) -> None:
+        tokens = engine.tokenizer.encode(text)
+        monkeypatch.setattr(engine, "generate", lambda *args: (t for t in tokens))
+
+    return reply_with
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_tool_call(client, replies_with, stream):
+    replies_with(' {"name": "weather", "parameters": {"city": "Paris"}}')
+    response = chat(client, "Weather in Paris?", tools=[WEATHER], stream=stream)
+    if stream:
+        choices = [chunk.choices[0] for chunk in response]
+        assert not any(c.delta.content for c in choices)
+        (call,), reason = choices[-2].delta.tool_calls, choices[-1].finish_reason
+    else:
+        message, reason = response.choices[0].message, response.choices[0].finish_reason
+        assert message.content is None
+        (call,) = message.tool_calls
+    assert call.type == "function" and call.id.startswith("call_") and reason == "tool_calls"
+    assert call.function.name == "weather"
+    assert json.loads(call.function.arguments) == {"city": "Paris"}
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    "text, choice",
+    [
+        ("It is sunny.", "auto"),
+        ('{"name": "unknown", "parameters": {}}', "auto"),
+        ('{"name": "weather", "parameters": {}}', "none"),
+    ],
+)
+def test_text_is_not_a_tool_call(client, replies_with, stream, text, choice):
+    replies_with(text)
+    kwargs = {"tools": [WEATHER], "tool_choice": choice, "stream": stream}
+    assert complete(client, "Weather in Paris?", **kwargs) == (text, "length")
+
+
 @pytest.mark.parametrize(
     "kwargs, error",
     [
@@ -107,6 +159,7 @@ def test_cached_tokens(client):
         ({"top_p": 0.5}, "top_p=0.5 is not supported"),
         ({"temperature": 3}, "temperature must be a number from 0 to 2"),
         ({"max_tokens": 0}, "max_tokens must be a positive integer"),
+        ({"tools": [WEATHER], "tool_choice": "required"}, "tool_choice='required' is not"),
         ({"messages": []}, "messages must be a non-empty list of objects"),
         ({"messages": [{"role": "user", "content": "x" * CONTEXT}]}, "the prompt has 64 tokens"),
     ],
@@ -133,6 +186,18 @@ def test_client_hangs_up(client):
 def llama(model_path) -> Iterator[openai.OpenAI]:
     with serving(Engine(model_path, max_context=4096, slots=4)) as client:
         yield client
+
+
+@pytest.mark.gpu
+@pytest.mark.model
+def test_llama3_calls_tools(llama):
+    messages = [{"role": "user", "content": "What is the weather in Paris right now?"}]
+    response = llama.chat.completions.create(
+        model="llama", messages=messages, tools=[WEATHER], temperature=0
+    )
+    (call,) = response.choices[0].message.tool_calls
+    assert call.function.name == "weather"
+    assert json.loads(call.function.arguments) == {"city": "Paris"}
 
 
 @pytest.mark.gpu

@@ -17,7 +17,7 @@ from typing import Any
 
 import jinja2
 
-from leat.chat import ChatTemplate
+from leat.chat import ChatTemplate, may_call_tool, parse_tool_call
 from leat.engine import Engine
 
 
@@ -38,6 +38,8 @@ _FIELDS: dict[str, tuple[Callable[[Any], bool], str]] = {
              and all(isinstance(s, str) for s in v), "a string or a list of strings"),
     "stream": (lambda v: isinstance(v, bool), "a boolean"),
     "stream_options": (lambda v: isinstance(v, dict), "an object"),
+    "tools": (lambda v: isinstance(v, list) and all(isinstance(t, dict) for t in v),
+              "a list of objects"),
 }  # fmt: skip
 
 # what leat does not implement, each with the value that asks for nothing more
@@ -63,6 +65,7 @@ class _Completion:
     temperature: float
     seed: int | None
     stop: list[str]
+    tools: list[dict[str, Any]] | None
     stream: bool
     stream_usage: bool
     id: str = field(default_factory=lambda: f"chatcmpl-{uuid.uuid4().hex}")
@@ -166,7 +169,11 @@ class _Handler(BaseHTTPRequestHandler):
             text = "".join(c.pieces())
         except RuntimeError as e:
             return self._error(500, str(e))
-        message, reason = {"role": "assistant", "content": text}, c.finish.reason
+        message: dict[str, Any] = {"role": "assistant", "content": text}
+        reason = c.finish.reason
+        if c.tools and (call := parse_tool_call(text, c.tools)):
+            message = {"role": "assistant", "content": None, "tool_calls": [_tool_call(call)]}
+            reason = "tool_calls"
         choice = {"index": 0, "message": message, "logprobs": None, "finish_reason": reason}
         body = self._head(c, "chat.completion") | {"choices": [choice], "usage": _usage(c)}
         self._json(200, body)
@@ -177,12 +184,23 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         self._chunk(c, {"role": "assistant", "content": ""})
+        held, holding = "", bool(c.tools)  # a reply that may call a tool is held back whole
         try:
             for piece in c.pieces():
-                self._chunk(c, {"content": piece})
+                if holding and may_call_tool(held + piece):
+                    held += piece
+                    continue
+                self._chunk(c, {"content": held + piece})
+                held, holding = "", False
         except RuntimeError as e:
             return self._event({"error": {"message": str(e), "type": "server_error"}})
-        self._chunk(c, {}, c.finish.reason)
+        reason = c.finish.reason
+        if c.tools and held and (call := parse_tool_call(held, c.tools)):
+            self._chunk(c, {"tool_calls": [{"index": 0} | _tool_call(call)]})
+            reason = "tool_calls"
+        elif held:
+            self._chunk(c, {"content": held})
+        self._chunk(c, {}, reason)
         if c.stream_usage:
             usage = {"choices": [], "usage": _usage(c)}
             self._event(self._head(c, "chat.completion.chunk") | usage)
@@ -223,7 +241,10 @@ def _completion(body: Any, server: Server) -> _Completion:
     for key, neutral in _UNSUPPORTED.items():
         if body.get(key) not in (None, neutral):
             raise ValueError(f"{key}={body[key]!r} is not supported")
-    prompt = server.chat.encode(body["messages"])
+    if (choice := body.get("tool_choice") or "auto") not in ("auto", "none"):
+        raise ValueError(f"tool_choice={choice!r} is not supported, only 'auto' and 'none'")
+    tools = (body.get("tools") or None) if choice == "auto" else None
+    prompt = server.chat.encode(body["messages"], **({"tools": tools} if tools else {}))
     if len(prompt) >= (context := server.engine.max_context):
         raise ValueError(f"the prompt has {len(prompt)} tokens, too many for {context} of context")
     stop, temperature = body.get("stop") or [], body.get("temperature")
@@ -233,6 +254,7 @@ def _completion(body: Any, server: Server) -> _Completion:
         temperature=1.0 if temperature is None else temperature,  # OpenAI's default
         seed=body.get("seed"),
         stop=[s for s in ([stop] if isinstance(stop, str) else stop) if s],
+        tools=tools,
         stream=bool(body.get("stream")),
         stream_usage=bool((body.get("stream_options") or {}).get("include_usage")),
     )
@@ -241,6 +263,12 @@ def _completion(body: Any, server: Server) -> _Completion:
 def _partial_stop(text: str, stops: list[str]) -> int:
     # the length of the longest end of `text` that a stop string begins with
     return max((n for s in stops for n in range(1, len(s)) if text.endswith(s[:n])), default=0)
+
+
+def _tool_call(call: dict[str, Any]) -> dict[str, Any]:
+    arguments = json.dumps(call["arguments"], ensure_ascii=False)
+    function = {"name": call["name"], "arguments": arguments}
+    return {"id": f"call_{uuid.uuid4().hex[:24]}", "type": "function", "function": function}
 
 
 def _usage(c: _Completion) -> dict[str, Any]:

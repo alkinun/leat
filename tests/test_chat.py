@@ -1,7 +1,9 @@
+import json
+
 import jinja2
 import pytest
 
-from leat.chat import ChatTemplate
+from leat.chat import ChatTemplate, may_call_tool, parse_tool_call
 from leat.gguf import GGUF
 from leat.tokenizer import Tokenizer
 from tests.helpers import ids, tiny_metadata
@@ -44,13 +46,34 @@ def test_template_helpers():
 
 
 def test_openai_messages():
-    # text parts are joined into one string, as templates expect
-    c, _ = chat("{% for m in messages %}{{ m.content }};{% endfor %}")
-    parts = [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]
-    messages = [{"role": "user", "content": parts}, {"role": "assistant", "content": "c"}]
-    assert c.render(messages) == "a\nb;c;"
+    # text parts are joined, and tool calls are left out where there are none and otherwise have
+    # their JSON arguments decoded, as templates expect
+    c, _ = chat(
+        "{% for m in messages %}{{ m.content or '' }}"
+        "{% if 'tool_calls' in m %}{{ m.tool_calls[0].function.arguments.city }}{% endif %};"
+        "{% endfor %}"
+    )
+    function = {"name": "f", "arguments": '{"city": "Oslo"}'}
+    call = {"id": "1", "type": "function", "function": function}
+    messages = [
+        {"role": "user", "content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]},
+        {"role": "assistant", "content": None, "tool_calls": [call]},
+        {"role": "assistant", "content": "c", "tool_calls": None},
+    ]
+    assert c.render(messages) == "a\nb;Oslo;c;"
     with pytest.raises(ValueError, match="only text"):
         c.render([{"role": "user", "content": [{"type": "image_url", "image_url": {}}]}])
+
+
+def test_tool_calls():
+    tools = [{"type": "function", "function": {"name": "weather"}}]
+    paris = {"name": "weather", "arguments": {"city": "Paris"}}
+    for key, space in (("parameters", " "), ("arguments", "\n")):
+        reply = space + json.dumps({"name": "weather", key: {"city": "Paris"}}) + space
+        assert parse_tool_call(reply, tools) == paris
+    for text in ("It is sunny.", '{"name": "news", "parameters": {}}', '{"name": "weather"}'):
+        assert parse_tool_call(text, tools) is None
+    assert may_call_tool("") and may_call_tool(' {"na') and not may_call_tool(" It")
 
 
 def test_no_template():
