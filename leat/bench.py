@@ -1,6 +1,7 @@
 """Measurements: speed as llama-bench reports it, and quality as perplexity or KL divergence.
 
-Quality follows llama-perplexity: chunks start with BOS and only their second half is scored.
+Quality follows llama-perplexity: chunks start with BOS where the tokenizer adds one, and only
+their second half is scored.
 """
 
 import math
@@ -111,7 +112,8 @@ def _logprobs(engine: Engine, chunk: list[int], decode: bool) -> Tensor:
     # log-probabilities at positions ctx/2 .. ctx-2, each predicting the next token. With decode,
     # those positions run one token at a time, through the kernels generation uses.
     ctx, first, model = len(chunk), len(chunk) // 2, engine.model
-    tokens = chunk if engine.tokenizer.bos_id is None else [engine.tokenizer.bos_id] + chunk[1:]
+    tok = engine.tokenizer
+    tokens = [tok.bos_id] + chunk[1:] if tok.add_bos and tok.bos_id is not None else chunk
     if not decode:
         hidden = model(Tensor([tokens], dtype=dtypes.int32), 0)[:, first : ctx - 1]
         return model.logits(hidden)[0].log_softmax(-1)
