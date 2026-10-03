@@ -4,7 +4,7 @@ import pytest
 from leat.chat import ChatTemplate
 from leat.gguf import GGUF
 from leat.tokenizer import Tokenizer
-from tests.test_tokenizer import ids, tiny_metadata
+from tests.helpers import ids, tiny_metadata
 
 TEMPLATE = (
     "{{ bos_token }}{% for m in messages %}{{ m['role'] }}:{{ m['content'] }}{{ eos_token }}"

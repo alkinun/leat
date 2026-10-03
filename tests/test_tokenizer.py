@@ -5,30 +5,12 @@ import subprocess
 import pytest
 
 from leat.gguf import GGUF
-from leat.tokenizer import _BYTE_CHAR, CONTROL, NORMAL, USER_DEFINED, Tokenizer
-
-
-def tiny_metadata(**overrides) -> dict:
-    tokens = [*_BYTE_CHAR.values(), "bc", "ab", "he", "ll", "hell", "<s>", "<|eot|>", "<user>"]
-    types = [NORMAL] * (len(tokens) - 3) + [CONTROL, CONTROL, USER_DEFINED]
-    metadata = {
-        "tokenizer.ggml.model": "gpt2",
-        "tokenizer.ggml.pre": "llama-bpe",
-        "tokenizer.ggml.tokens": tokens,
-        "tokenizer.ggml.token_type": types,
-        "tokenizer.ggml.merges": ["b c", "a b", "h e", "l l", "he ll"],
-        "tokenizer.ggml.bos_token_id": tokens.index("<s>"),
-        "tokenizer.ggml.eos_token_id": tokens.index("<|eot|>"),
-    }
-    return metadata | overrides
+from leat.tokenizer import Tokenizer
+from tests.helpers import ids, tiny_metadata
 
 
 def tiny_tokenizer(**overrides) -> Tokenizer:
     return Tokenizer(tiny_metadata(**overrides))
-
-
-def ids(tok: Tokenizer, *pieces: str) -> list[int]:
-    return [tok._vocab[p] if p in tok._vocab else tok._special[p] for p in pieces]
 
 
 def test_merges_apply_in_rank_order():

@@ -5,7 +5,7 @@ from gguf.quants import dequantize
 
 from leat.gguf import GGUF
 from leat.quant import GGMLType
-from tests.test_quant import random_blocks
+from tests.helpers import random_blocks
 
 
 @pytest.fixture

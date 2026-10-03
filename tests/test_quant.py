@@ -5,24 +5,7 @@ from gguf.quants import dequantize
 from tinygrad import Tensor
 
 from leat.quant import BLOCK, GGMLType, QTensor
-
-# byte offsets of each block's f16 scales; random bytes there would be inf/nan
-F16_FIELDS = {
-    GGMLType.Q8_0: (0,),
-    GGMLType.Q4_K: (0, 2),
-    GGMLType.Q5_K: (0, 2),
-    GGMLType.Q6_K: (208,),
-}
-
-
-def random_blocks(
-    ggml_type: GGMLType, n: int, rng: np.random.Generator, scale: float = 1.0
-) -> np.ndarray:
-    blocks = rng.integers(0, 256, (n, BLOCK[ggml_type][1]), dtype=np.uint8)
-    for offset in F16_FIELDS[ggml_type]:
-        d = rng.uniform(-scale, scale, (n, 1)).astype(np.float16)
-        blocks[:, offset : offset + 2] = d.view(np.uint8)
-    return blocks
+from tests.helpers import F16_FIELDS, random_blocks
 
 
 @pytest.mark.parametrize("ggml_type", list(F16_FIELDS))
