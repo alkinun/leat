@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["mypy", "numpy", "pytest", "ruff"]
+dev = ["gguf", "mypy", "numpy", "pytest", "ruff"]
 
 [build-system]
 requires = ["hatchling"]
@@ -36,6 +36,7 @@ warn_redundant_casts = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 addopts = "-ra --strict-markers"
 markers = [
   "gpu: needs a GPU backend (DEV=NV, CUDA or AMD)",
