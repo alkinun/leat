@@ -59,7 +59,10 @@ def mixture(
     # whose MLPs the router scores highest, weighted by the softmax of their scores. Experts are
     # stacked matrices (experts, rows, cols); only the chosen ones are read.
     n = rms_norm(x, *norm)
-    scores, experts = linear(n, router).topk(used)
+    scores = linear(n, router)
+    if _fast() and nv.supports_mixture(x, gate, up, down):
+        return nv.mixture(x, scores, gate, up, down, used, norm)
+    scores, experts = scores.topk(used)
     B, T, dim = x.shape
     ids = experts.flatten()
     n = n.unsqueeze(2).expand(B, T, used, dim).reshape(-1, 1, dim)

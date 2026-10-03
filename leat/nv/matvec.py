@@ -25,14 +25,15 @@ from leat.quant import GGMLType, QTensor
 Dot = Callable[[UOp, UOp, UOp | int], UOp]  # (row, unit, x) -> a unit's share of row . x
 
 
-def _rows(out: UOp, units: int, name: str, dots: list[Callable[[UOp, UOp], UOp]],
-          combine: Callable[..., UOp]) -> UOp:  # fmt: skip
-    # one block of one warp per output row: lanes take the row's `units` in turn, the warp sums
-    # each dot product, and out[row] = combine(row, *sums). Where a last turn has fewer units than
-    # lanes, the others repeat the last unit, whose loads hit in cache, and drop its share.
-    # Grouping rows into wider blocks measured slower on the 3090, by up to a quarter for Q6_K.
-    rows = out.shape[0]
-    row, lane = UOp.range(rows, 0, AxisType.GLOBAL), lane_range()
+def rows_kernel(out: UOp, units: int, name: str, dots: list[Callable[[UOp, UOp], UOp]],
+                combine: Callable[..., UOp], rows: int | UOp | None = None) -> UOp:  # fmt: skip
+    # one block of one warp per output row, of the first `rows` if given: lanes take the row's
+    # `units` in turn, the warp sums each dot product, and out[row] = combine(row, *sums). Where a
+    # last turn has fewer units than lanes, the others repeat the last unit, whose loads hit in
+    # cache, and drop its share. Grouping rows into wider blocks measured slower on the 3090, by up
+    # to a quarter for Q6_K.
+    row = UOp.range(out.shape[0] if rows is None else rows, 0, AxisType.GLOBAL)
+    lane = lane_range()
     zero = UOp.const(0.0, dtypes.float32)
 
     def share(dot: Callable[[UOp, UOp], UOp], turn: int) -> UOp:
@@ -44,7 +45,7 @@ def _rows(out: UOp, units: int, name: str, dots: list[Callable[[UOp, UOp], UOp]]
     turns = range(-(-units // WARP))
     sums = [warp_sum(sum((share(dot, t) for t in turns), zero)) for dot in dots]
     store = out[row.valid(lane.eq(0))].store(combine(row, *sums))
-    info = KernelInfo(name=f"{name}_{rows}_{units}", opts_to_apply=())
+    info = KernelInfo(name=f"{name}_{out.shape[0]}_{units}", opts_to_apply=())
     return store.end(row, lane).sink(arg=info)
 
 
@@ -137,7 +138,7 @@ def _q8_0_dot(w: UOp, xq: UOp, xd: UOp, xs: UOp, cols: int) -> Dot:
     return dot
 
 
-_DOTS: dict[GGMLType, Callable[[UOp, UOp, UOp, UOp, int], Dot]] = {
+DOTS: dict[GGMLType, Callable[[UOp, UOp, UOp, UOp, int], Dot]] = {
     GGMLType.Q4_K: functools.partial(_k_dot, high=False),
     GGMLType.Q5_K: functools.partial(_k_dot, high=True),
     GGMLType.Q6_K: _q6_k_dot,
@@ -152,8 +153,8 @@ def _matvec_kernel(
     def combine(row: UOp, total: UOp) -> UOp:
         return total + residual[0][row].load() if residual else total
 
-    dot = _DOTS[ggml_type](w, xq, xd, xs, cols := 4 * int(xq.shape[0]))
-    return _rows(out, cols // 64, ggml_type.name.lower(), [_shared_x(dot)], combine)
+    dot = DOTS[ggml_type](w, xq, xd, xs, cols := 4 * int(xq.shape[0]))
+    return rows_kernel(out, cols // 64, ggml_type.name.lower(), [_shared_x(dot)], combine)
 
 
 @functools.cache
@@ -164,8 +165,8 @@ def _swiglu_kernel(
         return silu(g) * u
 
     cols = 4 * int(xq.shape[0])
-    dots = [_shared_x(_DOTS[ggml_type](w, xq, xd, xs, cols)) for w in (gate, up)]
-    return _rows(out, cols // 64, f"swiglu_{ggml_type.name.lower()}", dots, combine)
+    dots = [_shared_x(DOTS[ggml_type](w, xq, xd, xs, cols)) for w in (gate, up)]
+    return rows_kernel(out, cols // 64, f"swiglu_{ggml_type.name.lower()}", dots, combine)
 
 
 def _shared_x(dot: Dot) -> Callable[[UOp, UOp], UOp]:
@@ -175,7 +176,7 @@ def _shared_x(dot: Dot) -> Callable[[UOp, UOp], UOp]:
 def supports_matvec(x: Tensor, w: QTensor) -> bool:
     # one token, and whole units of 64 weights
     one = isinstance(x.numel(), int) and x.numel() == x.shape[-1]
-    return on_nvidia(x) and one and w.type in _DOTS and w.shape[1] % 64 == 0
+    return on_nvidia(x) and one and w.type in DOTS and w.shape[1] % 64 == 0
 
 
 def matvecs(

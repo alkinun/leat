@@ -52,6 +52,10 @@ _MMA = {
 }
 
 
+# 0, once the threads for which a condition holds have exited
+_EXIT = '[&]{{ if ({0}) asm volatile("exit;"); return 0; }}()'
+
+
 def _mma(a: list[UOp], b: list[UOp]) -> list[UOp]:
     # lane 4g + t gets the results for rows g and g + 8 by tokens 2t and 2t + 1
     c = UOp.alloc((4,), dtypes.int32, addrspace=AddrSpace.REG)
@@ -66,18 +70,21 @@ class _Stack:
     a tile holds the same rows of two matrices instead, in its first and second half."""
 
     def __init__(
-        self, ws: tuple[UOp, ...], tiles: tuple[int, ...], tile: UOp, rows: int, paired: bool
-    ):
-        self.row_words = int(ws[0].shape[0]) // (tiles[0] * rows)
+        self, ws: tuple[UOp, ...], tiles: tuple[int, ...], tile: UOp, rows: int, paired: bool,
+        expert: UOp | None = None, experts: int = 1,
+    ):  # fmt: skip
+        # experts: each matrix stacks that many, and the tile's rows are those of `expert`
+        self.row_words = int(ws[0].shape[0]) // (tiles[0] * rows * experts)
         self.half, first = rows // 2 if paired else 0, 0
         self.parts: list[tuple[UOp, UOp, UOp | None]] = []
         for w, n in zip(ws, tiles, strict=True):
+            base = 0 if expert is None else expert * n * rows
             if paired:  # a matrix's rows from tile * half on are the tile's rows from first on
-                self.parts.append((w, tile * self.half - first, None))
+                self.parts.append((w, base + tile * self.half - first, None))
                 first += self.half
                 continue
             mine = None if len(ws) == 1 else (tile >= first) & (tile < first + n)
-            self.parts.append((w, (tile - first) * rows, mine))
+            self.parts.append((w, base + (tile - first) * rows, mine))
             first += n
 
     def load(self, row: UOp, at: UOp | int) -> UOp:
@@ -324,21 +331,55 @@ _TILES: dict[GGMLType, type[_Q4KTile] | type[_Q6KTile] | type[_Q80Tile]] = {
 @functools.cache
 def _matmul_kernel(
     out: UOp, *srcs: UOp, tokens: int | UOp, ggml_type: GGMLType, rows: int, tiles: tuple[int, ...],
-    gated: bool,
+    gated: bool, routed: tuple[int, bool] | None = None,
 ) -> UOp:  # fmt: skip
     # srcs: the stacked matrices, tiles of `rows` rows of each, then xq, xd, xs and a residual; a
     # block per tile of `rows` rows by TILE_TOKENS tokens. Gated, the matrices are gate and up,
     # a tile holds rows of both, each warp the same 16 of either, and out is silu(gate) * up.
-    ws, (xq, xd, xs, *residual) = srcs[: len(tiles)], srcs[len(tiles) :]
+    # Routed, the matrices stack experts, and order and counts list the (token, slot) pairs routed
+    # to each, of `used` slots per token: a block takes TILE_TOKENS pairs of an expert's list,
+    # reading activation row pair // used, by token, or else pair, and writing output row pair.
+    ws, (xq, xd, xs, *rest) = srcs[: len(tiles)], srcs[len(tiles) :]
     count, n = (int(x) for x in out.shape)
-    cols, threads, out_rows = 4 * int(xq.shape[0]) // count, rows, rows // 2 if gated else rows
-    steps = cols // STEP
+    sources = count // routed[0] if routed is not None and routed[1] else count
+    cols, threads = 4 * int(xq.shape[0]) // sources, rows
+    out_rows, steps = rows // 2 if gated else rows, cols // STEP
     tile_tokens = UOp.range((tokens + TILE_TOKENS - 1) // TILE_TOKENS, 0, AxisType.GLOBAL)
     tile_rows = UOp.range(n // out_rows, 1, AxisType.GLOBAL)
     lane, warp = lane_range(), UOp.range(rows // WARP_ROWS, 2, AxisType.LOCAL)
     tid, g, t4 = warp * WARP + lane, lane // 4, lane % 4
     row0, token0 = tile_rows * out_rows, tile_tokens * TILE_TOKENS
-    weights = _TILES[ggml_type](_Stack(ws, tiles, tile_rows, rows, gated), rows, tid)
+    ranges = [tile_tokens, tile_rows, lane, warp]
+    if routed is None:
+        residual, stack = rest, _Stack(ws, tiles, tile_rows, rows, gated)
+
+        def source(tok: UOp | int) -> UOp:  # the activation row of the tile's token tok
+            return token0 + tok
+
+        def target(tok: UOp | int, row: UOp) -> UOp:  # where its output for a row goes
+            return out[token0 + tok, row]
+
+    else:
+        (order, counts), residual = rest, []
+        (used, by_token), experts = routed, int(counts.shape[0])
+        ranges.append(block_expert := UOp.range(experts, 5, AxisType.GLOBAL))
+        # blocks past the end of their expert's list exit at once: all else depends on the expert
+        expert = block_expert + UOp(Ops.CUSTOM, src=(token0 >= counts[block_expert].load(),),
+                                    arg=(_EXIT, dtypes.int32))  # fmt: skip
+        listed, per = counts[expert].load(), count // used
+        stack = _Stack(ws, tiles, tile_rows, rows, gated, expert, experts)
+
+        def pair(tok: UOp | int) -> UOp:
+            at = token0 + tok
+            return (at < listed).where(order[expert * per + at].load(), 0)
+
+        def source(tok: UOp | int) -> UOp:
+            return pair(tok) // used if by_token else pair(tok)
+
+        def target(tok: UOp | int, row: UOp) -> UOp:
+            return out.flatten()[(pair(tok) * n + row).valid(token0 + tok < listed)]
+
+    weights = _TILES[ggml_type](stack, rows, tid)
     # the first rows of the warp's two subtiles of 16 rows, within the tile
     firsts = [warp * 16 + mi * out_rows if gated else warp * WARP_ROWS + mi * 16 for mi in (0, 1)]
     # the tile's tokens for a step: 32 words each, and the d and d * sum(q) of 4 groups
@@ -350,10 +391,10 @@ def _matmul_kernel(
     def fetch(step: UOp) -> list[UOp]:
         words = weights.fetch(step)
         for tok, word in pairs:
-            at = (token0 + tok) * (cols // 4) + step * 32 + word
+            at = source(tok) * (cols // 4) + step * 32 + word
             words.append(xq[at].load().bitcast(dtypes.uint32))
         for grp, tok in groups:
-            at = (token0 + tok) * (cols // GROUP) + step * 4 + grp
+            at = source(tok) * (cols // GROUP) + step * 4 + grp
             words += [xd[at].load().bitcast(dtypes.uint32), xs[at].load().bitcast(dtypes.uint32)]
         return words
 
@@ -405,22 +446,22 @@ def _matmul_kernel(
         for ni in range(SUBTILES_N):
             for e in range(4):
                 row = row0 + firsts[mi] + g + 8 * (e // 2)
-                tok = token0 + ni * 8 + 2 * t4 + e % 2
+                token = ni * 8 + 2 * t4 + e % 2
                 value = acc[(mi * SUBTILES_N + ni) * 4 + e].load()
                 if gated:
                     value = silu(value) * acc[(SUBTILES_N + ni) * 4 + e].load()
                 if residual:
-                    value = value + residual[0][tok, row].load()
-                results.append(out[tok, row].store(value))
+                    value = value + residual[0][token0 + token, row].load()
+                results.append(target(token, row).store(value))
     info = KernelInfo(name=f"matmul_{ggml_type.name.lower()}_{n}_{cols}", opts_to_apply=())
-    return UOp.group(*results).end(tile_tokens, tile_rows, lane, warp).sink(arg=info)
+    return UOp.group(*results).end(*ranges).sink(arg=info)
 
 
 def _split(a: UOp, b: int) -> tuple[UOp, UOp]:
     return a // b, a % b
 
 
-def _tiled(x: Tensor) -> Tensor:
+def tiled(x: Tensor) -> Tensor:
     # Several tokens, while prefilling a bound count of them: buffers hold the most there may be,
     # rounded up to whole tiles, and the kernels stop after the tiles holding actual tokens. The
     # first rows of a kernel's output of that many rows are that output, whose other rows nobody
@@ -446,7 +487,7 @@ def _products(
     xq, xd, xs = q8
     count = int(xd.shape[0]) * GROUP // ws[0].shape[1]
     xq, bound = carry(xq, tokens)
-    res = () if residual is None else (_tiled(residual),)
+    res = () if residual is None else (tiled(residual),)
     outs = []
     for _, group in itertools.groupby(ws, key=lambda w: w.type):
         stack = tuple(group)
@@ -463,6 +504,29 @@ def _products(
         out = Tensor.custom_kernel(out, *words, xq, xd, xs, *res, fxn=fxn)[0]
         outs.append((out, [width] if gated else heights))
     return outs
+
+
+def routed_products(
+    q8: tuple[Tensor, Tensor, Tensor], tokens: int | UOp, ws: tuple[QTensor, ...], order: Tensor,
+    counts: Tensor, used: int, by_token: bool,
+) -> Tensor:  # fmt: skip
+    """The products of quantized activations and the experts that (token, slot) pairs are routed
+    to, a row per pair, slot p % used of token p // used: ws stack experts (experts, rows, cols),
+    and `order` (experts, n) and `counts` list each expert's pairs. The activations have a row per
+    token if by_token, else per pair. Two matrices are gate and up, multiplied as silu(gate) * up.
+    """
+    experts, rows, _ = ws[0].shape
+    tile = 256 if rows >= 4096 and rows % 256 == 0 and _TILES[ws[0].type].max_rows == 256 else 128
+    out = Tensor.empty(
+        int(order.shape[0]) // experts * used, rows, dtype=dtypes.float32, device=q8[0].device
+    )
+    xq, bound = carry(q8[0], tokens)
+    fxn = functools.partial(
+        _matmul_kernel, tokens=bound, ggml_type=ws[0].type, rows=tile,
+        tiles=(rows // tile,) * len(ws), gated=len(ws) == 2, routed=(used, by_token),
+    )  # fmt: skip
+    words = map(storage_words, ws)
+    return Tensor.custom_kernel(out, *words, xq, *q8[1:], order, counts, fxn=fxn)[0]
 
 
 def supports_matmul(x: Tensor, w: QTensor) -> bool:
@@ -483,7 +547,7 @@ def matmuls(
     """
     assert residual is None or len(ws) == 1, "a residual goes with one matrix"
     tokens = x.shape[-2]
-    q8 = quantize_q8(_tiled(x), norm, rows=tokens)
+    q8 = quantize_q8(tiled(x), norm, rows=tokens)
     outs = []
     for out, heights in _products(q8, tokens, ws, residual):
         for start, h in zip(itertools.accumulate([0, *heights]), heights, strict=False):
@@ -497,7 +561,7 @@ def feed_forward(
     """x + silu(n @ gate.T) * (n @ up.T) @ down.T for tokens x and n = rms_norm(x, *norm), with
     gate and up, which share a type and shape, in one kernel that also applies silu."""
     tokens = x.shape[-2]
-    q8 = quantize_q8(_tiled(x), norm, rows=tokens)
+    q8 = quantize_q8(tiled(x), norm, rows=tokens)
     ((hidden, _),) = _products(q8, tokens, (gate, up), None, gated=True)
     ((out, _),) = _products(quantize_q8(hidden, rows=tokens), tokens, (down,), x)
     return out[:tokens].reshape(*x.shape[:-1], down.shape[0])

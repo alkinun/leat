@@ -11,15 +11,15 @@ from leat.nv.common import WARP, lane_range, on_nvidia, shfl_xor
 PARTS = 256  # warps per row in the first pass
 
 
-def _argmax_step(best: UOp, index: UOp, value: UOp, at: UOp) -> tuple[UOp, UOp]:
+def argmax_step(best: UOp, index: UOp, value: UOp, at: UOp) -> tuple[UOp, UOp]:
     # keep the larger value, and on ties the lower index, as argmax does
     take = (value > best) | (value.eq(best) & (at < index))
     return take.where(value, best), take.where(at, index)
 
 
-def _warp_argmax(best: UOp, index: UOp) -> tuple[UOp, UOp]:
+def warp_argmax(best: UOp, index: UOp) -> tuple[UOp, UOp]:
     for mask in (16, 8, 4, 2, 1):
-        best, index = _argmax_step(best, index, shfl_xor(best, mask), shfl_xor(index, mask))
+        best, index = argmax_step(best, index, shfl_xor(best, mask), shfl_xor(index, mask))
     return best, index
 
 
@@ -36,8 +36,8 @@ def _argmax_partial_kernel(values: UOp, indices: UOp, x: UOp) -> UOp:
         at = (part * per + offset).cast(dtypes.int32)
         live = (offset < per) & (at < n)
         value = live.where(x[row, at.minimum(n - 1)].load(), -math.inf)
-        best, index = _argmax_step(best, index, value, at)
-    best, index = _warp_argmax(best, index)
+        best, index = argmax_step(best, index, value, at)
+    best, index = warp_argmax(best, index)
     first = part.valid(lane.eq(0))
     stores = (values[row, first].store(best), indices[row, first].store(index))
     info = KernelInfo(name="argmax_partial", opts_to_apply=())
@@ -50,8 +50,8 @@ def _argmax_final_kernel(out: UOp, values: UOp, indices: UOp) -> UOp:
     best, index = UOp.const(-math.inf, dtypes.float32), UOp.const(0, dtypes.int32)
     for k in range(PARTS // WARP):
         part = k * WARP + lane
-        best, index = _argmax_step(best, index, values[row, part].load(), indices[row, part].load())
-    _, index = _warp_argmax(best, index)
+        best, index = argmax_step(best, index, values[row, part].load(), indices[row, part].load())
+    _, index = warp_argmax(best, index)
     info = KernelInfo(name="argmax_final", opts_to_apply=())
     return out[row.valid(lane.eq(0))].store(index).end(row, lane).sink(arg=info)
 

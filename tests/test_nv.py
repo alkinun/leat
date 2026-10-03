@@ -153,6 +153,63 @@ def test_matmul_stacked(heights):
         assert_close(got.numpy()[0], reference_matmul(x[0], b, t), 1e-4)
 
 
+# ******** mixtures of experts ********
+
+
+@pytest.mark.parametrize("tokens", [1, 7, UOp.variable("tokens", 1, 16).bind(5)])
+def test_route(tokens):
+    rng = np.random.default_rng(14)
+    scores = rng.standard_normal((16, 128)).astype(np.float32)
+    n = tokens if isinstance(tokens, int) else tokens.unbind()[1]
+    ids, weights = (t.numpy()[: n * 8] for t in nv.route(Tensor(scores)[:tokens], 8))
+    best = np.argsort(-scores[:n], -1, kind="stable")[:, :8]
+    np.testing.assert_array_equal(ids.reshape(n, 8), best)
+    top = np.take_along_axis(scores[:n], best, -1)
+    p = np.exp(top - top[:, :1])
+    np.testing.assert_allclose(weights.reshape(n, 8), p / p.sum(-1, keepdims=True), rtol=1e-6)
+
+
+def random_experts(
+    ggml_type: GGMLType, experts: int, rows: int, cols: int, rng: np.random.Generator
+) -> tuple[QTensor, np.ndarray]:
+    # a stack of matrices, and each one's blocks
+    w, blocks = random_matrix(ggml_type, experts * rows, cols, rng)
+    return QTensor(w.data, ggml_type, (experts, rows, cols)), blocks.reshape(
+        experts, -1, blocks.shape[-1]
+    )
+
+
+# up to FEW tokens take the matrix-vector kernels, more the tensor cores
+@pytest.mark.parametrize("tokens", [1, 3, 70, UOp.variable("tokens", 1, 128).bind(37)])
+def test_mixture(tokens):
+    rng = np.random.default_rng(15)
+    experts, used, dim, hidden = 32, 4, 512, 768
+    (gate, gate_blocks), (up, up_blocks) = (
+        random_experts(Q4_K, experts, hidden, dim, rng) for _ in "gu"
+    )
+    down, down_blocks = random_experts(Q6_K, experts, dim, hidden, rng)
+    x = (rng.standard_normal((1, 128, dim)) * 3).astype(np.float32)
+    scores = rng.standard_normal((1, 128, experts)).astype(np.float32)
+    weight = rng.uniform(0.5, 1.5, dim).astype(np.float32)
+    n = tokens if isinstance(tokens, int) else tokens.unbind()[1]
+    x_t, scores_t = Tensor(x)[:, :tokens], Tensor(scores)[:, :tokens]
+    assert nv.supports_mixture(x_t, gate, up, down)
+    got = nv.mixture(x_t, scores_t, gate, up, down, used, (Tensor(weight), 1e-5))
+    got = got.pad_to((1, 128, dim)).numpy()[0, :n]
+    normed = rms_norm(x[0, :n], weight, 1e-5)
+    expected = x[0, :n].astype(np.float64)
+    for t in range(n):
+        best = np.argsort(-scores[0, t], kind="stable")[:used]
+        p = np.exp(scores[0, t, best] - scores[0, t, best].max())
+        for e, pe in zip(best, p / p.sum(), strict=True):
+            g, u = (
+                reference_matmul(normed[t : t + 1], b[e], Q4_K) for b in (gate_blocks, up_blocks)
+            )
+            h = (g / (1 + np.exp(-g)) * u).astype(np.float32)
+            expected[t] += pe * reference_matmul(h, down_blocks[e], Q6_K)[0]
+    assert_close(got, expected, 2e-3)
+
+
 # ******** ops on the kernels ********
 
 
