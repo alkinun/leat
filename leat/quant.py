@@ -7,7 +7,7 @@ reference path matches llama.cpp. Fast kernels are tested against these function
 from dataclasses import dataclass
 from enum import IntEnum
 
-from tinygrad import Tensor, dtypes
+from tinygrad import Tensor, UOp, dtypes
 from tinygrad.dtype import DType
 
 
@@ -121,12 +121,13 @@ class QTensor:
     """A GGUF tensor in its storage format.
 
     `data` holds `(blocks, block_bytes)` uint8 for quantized types, or the values themselves for
-    native float types. `shape` is the logical row-major shape.
+    native float types. `shape` is the logical row-major shape; it is symbolic for
+    rows gathered by a symbolic number of tokens.
     """
 
     data: Tensor
     type: GGMLType
-    shape: tuple[int, ...]
+    shape: tuple[int | UOp, ...]
 
     def dequant(self, dtype: DType = dtypes.float32) -> Tensor:
         if self.type in NATIVE:

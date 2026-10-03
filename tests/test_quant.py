@@ -15,12 +15,13 @@ F16_FIELDS = {
 }
 
 
-def random_blocks(ggml_type: GGMLType, n: int, rng: np.random.Generator) -> np.ndarray:
+def random_blocks(
+    ggml_type: GGMLType, n: int, rng: np.random.Generator, scale: float = 1.0
+) -> np.ndarray:
     blocks = rng.integers(0, 256, (n, BLOCK[ggml_type][1]), dtype=np.uint8)
     for offset in F16_FIELDS[ggml_type]:
-        blocks[:, offset : offset + 2] = (
-            rng.uniform(-1, 1, (n, 1)).astype(np.float16).view(np.uint8)
-        )
+        d = rng.uniform(-scale, scale, (n, 1)).astype(np.float16)
+        blocks[:, offset : offset + 2] = d.view(np.uint8)
     return blocks
 
 
