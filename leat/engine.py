@@ -20,7 +20,7 @@ class Engine:
     """
 
     def __init__(self, path: str | Path, max_context: int = 4096, prefill_chunk: int = 512):
-        gguf = GGUF.open(path)
+        self.gguf = gguf = GGUF.open(path)
         self.tokenizer = Tokenizer(gguf.metadata)
         self.config = Config.from_gguf(gguf.metadata)
         self.model = Transformer(self.config, gguf.load(), max_context)
@@ -31,9 +31,9 @@ class Engine:
         self._cached: list[int] = []  # tokens whose keys and values are in the cache
 
     def generate(
-        self, prompt: list[int], max_tokens: int, temperature: float = 0.0
+        self, prompt: list[int], max_tokens: int, temperature: float = 0.0, ignore_eog: bool = False
     ) -> Iterator[int]:
-        """Yields generated token ids, stopping at end of generation or the context limit."""
+        """Yields up to `max_tokens` ids; stops early at end of generation or the context limit."""
         if max_tokens < 1:
             raise ValueError(f"max_tokens must be at least 1, got {max_tokens}")
         if not 0 < len(prompt) < self.max_context:
@@ -54,11 +54,16 @@ class Engine:
         self._cached = list(prompt)
         for remaining in reversed(range(max_tokens)):
             yield (t := int(token.item()))
-            if not remaining or t in self.tokenizer.eog_ids or pos >= self.max_context:
+            eog = t in self.tokenizer.eog_ids and not ignore_eog
+            if not remaining or eog or pos >= self.max_context:
                 return
             token = self._decode(token, self._pos.bind(pos), temp)
             self._cached.append(t)
             pos += 1
+
+    def reset(self) -> None:
+        """Forgets the cached prefix, so the next prompt is prefilled from scratch."""
+        self._cached = []
 
     def _step(self, tokens: Tensor, start_pos: UOp, temperature: Tensor) -> Tensor:
         hidden = self.model(tokens, start_pos)

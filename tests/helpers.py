@@ -79,6 +79,7 @@ def write_tiny_llama(path: Path) -> dict[str, np.ndarray]:
     w.add_array("tokenizer.ggml.tokens", [*_BYTE_CHAR.values()] + [f"t{i}" for i in range(V - 256)])
     w.add_array("tokenizer.ggml.token_type", [1] * V)
     w.add_array("tokenizer.ggml.merges", [])
+    w.add_chat_template("{{ messages[-1]['content'] }}")
 
     weights = {}
 

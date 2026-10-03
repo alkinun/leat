@@ -11,6 +11,9 @@ dependencies = [
   "tinygrad @ git+https://github.com/tinygrad/tinygrad.git@9d7054488aee0e455e226514ba4b8b2f32329c29",
 ]
 
+[project.scripts]
+leat = "leat.cli:main"
+
 [dependency-groups]
 dev = ["gguf", "mypy", "numpy", "pytest", "ruff"]
 
