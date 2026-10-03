@@ -101,8 +101,7 @@ class Transformer:
 
         cache = self.cache[i]
         cache[:, :, :, start_pos : start_pos + T].assign(Tensor.stack(k, v).cast(cache.dtype))
-        attn = ops.attention(q, cache, start_pos).transpose(1, 2).reshape(B, T, -1)
-        x = x + ops.linear(attn, w["attn_output"])
+        x = x + ops.linear(ops.attention(q, cache, start_pos), w["attn_output"])
 
         gate, up = ops.linears(x, w["ffn_gate"], w["ffn_up"], norm=(ffn_norm, c.norm_eps))
         return x + ops.linear(gate.silu() * up, w["ffn_down"])

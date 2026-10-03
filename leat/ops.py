@@ -50,10 +50,12 @@ def rope(x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
 
 
 def attention(q: Tensor, cache: Tensor, start_pos: int | UOp) -> Tensor:
-    # q: (B, H, T, D) at positions start_pos.. ; cache: (2, B, KV_H, max_context, D), causal
-    T = q.shape[2]
+    # q: (B, H, T, D) at positions start_pos.. ; cache: (2, B, KV_H, max_context, D), causal.
+    # Returns (B, T, H * D), the layout the output projection reads.
+    B, H, T, D = q.shape
     if _fast() and nv.supports_attention(q, cache):
-        return nv.attention(q, cache, start_pos + T)
+        # one token: the heads already follow each other; a transpose here would cost a copy
+        return nv.attention(q, cache, start_pos + T).reshape(B, T, H * D)
     k, v = (
         cache[0, :, :, : start_pos + T].cast(q.dtype),
         cache[1, :, :, : start_pos + T].cast(q.dtype),
@@ -61,7 +63,8 @@ def attention(q: Tensor, cache: Tensor, start_pos: int | UOp) -> Tensor:
     mask = None
     if not (isinstance(T, int) and T == 1):
         mask = Tensor.full((1, 1, T, k.shape[2]), float("-inf"), dtype=q.dtype).triu(start_pos + 1)
-    return q.scaled_dot_product_attention(k, v, mask, enable_gqa=True)
+    out = q.scaled_dot_product_attention(k, v, mask, enable_gqa=True)
+    return out.transpose(1, 2).reshape(B, T, H * D)
 
 
 def argmax(x: Tensor) -> Tensor:
