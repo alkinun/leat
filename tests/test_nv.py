@@ -61,22 +61,6 @@ def test_norm_quantize_q8():
     np.testing.assert_array_equal(s, (d * sums).astype(np.float32))
 
 
-def test_quantize_q8_gated():
-    rng = np.random.default_rng(11)
-    gate, up = (
-        (rng.standard_normal((3, 2048)) * 3).astype(np.float32),
-        rng.standard_normal((3, 2048)),
-    )
-    x = np.concatenate([gate, up.astype(np.float32)], -1)
-    q, d, _ = (t.numpy() for t in nv.quantize_q8(Tensor(x), gated=True))
-    silu = gate.astype(np.float64) / (1 + np.exp(-gate.astype(np.float64)))
-    want_q, want_d, _ = quantize_q8((silu * up).astype(np.float32))
-    # silu in f32 may round a few values differently, as normalizing does
-    off = q.view(np.int8).astype(np.int32) - want_q
-    assert np.abs(off).max() <= 1 and np.count_nonzero(off) <= 4 * len(x)
-    np.testing.assert_allclose(d, want_d, rtol=1e-5)
-
-
 def test_linear_after_norm():
     rng = np.random.default_rng(5)
     blocks = random_blocks(GGMLType.Q4_K, 64 * 4096 // 256, rng, scale=1e-3)
@@ -206,10 +190,11 @@ def test_matmul_norm_residual():
     np.testing.assert_array_equal(got, (ops.linear(Tensor(x), w) + Tensor(r)).numpy())
 
 
-@pytest.mark.parametrize("tokens", [1, 70])
-def test_feed_forward(tokens):
+# several tokens put gate and up in tiles of 256 rows, or 128 for few rows
+@pytest.mark.parametrize("tokens, hidden", [(1, 4096), (70, 4096), (70, 1024)])
+def test_feed_forward(tokens, hidden):
     rng = np.random.default_rng(12)
-    dim, hidden = 2048, 4096
+    dim = 2048
     shapes = {GGMLType.Q4_K: (hidden, dim), GGMLType.Q6_K: (dim, hidden)}
     gate, up, down = (
         random_blocks(t, shapes[t][0] * shapes[t][1] // 256, rng, 1e-3)
