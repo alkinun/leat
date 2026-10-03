@@ -35,26 +35,28 @@ PAD = 8  # halves of shared memory after each warp's outputs, see _attention_par
 @functools.cache
 def _attention_partial_kernel(
     out: UOp, stats: UOp, q: UOp, cache: UOp, slot: int | UOp, length: int | UOp, waves: int,
-    scale: float,
+    scale: float, window: int,
 ) -> UOp:  # fmt: skip
     # A block takes one kv head of the slot and every PARTIALS-th chunk of its keys, for all query
-    # heads of the GQA group. Each of `waves` warps scores KEYS / waves keys of a chunk; lanes hold
-    # dim / 32 dimensions. The warps then merge through shared memory into one partial per block:
-    # the unnormalized output, its running max and its sum of weights.
+    # heads of the GQA group, from the chunk of the first key the window holds. Each of `waves`
+    # warps scores KEYS / waves keys of a chunk; lanes hold dim / 32 dimensions. The warps then
+    # merge through shared memory into one partial per block: the unnormalized output, its running
+    # max and its sum of weights.
     kv_heads, dim = int(cache.shape[2]), int(cache.shape[4])
     group, per_lane, partials = int(q.shape[1]) // kv_heads, dim // WARP, int(out.shape[1])
     per_wave, zero = KEYS // waves, UOp.const(0.0, dtypes.float32)
-    chunks = (length + KEYS - 1) // KEYS
+    since = _since(length, window)
+    chunks = (length + KEYS - 1) // KEYS - since // KEYS
     head = UOp.range(kv_heads, 0, AxisType.GLOBAL)
     block = UOp.range(at_most(chunks, partials), 1, AxisType.GLOBAL)
     lane, wave = lane_range(), UOp.range(waves, 3, AxisType.LOCAL)
     qs = [load_vector(q[0, head * group + h, 0, lane * per_lane], per_lane) for h in range(group)]
     rounds = UOp.range((chunks - 1 - block) // partials + 1, 4, AxisType.LOOP)
-    chunk = block + rounds * partials
+    chunk = since // KEYS + block + rounds * partials
     valid, scores, values = [], [], []
     for j in range(per_wave):
         key = chunk * KEYS + wave * per_wave + j
-        valid.append(key < length)
+        valid.append((key < length) & (key >= since) if window else key < length)
         k = load_vector(cache[0, slot, head, key, lane * per_lane], per_lane)
         # values load during scoring, so both streams are in flight together
         v = load_vector(cache[1, slot, head, key, lane * per_lane], per_lane)
@@ -154,6 +156,13 @@ def _attention_combine_kernel(o: UOp, partial: UOp, stats: UOp, live: int | UOp)
     return UOp.group(*stores).end(lane, part, head).sink(arg=info)
 
 
+def _since(length: int | UOp, window: int) -> int | UOp:
+    # the first of `length` positions that a window of the last `window` holds, 0 for no window
+    if not window:
+        return 0
+    return (length - window).maximum(0) if isinstance(length, UOp) else max(length - window, 0)
+
+
 def supports_attention(q: Tensor, cache: Tensor) -> bool:
     shape = (*cache.shape[2:], *q.shape[:3])
     if not on_nvidia(q) or not all(isinstance(x, int) for x in shape):
@@ -164,9 +173,12 @@ def supports_attention(q: Tensor, cache: Tensor) -> bool:
     return batch == 1 and tokens == 1 and dim % 64 == 0 and n % KEYS == 0 and fits
 
 
-def attention(q: Tensor, cache: Tensor, slot: int | UOp, length: int | UOp, scale: float) -> Tensor:
+def attention(
+    q: Tensor, cache: Tensor, slot: int | UOp, length: int | UOp, scale: float, window: int = 0
+) -> Tensor:
     """Attention of one query token (1, H, 1, D) over the first `length` positions of a slot of
-    the cache (2, slots, KV_H, positions, D), with scores q.k * scale."""
+    the cache (2, slots, KV_H, positions, D), or the last `window` of them, with scores
+    q.k * scale."""
     heads, dim, group = q.shape[1], cache.shape[4], q.shape[1] // cache.shape[2]
     q, slot = carry(q.float().contiguous(), slot)
     cache, length = carry(cache, length)
@@ -177,10 +189,11 @@ def attention(q: Tensor, cache: Tensor, slot: int | UOp, length: int | UOp, scal
     partial = Tensor.empty(heads, chunks, dim, dtype=dtypes.float32, device=q.device)
     stats = Tensor.empty(heads, chunks, 2, dtype=dtypes.float32, device=q.device)
     fxn = functools.partial(
-        _attention_partial_kernel, slot=slot, length=length, waves=waves, scale=scale
-    )
+        _attention_partial_kernel, slot=slot, length=length, waves=waves, scale=scale,
+        window=window,
+    )  # fmt: skip
     outs = Tensor.custom_kernel(partial, stats, q, cache, fxn=fxn)
-    live = at_most((length + KEYS - 1) // KEYS, chunks)
+    live = at_most((length + KEYS - 1) // KEYS - _since(length, window) // KEYS, chunks)
     out = Tensor.empty(1, heads, 1, dim, dtype=dtypes.float32, device=q.device)
     fxn = functools.partial(_attention_combine_kernel, live=live)
     return Tensor.custom_kernel(out, outs[0], outs[1], fxn=fxn)[0]
@@ -236,10 +249,12 @@ def _quad(value: UOp, op: Callable[[UOp, UOp], UOp]) -> UOp:
 
 @functools.cache
 def _flash_attention_kernel(
-    out: UOp, q: UOp, cache: UOp, slot: int | UOp, start: int | UOp, tokens: int | UOp
-) -> UOp:
+    out: UOp, q: UOp, cache: UOp, slot: int | UOp, start: int | UOp, tokens: int | UOp,
+    window: int,
+) -> UOp:  # fmt: skip
     # q (count, heads, dim) in f16, scaled so that exp2 gives the softmax, and the f16 cache, read
-    # as words of f16 pairs; query i is at position start + i and sees the slot's positions up to it
+    # as words of f16 pairs; query i is at position start + i and sees the slot's positions up to
+    # it, or the last `window` of them
     heads, dim = int(q.shape[1]), int(q.shape[2])
     _, slots, kv_heads, positions, _ = (int(d) for d in cache.shape)
     words = dim // 2
@@ -260,10 +275,12 @@ def _flash_attention_kernel(
         ]
         for k in range(dim // 16)
     ]
-    # the keys and values up to the tile's last query, KEY_TILE at a time: keys as they are in
-    # the cache, values transposed so that B fragments of keys are words
+    # the keys and values from the tile's first query's window to its last query, KEY_TILE at a
+    # time: keys as they are in the cache, values transposed so that B fragments of keys are words
     end = start + (tile * QUERIES + QUERIES).minimum(tokens)
-    kt = UOp.range((end + KEY_TILE - 1) // KEY_TILE, 3, AxisType.LOOP)
+    first = _since(start + tile * QUERIES + 1, window) // KEY_TILE
+    tiles = UOp.range((end + KEY_TILE - 1) // KEY_TILE - first, 3, AxisType.LOOP)
+    kt = first + tiles
     keys = UOp.alloc((KEY_TILE, words + 4), dtypes.uint32, addrspace=AddrSpace.LOCAL)
     values = UOp.alloc((dim, KEY_TILE // 2 + 4), dtypes.uint32, addrspace=AddrSpace.LOCAL)
     stores = []
@@ -279,7 +296,7 @@ def _flash_attention_kernel(
 
     # a finite initial max keeps exp2 from seeing -inf - -inf
     acc, mx, total = register((dim // 2,), 0.0), register((2,), -1e30), register((2,), 0.0)
-    prev_acc, prev_max, prev_total = acc.after(kt), mx.after(kt), total.after(kt)
+    prev_acc, prev_max, prev_total = acc.after(tiles), mx.after(tiles), total.after(tiles)
     zero = UOp.const(0.0, dtypes.float32)
     scores = []  # tiles of 8 keys, masked to the positions each row sees
     for j in range(KEY_TILE // 8):
@@ -288,9 +305,9 @@ def _flash_attention_kernel(
             b = [keys[8 * j + g, 8 * k + 4 * h + t].load() for h in (0, 1)]
             c = _mma_f16(queries[k], b, c)
         position = kt * KEY_TILE + 8 * j + 2 * t
-        scores.append(
-            [(position + e % 2 <= start + rows[e // 2]).where(c[e], -math.inf) for e in range(4)]
-        )
+        back = [start + rows[e // 2] - position - e % 2 for e in range(4)]  # how far each key is
+        seen = [(b >= 0) & (b < window) if window else b >= 0 for b in back]
+        scores.append([seen[e].where(c[e], -math.inf) for e in range(4)])
     row_max = [
         _quad(functools.reduce(UOp.maximum, (s[e] for s in scores for e in (2 * r, 2 * r + 1))),
               UOp.maximum)
@@ -318,7 +335,7 @@ def _flash_attention_kernel(
         acc.store(UOp.stack(*outs)),
         mx.store(UOp.stack(*new_max)),
         total.store(UOp.stack(*(prev_total[r].load() * rescale[r] + sums[r] for r in (0, 1)))),
-    ).end(kt)
+    ).end(tiles)
     acc, total = acc.after(update), total.after(update)
     results = []
     for n in range(dim // 8):
@@ -342,11 +359,11 @@ def supports_flash_attention(q: Tensor, cache: Tensor) -> bool:
 
 
 def flash_attention(
-    q: Tensor, cache: Tensor, slot: int | UOp, start_pos: int | UOp, scale: float
+    q: Tensor, cache: Tensor, slot: int | UOp, start_pos: int | UOp, scale: float, window: int = 0
 ) -> Tensor:
     """Causal attention of query tokens (1, H, T, D) at positions start_pos.. over a slot of the
-    cache, which already holds their keys and values, with scores q.k * scale. Returns (1, T,
-    H * D)."""
+    cache, which already holds their keys and values, or over the last `window` positions of
+    each, with scores q.k * scale. Returns (1, T, H * D)."""
     _, heads, tokens, dim = q.shape
     count = -(-q.max_shape[2] // QUERIES) * QUERIES
     # in the layout of the projection that made q, where scaling and rounding it is a plain copy
@@ -356,6 +373,8 @@ def flash_attention(
     cache, length = carry(cache, tokens)
     out = Tensor.empty(count, heads * dim, dtype=dtypes.float32, device=q.device)
     out, slot = carry(out, slot)
-    fxn = functools.partial(_flash_attention_kernel, slot=slot, start=start, tokens=length)
+    fxn = functools.partial(
+        _flash_attention_kernel, slot=slot, start=start, tokens=length, window=window
+    )
     out = Tensor.custom_kernel(out, q, cache, fxn=fxn)[0]
     return out[:tokens].reshape(1, tokens, heads * dim)

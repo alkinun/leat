@@ -127,11 +127,11 @@ def attention(
     # over the slot's positions, and over only the last `window` of them if given, with scores
     # q.k * scale. Returns (1, T, H * D), the layout the output projection reads.
     B, H, T, D = q.shape
-    if _fast() and not window and nv.supports_attention(q, cache):
+    if _fast() and nv.supports_attention(q, cache):
         # one token: the heads already follow each other; a transpose here would cost a copy
-        return nv.attention(q, cache, slot, start_pos + T, scale).reshape(B, T, H * D)
-    if _fast() and not window and nv.supports_flash_attention(q, cache):
-        return nv.flash_attention(q, cache, slot, start_pos, scale)
+        return nv.attention(q, cache, slot, start_pos + T, scale, window).reshape(B, T, H * D)
+    if _fast() and nv.supports_flash_attention(q, cache):
+        return nv.flash_attention(q, cache, slot, start_pos, scale, window)
     k, v = (cache[i, slot : slot + 1, :, : start_pos + T].cast(q.dtype) for i in (0, 1))
     mask = None
     if window or not (isinstance(T, int) and T == 1):
