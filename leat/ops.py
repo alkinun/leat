@@ -32,6 +32,17 @@ def linears(x: Tensor, *ws: QTensor, norm: tuple[Tensor, float] | None = None) -
     return [x @ w.dequant(x.dtype).T for w in ws]
 
 
+def swiglu(
+    x: Tensor, gate: QTensor, up: QTensor, norm: tuple[Tensor, float] | None = None
+) -> Tensor:
+    # silu(x @ gate.T) * (x @ up.T), after rms_norm(x, *norm) if given
+    same = gate.type == up.type and gate.shape == up.shape
+    if _fast() and same and nv.supports(x, gate) and nv.supports(x, up):
+        return nv.swiglu(x, gate, up, norm)
+    g, u = linears(x, gate, up, norm=norm)
+    return g.silu() * u
+
+
 def embedding(tokens: Tensor, w: QTensor) -> Tensor:
     # gathers whole rows of storage, then decodes only those; tinygrad lowers the gather to a load
     vocab, dim = w.shape

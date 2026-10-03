@@ -99,6 +99,23 @@ def test_shared_input():
         np.testing.assert_array_equal(got.numpy(), ops.linear(x, w).numpy())
 
 
+@pytest.mark.parametrize("types", [(GGMLType.Q4_K,) * 2, (GGMLType.Q6_K,) * 2,
+                                   (GGMLType.Q4_K, GGMLType.Q6_K)])  # fmt: skip
+def test_swiglu(types):
+    rng = np.random.default_rng(7)
+    rows, cols = 16, 4096
+    blocks = [random_blocks(t, rows * cols // 256, rng, 1e-3) for t in types]
+    gate, up = (QTensor(Tensor(b), t, (rows, cols)) for b, t in zip(blocks, types, strict=True))
+    x = rng.standard_normal((1, 1, cols)).astype(np.float32)
+    q, d, _ = quantize_q8(x.ravel())
+    xq = (q.reshape(-1, nv.GROUP) * d[:, None]).ravel()
+    g, u = (dequantize(b, gguf.GGMLQuantizationType(t)).reshape(rows, cols).astype(np.float64) @ xq
+            for b, t in zip(blocks, types, strict=True))  # fmt: skip
+    expected = g / (1 + np.exp(-g)) * u
+    got = ops.swiglu(Tensor(x), gate, up).numpy().ravel()
+    np.testing.assert_allclose(got, expected, rtol=1e-4, atol=1e-4 * np.abs(expected).max())
+
+
 @pytest.mark.parametrize("ggml_type", [GGMLType.Q4_K, GGMLType.Q6_K])
 def test_residual(ggml_type):
     rng = np.random.default_rng(6)

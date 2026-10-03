@@ -17,6 +17,7 @@ from leat.quant import GGMLType, QTensor
 
 WARP = 32
 GROUP = 32  # activations per int8 scale
+LOG2E = math.log2(math.e)
 
 
 def _lane() -> UOp:
@@ -140,25 +141,24 @@ def _k_scale_min(w: UOp, base: UOp, sub: UOp) -> tuple[UOp, UOp]:
     return sc.float(), mn.float()
 
 
-def _rows(
-    out: UOp, cols: int, name: str, dot: Callable[[UOp, UOp], UOp], residual: tuple[UOp, ...]
-) -> UOp:
-    # one block of one warp per output row: lanes take units of 64 weights in turn, dot(row, unit)
-    # gives a unit's contribution, and the warp sums them, plus residual[row] if given. Grouping
-    # rows into wider blocks measured slower on the 3090, by up to a quarter for Q6_K.
+Dot = Callable[[UOp, UOp], UOp]  # (row, unit) -> a unit's share of one row's dot product
+
+
+def _rows(out: UOp, cols: int, name: str, dots: list[Dot], combine: Callable[..., UOp]) -> UOp:
+    # one block of one warp per output row: lanes take units of 64 weights in turn, the warp sums
+    # each dot product, and out[row] = combine(row, *sums). Grouping rows into wider blocks
+    # measured slower on the 3090, by up to a quarter for Q6_K.
     rows = out.shape[0]
     row, lane = UOp.range(rows, 0, AxisType.GLOBAL), _lane()
-    units = (dot(row, it * WARP + lane) for it in range(cols // 64 // WARP))
-    total = _warp_sum(sum(units, UOp.const(0.0, dtypes.float32)))
-    if residual:
-        total = total + residual[0][row].load()
-    store = out[row.valid(lane.eq(0))].store(total)
+    units = range(cols // 64 // WARP)
+    zero = UOp.const(0.0, dtypes.float32)
+    sums = [_warp_sum(sum((dot(row, it * WARP + lane) for it in units), zero)) for dot in dots]
+    store = out[row.valid(lane.eq(0))].store(combine(row, *sums))
     info = KernelInfo(name=f"{name}_{rows}_{cols}", opts_to_apply=())
     return store.end(row, lane).sink(arg=info)
 
 
-@functools.cache
-def _q4_k_kernel(out: UOp, w: UOp, xq: UOp, xd: UOp, xs: UOp, *residual: UOp) -> UOp:
+def _q4_k_dot(w: UOp, xq: UOp, xd: UOp, xs: UOp) -> Dot:
     # Q4_K block, 36 words: d and dmin as f16, 12 bytes of 6-bit scales and mins, then 32 words of
     # nibbles. Sub-blocks 2j and 2j+1 are the low and high nibbles of words 4+8j .. 11+8j, so a
     # unit is such a pair: 64 weights against 16 words of activations.
@@ -180,7 +180,7 @@ def _q4_k_kernel(out: UOp, w: UOp, xq: UOp, xd: UOp, xs: UOp, *residual: UOp) ->
         mins = m0 * xs[g].load() + m1 * xs[g + 1].load()
         return _half(dm) * scaled - _half(dm >> 16) * mins
 
-    return _rows(out, cols, "q4_k", dot, residual)
+    return dot
 
 
 def _word16(w: UOp, i: UOp) -> UOp:
@@ -194,8 +194,7 @@ def _minus_32(q: UOp) -> UOp:
     return centered.bitcast(dtypes.int32)
 
 
-@functools.cache
-def _q6_k_kernel(out: UOp, w: UOp, xq: UOp, xd: UOp, xs: UOp, *residual: UOp) -> UOp:
+def _q6_k_dot(w: UOp, xq: UOp, xd: UOp, xs: UOp) -> Dot:
     # Q6_K block, 105 halfwords: ql[128] low nibbles, qh[64] high 2-bit pairs, 16 int8 scales and d
     # as f16. Each half n of 128 weights is 4 rows of 32: row k takes nibble k // 2 of
     # ql[64n + 32(k % 2):][:32] and bits 2k of qh[32n:][:32], minus 32, with a scale per 16. A unit
@@ -222,14 +221,36 @@ def _q6_k_kernel(out: UOp, w: UOp, xq: UOp, xd: UOp, xs: UOp, *residual: UOp) ->
                 total = total + xd[g + 2 * r].load() * sc * dots[r][h].float()
         return _half(w[base + 104].load().cast(dtypes.uint32)) * total
 
-    return _rows(out, cols, "q6_k", dot, residual)
+    return dot
 
 
-# each kernel, and the word type it reads the weights as
-_KERNELS = {
-    GGMLType.Q4_K: (_q4_k_kernel, dtypes.uint32),
-    GGMLType.Q6_K: (_q6_k_kernel, dtypes.uint16),
+# per type, the unit dot product and the word type it reads the weights as
+_DOTS = {
+    GGMLType.Q4_K: (_q4_k_dot, dtypes.uint32),
+    GGMLType.Q6_K: (_q6_k_dot, dtypes.uint16),
 }
+
+
+@functools.cache
+def _matvec_kernel(
+    out: UOp, w: UOp, xq: UOp, xd: UOp, xs: UOp, *residual: UOp, ggml_type: GGMLType
+) -> UOp:
+    def combine(row: UOp, total: UOp) -> UOp:
+        return total + residual[0][row].load() if residual else total
+
+    dot = _DOTS[ggml_type][0](w, xq, xd, xs)
+    return _rows(out, 4 * int(xq.shape[0]), ggml_type.name.lower(), [dot], combine)
+
+
+@functools.cache
+def _swiglu_kernel(
+    out: UOp, gate: UOp, up: UOp, xq: UOp, xd: UOp, xs: UOp, ggml_type: GGMLType
+) -> UOp:
+    def combine(row: UOp, g: UOp, u: UOp) -> UOp:
+        return g * (1 + (g * -LOG2E).exp2()).reciprocal() * u  # silu(g) * u, as tinygrad's silu
+
+    dots = [_DOTS[ggml_type][0](w, xq, xd, xs) for w in (gate, up)]
+    return _rows(out, 4 * int(xq.shape[0]), f"swiglu_{ggml_type.name.lower()}", dots, combine)
 
 
 def supports(x: Tensor, w: QTensor) -> bool:
@@ -239,7 +260,7 @@ def supports(x: Tensor, w: QTensor) -> bool:
     cols = w.shape[1]
     single = isinstance(x.numel(), int) and x.numel() == cols
     fits = isinstance(cols, int) and cols % (64 * WARP) == 0  # also a multiple of NORM_THREADS
-    return w.type in _KERNELS and single and fits
+    return w.type in _DOTS and single and fits
 
 
 def linears(
@@ -255,15 +276,29 @@ def linears(
     assert residual is None or len(ws) == 1, "a residual goes with one matrix"
     xq, xd, xs = quantize_q8(x.reshape(x.shape[-1]), norm)
     res = () if residual is None else (residual.reshape(ws[0].shape[0]).float().contiguous(),)
-    return [_matvec(w, xq, xd, xs, *res).reshape(*x.shape[:-1], w.shape[0]) for w in ws]
+    outs = []
+    for w in ws:
+        out = Tensor.empty(w.shape[0], dtype=dtypes.float32, device=x.device)
+        fxn = functools.partial(_matvec_kernel, ggml_type=w.type)
+        out = Tensor.custom_kernel(out, _words(w), xq, xd, xs, *res, fxn=fxn)[0]
+        outs.append(out.reshape(*x.shape[:-1], w.shape[0]))
+    return outs
 
 
-def _matvec(w: QTensor, xq: Tensor, xd: Tensor, xs: Tensor, *residual: Tensor) -> Tensor:
-    out = Tensor.empty(w.shape[0], dtype=dtypes.float32, device=xq.device)
-    kernel, word = _KERNELS[w.type]
+def swiglu(
+    x: Tensor, gate: QTensor, up: QTensor, norm: tuple[Tensor, float] | None = None
+) -> Tensor:
+    """silu(x @ gate.T) * (x @ up.T) for one token, both matrices in one kernel."""
+    xq, xd, xs = quantize_q8(x.reshape(x.shape[-1]), norm)
+    out = Tensor.empty(gate.shape[0], dtype=dtypes.float32, device=x.device)
+    fxn = functools.partial(_swiglu_kernel, ggml_type=gate.type)
+    out = Tensor.custom_kernel(out, _words(gate), _words(up), xq, xd, xs, fxn=fxn)[0]
+    return out.reshape(*x.shape[:-1], gate.shape[0])
+
+
+def _words(w: QTensor) -> Tensor:
     # .contiguous() on a bitcast of contiguous storage is a view; without it tinygrad copies
-    words = w.data.flatten().bitcast(word).contiguous()
-    return Tensor.custom_kernel(out, words, xq, xd, xs, *residual, fxn=kernel)[0]
+    return w.data.flatten().bitcast(_DOTS[w.type][1]).contiguous()
 
 
 # ******** attention: one query token against the KV cache ********
@@ -274,7 +309,6 @@ KEYS = 64  # keys per chunk
 PARTIALS = 48  # most blocks per kv head; longer caches loop over several chunks per block
 SHARED = 49152  # bytes of shared memory a block may use without opting in to more
 PAD = 8  # halves of shared memory after each warp's outputs, see _attention_partial_kernel
-LOG2E = math.log2(math.e)
 
 
 def _vector(ptr: UOp, lanes: int) -> tuple[UOp, ...]:
