@@ -37,3 +37,11 @@ def llama_cpp() -> Path:
     if not (path := os.environ.get("LLAMA_CPP")):
         pytest.skip("needs LLAMA_CPP=path/to/llama.cpp/build/bin")
     return Path(path).expanduser()
+
+
+@pytest.fixture(scope="session")
+def wikitext() -> Path:
+    # wikitext-2's wiki.test.raw, the usual text for perplexity
+    if not (path := os.environ.get("WIKITEXT")):
+        pytest.skip("needs WIKITEXT=path/to/wiki.test.raw")
+    return Path(path).expanduser()
