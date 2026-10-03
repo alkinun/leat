@@ -1,5 +1,6 @@
 """Decoder-only transformer, configured entirely from GGUF metadata."""
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -9,13 +10,12 @@ from leat import ops
 from leat.quant import QTensor
 
 CACHE_TILE = 256  # positions
-_LAYER = ("attn_norm", "attn_q", "attn_k", "attn_v", "attn_output", "ffn_norm")
+_LAYER = ("attn_norm", "attn_q", "attn_k", "attn_output", "ffn_norm")
 _MLP = ("ffn_gate", "ffn_up", "ffn_down")
-_EXPERTS = ("ffn_gate_inp", "ffn_gate_exps", "ffn_up_exps", "ffn_down_exps")  # router first
-_QK_NORM = ("attn_q_norm", "attn_k_norm")  # RMSNorm of each head of q and k, before RoPE
+_EXPERTS = ("ffn_gate_inp", "ffn_down_exps")  # the router, and the experts' down projections
 # the supported architectures, and whether their RoPE rotates dimension i with i + D/2, ggml's
 # "neox" mode, rather than adjacent pairs, its "normal" mode, as GGUF lays out llama's q and k
-_ROPE_HALVES = {"llama": False, "qwen3": True, "qwen3moe": True}
+_ROPE_HALVES = {"llama": False, "qwen3": True, "qwen3moe": True, "gemma4": True}
 
 
 @dataclass(frozen=True)
@@ -24,44 +24,66 @@ class Config:
     dim: int
     hidden_dim: int
     n_heads: int
-    n_kv_heads: int
-    head_dim: int
     vocab_size: int
     norm_eps: float
-    rope_theta: float
-    rope_halves: bool
     context_length: int
+    rope_halves: bool
+    # each layer's attention: kv heads, head size, how many positions back it sees (0 for all)
+    # and the base of its RoPE frequencies
+    kv_heads: tuple[int, ...]
+    head_dims: tuple[int, ...]
+    windows: tuple[int, ...]
+    rope_thetas: tuple[float, ...]
     experts: int = 0  # MLPs per layer of a mixture of experts, 0 for one MLP
     experts_used: int = 0  # experts each token takes
+    # Gemma 4: embeddings scaled by sqrt(dim), unit attention scale rather than 1/sqrt(head
+    # size), values normed like keys, GELU rather than SiLU gating its MLPs, and logits capped
+    gemma: bool = False
+    logit_cap: float = 0.0
 
     @staticmethod
     def from_gguf(metadata: dict[str, Any]) -> "Config":
         if (arch := metadata["general.architecture"]) not in _ROPE_HALVES:
             raise NotImplementedError(f"architecture {arch!r} is not supported")
         m = {k.removeprefix(f"{arch}."): v for k, v in metadata.items()}
-        n_heads = m["attention.head_count"]
+        n_layers, n_heads = m["block_count"], m["attention.head_count"]
+
+        def per_layer(value: Any) -> tuple:
+            return tuple(value) if isinstance(value, list) else (value,) * n_layers
+
+        # Gemma 4's sliding-window layers have their own head size and RoPE
+        sliding = per_layer(m.get("attention.sliding_window_pattern", False))
         head_dim = m.get("attention.key_length", m["embedding_length"] // n_heads)
-        if m.get("rope.dimension_count", head_dim) != head_dim:
+        rotated = m.get("rope.dimension_count", head_dim), m.get("rope.dimension_count_swa")
+        if rotated[0] != head_dim or rotated[1] not in (None, m.get("attention.key_length_swa")):
             raise NotImplementedError("partial rotary embeddings are not supported")
+        theta = m.get("rope.freq_base", 10000.0)
         return Config(
-            n_layers=m["block_count"],
+            n_layers=n_layers,
             dim=m["embedding_length"],
             hidden_dim=m["feed_forward_length"],
             n_heads=n_heads,
-            n_kv_heads=m.get("attention.head_count_kv", n_heads),
-            head_dim=head_dim,
             vocab_size=len(metadata["tokenizer.ggml.tokens"]),
             norm_eps=m["attention.layer_norm_rms_epsilon"],
-            rope_theta=m.get("rope.freq_base", 10000.0),
-            rope_halves=_ROPE_HALVES[arch],
             context_length=m["context_length"],
+            rope_halves=_ROPE_HALVES[arch],
+            kv_heads=per_layer(m.get("attention.head_count_kv", n_heads)),
+            head_dims=tuple(m["attention.key_length_swa"] if s else head_dim for s in sliding),
+            windows=tuple(m["attention.sliding_window"] if s else 0 for s in sliding),
+            rope_thetas=tuple(m["rope.freq_base_swa"] if s else theta for s in sliding),
             experts=m.get("expert_count", 0),
             experts_used=m.get("expert_used_count", 0),
+            gemma=arch == "gemma4",
+            logit_cap=m.get("final_logit_softcapping", 0.0),
         )
 
 
 class Transformer:
-    """Weights, RoPE tables and a KV cache of `slots` sequences of up to `max_context` tokens."""
+    """Weights, RoPE tables and a KV cache of `slots` sequences of up to `max_context` tokens.
+
+    Optional parts are used where the GGUF has their tensors: RMSNorms of q and k, of the
+    attention and MLP outputs, a shared MLP beside the experts, and a scale per layer output.
+    """
 
     def __init__(
         self, config: Config, weights: dict[str, QTensor], max_context: int, slots: int = 1
@@ -69,43 +91,62 @@ class Transformer:
         if not 0 < max_context <= config.context_length:
             raise ValueError(f"max_context must be in [1, {config.context_length}]")
         self.config, self.max_context = config, max_context
-        self.qk_norm = "blk.0.attn_q_norm.weight" in weights
-        names = _LAYER + (_EXPERTS if config.experts else _MLP) + (_QK_NORM if self.qk_norm else ())
-        expected = [f"blk.{i}.{n}.weight" for i in range(config.n_layers) for n in names]
-        if missing := [name for name in expected if name not in weights]:
-            raise ValueError(f"missing {len(missing)} tensors, first: {missing[0]}")
-        self.layers = [
-            {n: weights[f"blk.{i}.{n}.weight"] for n in names} for i in range(config.n_layers)
+        # each layer's tensors by name, without "blk.{i}." and ".weight"
+        self.layers: list[dict[str, QTensor]] = [{} for _ in range(config.n_layers)]
+        for name, w in weights.items():
+            if name.startswith("blk."):
+                i, part = name.removeprefix("blk.").split(".", 1)
+                self.layers[int(i)][part.removesuffix(".weight")] = w
+        needed = _LAYER + (_EXPERTS if config.experts else _MLP)
+        missing = [
+            f"blk.{i}.{n}" for i, layer in enumerate(self.layers) for n in needed if n not in layer
         ]
-        self.norms = [
-            {n: w.dequant() for n, w in layer.items() if n.endswith("norm")}
-            for layer in self.layers
+        if missing:
+            raise ValueError(f"missing {len(missing)} tensors, first: {missing[0]}")
+        # norm weights and scales, decoded once
+        self.small = [
+            {n: w.dequant() for n, w in layer.items() if len(w.shape) == 1} for layer in self.layers
         ]
         self.embed = weights["token_embd.weight"]
         self.output = weights.get("output.weight", self.embed)  # tied embeddings when absent
         self.output_norm = weights["output_norm.weight"].dequant()
-        factors = (
-            None if "rope_freqs.weight" not in weights else weights["rope_freqs.weight"].dequant()
-        )
-        self.cos, self.sin = _rope_table(config, max_context, factors)
+        # RoPE tables by base and head size; rope_freqs, where there is one, divides the
+        # frequencies of the layers that see all positions: all of Llama 3.1's, few of Gemma 4's
+        factors = weights.get("rope_freqs.weight")
+        tables: dict[tuple, tuple[Tensor, Tensor]] = {}
+        self.rope: list[tuple[Tensor, Tensor]] = []
+        layers = zip(config.rope_thetas, config.head_dims, config.windows, strict=True)
+        for theta, dim, window in layers:
+            scaled = None if factors is None or window else factors.dequant()
+            if (key := (theta, dim, scaled is None)) not in tables:
+                tables[key] = _rope_table(theta, dim, max_context, scaled)
+            self.rope.append(tables[key])
         # whole tiles of positions, which the attention kernels need; the rest stay unused
         positions = -(-max_context // CACHE_TILE) * CACHE_TILE
-        shape = (2, slots, config.n_kv_heads, positions, config.head_dim)
         self.cache = [
-            Tensor.zeros(shape, dtype=dtypes.half).contiguous().realize()
-            for _ in range(config.n_layers)
+            Tensor.zeros(2, slots, kv_heads, positions, dim, dtype=dtypes.half)
+            .contiguous()
+            .realize()
+            for kv_heads, dim in zip(config.kv_heads, config.head_dims, strict=True)
         ]
 
     def __call__(self, tokens: Tensor, start_pos: int | UOp, slot: int | UOp = 0) -> Tensor:
         """Runs `tokens` (1, T) at positions `start_pos...` of cache slot `slot` and returns normed
         hidden states."""
         x = ops.embedding(tokens, self.embed)
+        if self.config.gemma:
+            x = x * math.sqrt(self.config.dim)
         for i in range(self.config.n_layers):
-            x = self._block(i, x, start_pos, slot)
+            x = self._feed_forward(i, self._attention(i, x, start_pos, slot))
+            if "layer_output_scale" in self.small[i]:
+                x = x * self.small[i]["layer_output_scale"]
         return ops.rms_norm(x, self.output_norm, self.config.norm_eps)
 
     def logits(self, hidden: Tensor) -> Tensor:
-        return ops.linear(hidden, self.output)
+        logits = ops.linear(hidden, self.output)
+        if cap := self.config.logit_cap:
+            logits = (logits / cap).tanh() * cap
+        return logits
 
     def copy(self, source: int | UOp, slot: int | UOp) -> None:
         """Copies the cache of slot `source` to slot `slot`."""
@@ -115,38 +156,68 @@ class Transformer:
             cache[:, slot : slot + 1].assign(cache[:, source : source + 1])
         Tensor.realize(*self.cache)
 
-    def _block(self, i: int, x: Tensor, start_pos: int | UOp, slot: int | UOp) -> Tensor:
-        c, w, norms = self.config, self.layers[i], self.norms[i]
+    def _attention(self, i: int, x: Tensor, start_pos: int | UOp, slot: int | UOp) -> Tensor:
+        # x + the attention block's output
+        c, w, s = self.config, self.layers[i], self.small[i]
         B, T, _ = x.shape
-        q, k, v = ops.linears(
-            x, w["attn_q"], w["attn_k"], w["attn_v"], norm=(norms["attn_norm"], c.norm_eps)
-        )
-        q = q.reshape(B, T, c.n_heads, c.head_dim)
-        k = k.reshape(B, T, c.n_kv_heads, c.head_dim)
-        if self.qk_norm:
-            q = ops.rms_norm(q, norms["attn_q_norm"], c.norm_eps)
-            k = ops.rms_norm(k, norms["attn_k_norm"], c.norm_eps)
-        q, k = q.transpose(1, 2), k.transpose(1, 2)
-        v = v.reshape(B, T, c.n_kv_heads, c.head_dim).transpose(1, 2)
-        cos, sin = self.cos[start_pos : start_pos + T], self.sin[start_pos : start_pos + T]
-        q, k = ops.rope(q, cos, sin, c.rope_halves), ops.rope(k, cos, sin, c.rope_halves)
+        kv_heads, dim, eps = c.kv_heads[i], c.head_dims[i], c.norm_eps
+        # Gemma 4's full-attention layers have no values of their own: the keys are, before norm
+        proj = [w["attn_q"], w["attn_k"]] + ([w["attn_v"]] if "attn_v" in w else [])
+        q, k, *values = ops.linears(x, *proj, norm=(s["attn_norm"], eps))
+        q, k = q.reshape(B, T, c.n_heads, dim), k.reshape(B, T, kv_heads, dim)
+        v = (values[0] if values else k).reshape(B, T, kv_heads, dim)
+        if "attn_q_norm" in s:
+            q, k = ops.rms_norm(q, s["attn_q_norm"], eps), ops.rms_norm(k, s["attn_k_norm"], eps)
+        if c.gemma:
+            v = ops.rms_norm(v, None, eps)
+        cos, sin = (table[start_pos : start_pos + T] for table in self.rope[i])
+        q, k = (ops.rope(t.transpose(1, 2), cos, sin, c.rope_halves) for t in (q, k))
 
         cache = self.cache[i]
-        new = Tensor.stack(k, v).cast(cache.dtype)
+        new = Tensor.stack(k, v.transpose(1, 2)).cast(cache.dtype)
         cache[:, slot : slot + 1, :, start_pos : start_pos + T].assign(new)
-        x = ops.linear(ops.attention(q, cache, slot, start_pos), w["attn_output"], residual=x)
+        scale = 1.0 if c.gemma else 1 / math.sqrt(dim)
+        out = ops.attention(q, cache, slot, start_pos, scale, c.windows[i])
+        if "post_attention_norm" in s:
+            return x + ops.rms_norm(
+                ops.linear(out, w["attn_output"]), s["post_attention_norm"], eps
+            )
+        return ops.linear(out, w["attn_output"], residual=x)
 
-        norm = (norms["ffn_norm"], c.norm_eps)
-        if c.experts:
-            router, gate, up, down = (w[n] for n in _EXPERTS)
-            return ops.mixture(x, router, gate, up, down, c.experts_used, norm)
-        return ops.feed_forward(x, w["ffn_gate"], w["ffn_up"], w["ffn_down"], norm=norm)
+    def _feed_forward(self, i: int, x: Tensor) -> Tensor:
+        # x + the MLP block's output: an MLP, a mixture of experts, or as in Gemma 4 both, each
+        # output normed and then their sum
+        c, w, s = self.config, self.layers[i], self.small[i]
+        norm, eps = (s["ffn_norm"], c.norm_eps), c.norm_eps
+        mlp = (w["ffn_gate"], w["ffn_up"], w["ffn_down"]) if "ffn_gate" in w else None
+        if mlp and not c.experts:
+            if "post_ffw_norm" not in s:
+                return ops.feed_forward(x, *mlp, norm)
+            out = ops.feed_forward(x, *mlp, norm, c.gemma, residual=False)
+            return x + ops.rms_norm(out, s["post_ffw_norm"], eps)
+        # Gemma 4 routes from x normed with a weight of its own, over sqrt(dim)
+        router = s["ffn_gate_inp.scale"] / math.sqrt(c.dim) if c.gemma else s["ffn_norm"]
+        scores = ops.linear(ops.rms_norm(x, router, eps), w["ffn_gate_inp"])
+        # stacked gate and up matrices, or one stack of both, the gate's rows first
+        gate, up = (w["ffn_gate_up_exps"], None) if "ffn_gate_up_exps" in w else (
+            w["ffn_gate_exps"], w["ffn_up_exps"])  # fmt: skip
+        experts = (scores, gate, up, w["ffn_down_exps"], c.experts_used)
+        if not mlp:
+            return ops.mixture(x, *experts, norm)
+        scales = s["ffn_down_exps.scale"]
+        mixed = ops.mixture(x, *experts, (s["pre_ffw_norm_2"], eps), c.gemma, scales, False)
+        out = ops.feed_forward(x, *mlp, norm, c.gemma, residual=False)
+        both = ops.rms_norm(out, s["post_ffw_norm_1"], eps) + ops.rms_norm(
+            mixed, s["post_ffw_norm_2"], eps
+        )
+        return x + ops.rms_norm(both, s["post_ffw_norm"], eps)
 
 
-def _rope_table(config: Config, length: int, factors: Tensor | None) -> tuple[Tensor, Tensor]:
+def _rope_table(
+    theta: float, dim: int, length: int, factors: Tensor | None
+) -> tuple[Tensor, Tensor]:
     # angle = pos * theta^(-2i/d) / factor_i in f32, the order llama.cpp's rope kernels use
-    half = config.head_dim // 2
-    freqs = Tensor([config.rope_theta ** (-2 * i / config.head_dim) for i in range(half)])
+    freqs = Tensor([theta ** (-2 * i / dim) for i in range(dim // 2)])
     angles = Tensor.arange(length).float().unsqueeze(1) * freqs.unsqueeze(0)
     if factors is not None:
         angles = angles / factors.unsqueeze(0)

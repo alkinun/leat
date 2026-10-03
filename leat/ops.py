@@ -3,6 +3,7 @@
 Ops dispatch to hand-written kernels where one applies; LEAT_KERNELS=ref turns them off.
 """
 
+import math
 import os
 
 from tinygrad import Tensor, UOp, dtypes
@@ -35,41 +36,47 @@ def linears(
 
 
 def feed_forward(
-    x: Tensor, gate: QTensor, up: QTensor, down: QTensor, norm: tuple[Tensor, float]
-) -> Tensor:
-    # x + (silu(n @ gate.T) * (n @ up.T)) @ down.T for n = rms_norm(x, *norm): llama's MLP with
-    # its residual. Kernels take gate and up together where they share a type and shape; one
-    # token takes the matrix-vector kernels, though the matrix kernels would also accept it.
-    paired = gate.type == up.type and gate.shape == up.shape
-    if _fast() and paired and nv.supports_matvec(x, gate):
+    x: Tensor, gate: QTensor, up: QTensor, down: QTensor, norm: tuple[Tensor, float],
+    gelu: bool = False, residual: bool = True,
+) -> Tensor:  # fmt: skip
+    # x + (act(n @ gate.T) * (n @ up.T)) @ down.T for n = rms_norm(x, *norm) and act SiLU, or GELU
+    # if gelu; without x if not residual. Kernels take gate and up together where they share a
+    # type and shape; one token takes the matrix-vector kernels, though the matrix kernels would
+    # also accept it.
+    paired = _fast() and gate.type == up.type and gate.shape == up.shape and not gelu
+    if paired and nv.supports_matvec(x, gate):
         hidden = nv.swiglu(x, gate, up, norm)
-    elif _fast() and paired and all(nv.supports_matmul(x, w) for w in (gate, up, down)):
+    elif paired and residual and all(nv.supports_matmul(x, w) for w in (gate, up, down)):
         return nv.feed_forward(x, gate, up, down, norm)
     else:
         g, u = linears(x, gate, up, norm=norm)
-        hidden = g.silu() * u
-    return linear(hidden, down, residual=x)
+        hidden = (g.gelu() if gelu else g.silu()) * u
+    return linear(hidden, down, residual=x if residual else None)
 
 
 def mixture(
-    x: Tensor, router: QTensor, gate: QTensor, up: QTensor, down: QTensor, used: int,
-    norm: tuple[Tensor, float],
+    x: Tensor, scores: Tensor, gate: QTensor, up: QTensor | None, down: QTensor, used: int,
+    norm: tuple[Tensor, float], gelu: bool = False, scales: Tensor | None = None,
+    residual: bool = True,
 ) -> Tensor:  # fmt: skip
-    # x + a mixture of experts for n = rms_norm(x, *norm): each token takes the `used` experts
-    # whose MLPs the router scores highest, weighted by the softmax of their scores. Experts are
-    # stacked matrices (experts, rows, cols); only the chosen ones are read.
-    n = rms_norm(x, *norm)
-    scores = linear(n, router)
-    if _fast() and nv.supports_mixture(x, gate, up, down):
+    # x + a mixture of experts for n = rms_norm(x, *norm), as feed_forward, given the router's
+    # scores (B, T, experts): each token takes the MLPs of the `used` experts it scores highest,
+    # weighted by the softmax of their scores and by each expert's scale if given. Experts are
+    # stacked matrices (experts, rows, cols); where up is None, gate stacks both, the gate's rows
+    # first in each. Only the chosen experts are read.
+    kernels = _fast() and not gelu and scales is None and residual
+    if kernels and up is not None and nv.supports_mixture(x, gate, up, down):
         return nv.mixture(x, scores, gate, up, down, used, norm)
-    scores, experts = scores.topk(used)
+    top, experts = scores.topk(used)
+    weights = top.softmax(-1) if scales is None else top.softmax(-1) * scales[experts]
     B, T, dim = x.shape
     ids = experts.flatten()
-    n = n.unsqueeze(2).expand(B, T, used, dim).reshape(-1, 1, dim)
-    g, u = (n @ _take(w, ids).dequant().transpose(1, 2) for w in (gate, up))
-    out = (g.silu() * u) @ _take(down, ids).dequant().transpose(1, 2)
-    weights = scores.softmax(-1).reshape(B, T, used, 1)
-    return x + (out.reshape(B, T, used, dim) * weights).sum(2)
+    n = rms_norm(x, *norm).unsqueeze(2).expand(B, T, used, dim).reshape(-1, 1, dim)
+    g = n @ _take(gate, ids).dequant().transpose(1, 2)
+    g, u = g.chunk(2, dim=-1) if up is None else (g, n @ _take(up, ids).dequant().transpose(1, 2))
+    out = ((g.gelu() if gelu else g.silu()) * u) @ _take(down, ids).dequant().transpose(1, 2)
+    mixed = (out.reshape(B, T, used, dim) * weights.reshape(B, T, used, 1)).sum(2)
+    return x + mixed if residual else mixed
 
 
 def _take(w: QTensor, index: Tensor) -> QTensor:
@@ -97,8 +104,9 @@ def embedding(tokens: Tensor, w: QTensor) -> Tensor:
     return out.shrink_to((*shape, dim))
 
 
-def rms_norm(x: Tensor, weight: Tensor, eps: float) -> Tensor:
-    return x * (x.square().mean(-1, keepdim=True) + eps).rsqrt() * weight
+def rms_norm(x: Tensor, weight: Tensor | None, eps: float) -> Tensor:
+    x = x * (x.square().mean(-1, keepdim=True) + eps).rsqrt()
+    return x if weight is None else x * weight
 
 
 def rope(x: Tensor, cos: Tensor, sin: Tensor, halves: bool = False) -> Tensor:
@@ -112,20 +120,26 @@ def rope(x: Tensor, cos: Tensor, sin: Tensor, halves: bool = False) -> Tensor:
     return Tensor.stack(x0 * cos - x1 * sin, x0 * sin + x1 * cos, dim=-1).flatten(-2)
 
 
-def attention(q: Tensor, cache: Tensor, slot: int | UOp, start_pos: int | UOp) -> Tensor:
+def attention(
+    q: Tensor, cache: Tensor, slot: int | UOp, start_pos: int | UOp, scale: float, window: int = 0
+) -> Tensor:
     # q: (1, H, T, D) at positions start_pos.. ; cache: (2, slots, KV_H, positions, D), causal
-    # over the slot's positions. Returns (1, T, H * D), the layout the output projection reads.
+    # over the slot's positions, and over only the last `window` of them if given, with scores
+    # q.k * scale. Returns (1, T, H * D), the layout the output projection reads.
     B, H, T, D = q.shape
-    if _fast() and nv.supports_attention(q, cache):
+    if _fast() and not window and nv.supports_attention(q, cache):
         # one token: the heads already follow each other; a transpose here would cost a copy
-        return nv.attention(q, cache, slot, start_pos + T).reshape(B, T, H * D)
-    if _fast() and nv.supports_flash_attention(q, cache):
-        return nv.flash_attention(q, cache, slot, start_pos)
+        return nv.attention(q, cache, slot, start_pos + T, scale).reshape(B, T, H * D)
+    if _fast() and not window and nv.supports_flash_attention(q, cache):
+        return nv.flash_attention(q, cache, slot, start_pos, scale)
     k, v = (cache[i, slot : slot + 1, :, : start_pos + T].cast(q.dtype) for i in (0, 1))
     mask = None
-    if not (isinstance(T, int) and T == 1):
-        mask = Tensor.full((1, 1, T, k.shape[2]), float("-inf"), dtype=q.dtype).triu(start_pos + 1)
-    out = q.scaled_dot_product_attention(k, v, mask, enable_gqa=True)
+    if window or not (isinstance(T, int) and T == 1):
+        full = Tensor.full((1, 1, T, k.shape[2]), float("-inf"), dtype=q.dtype)
+        mask = full.triu(start_pos + 1)  # later positions
+        if window:  # and positions `window` or more back
+            mask = mask + full.tril(start_pos - window)
+    out = (q * (scale * math.sqrt(D))).scaled_dot_product_attention(k, v, mask, enable_gqa=True)
     return out.transpose(1, 2).reshape(B, T, H * D)
 
 

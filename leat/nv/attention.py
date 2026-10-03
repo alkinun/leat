@@ -34,8 +34,9 @@ PAD = 8  # halves of shared memory after each warp's outputs, see _attention_par
 
 @functools.cache
 def _attention_partial_kernel(
-    out: UOp, stats: UOp, q: UOp, cache: UOp, slot: int | UOp, length: int | UOp, waves: int
-) -> UOp:
+    out: UOp, stats: UOp, q: UOp, cache: UOp, slot: int | UOp, length: int | UOp, waves: int,
+    scale: float,
+) -> UOp:  # fmt: skip
     # A block takes one kv head of the slot and every PARTIALS-th chunk of its keys, for all query
     # heads of the GQA group. Each of `waves` warps scores KEYS / waves keys of a chunk; lanes hold
     # dim / 32 dimensions. The warps then merge through shared memory into one partial per block:
@@ -59,7 +60,7 @@ def _attention_partial_kernel(
         v = load_vector(cache[1, slot, head, key, lane * per_lane], per_lane)
         values.append([valid[j].where(x, zero) for x in v])
         dots = [warp_sum(sum((a * b for a, b in zip(qh, k, strict=True)), zero)) for qh in qs]
-        scores.append([valid[j].where(d / math.sqrt(dim), -1e30) for d in dots])
+        scores.append([valid[j].where(d * scale, -1e30) for d in dots])
     # a finite initial max keeps fully masked warps from computing exp(-inf - -inf)
     acc = register((group, per_lane), 0.0)
     mx, total = register((group,), -1e30), register((group,), 0.0)
@@ -68,9 +69,9 @@ def _attention_partial_kernel(
         functools.reduce(UOp.maximum, (sc[h] for sc in scores), prev_max[h].load())
         for h in range(group)
     ]
-    scale = [((prev_max[h].load() - new_max[h]) * LOG2E).exp2() for h in range(group)]
-    accs = [[scale[h] * prev_acc[h, i].load() for i in range(per_lane)] for h in range(group)]
-    sums = [scale[h] * prev_sum[h].load() for h in range(group)]
+    rescale = [((prev_max[h].load() - new_max[h]) * LOG2E).exp2() for h in range(group)]
+    accs = [[rescale[h] * prev_acc[h, i].load() for i in range(per_lane)] for h in range(group)]
+    sums = [rescale[h] * prev_sum[h].load() for h in range(group)]
     for j in range(per_wave):
         for h in range(group):
             weight = valid[j].where(((scores[j][h] - new_max[h]) * LOG2E).exp2(), zero)
@@ -163,9 +164,9 @@ def supports_attention(q: Tensor, cache: Tensor) -> bool:
     return batch == 1 and tokens == 1 and dim % 64 == 0 and n % KEYS == 0 and fits
 
 
-def attention(q: Tensor, cache: Tensor, slot: int | UOp, length: int | UOp) -> Tensor:
+def attention(q: Tensor, cache: Tensor, slot: int | UOp, length: int | UOp, scale: float) -> Tensor:
     """Attention of one query token (1, H, 1, D) over the first `length` positions of a slot of
-    the cache (2, slots, KV_H, positions, D)."""
+    the cache (2, slots, KV_H, positions, D), with scores q.k * scale."""
     heads, dim, group = q.shape[1], cache.shape[4], q.shape[1] // cache.shape[2]
     q, slot = carry(q.float().contiguous(), slot)
     cache, length = carry(cache, length)
@@ -175,7 +176,9 @@ def attention(q: Tensor, cache: Tensor, slot: int | UOp, length: int | UOp) -> T
     chunks = min(PARTIALS, int(cache.shape[3]) // KEYS)
     partial = Tensor.empty(heads, chunks, dim, dtype=dtypes.float32, device=q.device)
     stats = Tensor.empty(heads, chunks, 2, dtype=dtypes.float32, device=q.device)
-    fxn = functools.partial(_attention_partial_kernel, slot=slot, length=length, waves=waves)
+    fxn = functools.partial(
+        _attention_partial_kernel, slot=slot, length=length, waves=waves, scale=scale
+    )
     outs = Tensor.custom_kernel(partial, stats, q, cache, fxn=fxn)
     live = at_most((length + KEYS - 1) // KEYS, chunks)
     out = Tensor.empty(1, heads, 1, dim, dtype=dtypes.float32, device=q.device)
@@ -338,13 +341,16 @@ def supports_flash_attention(q: Tensor, cache: Tensor) -> bool:
     return batch == 1 and fits
 
 
-def flash_attention(q: Tensor, cache: Tensor, slot: int | UOp, start_pos: int | UOp) -> Tensor:
+def flash_attention(
+    q: Tensor, cache: Tensor, slot: int | UOp, start_pos: int | UOp, scale: float
+) -> Tensor:
     """Causal attention of query tokens (1, H, T, D) at positions start_pos.. over a slot of the
-    cache, which already holds their keys and values. Returns (1, T, H * D)."""
+    cache, which already holds their keys and values, with scores q.k * scale. Returns (1, T,
+    H * D)."""
     _, heads, tokens, dim = q.shape
     count = -(-q.max_shape[2] // QUERIES) * QUERIES
     # in the layout of the projection that made q, where scaling and rounding it is a plain copy
-    q = (q.transpose(1, 2).reshape(tokens, heads, dim).float() * (LOG2E / math.sqrt(dim))).half()
+    q = (q.transpose(1, 2).reshape(tokens, heads, dim).float() * (LOG2E * scale)).half()
     q = q.pad_to((count, heads, dim)).contiguous()
     q, start = carry(q, start_pos)
     cache, length = carry(cache, tokens)

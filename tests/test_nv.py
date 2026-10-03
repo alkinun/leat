@@ -305,7 +305,7 @@ def test_attention(n, length, symbolic):
     valid = UOp.variable("start_pos", 0, n - 1).bind(length - 1) + 1 if symbolic else length
     q_t, cache_t = Tensor(q).realize(), Tensor(cache).realize()  # the model's cache is a buffer
     assert nv.supports_attention(q_t, cache_t)
-    got = nv.attention(q_t, cache_t, slot(symbolic), valid).numpy()[0, :, 0]
+    got = nv.attention(q_t, cache_t, slot(symbolic), valid, 128**-0.5).numpy()[0, :, 0]
     expected = reference_attention(q[0], cache, length - 1)[0]
     np.testing.assert_allclose(got, expected, rtol=2e-3, atol=2e-3)
 
@@ -323,7 +323,7 @@ def test_flash_attention(tokens, start, symbolic):
     else:
         pos, q_t = start, q_t[:, :, :tokens]
     assert nv.supports_flash_attention(q_t, cache_t)
-    got = nv.flash_attention(q_t, cache_t, slot(symbolic), pos)
+    got = nv.flash_attention(q_t, cache_t, slot(symbolic), pos, 128**-0.5)
     got = got.pad_to((1, 512, 32 * 128)).numpy()[0, :tokens]
     expected = reference_attention(q[0, :, :tokens], cache, start)
     # queries and weights are rounded to f16 for the tensor cores
