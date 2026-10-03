@@ -16,7 +16,6 @@ from tinygrad.uop.ops import AxisType, KernelInfo, Ops
 from leat.quant import GGMLType, QTensor
 
 WARP = 32
-ROWS = 4  # output rows per block, one warp each
 GROUP = 32  # activations per int8 scale
 
 
@@ -142,17 +141,15 @@ def _k_scale_min(w: UOp, base: UOp, sub: UOp) -> tuple[UOp, UOp]:
 
 
 def _rows(out: UOp, cols: int, name: str, dot: Callable[[UOp, UOp], UOp]) -> UOp:
-    # one warp per output row, ROWS rows per block. Lanes take units of 64 weights in turn,
-    # dot(row, unit) gives a unit's contribution, and the warp sums them.
+    # one block of one warp per output row: lanes take units of 64 weights in turn, dot(row, unit)
+    # gives a unit's contribution, and the warp sums them. Grouping rows into wider blocks measured
+    # slower on the 3090, by up to a quarter for Q6_K.
     rows = out.shape[0]
-    blk = UOp.range(rows // ROWS, 0, AxisType.GLOBAL)
-    lane = _lane()
-    wave = UOp.range(ROWS, 2, AxisType.LOCAL)
-    row = blk * ROWS + wave
+    row, lane = UOp.range(rows, 0, AxisType.GLOBAL), _lane()
     units = (dot(row, it * WARP + lane) for it in range(cols // 64 // WARP))
     store = out[row.valid(lane.eq(0))].store(_warp_sum(sum(units, UOp.const(0.0, dtypes.float32))))
     info = KernelInfo(name=f"{name}_{rows}_{cols}", opts_to_apply=())
-    return store.end(blk, wave, lane).sink(arg=info)
+    return store.end(row, lane).sink(arg=info)
 
 
 @functools.cache
@@ -234,14 +231,9 @@ def supports(x: Tensor, w: QTensor) -> bool:
     if not isinstance(x.device, str) or x.device.split(":")[0] not in ("NV", "CUDA"):
         return False
     # one token, and whole warps: each lane takes pairs of sub-blocks, 32 lanes per row
-    rows, cols = w.shape
+    cols = w.shape[1]
     single = isinstance(x.numel(), int) and x.numel() == cols
-    fits = (
-        isinstance(cols, int)
-        and cols % (64 * WARP) == 0  # also a multiple of NORM_THREADS
-        and isinstance(rows, int)
-        and rows % ROWS == 0
-    )
+    fits = isinstance(cols, int) and cols % (64 * WARP) == 0  # also a multiple of NORM_THREADS
     return w.type in _KERNELS and single and fits
 
 
