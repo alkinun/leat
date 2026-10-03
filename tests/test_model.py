@@ -126,9 +126,14 @@ def test_one_generation_at_a_time(tiny_model):
     next(engine.generate(PROMPT, 6))
 
 
-def test_sampling_varies(tiny_model):
-    # each generation draws new random numbers, though the graphs are captured on their first call
+def test_seeded_sampling(tiny_model):
+    # a seed repeats a sampled generation, whatever part of its prompt was cached; graphs captured
+    # on the first call draw anew in every generation without one
     engine = Engine(tiny_model[0], max_context=CONTEXT, prefill_chunk=8)
+    first = list(engine.generate(PROMPT, 8, temperature=1.0, seed=1))
+    assert list(engine.generate(PROMPT, 8, temperature=1.0, seed=1)) == first  # prefix cached
+    engine.reset()
+    assert list(engine.generate(PROMPT, 8, temperature=1.0, seed=1)) == first
     assert len({tuple(engine.generate(PROMPT, 8, temperature=1.0)) for _ in range(3)}) == 3
 
 

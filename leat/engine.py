@@ -1,6 +1,7 @@
 """Generation: chunked prefill and token-by-token decode, each replayed from one compiled graph."""
 
 import itertools
+import random
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -38,9 +39,7 @@ class Engine:
         self._source = UOp.variable("source", 0, slots - 1)
         self._prefix = UOp.variable("prefix", 1, max_context - 1)
         # TinyJit runs a function once as is, then captures it on the second call: capture on the
-        # first, a fresh process's slow call for each graph. The device's random state must exist
-        # by then, or the graph would create it anew every call.
-        Tensor.rand(1).realize()  # on the default device, which holds the model
+        # first, a fresh process's slow call for each graph
         self._prefill, self._decode = TinyJit(self._step), TinyJit(self._step)
         self._copy = TinyJit(self.model.copy)
         self._prefill.cnt = self._decode.cnt = self._copy.cnt = 1
@@ -50,11 +49,17 @@ class Engine:
         self._generating = False
 
     def generate(
-        self, prompt: list[int], max_tokens: int, temperature: float = 0.0, ignore_eog: bool = False
+        self,
+        prompt: list[int],
+        max_tokens: int,
+        temperature: float = 0.0,
+        seed: int | None = None,
+        ignore_eog: bool = False,
     ) -> Iterator[int]:
         """Yields up to `max_tokens` ids; stops early at end of generation or the context limit.
 
-        One generation runs at a time: exhaust or close one before starting the next.
+        Sampling is greedy at temperature 0; above, a `seed` makes it repeatable. One generation
+        runs at a time: exhaust or close one before starting the next.
         """
         if max_tokens < 1:
             raise ValueError(f"max_tokens must be at least 1, got {max_tokens}")
@@ -67,16 +72,18 @@ class Engine:
             raise RuntimeError("a generation is unfinished: exhaust or close it first")
         slot = self._claim(prompt)
         cached = self._cached[slot]  # the prompt's prefix the slot holds, kept up to date
+        seed = random.getrandbits(32) if seed is None else seed % 2**32
         self._generating = True
         try:
             pos, slot_var = len(cached), self._slot.bind(slot)
             temp = Tensor([temperature], dtype=dtypes.float32)
+            seeds = Tensor([seed], dtype=dtypes.uint32)
             padded = Tensor([prompt + [0] * (self.max_context - len(prompt))], dtype=dtypes.int32)
             while pos < len(prompt):
                 n = min(self.prefill_chunk, len(prompt) - pos)
                 start, length = self._pos.bind(pos), self._len.bind(n)
                 chunk = padded[:, start : start + length]
-                token = self._prefill(chunk, slot_var, start, temp)
+                token = self._prefill(chunk, slot_var, start, temp, seeds)
                 pos += n
             cached += prompt[len(cached) :]
             for remaining in reversed(range(max_tokens)):
@@ -84,7 +91,7 @@ class Engine:
                 eog = t in self.tokenizer.eog_ids and not ignore_eog
                 if not remaining or eog or pos >= self.max_context:
                     return
-                token = self._decode(token, slot_var, self._pos.bind(pos), temp)
+                token = self._decode(token, slot_var, self._pos.bind(pos), temp, seeds)
                 cached.append(t)
                 pos += 1
         finally:
@@ -111,9 +118,12 @@ class Engine:
         self._used[slot] = next(self._clock)
         return slot
 
-    def _step(self, tokens: Tensor, slot: UOp, start_pos: UOp, temperature: Tensor) -> Tensor:
+    def _step(
+        self, tokens: Tensor, slot: UOp, start_pos: UOp, temperature: Tensor, seed: Tensor
+    ) -> Tensor:
         hidden = self.model(tokens, start_pos, slot)
-        return sample(self.model.logits(hidden[:, -1, :]), temperature).realize()
+        logits = self.model.logits(hidden[:, -1, :])
+        return sample(logits, temperature, seed, start_pos + tokens.shape[1]).realize()
 
 
 def _shared(prompt: list[int], cached: list[int]) -> int:
