@@ -166,16 +166,20 @@ class Transformer:
         q, k, *values = ops.linears(x, *proj, norm=(s["attn_norm"], eps))
         q, k = q.reshape(B, T, c.n_heads, dim), k.reshape(B, T, kv_heads, dim)
         v = (values[0] if values else k).reshape(B, T, kv_heads, dim)
-        if "attn_q_norm" in s:
-            q, k = ops.rms_norm(q, s["attn_q_norm"], eps), ops.rms_norm(k, s["attn_k_norm"], eps)
-        if c.gemma:
-            v = ops.rms_norm(v, None, eps)
-        cos, sin = (table[start_pos : start_pos + T] for table in self.rope[i])
-        q, k = (ops.rope(t.transpose(1, 2), cos, sin, c.rope_halves) for t in (q, k))
-
-        cache = self.cache[i]
-        new = Tensor.stack(k, v.transpose(1, 2)).cast(cache.dtype)
-        cache[:, slot : slot + 1, :, start_pos : start_pos + T].assign(new)
+        norms = (s["attn_q_norm"], s["attn_k_norm"]) if "attn_q_norm" in s else None
+        q, cache = ops.rotate(
+            q,
+            k,
+            v,
+            self.cache[i],
+            slot,
+            start_pos,
+            self.rope[i],
+            c.rope_halves,
+            norms,
+            c.gemma,
+            eps,
+        )
         scale = 1.0 if c.gemma else 1 / math.sqrt(dim)
         out = ops.attention(q, cache, slot, start_pos, scale, c.windows[i])
         if "post_attention_norm" in s:

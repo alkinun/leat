@@ -383,3 +383,86 @@ def flash_attention(
     )
     out = Tensor.custom_kernel(out, q, cache, fxn=fxn)[0]
     return out[:tokens].reshape(1, tokens, heads * dim)
+
+
+# ******** one token's queries, keys and values: norms, RoPE, and the cache ********
+
+
+@functools.cache
+def _rotate_kernel(
+    out: UOp, cache: UOp, q: UOp, k: UOp, v: UOp, cos: UOp, sin: UOp, *norms: UOp,
+    slot: int | UOp, pos: int | UOp, halves: bool, v_norm: bool, eps: float,
+) -> UOp:  # fmt: skip
+    # A warp per head of q, then of k and its v. Each head of q and k is normed with its weight,
+    # if norms holds them, and of v without, if v_norm; q and k are rotated, q into out and k into
+    # the cache with v. Lanes take pairs of dimensions that rotate together: i and i + dim / 2, or
+    # adjacent ones, each pair i turning by angle cos[pos, i], sin[pos, i].
+    _, slots, kv_heads, positions, dim = (int(d) for d in cache.shape)
+    heads, half = int(out.shape[0]) // dim, dim // 2
+    head, lane = UOp.range(heads + kv_heads, 0, AxisType.GLOBAL), lane_range()
+    is_q, is_kv, kv = head < heads, head >= heads, head - heads
+    zero = UOp.const(0.0, dtypes.float32)
+    pairs = [lane + WARP * m for m in range(half // WARP)]
+    dims = [(i, i + half) if halves else (2 * i, 2 * i + 1) for i in pairs]
+
+    def load(d: UOp) -> UOp:  # dimension d of the warp's head of q or k
+        return q[(head * dim + d).valid(is_q)].load() + k[(kv * dim + d).valid(is_kv)].load()
+
+    def normed(values: list[UOp], weight: list[UOp] | None) -> list[UOp]:
+        inv = (warp_sum(sum((x * x for x in values), zero)) / dim + eps).rsqrt()
+        return [
+            x * inv * (1.0 if weight is None else w)
+            for x, w in zip(values, weight or values, strict=True)
+        ]
+
+    def stored(kind: int, d: UOp) -> UOp:  # where dimension d of the warp's key or value goes
+        at = (((kind * slots + slot) * kv_heads + kv) * positions + pos) * dim + d
+        return cache.flatten()[at.valid(is_kv)]
+
+    x = [load(d) for pair in dims for d in pair]
+    if norms:
+        x = normed(
+            x, [is_q.where(norms[0][d].load(), norms[1][d].load()) for pair in dims for d in pair]
+        )
+    stores = []
+    for n, ((d0, d1), i) in enumerate(zip(dims, pairs, strict=True)):
+        c, s = cos[pos, i].load(), sin[pos, i].load()
+        x0, x1 = x[2 * n], x[2 * n + 1]
+        for d, value in ((d0, x0 * c - x1 * s), (d1, x0 * s + x1 * c)):
+            stores.append(out[(head * dim + d).valid(is_q)].store(value))
+            stores.append(stored(0, d).store(value.cast(dtypes.half)))
+    values = [v[(kv * dim + d).valid(is_kv)].load() for pair in dims for d in pair]
+    if v_norm:
+        values = normed(values, None)
+    for value, d in zip(values, (d for pair in dims for d in pair), strict=True):
+        stores.append(stored(1, d).store(value.cast(dtypes.half)))
+    info = KernelInfo(name="rotate", opts_to_apply=())
+    return UOp.group(*stores).end(head, lane).sink(arg=info)
+
+
+def supports_rotate(q: Tensor, cache: Tensor) -> bool:
+    # one token, and whole warps of pairs of dimensions
+    one = isinstance(q.numel(), int) and q.numel() == q.shape[-2] * q.shape[-1]
+    return on_nvidia(q) and one and int(cache.shape[4]) % (2 * WARP) == 0
+
+
+def rotate(
+    q: Tensor, k: Tensor, v: Tensor, cache: Tensor, slot: int | UOp, start_pos: int | UOp,
+    rope: tuple[Tensor, Tensor], halves: bool, norms: tuple[Tensor, Tensor] | None,
+    v_norm: bool, eps: float,
+) -> tuple[Tensor, Tensor]:  # fmt: skip
+    """For one token's q (1, 1, H, D), k and v (1, 1, KV_H, D): norms each head of q and k with
+    its weight, if given, and of v without, if v_norm; rotates q and k by RoPE's tables at
+    start_pos, and stores k and v at start_pos of a slot of the cache. Returns q (1, H, 1, D) and
+    the cache."""
+    heads, dim = q.shape[-2], q.shape[-1]
+    out = Tensor.empty(heads * dim, dtype=dtypes.float32, device=q.device)
+    q, k, v = (t.reshape(-1).float().contiguous() for t in (q, k, v))
+    q, pos = carry(q, start_pos)
+    k, slot = carry(k, slot)
+    weights = () if norms is None else tuple(w.float().contiguous() for w in norms)
+    fxn = functools.partial(
+        _rotate_kernel, slot=slot, pos=pos, halves=halves, v_norm=v_norm, eps=eps
+    )
+    out, cache = Tensor.custom_kernel(out, cache, q, k, v, *rope, *weights, fxn=fxn)[:2]
+    return out.reshape(1, heads, 1, dim), cache

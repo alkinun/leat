@@ -4,7 +4,7 @@ import gguf
 import numpy as np
 import pytest
 from gguf.quants import dequantize
-from tinygrad import Tensor, UOp
+from tinygrad import Tensor, UOp, dtypes
 
 from leat import nv, ops
 from leat.quant import BLOCK, GGMLType, QTensor
@@ -438,6 +438,44 @@ def test_flash_attention_window(tokens, start, dim, window, symbolic):
     got = got.pad_to((1, 512, 16 * dim)).numpy()[0, :tokens]
     expected = reference_attention(q[0, :, :tokens], cache, start, window, 1.0)
     np.testing.assert_allclose(got.reshape(expected.shape), expected, rtol=3e-3, atol=3e-3)
+
+
+# llama: adjacent pairs; qwen3: halves and norms of q and k; gemma4: v normed too, two kv heads
+@pytest.mark.parametrize(
+    "halves, normed, v_norm, kv_heads",
+    [(False, False, False, 8), (True, True, False, 8), (True, True, True, 2)],
+)
+@pytest.mark.parametrize("symbolic", [False, True])
+def test_rotate(monkeypatch, halves, normed, v_norm, kv_heads, symbolic):
+    rng = np.random.default_rng(18)
+    dim, pos = 128, 300
+    q, k, v = (
+        Tensor(rng.standard_normal((1, 1, h, dim)).astype(np.float32)).realize()
+        for h in (32, kv_heads, kv_heads)
+    )
+    angles = rng.uniform(0, 6, (512, dim // 2)).astype(np.float32)
+    rope = (Tensor(np.cos(angles)).realize(), Tensor(np.sin(angles)).realize())
+    norms = (
+        tuple(Tensor(rng.uniform(0.5, 1.5, dim).astype(np.float32)) for _ in "qk")
+        if normed
+        else None
+    )
+    start = UOp.variable("start_pos", 0, 511).bind(pos) if symbolic else pos
+    results = []
+    for kernels in ("auto", "ref"):
+        monkeypatch.setenv("LEAT_KERNELS", kernels)
+        cache = Tensor.zeros(2, SLOTS, kv_heads, 512, dim, dtype=dtypes.half).contiguous().realize()
+        assert nv.supports_rotate(q, cache)
+        out, cache = ops.rotate(
+            q, k, v, cache, slot(symbolic), start, rope, halves, norms, v_norm, 1e-6
+        )
+        Tensor.realize(out, cache)  # in one schedule, as in the model: alone, either loses vars
+        results.append((out.numpy(), cache.numpy()))
+    np.testing.assert_allclose(results[0][0], results[1][0], rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(
+        results[0][1].astype(np.float32), results[1][1], rtol=1e-3, atol=1e-3
+    )
+    assert np.abs(results[0][1][:, SLOT, :, pos]).sum() > 0
 
 
 # ******** argmax ********

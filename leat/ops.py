@@ -117,7 +117,7 @@ def rms_norm(x: Tensor, weight: Tensor | None, eps: float) -> Tensor:
     return x if weight is None else x * weight
 
 
-def rope(x: Tensor, cos: Tensor, sin: Tensor, halves: bool = False) -> Tensor:
+def _rope(x: Tensor, cos: Tensor, sin: Tensor, halves: bool) -> Tensor:
     # rotates adjacent pairs of dimensions, or with halves dimension i with i + D/2.
     # x: (B, H, T, D); cos, sin: (T, D/2)
     if halves:
@@ -126,6 +126,29 @@ def rope(x: Tensor, cos: Tensor, sin: Tensor, halves: bool = False) -> Tensor:
     pairs = x.reshape(*x.shape[:-1], -1, 2)
     x0, x1 = pairs[..., 0], pairs[..., 1]
     return Tensor.stack(x0 * cos - x1 * sin, x0 * sin + x1 * cos, dim=-1).flatten(-2)
+
+
+def rotate(
+    q: Tensor, k: Tensor, v: Tensor, cache: Tensor, slot: int | UOp, start_pos: int | UOp,
+    rope: tuple[Tensor, Tensor], halves: bool, norms: tuple[Tensor, Tensor] | None,
+    v_norm: bool, eps: float,
+) -> tuple[Tensor, Tensor]:  # fmt: skip
+    # q (1, T, H, D), k and v (1, T, KV_H, D): each head of q and k normed with its weight, if
+    # given, and of v without, if v_norm; q and k rotated by RoPE's tables (positions, D/2) from
+    # start_pos, and k and v stored there in a slot of the cache. Returns q (1, H, T, D) and the
+    # cache.
+    if _fast() and nv.supports_rotate(q, cache):
+        return nv.rotate(q, k, v, cache, slot, start_pos, rope, halves, norms, v_norm, eps)
+    T = q.shape[1]
+    if norms is not None:
+        q, k = rms_norm(q, norms[0], eps), rms_norm(k, norms[1], eps)
+    if v_norm:
+        v = rms_norm(v, None, eps)
+    cos, sin = (table[start_pos : start_pos + T] for table in rope)
+    q, k = (_rope(t.transpose(1, 2), cos, sin, halves) for t in (q, k))
+    new = Tensor.stack(k, v.transpose(1, 2)).cast(cache.dtype)
+    cache[:, slot : slot + 1, :, start_pos : start_pos + T].assign(new)
+    return q, cache
 
 
 def attention(
