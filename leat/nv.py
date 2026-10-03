@@ -37,16 +37,33 @@ def _shfl_xor(value: UOp, mask: int) -> UOp:
     return UOp(Ops.CUSTOM, src=(value,), arg=(fmt, value.dtype))
 
 
-def _warp_sum(value: UOp) -> UOp:
-    for mask in (16, 8, 4, 2, 1):
+def _lanes_sum(value: UOp, lanes: int) -> UOp:
+    # over each aligned run of `lanes` lanes
+    for mask in (16, 8, 4, 2, 1)[5 - lanes.bit_length() + 1 :]:
         value = value + _shfl_xor(value, mask)
     return value
 
 
-def _warp_max(value: UOp) -> UOp:
-    for mask in (16, 8, 4, 2, 1):
+def _lanes_max(value: UOp, lanes: int) -> UOp:
+    for mask in (16, 8, 4, 2, 1)[5 - lanes.bit_length() + 1 :]:
         value = value.maximum(_shfl_xor(value, mask))
     return value
+
+
+def _warp_sum(value: UOp) -> UOp:
+    return _lanes_sum(value, WARP)
+
+
+def _warp_max(value: UOp) -> UOp:
+    return _lanes_max(value, WARP)
+
+
+def _vector(ptr: UOp, lanes: int) -> tuple[UOp, ...]:
+    # `lanes` consecutive values from an index, as one vector load, widened to f32
+    buf, coords = ptr.src[0], ptr.src[1:]
+    start = sum((c * math.prod(buf.shape[i + 1 :]) for i, c in enumerate(coords)), UOp.const(0))
+    vec = UOp(Ops.SHRINK, src=(buf.flatten(), start, UOp.const(lanes))).load()
+    return tuple(vec[i].float() for i in range(lanes))
 
 
 def _silu(x: UOp) -> UOp:
@@ -58,28 +75,30 @@ def _half(bits: UOp) -> UOp:
     return (bits & 0xFFFF).cast(dtypes.uint16).bitcast(dtypes.float16).float()
 
 
-def _quantize_group(q: UOp, d: UOp, s: UOp, group: UOp, lane: UOp, value: UOp) -> list[UOp]:
-    # one warp quantizes a group of 32 values, one per lane: d = max|x| / 127, q = round(x / d),
-    # s = d * sum(q), with q packed four per int32 word so matrix kernels read it without a copy
-    # custom expressions keep both divisions exact: tinygrad would multiply by a reciprocal
-    amax = _warp_max(value.maximum(-value))
+QUANT_WARPS = 8  # per block of the quantization kernel
+
+
+def _quantize_group(q: UOp, d: UOp, s: UOp, group: UOp, part: UOp, values: list[UOp]) -> list[UOp]:
+    # 8 lanes quantize a group of 32 values, 4 consecutive ones each, the lane's `part` of the
+    # group: d = max|x| / 127, q = round(x / d), s = d * sum(q), with q packed four per int32 word
+    # so matrix kernels read it without a copy. Custom expressions keep both divisions exact:
+    # tinygrad would multiply by a reciprocal.
+    amax = _lanes_max(functools.reduce(UOp.maximum, (v.maximum(-v) for v in values)), 8)
     scale = UOp(Ops.CUSTOMI, src=(amax,), arg=("({}/127.0f)", dtypes.float32))
-    rounded = UOp(Ops.CUSTOMI, src=(value, scale), arg=("roundf({}/{})", dtypes.float32))
-    quant = (scale > 0).where(rounded, 0.0).cast(dtypes.int32)
-    total = _warp_sum(quant)
-    # each lane shifts its byte into place, then the four lanes of a word OR theirs together
-    word = (quant & 0xFF).cast(dtypes.uint32) << ((lane % 4) * 8).cast(dtypes.uint32)
-    for mask in (1, 2):
-        word = word | _shfl_xor(word, mask)
-    word_index = group * (GROUP // 4) + (lane // 4).valid((lane % 4).eq(0))
+    quants = []
+    for v in values:
+        rounded = UOp(Ops.CUSTOMI, src=(v, scale), arg=("roundf({}/{})", dtypes.float32))
+        quants.append((scale > 0).where(rounded, 0.0).cast(dtypes.int32))
+    word = functools.reduce(
+        UOp.__or__, ((x & 0xFF).cast(dtypes.uint32) << (8 * i) for i, x in enumerate(quants))
+    )
+    total = _lanes_sum(sum(quants[1:], quants[0]), 8)
+    first = group.valid(part.eq(0))
     return [
-        q[word_index].store(word.bitcast(dtypes.int32)),
-        d[group.valid(lane.eq(0))].store(scale),
-        s[group.valid(lane.eq(0))].store(scale * total.float()),
+        q[group * (GROUP // 4) + part].store(word.bitcast(dtypes.int32)),
+        d[first].store(scale),
+        s[first].store(scale * total.float()),
     ]
-
-
-QUANT_WARPS = 8  # per block of the quantization kernel, each quantizing a group at a time
 
 
 @functools.cache
@@ -87,29 +106,33 @@ def _quantize_q8_kernel(
     q: UOp, d: UOp, s: UOp, x: UOp, *weight: UOp, rows: int | UOp, eps: float, gated: bool
 ) -> UOp:
     # Quantization, after RMSNorm when given its weight, or of silu(gate) * up from rows holding
-    # gate then up when gated. Each row takes a block, whose warps quantize one group after another.
-    # A single row, the vector of a decode step, spreads over blocks of a group per warp instead:
-    # on the 3090 that takes 3 us for 4096 values against 5 us for one block, though each block
-    # sums the squares of the whole row, from L2 after the first.
-    n, warps = int(x.shape[1]) // (2 if gated else 1), QUANT_WARPS
-    groups = n // GROUP
-    spread = isinstance(rows, int) and rows == 1
+    # gate then up when gated. Each row takes a block, whose threads quantize 4 consecutive values
+    # at a time. A single row, the vector of a decode step, spreads over blocks instead, though
+    # each block sums the squares of the whole row, from L2 after the first.
+    n, spread = int(x.shape[1]) // (2 if gated else 1), isinstance(rows, int) and rows == 1
+    warps = math.gcd(QUANT_WARPS, n // (4 * WARP))
+    threads = warps * WARP
     row = UOp.range(rows, 0, AxisType.GLOBAL)
     lane, wave = _lane(), UOp.range(warps, 2, AxisType.LOCAL)
-    turn = UOp.range(groups // warps, 1, AxisType.GLOBAL if spread else AxisType.LOOP)
-    scale = UOp.const(1.0, dtypes.float32)
+    turn = UOp.range(n // (4 * threads), 1, AxisType.GLOBAL if spread else AxisType.LOOP)
+    thread = wave * WARP + lane
+    at = (turn * threads + thread) * 4  # the thread's first value
     if weight:
-        thread, threads, zero = wave * WARP + lane, warps * WARP, UOp.const(0.0, dtypes.float32)
-        squares = sum((x[row, i * threads + thread].load() ** 2 for i in range(n // threads)), zero)
+        zero = UOp.const(0.0, dtypes.float32)
+        chunks = (_vector(x[row, (i * threads + thread) * 4], 4) for i in range(n // (4 * threads)))
+        squares = sum((v * v for chunk in chunks for v in chunk), zero)
         partial = UOp.alloc((warps,), dtypes.float32, addrspace=AddrSpace.LOCAL)
-        partial = partial.after(partial[wave.valid(lane.eq(0))].store(_warp_sum(squares)))
-        scale = (sum((partial[w].load() for w in range(warps)), zero) / n + eps).rsqrt()
-    group = turn * warps + wave
-    at = group * GROUP + lane
-    value = x[row, at].load() * scale * (weight[0][at].load() if weight else 1.0)
-    if gated:
-        value = _silu(value) * x[row, n + at].load()
-    stores = UOp.group(*_quantize_group(q, d, s, row * groups + group, lane, value))
+        partial = partial.after(partial[wave.valid(lane.eq(0))].store(_lanes_sum(squares, WARP)))
+        inv = (sum((partial[w].load() for w in range(warps)), zero) / n + eps).rsqrt()
+        scales = _vector(weight[0][at], 4)
+        values = [v * inv * w for v, w in zip(_vector(x[row, at], 4), scales, strict=True)]
+    elif gated:
+        ups = _vector(x[row, n + at], 4)
+        values = [_silu(g) * u for g, u in zip(_vector(x[row, at], 4), ups, strict=True)]
+    else:
+        values = list(_vector(x[row, at], 4))
+    group = row * (n // GROUP) + at // GROUP
+    stores = UOp.group(*_quantize_group(q, d, s, group, lane % 8, values))
     if not spread:
         stores = stores.end(turn)
     info = KernelInfo(name="norm_quantize_q8" if weight else "quantize_q8", opts_to_apply=())
@@ -698,14 +721,6 @@ KEYS = 64  # keys per chunk
 PARTIALS = 48  # most blocks per kv head; longer caches loop over several chunks per block
 SHARED = 49152  # bytes of shared memory a block may use without opting in to more
 PAD = 8  # halves of shared memory after each warp's outputs, see _attention_partial_kernel
-
-
-def _vector(ptr: UOp, lanes: int) -> tuple[UOp, ...]:
-    # `lanes` consecutive values from an index, as one vector load, widened to f32
-    buf, coords = ptr.src[0], ptr.src[1:]
-    start = sum((c * math.prod(buf.shape[i + 1 :]) for i, c in enumerate(coords)), UOp.const(0))
-    vec = UOp(Ops.SHRINK, src=(buf.flatten(), start, UOp.const(lanes))).load()
-    return tuple(vec[i].float() for i in range(lanes))
 
 
 def _min(a: int | UOp, b: int) -> int | UOp:
