@@ -1,9 +1,7 @@
-import json
-
 import jinja2
 import pytest
 
-from leat.chat import ChatTemplate, may_call_tool, parse_tool_call
+from leat.chat import ChatTemplate, parse_tool_calls, tool_call_start
 from leat.gguf import GGUF
 from leat.tokenizer import Tokenizer
 from tests.helpers import ids, tiny_metadata
@@ -65,15 +63,57 @@ def test_openai_messages():
         c.render([{"role": "user", "content": [{"type": "image_url", "image_url": {}}]}])
 
 
-def test_tool_calls():
-    tools = [{"type": "function", "function": {"name": "weather"}}]
-    paris = {"name": "weather", "arguments": {"city": "Paris"}}
-    for key, space in (("parameters", " "), ("arguments", "\n")):
-        reply = space + json.dumps({"name": "weather", key: {"city": "Paris"}}) + space
-        assert parse_tool_call(reply, tools) == paris
-    for text in ("It is sunny.", '{"name": "news", "parameters": {}}', '{"name": "weather"}'):
-        assert parse_tool_call(text, tools) is None
-    assert may_call_tool("") and may_call_tool(' {"na') and not may_call_tool(" It")
+WEATHER = [{"type": "function", "function": {"name": "weather"}}]
+PARIS = {"name": "weather", "arguments": {"city": "Paris"}}
+
+
+@pytest.mark.parametrize(
+    "reply, text",
+    [
+        (' {"name": "weather", "parameters": {"city": "Paris"}} ', ""),  # Llama 3
+        ('\n{"name": "weather", "arguments": {"city": "Paris"}}\n', ""),
+        ('Let me see.\n<tool_call>\n{"name": "weather", "arguments": {"city": "Paris"}}\n'
+         "</tool_call>", "Let me see."),  # Qwen3
+        ('<|tool_call>call:weather{city:<|"|>Paris<|"|>}<tool_call|>', ""),  # Gemma 4
+    ],
+)  # fmt: skip
+def test_tool_calls(reply, text):
+    assert parse_tool_calls(reply, WEATHER) == (text, [PARIS])
+
+
+def test_tool_call_arguments():
+    # Gemma 4's syntax: quoted strings, which may hold its other marks, bare or quoted keys,
+    # nested objects and lists, and JSON's other values; several calls in a row
+    q = '<|"|>'
+    args = f"{{a:{q}x, y: {{z}}{q},b:[1,-2.5,true,null],c:{{{q}d{q}:false}}}}"
+    reply = f"<|tool_call>call:weather{args}<tool_call|><|tool_call>call:weather{{}}<tool_call|>"
+    arguments = {"a": "x, y: {z}", "b": [1, -2.5, True, None], "c": {"d": False}}
+    assert parse_tool_calls(reply, WEATHER) == (
+        "",
+        [PARIS | {"arguments": arguments}, PARIS | {"arguments": {}}],
+    )
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "It is sunny.",
+        '{"name": "news", "parameters": {}}',
+        '{"name": "weather"}',
+        '<tool_call>{"name": "weather", "arguments": {}</tool_call>',
+        "<|tool_call>call:news{}<tool_call|>",
+        "<|tool_call>call:weather{city:Paris}<tool_call|>",
+    ],
+)
+def test_text_is_not_a_tool_call(reply):
+    assert parse_tool_calls(reply, WEATHER) == (reply, [])
+
+
+def test_tool_call_start():
+    # what follows may yet be a tool call: all of a reply that may be JSON, from a marker on, or
+    # the start of a marker at the end, and whitespace before those
+    replies = ("", ' {"na', " It", "Hi\n<tool_call>{", "Hi <|tool", "Hi ")
+    assert [tool_call_start(t) for t in replies] == [0, 0, 3, 2, 2, 2]
 
 
 def test_no_template():

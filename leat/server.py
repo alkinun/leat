@@ -17,7 +17,7 @@ from typing import Any
 
 import jinja2
 
-from leat.chat import ChatTemplate, may_call_tool, parse_tool_call
+from leat.chat import ChatTemplate, parse_tool_calls, tool_call_start
 from leat.engine import Engine
 
 
@@ -171,8 +171,13 @@ class _Handler(BaseHTTPRequestHandler):
             return self._error(500, str(e))
         message: dict[str, Any] = {"role": "assistant", "content": text}
         reason = c.finish.reason
-        if c.tools and (call := parse_tool_call(text, c.tools)):
-            message = {"role": "assistant", "content": None, "tool_calls": [_tool_call(call)]}
+        content, calls = parse_tool_calls(text, c.tools) if c.tools else (text, [])
+        if calls:
+            message = {
+                "role": "assistant",
+                "content": content or None,
+                "tool_calls": _tool_calls(calls),
+            }
             reason = "tool_calls"
         choice = {"index": 0, "message": message, "logprobs": None, "finish_reason": reason}
         body = self._head(c, "chat.completion") | {"choices": [choice], "usage": _usage(c)}
@@ -184,22 +189,25 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         self._chunk(c, {"role": "assistant", "content": ""})
-        held, holding = "", bool(c.tools)  # a reply that may call a tool is held back whole
+        text, sent = "", 0  # what may yet be part of a tool call is held back
         try:
             for piece in c.pieces():
-                if holding and may_call_tool(held + piece):
-                    held += piece
-                    continue
-                self._chunk(c, {"content": held + piece})
-                held, holding = "", False
+                text += piece
+                if (end := tool_call_start(text) if c.tools else len(text)) > sent:
+                    self._chunk(c, {"content": text[sent:end]})
+                    sent = end
         except RuntimeError as e:
             return self._event({"error": {"message": str(e), "type": "server_error"}})
         reason = c.finish.reason
-        if c.tools and held and (call := parse_tool_call(held, c.tools)):
-            self._chunk(c, {"tool_calls": [{"index": 0} | _tool_call(call)]})
+        content, calls = parse_tool_calls(text, c.tools) if c.tools else (text, [])
+        if len(content) > sent:
+            self._chunk(c, {"content": content[sent:]})
+        if calls:
+            self._chunk(
+                c,
+                {"tool_calls": [{"index": i} | call for i, call in enumerate(_tool_calls(calls))]},
+            )
             reason = "tool_calls"
-        elif held:
-            self._chunk(c, {"content": held})
         self._chunk(c, {}, reason)
         if c.stream_usage:
             usage = {"choices": [], "usage": _usage(c)}
@@ -265,10 +273,19 @@ def _partial_stop(text: str, stops: list[str]) -> int:
     return max((n for s in stops for n in range(1, len(s)) if text.endswith(s[:n])), default=0)
 
 
-def _tool_call(call: dict[str, Any]) -> dict[str, Any]:
-    arguments = json.dumps(call["arguments"], ensure_ascii=False)
-    function = {"name": call["name"], "arguments": arguments}
-    return {"id": f"call_{uuid.uuid4().hex[:24]}", "type": "function", "function": function}
+def _tool_calls(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    # as OpenAI's API has them, with the arguments as JSON text
+    return [
+        {
+            "id": f"call_{uuid.uuid4().hex[:24]}",
+            "type": "function",
+            "function": {
+                "name": c["name"],
+                "arguments": json.dumps(c["arguments"], ensure_ascii=False),
+            },
+        }
+        for c in calls
+    ]
 
 
 def _usage(c: _Completion) -> dict[str, Any]:

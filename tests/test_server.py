@@ -120,17 +120,27 @@ def replies_with(engine, monkeypatch):
     return reply_with
 
 
+# as Llama 3, Qwen3 and Gemma 4 call tools; Qwen3's text before its call is the content
+CALLS = [
+    (' {"name": "weather", "parameters": {"city": "Paris"}}', None),
+    ('Checking.\n<tool_call>\n{"name": "weather", "arguments": {"city": "Paris"}}\n</tool_call>',
+     "Checking."),
+    ('<|tool_call>call:weather{city:<|"|>Paris<|"|>}<tool_call|>', None),
+]  # fmt: skip
+
+
 @pytest.mark.parametrize("stream", [False, True])
-def test_tool_call(client, replies_with, stream):
-    replies_with(' {"name": "weather", "parameters": {"city": "Paris"}}')
+@pytest.mark.parametrize("reply, content", CALLS)
+def test_tool_call(client, replies_with, stream, reply, content):
+    replies_with(reply)
     response = chat(client, "Weather in Paris?", tools=[WEATHER], stream=stream)
     if stream:
         choices = [chunk.choices[0] for chunk in response]
-        assert not any(c.delta.content for c in choices)
+        assert "".join(c.delta.content or "" for c in choices) == (content or "")
         (call,), reason = choices[-2].delta.tool_calls, choices[-1].finish_reason
     else:
         message, reason = response.choices[0].message, response.choices[0].finish_reason
-        assert message.content is None
+        assert message.content == content
         (call,) = message.tool_calls
     assert call.type == "function" and call.id.startswith("call_") and reason == "tool_calls"
     assert call.function.name == "weather"
@@ -183,17 +193,17 @@ def test_client_hangs_up(client):
 
 
 @pytest.fixture(scope="module")
-def llama(model_path) -> Iterator[openai.OpenAI]:
+def served(model_path) -> Iterator[openai.OpenAI]:
     with serving(Engine(model_path, max_context=4096, slots=4)) as client:
         yield client
 
 
 @pytest.mark.gpu
 @pytest.mark.model
-def test_llama3_calls_tools(llama):
+def test_calls_tools(served):
     messages = [{"role": "user", "content": "What is the weather in Paris right now?"}]
-    response = llama.chat.completions.create(
-        model="llama", messages=messages, tools=[WEATHER], temperature=0
+    response = served.chat.completions.create(
+        model="real", messages=messages, tools=[WEATHER], temperature=0
     )
     (call,) = response.choices[0].message.tool_calls
     assert call.function.name == "weather"
@@ -202,7 +212,7 @@ def test_llama3_calls_tools(llama):
 
 @pytest.mark.gpu
 @pytest.mark.model
-def test_shared_system_prompt(llama):
+def test_shared_system_prompt(served):
     # a system prompt that another conversation cached cuts the time to the first token by 5x or
     # more: from 549 to 55 ms for these 2141 tokens on the 3090
     def system(name: str) -> str:
@@ -212,8 +222,8 @@ def test_shared_system_prompt(llama):
     def first_token(system: str, question: str) -> float:
         messages = [{"role": "system", "content": system}, {"role": "user", "content": question}]
         start = time.perf_counter()
-        with llama.chat.completions.create(
-            model="llama", messages=messages, max_tokens=1, temperature=0, stream=True
+        with served.chat.completions.create(
+            model="real", messages=messages, max_tokens=1, temperature=0, stream=True
         ) as stream:
             next(chunk for chunk in stream if chunk.choices and chunk.choices[0].delta.content)
         return time.perf_counter() - start
