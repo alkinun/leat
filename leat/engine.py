@@ -27,7 +27,12 @@ class Engine:
         self.max_context, self.prefill_chunk = max_context, prefill_chunk
         self._pos = UOp.variable("start_pos", 0, max_context - 1)
         self._len = UOp.variable("chunk_len", 1, prefill_chunk)
+        # TinyJit runs a function once as is, then captures it on the second call: capture on the
+        # first, a fresh process's slow call for each graph. The device's random state must exist
+        # by then, or the graph would create it anew every call.
+        Tensor.rand(1).realize()  # on the default device, which holds the model
         self._prefill, self._decode = TinyJit(self._step), TinyJit(self._step)
+        self._prefill.cnt = self._decode.cnt = 1
         self._cached: list[int] = []  # tokens whose keys and values are in the cache
 
     def generate(

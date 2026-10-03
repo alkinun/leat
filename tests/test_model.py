@@ -66,6 +66,12 @@ def test_generate_fills_context(tiny_model):
     assert list(engine.generate(PROMPT, 1000)) == out and engine._decode.captured is captured
 
 
+def test_sampling_varies(tiny_model):
+    # each generation draws new random numbers, though the graphs are captured on their first call
+    engine = Engine(tiny_model[0], max_context=CONTEXT, prefill_chunk=8)
+    assert len({tuple(engine.generate(PROMPT, 8, temperature=1.0)) for _ in range(3)}) == 3
+
+
 @pytest.mark.gpu
 @pytest.mark.model
 @pytest.mark.parametrize("decode", [False, True], ids=["prefill", "decode"])
