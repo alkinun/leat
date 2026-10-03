@@ -43,6 +43,16 @@ def test_template_helpers():
         c.render([], tools=[{"name": "f"}])
 
 
+def test_openai_messages():
+    # text parts are joined into one string, as templates expect
+    c, _ = chat("{% for m in messages %}{{ m.content }};{% endfor %}")
+    parts = [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]
+    messages = [{"role": "user", "content": parts}, {"role": "assistant", "content": "c"}]
+    assert c.render(messages) == "a\nb;c;"
+    with pytest.raises(ValueError, match="only text"):
+        c.render([{"role": "user", "content": [{"type": "image_url", "image_url": {}}]}])
+
+
 def test_no_template():
     with pytest.raises(ValueError, match="no chat template"):
         ChatTemplate(tiny_metadata(), Tokenizer(tiny_metadata()))

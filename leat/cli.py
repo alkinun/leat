@@ -1,6 +1,7 @@
-"""Command line: `leat run`, `leat bench` and `leat perplexity`."""
+"""Command line: `leat run`, `leat serve`, `leat bench` and `leat perplexity`."""
 
 import argparse
+import contextlib
 import json
 import time
 from dataclasses import asdict
@@ -11,6 +12,7 @@ from tinygrad import Device
 from leat import bench
 from leat.chat import ChatTemplate
 from leat.engine import Engine
+from leat.server import Server
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -24,6 +26,13 @@ def main(argv: list[str] | None = None) -> None:
     run.add_argument("--max-context", type=int, default=4096)
     run.add_argument("--temperature", type=float, default=0.7)
     run.add_argument("--system", help="system prompt")
+
+    serve = commands.add_parser("serve", help="serve the OpenAI chat completions API")
+    serve.add_argument("model", type=Path, help="GGUF file")
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8080)
+    serve.add_argument("--max-context", type=int, default=4096)
+    serve.add_argument("--slots", type=int, default=4, help="sequences the KV cache keeps")
 
     speed = commands.add_parser("bench", help="measure prefill and decode speed")
     speed.add_argument("model", type=Path, help="GGUF file")
@@ -51,7 +60,7 @@ def main(argv: list[str] | None = None) -> None:
     quality.add_argument("--json", action="store_true", help="print one JSON object")
 
     args = parser.parse_args(argv)
-    {"run": _run, "bench": _bench, "perplexity": _perplexity}[args.command](args)
+    {"run": _run, "serve": _serve, "bench": _bench, "perplexity": _perplexity}[args.command](args)
 
 
 def _run(args: argparse.Namespace) -> None:
@@ -84,6 +93,15 @@ def _run(args: argparse.Namespace) -> None:
         rate = len(reply) / (time.perf_counter() - start)
         print(f"\n\033[2m[{len(reply)} tokens, {rate:.1f} tok/s]\033[0m")
         messages.append({"role": "assistant", "content": tok.decode(reply)})
+
+
+def _serve(args: argparse.Namespace) -> None:
+    engine = Engine(args.model, max_context=args.max_context, slots=args.slots)
+    with Server(engine, args.host, args.port) as server:
+        url = f"http://{args.host}:{server.server_port}/v1"
+        print(f"{server.model} on {Device.DEFAULT} at {url}. Ctrl-C quits.", flush=True)
+        with contextlib.suppress(KeyboardInterrupt):
+            server.serve_forever()
 
 
 def _bench(args: argparse.Namespace) -> None:

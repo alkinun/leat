@@ -2,5 +2,6 @@
 
 from leat.chat import ChatTemplate
 from leat.engine import Engine
+from leat.server import Server
 
-__all__ = ["ChatTemplate", "Engine"]
+__all__ = ["ChatTemplate", "Engine", "Server"]

@@ -15,7 +15,7 @@ dependencies = [
 leat = "leat.cli:main"
 
 [dependency-groups]
-dev = ["gguf", "mypy", "numpy", "pytest", "ruff"]
+dev = ["gguf", "mypy", "numpy", "openai", "pytest", "ruff"]
 
 [build-system]
 requires = ["hatchling"]

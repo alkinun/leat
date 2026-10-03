@@ -2,7 +2,7 @@
 
 import itertools
 import random
-from collections.abc import Iterator
+from collections.abc import Generator
 from pathlib import Path
 
 from tinygrad import Tensor, TinyJit, UOp, dtypes
@@ -54,7 +54,7 @@ class Engine:
         temperature: float = 0.0,
         seed: int | None = None,
         ignore_eog: bool = False,
-    ) -> Iterator[int]:
+    ) -> Generator[int, None, None]:
         """Yields up to `max_tokens` ids; stops early at end of generation or the context limit.
 
         Sampling is greedy at temperature 0; above, a `seed` makes it repeatable. One generation
@@ -95,6 +95,10 @@ class Engine:
                 pos += 1
         finally:
             self._generating = False
+
+    def cached_prefix(self, prompt: list[int]) -> int:
+        """How many leading tokens of `prompt` the cache holds: generate() prefills the rest."""
+        return max(_shared(prompt, cached) for cached in self._cached)
 
     def reset(self) -> None:
         """Forgets every cached prefix, so the next prompt is prefilled from scratch."""

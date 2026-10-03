@@ -13,8 +13,9 @@ from leat.tokenizer import Tokenizer
 class ChatTemplate:
     """Turns OpenAI-style messages into prompt tokens.
 
-    Rendering matches transformers' `apply_chat_template`. As there and in llama.cpp, control-token
-    text inside message content is parsed as control tokens.
+    Rendering matches transformers' `apply_chat_template` once text parts are joined into one
+    string, as templates expect. As there and in llama.cpp, control-token text inside message
+    content is parsed as control tokens.
     """
 
     def __init__(self, metadata: dict[str, Any], tokenizer: Tokenizer):
@@ -36,7 +37,7 @@ class ChatTemplate:
         self, messages: list[dict[str, Any]], add_generation_prompt: bool = True, **kwargs
     ) -> str:
         return self._template.render(
-            messages=messages,
+            messages=[_message(m) for m in messages],
             add_generation_prompt=add_generation_prompt,
             bos_token=self._bos,
             eos_token=self._eos,
@@ -50,6 +51,16 @@ class ChatTemplate:
         # most templates write the BOS text themselves; add it only when they don't
         bos = self._tokenizer.add_bos and not (self._bos and text.startswith(self._bos))
         return self._tokenizer.encode(text, bos=bos, special=True)
+
+
+def _message(message: dict[str, Any]) -> dict[str, Any]:
+    # an OpenAI message as templates read it: content as one string
+    message = dict(message)
+    if isinstance(parts := message.get("content"), list):
+        if any(part.get("type") != "text" for part in parts):
+            raise ValueError("only text content is supported")
+        message["content"] = "\n".join(part["text"] for part in parts)
+    return message
 
 
 def _tojson(value: Any, ensure_ascii=False, indent=None, separators=None, sort_keys=False) -> str:
