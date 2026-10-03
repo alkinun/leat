@@ -36,9 +36,17 @@ def test_generate_matches_reference(tiny_model):
     assert again == list(Engine(path, max_context=CONTEXT, prefill_chunk=5).generate(longer, 4))
 
 
-def test_generate_stops_at_context_end(tiny_model):
-    engine = Engine(tiny_model[0], max_context=16, prefill_chunk=8)
-    assert len(list(engine.generate(PROMPT, 100))) == 16 - len(PROMPT) + 1
+def test_generate_fills_context(tiny_model):
+    # one capture of the decode graph replays correctly at every position up to the last
+    path, weights = tiny_model
+    engine = Engine(path, max_context=CONTEXT, prefill_chunk=8)
+    out = list(engine.generate(PROMPT, 1000))
+    assert len(out) == CONTEXT - len(PROMPT) + 1
+    expected = reference_logits(weights, PROMPT + out[:-1])[len(PROMPT) - 1 :].argmax(-1)
+    assert out == expected.tolist()
+    captured = engine._decode.captured
+    engine.reset()
+    assert list(engine.generate(PROMPT, 1000)) == out and engine._decode.captured is captured
 
 
 @pytest.mark.gpu
