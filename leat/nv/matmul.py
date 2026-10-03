@@ -529,11 +529,15 @@ def routed_products(
     return Tensor.custom_kernel(out, *words, xq, *q8[1:], order, counts, fxn=fxn)[0]
 
 
+def matmul_fits(ggml_type: GGMLType, rows: int, cols: int) -> bool:
+    # whole tiles of rows, and whole steps along a row
+    return ggml_type in _TILES and rows % 128 == 0 and cols % 256 == 0
+
+
 def supports_matmul(x: Tensor, w: QTensor) -> bool:
-    # tokens of one sequence, whole tiles of rows, and whole steps along a row
-    rows, cols = w.shape
+    # tokens of one sequence, and a matrix the tiles fit
     single = all(isinstance(b, int) and b == 1 for b in x.shape[:-2])
-    return on_nvidia(x) and single and w.type in _TILES and rows % 128 == 0 and cols % 256 == 0
+    return on_nvidia(x) and single and matmul_fits(w.type, *w.shape)
 
 
 def matmuls(

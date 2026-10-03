@@ -16,7 +16,7 @@ pytestmark = [
         os.environ.get("DEV", "").split(":")[0] not in ("NV", "CUDA"), reason="needs DEV=NV or CUDA"
     ),
 ]
-Q4_K, Q5_K, Q6_K, Q8_0 = GGMLType.Q4_K, GGMLType.Q5_K, GGMLType.Q6_K, GGMLType.Q8_0
+Q4_K, Q5_K, Q6_K, Q5_0, Q8_0 = (GGMLType[t] for t in ("Q4_K", "Q5_K", "Q6_K", "Q5_0", "Q8_0"))
 
 
 def quantize_q8(x: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -59,23 +59,27 @@ def assert_close(got: np.ndarray, expected: np.ndarray, tolerance: float) -> Non
 # ******** quantization ********
 
 
+# rows of 704 and 2112 values are not whole turns of the kernel's threads
 @pytest.mark.parametrize("rows", [None, 5, UOp.variable("rows", 1, 8).bind(3)])
-def test_quantize_q8(rows):
+@pytest.mark.parametrize("width", [4096, 704, 2112])
+def test_quantize_q8(rows, width):
     rng = np.random.default_rng(0)
-    x = (rng.standard_normal((8, 4096)) * rng.uniform(0.01, 10, (8, 4096))).astype(np.float32)
+    x = (rng.standard_normal((8, width)) * rng.uniform(0.01, 10, (8, width))).astype(np.float32)
     x[:, 64:96] = 0  # an all-zero group must give d = 0, not nan
     q, d, s = nv.quantize_q8(Tensor(x), rows=rows)
     Tensor.realize(q, d, s)  # in one schedule, as in the model: each alone would lose rows
     n = 8 if rows is None else rows if isinstance(rows, int) else rows.unbind()[1]
-    outs = (q.numpy().view(np.int8)[: n * 4096], d.numpy()[: n * 128], s.numpy()[: n * 128])
+    groups = n * width // nv.GROUP
+    outs = (q.numpy().view(np.int8)[: n * width], d.numpy()[:groups], s.numpy()[:groups])
     for got, want in zip(outs, quantize_q8(x[:n]), strict=True):
         np.testing.assert_array_equal(got, want)
 
 
-def test_norm_quantize_q8():
+@pytest.mark.parametrize("width", [4096, 2112])
+def test_norm_quantize_q8(width):
     rng = np.random.default_rng(4)
-    x = (rng.standard_normal((3, 4096)) * rng.uniform(1, 5, (3, 1))).astype(np.float32)
-    weight = rng.uniform(0.5, 1.5, 4096).astype(np.float32)
+    x = (rng.standard_normal((3, width)) * rng.uniform(1, 5, (3, 1))).astype(np.float32)
+    weight = rng.uniform(0.5, 1.5, width).astype(np.float32)
     q, d, s = (t.numpy() for t in nv.quantize_q8(Tensor(x), (Tensor(weight), 1e-5)))
     want_q, want_d, _ = quantize_q8(rms_norm(x, weight, 1e-5))
     # normalizing in f32 rather than f64 may move a value across a rounding boundary
@@ -90,7 +94,7 @@ def test_norm_quantize_q8():
 
 
 # rows of 768 weights leave lanes idle, and of 2816 some in a second turn
-@pytest.mark.parametrize("ggml_type", [Q4_K, Q5_K, Q6_K, Q8_0])
+@pytest.mark.parametrize("ggml_type", [Q4_K, Q5_K, Q6_K, Q5_0, Q8_0])
 @pytest.mark.parametrize("shape", [(64, 4096), (8, 14336), (16, 768), (24, 2816)])
 def test_matvec(ggml_type, shape):
     rng = np.random.default_rng(1)
@@ -112,13 +116,20 @@ def test_shared_input():
 
 
 @pytest.mark.parametrize("ggml_type", [Q4_K, Q6_K])
-def test_swiglu(ggml_type):
+@pytest.mark.parametrize("gelu", [False, True])
+def test_swiglu(ggml_type, gelu):
     rng = np.random.default_rng(7)
     (gate, gate_blocks), (up, up_blocks) = (random_matrix(ggml_type, 16, 4096, rng) for _ in "gu")
     x = rng.standard_normal((1, 1, 4096)).astype(np.float32)
     g, u = (reference_matmul(x[0], b, ggml_type) for b in (gate_blocks, up_blocks))
-    got = nv.swiglu(Tensor(x), gate, up).numpy()[0]
-    assert_close(got, g / (1 + np.exp(-g)) * u, 1e-4)
+    got = nv.swiglu(Tensor(x), gate, up, gelu=gelu).numpy()[0]
+    assert_close(got, activation(g, gelu) * u, 1e-4)
+
+
+def activation(x: np.ndarray, gelu: bool) -> np.ndarray:
+    if gelu:  # tanh's approximation
+        return 0.5 * x * (1 + np.tanh(np.sqrt(2 / np.pi) * (x + 0.044715 * x**3)))
+    return x / (1 + np.exp(-x))
 
 
 # ******** several tokens ********
@@ -179,6 +190,18 @@ def random_experts(
     )
 
 
+def expected_mixture(normed: np.ndarray, scores: np.ndarray, used: int, expert) -> np.ndarray:
+    # each token's `used` best scoring experts' outputs expert(e, normed row), weighted by the
+    # softmax of their scores
+    out = np.zeros(normed.shape, dtype=np.float64)
+    for t in range(len(normed)):
+        best = np.argsort(-scores[t], kind="stable")[:used]
+        p = np.exp(scores[t, best] - scores[t, best].max())
+        for e, pe in zip(best, p / p.sum(), strict=True):
+            out[t] += pe * expert(e, normed[t : t + 1])[0]
+    return out
+
+
 # up to FEW tokens take the matrix-vector kernels, more the tensor cores
 @pytest.mark.parametrize("tokens", [1, 3, 70, UOp.variable("tokens", 1, 128).bind(37)])
 def test_mixture(tokens):
@@ -196,18 +219,41 @@ def test_mixture(tokens):
     assert nv.supports_mixture(x_t, gate, up, down)
     got = nv.mixture(x_t, scores_t, gate, up, down, used, (Tensor(weight), 1e-5))
     got = got.pad_to((1, 128, dim)).numpy()[0, :n]
+
+    def expert(e, row):
+        g, u = (reference_matmul(row, b[e], Q4_K) for b in (gate_blocks, up_blocks))
+        return reference_matmul(activation(g, False).astype(np.float32) * u, down_blocks[e], Q6_K)
+
     normed = rms_norm(x[0, :n], weight, 1e-5)
-    expected = x[0, :n].astype(np.float64)
-    for t in range(n):
-        best = np.argsort(-scores[0, t], kind="stable")[:used]
-        p = np.exp(scores[0, t, best] - scores[0, t, best].max())
-        for e, pe in zip(best, p / p.sum(), strict=True):
-            g, u = (
-                reference_matmul(normed[t : t + 1], b[e], Q4_K) for b in (gate_blocks, up_blocks)
-            )
-            h = (g / (1 + np.exp(-g)) * u).astype(np.float32)
-            expected[t] += pe * reference_matmul(h, down_blocks[e], Q6_K)[0]
-    assert_close(got, expected, 2e-3)
+    assert_close(got, x[0, :n] + expected_mixture(normed, scores[0, :n], used, expert), 2e-3)
+
+
+# Gemma 4: gate and up in one stack, GELU, a scale per expert and no residual, on the
+# matrix-vector kernels for any number of tokens; rows of 192 weights quantize in a ragged turn
+@pytest.mark.parametrize("tokens", [1, 70, UOp.variable("tokens", 1, 128).bind(37)])
+def test_mixture_gemma(tokens):
+    rng = np.random.default_rng(16)
+    experts, used, dim, hidden = 32, 4, 512, 192
+    gate_up, gate_up_blocks = random_experts(Q4_K, experts, 2 * hidden, dim, rng)
+    down, down_blocks = random_experts(Q5_0, experts, dim, hidden, rng)
+    x = (rng.standard_normal((1, 128, dim)) * 3).astype(np.float32)
+    scores = rng.standard_normal((1, 128, experts)).astype(np.float32)
+    weight = rng.uniform(0.5, 1.5, dim).astype(np.float32)
+    scales = rng.uniform(0.5, 2, experts).astype(np.float32)
+    n = tokens if isinstance(tokens, int) else tokens.unbind()[1]
+    x_t, scores_t = Tensor(x)[:, :tokens], Tensor(scores)[:, :tokens]
+    assert nv.supports_mixture(x_t, gate_up, None, down)
+    norm = (Tensor(weight), 1e-5)
+    got = nv.mixture(x_t, scores_t, gate_up, None, down, used, norm, True, Tensor(scales), False)
+    got = got.pad_to((1, 128, dim)).numpy()[0, :n]
+
+    def expert(e, row):
+        g, u = np.split(reference_matmul(row, gate_up_blocks[e], Q4_K), 2, axis=-1)
+        h = activation(g, True).astype(np.float32) * u
+        return reference_matmul(h, down_blocks[e], Q5_0) * scales[e]
+
+    normed = rms_norm(x[0, :n], weight, 1e-5)
+    assert_close(got, expected_mixture(normed, scores[0, :n], used, expert), 2e-3)
 
 
 # ******** ops on the kernels ********

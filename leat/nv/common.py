@@ -1,6 +1,7 @@
 """What the NVIDIA kernels share: warp intrinsics, loads, conversions and bound variables."""
 
 import math
+from collections.abc import Callable
 
 from tinygrad import Tensor, UOp, dtypes
 from tinygrad.dtype import AddrSpace
@@ -16,7 +17,7 @@ SHARED = 49152  # bytes of shared memory a block may use without opting in to mo
 # the word type kernels read each storage type as: some blocks are only halfword aligned
 WORD_TYPE = {
     GGMLType.Q4_K: dtypes.uint32, GGMLType.Q5_K: dtypes.uint32, GGMLType.Q6_K: dtypes.uint16,
-    GGMLType.Q8_0: dtypes.uint16,
+    GGMLType.Q5_0: dtypes.uint16, GGMLType.Q8_0: dtypes.uint16,
 }  # fmt: skip
 
 
@@ -79,6 +80,17 @@ def minus_32(q: UOp) -> UOp:
 
 def silu(x: UOp) -> UOp:
     return x * (1 + (x * -LOG2E).exp2()).reciprocal()  # as tinygrad's silu
+
+
+def activation(gelu: bool) -> Callable[[UOp], UOp]:
+    # what gates an MLP: SiLU, or GELU
+    return _gelu if gelu else silu
+
+
+def _gelu(x: UOp) -> UOp:
+    # tanh's approximation, as ggml's and tinygrad's: x * sigmoid(2 sqrt(2/pi) (x + 0.044715 x^3))
+    z = x * (1 + 0.044715 * x * x) * (2 * math.sqrt(2 / math.pi))
+    return x * (1 + (z * -LOG2E).exp2()).reciprocal()
 
 
 def register(shape: tuple[int, ...], value: float) -> UOp:

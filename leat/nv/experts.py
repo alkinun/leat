@@ -12,8 +12,8 @@ from tinygrad.dtype import AddrSpace
 from tinygrad.uop.ops import AxisType, KernelInfo, Ops
 
 from leat.nv.argmax import argmax_step, warp_argmax
-from leat.nv.common import LOG2E, WARP, carry, lane_range, on_nvidia, silu, storage_words
-from leat.nv.matmul import TILE_TOKENS, routed_products, tiled
+from leat.nv.common import LOG2E, WARP, activation, carry, lane_range, on_nvidia, storage_words
+from leat.nv.matmul import TILE_TOKENS, matmul_fits, routed_products, tiled
 from leat.nv.matvec import DOTS, rows_kernel
 from leat.nv.quantize import quantize_q8
 from leat.quant import GGMLType, QTensor
@@ -51,45 +51,51 @@ def _route_kernel(ids: UOp, weights: UOp, scores: UOp, tokens: int | UOp, used: 
 @functools.cache
 def _experts_swiglu_kernel(
     out: UOp, gate: UOp, up: UOp, xq: UOp, xd: UOp, xs: UOp, ids: UOp, pairs: int | UOp,
-    meta: tuple[GGMLType, int, int, int],
+    meta: tuple[GGMLType, int, int, int, bool, bool],
 ) -> UOp:  # fmt: skip
-    # out[p * rows + r] = silu(gate . x) * (up . x) for row r of expert ids[p], where pair p is
-    # slot p % used of token p // used
-    ggml_type, cols, rows, used = meta
+    # out[p * rows + r] = act(gate . x) * (up . x) for row r of expert ids[p], where pair p is
+    # slot p % used of token p // used. Fused, gate and up are one stack, each expert's gate rows
+    # before its up rows.
+    ggml_type, cols, rows, used, gelu, fused = meta
 
-    def expert(w: UOp) -> Callable[[UOp, UOp], UOp]:
-        dot = DOTS[ggml_type](w, xq, xd, xs, cols)
+    def expert(w: UOp, first: int) -> Callable[[UOp, UOp], UOp]:
+        dot, stride = DOTS[ggml_type](w, xq, xd, xs, cols), 2 * rows if fused else rows
 
         def chosen(row: UOp, unit: UOp) -> UOp:
             pair = row // rows
-            return dot(ids[pair].load() * rows + row % rows, unit, pair // used)
+            return dot(ids[pair].load() * stride + first + row % rows, unit, pair // used)
 
         return chosen
 
     def combine(row: UOp, g: UOp, u: UOp) -> UOp:
-        return silu(g) * u
+        return activation(gelu)(g) * u
 
-    name = f"experts_swiglu_{ggml_type.name.lower()}"
-    return rows_kernel(out, cols // 64, name, [expert(gate), expert(up)], combine, pairs * rows)
+    dots = [expert(gate, 0), expert(up, rows if fused else 0)]
+    name = f"experts_{'geglu' if gelu else 'swiglu'}_{ggml_type.name.lower()}"
+    return rows_kernel(out, cols // 64, name, dots, combine, pairs * rows)
 
 
 @functools.cache
 def _experts_down_kernel(
-    out: UOp, w: UOp, hq: UOp, hd: UOp, hs: UOp, ids: UOp, weights: UOp, residual: UOp,
-    tokens: int | UOp, meta: tuple[GGMLType, int, int, int],
+    out: UOp, w: UOp, hq: UOp, hd: UOp, hs: UOp, ids: UOp, weights: UOp, *extra: UOp,
+    tokens: int | UOp, meta: tuple[GGMLType, int, int, int, bool, bool],
 ) -> UOp:  # fmt: skip
-    # out[t * rows + r] = residual + the sum over token t's pairs p of weights[p] times row r of
-    # expert ids[p] . the pair's hidden activations. Lanes take (slot, unit) items in turn, so
-    # experts with narrow rows still keep them busy.
-    ggml_type, cols, rows, used = meta
+    # out[t * rows + r] = the sum over token t's pairs p of weights[p] times row r of expert ids[p]
+    # . the pair's hidden activations; extra holds, as meta says, each expert's scale of its
+    # output, and a residual to add. Lanes take (slot, unit) items in turn, so experts with
+    # narrow rows still keep them busy.
+    ggml_type, cols, rows, used, scaled, residual = meta
     dot, units = DOTS[ggml_type](w, hq, hd, hs, cols), cols // 64
 
     def mixed(row: UOp, item: UOp) -> UOp:
         pair = row // rows * used + item // units
-        return weights[pair].load() * dot(ids[pair].load() * rows + row % rows, item % units, pair)
+        expert, weight = ids[pair].load(), weights[pair].load()
+        if scaled:
+            weight = weight * extra[0][expert].load()
+        return weight * dot(expert * rows + row % rows, item % units, pair)
 
     def combine(row: UOp, total: UOp) -> UOp:
-        return total + residual[row].load()
+        return total + extra[-1][row].load() if residual else total
 
     name = f"experts_down_{ggml_type.name.lower()}"
     return rows_kernel(out, used * units, name, [mixed], combine, tokens * rows)
@@ -107,27 +113,36 @@ def route(scores: Tensor, used: int) -> tuple[Tensor, Tensor]:
     return ids, weights
 
 
-def supports_mixture(x: Tensor, gate: QTensor, up: QTensor, down: QTensor) -> bool:
-    # whole warps of experts to route, and rows the quantization kernel takes whole
+def supports_mixture(
+    x: Tensor, gate: QTensor, up: QTensor | None, down: QTensor, gelu: bool = False
+) -> bool:
+    # whole warps of experts to route, and the matrix-vector kernels' units of 64 weights; where
+    # up is None, gate stacks both
     experts, rows, cols = gate.shape
-    same = gate.type == up.type and gate.shape == up.shape and down.shape == (experts, cols, rows)
+    rows //= 2 if up is None else 1
+    same = up is None or (gate.type == up.type and gate.shape == up.shape)
+    shapes = experts % WARP == 0 and rows % 64 == 0 and cols % 64 == 0
     single = all(isinstance(b, int) and b == 1 for b in x.shape[:-2])
-    types = gate.type in DOTS and down.type in DOTS
-    shapes = experts % WARP == 0 and rows % 128 == 0 and cols % 128 == 0
-    return on_nvidia(x) and single and same and types and shapes
+    types = gate.type in DOTS and down.type in DOTS and down.shape == (experts, cols, rows)
+    return on_nvidia(x) and single and same and shapes and types
 
 
 def mixture(
-    x: Tensor, scores: Tensor, gate: QTensor, up: QTensor, down: QTensor, used: int,
-    norm: tuple[Tensor, float],
+    x: Tensor, scores: Tensor, gate: QTensor, up: QTensor | None, down: QTensor, used: int,
+    norm: tuple[Tensor, float], gelu: bool = False, scales: Tensor | None = None,
+    residual: bool = True,
 ) -> Tensor:  # fmt: skip
     """x + the mixture of experts for tokens x (1, T, dim) and their router `scores` (1, T,
-    experts): each token's `used` best scoring experts, weighted by the softmax of their scores,
-    run silu(n @ gate.T) * (n @ up.T) @ down.T on n = rms_norm(x, *norm)."""
+    experts): each token's `used` best scoring experts, weighted by the softmax of their scores
+    and by each expert's scale if given, run act(n @ gate.T) * (n @ up.T) @ down.T on
+    n = rms_norm(x, *norm), act SiLU or GELU if gelu; without x if not residual. Where up is
+    None, gate stacks both, each expert's gate rows first."""
     _, tokens, dim = x.shape
     ids, weights = route(scores.reshape(tokens, gate.shape[0]), used)
-    if isinstance(tokens, int) and tokens <= FEW:
-        return _few(x, ids, weights, gate, up, down, used, norm)
+    # few tokens, or what the tensor-core kernels lack, take the matrix-vector kernels
+    few = isinstance(tokens, int) and tokens <= FEW
+    if up is None or few or gelu or scales is not None or not residual or not _fit(gate, up, down):
+        return _matvecs(x, ids, weights, gate, up, down, used, norm, gelu, scales, residual)
     # many tokens: on tensor cores, each expert taking the pairs routed to it
     count = -(-x.max_shape[1] // TILE_TOKENS) * TILE_TOKENS
     order, counts = _bucket(ids, gate.shape[0], count, tokens * used)
@@ -139,26 +154,36 @@ def mixture(
     return x + out.sum(1).reshape(x.shape)
 
 
-def _few(
-    x: Tensor, ids: Tensor, weights: Tensor, gate: QTensor, up: QTensor, down: QTensor,
-    used: int, norm: tuple[Tensor, float],
+def _fit(*ws: QTensor) -> bool:
+    return all(matmul_fits(w.type, *w.shape[1:]) for w in ws)
+
+
+def _matvecs(
+    x: Tensor, ids: Tensor, weights: Tensor, gate: QTensor, up: QTensor | None, down: QTensor,
+    used: int, norm: tuple[Tensor, float], gelu: bool, scales: Tensor | None, residual: bool,
 ) -> Tensor:  # fmt: skip
     # the matrix-vector kernels, reading each chosen expert's rows once per token
     _, tokens, dim = x.shape
-    _, rows, cols = gate.shape
-    xq, xd, xs = quantize_q8(x.reshape(tokens, dim), norm)
-    hidden = Tensor.empty(tokens * used * rows, dtype=dtypes.float32, device=x.device)
-    fxn = functools.partial(
-        _experts_swiglu_kernel, pairs=tokens * used, meta=(gate.type, cols, rows, used)
-    )
-    words = storage_words(gate), storage_words(up)
+    count = x.max_shape[1]
+    _, cols, rows = down.shape  # (experts, dim, hidden)
+    xq, xd, xs = quantize_q8(x.reshape(tokens, dim).pad_to((count, dim)), norm, rows=tokens)
+    hidden = Tensor.empty(count * used * rows, dtype=dtypes.float32, device=x.device)
+    xq, pairs = carry(xq, tokens * used)
+    meta = (gate.type, cols, rows, used, gelu, up is None)
+    fxn = functools.partial(_experts_swiglu_kernel, pairs=pairs, meta=meta)
+    words = storage_words(gate), storage_words(gate if up is None else up)
     hidden = Tensor.custom_kernel(hidden, *words, xq, xd, xs, ids, fxn=fxn)[0]
-    hq, hd, hs = quantize_q8(hidden.reshape(tokens * used, rows))
-    out = Tensor.empty(tokens * dim, dtype=dtypes.float32, device=x.device)
-    residual = x.reshape(tokens * dim).float().contiguous()
-    fxn = functools.partial(_experts_down_kernel, tokens=tokens, meta=(down.type, rows, cols, used))
-    srcs = storage_words(down), hq, hd, hs, ids, weights, residual
-    return Tensor.custom_kernel(out, *srcs, fxn=fxn)[0].reshape(x.shape)
+    hq, hd, hs = quantize_q8(hidden.reshape(count * used, rows), rows=tokens * used)
+    out = Tensor.empty(count * dim, dtype=dtypes.float32, device=x.device)
+    extra = [] if scales is None else [scales.float().contiguous()]
+    if residual:
+        extra.append(x.reshape(tokens, dim).float().pad_to((count, dim)).contiguous().flatten())
+    hq, bound = carry(hq, tokens)
+    meta = (down.type, rows, cols, used, scales is not None, residual)
+    fxn = functools.partial(_experts_down_kernel, tokens=bound, meta=meta)
+    srcs = storage_words(down), hq, hd, hs, ids, weights, *extra
+    out = Tensor.custom_kernel(out, *srcs, fxn=fxn)[0]
+    return out.reshape(count, dim)[:tokens].reshape(x.shape)
 
 
 @functools.cache

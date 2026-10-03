@@ -43,10 +43,12 @@ def feed_forward(
     # if gelu; without x if not residual. Kernels take gate and up together where they share a
     # type and shape; one token takes the matrix-vector kernels, though the matrix kernels would
     # also accept it.
-    paired = _fast() and gate.type == up.type and gate.shape == up.shape and not gelu
+    paired = _fast() and gate.type == up.type and gate.shape == up.shape
     if paired and nv.supports_matvec(x, gate):
-        hidden = nv.swiglu(x, gate, up, norm)
-    elif paired and residual and all(nv.supports_matmul(x, w) for w in (gate, up, down)):
+        hidden = nv.swiglu(x, gate, up, norm, gelu)
+    elif (
+        paired and not gelu and residual and all(nv.supports_matmul(x, w) for w in (gate, up, down))
+    ):
         return nv.feed_forward(x, gate, up, down, norm)
     else:
         g, u = linears(x, gate, up, norm=norm)
@@ -64,9 +66,8 @@ def mixture(
     # weighted by the softmax of their scores and by each expert's scale if given. Experts are
     # stacked matrices (experts, rows, cols); where up is None, gate stacks both, the gate's rows
     # first in each. Only the chosen experts are read.
-    kernels = _fast() and not gelu and scales is None and residual
-    if kernels and up is not None and nv.supports_mixture(x, gate, up, down):
-        return nv.mixture(x, scores, gate, up, down, used, norm)
+    if _fast() and nv.supports_mixture(x, gate, up, down):
+        return nv.mixture(x, scores, gate, up, down, used, norm, gelu, scales, residual)
     top, experts = scores.topk(used)
     weights = top.softmax(-1) if scales is None else top.softmax(-1) * scales[experts]
     B, T, dim = x.shape

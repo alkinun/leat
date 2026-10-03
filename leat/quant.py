@@ -69,6 +69,16 @@ def _q8_0(b: Tensor) -> Tensor:
     return _f16(b[:, :2]) * b[:, 2:].bitcast(dtypes.int8).cast(dtypes.float32)
 
 
+def _q5_0(b: Tensor) -> Tensor:
+    # d:f16, qh:u8[4], qs:u8[16]; value i < 16 is the low nibble of qs[i] and i + 16 its high one,
+    # with bit i of qh as bit 4; minus 16
+    n = b.shape[0]
+    shifts = Tensor([1 << s for s in range(8)], dtype=dtypes.uint8, device=b.device)
+    high = ((b[:, 2:6].reshape(n, 4, 1) // shifts.reshape(1, 1, 8)) & 1).reshape(n, 32)
+    q = ((b[:, 6:] & 15).cat(b[:, 6:] >> 4, dim=1) | (high << 4)).cast(dtypes.float32)
+    return _f16(b[:, :2]) * (q - 16)
+
+
 def _k_scales(s: Tensor) -> tuple[Tensor, Tensor]:
     # 8 six-bit (scale, min) pairs packed in 12 bytes, ggml's get_scale_min_k4
     lo, mid, hi = s[:, 0:4], s[:, 4:8], s[:, 8:12]
@@ -113,7 +123,10 @@ def _q6_k(b: Tensor) -> Tensor:
     return (_f16(b[:, 208:210]).reshape(n, 1, 1, 1, 1) * sc * q).reshape(n, 256)
 
 
-DEQUANT = {GGMLType.Q8_0: _q8_0, GGMLType.Q4_K: _q4_k, GGMLType.Q5_K: _q5_k, GGMLType.Q6_K: _q6_k}
+DEQUANT = {
+    GGMLType.Q5_0: _q5_0, GGMLType.Q8_0: _q8_0, GGMLType.Q4_K: _q4_k, GGMLType.Q5_K: _q5_k,
+    GGMLType.Q6_K: _q6_k,
+}  # fmt: skip
 
 
 @dataclass(frozen=True, eq=False)

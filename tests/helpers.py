@@ -12,6 +12,7 @@ from leat.tokenizer import _BYTE_CHAR, CONTROL, NORMAL, USER_DEFINED, Tokenizer
 
 # byte offsets of each block's f16 scales; random bytes there would be inf/nan
 F16_FIELDS = {
+    GGMLType.Q5_0: (0,),
     GGMLType.Q8_0: (0,),
     GGMLType.Q4_K: (0, 2),
     GGMLType.Q5_K: (0, 2),
