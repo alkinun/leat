@@ -185,23 +185,27 @@ def mixture(
     None, gate stacks both, each expert's gate rows first."""
     _, tokens, dim = x.shape
     ids, weights = route(scores.reshape(tokens, gate.shape[0]), used)
-    # few tokens, or what the tensor-core kernels lack, take the matrix-vector kernels
+    # few tokens, or matrices the tensor-core kernels do not fit, take the matrix-vector kernels
     few = isinstance(tokens, int) and tokens <= FEW
-    if up is None or few or gelu or scales is not None or not residual or not _fit(gate, up, down):
+    gate_rows = gate.shape[1] // (2 if up is None else 1)
+    fit = matmul_fits(gate.type, gate_rows, gate.shape[2]) and matmul_fits(
+        down.type, *down.shape[1:]
+    )
+    if few or not fit:
         return _matvecs(x, ids, weights, gate, up, down, used, norm, gelu, scales, residual)
     # many tokens: on tensor cores, each expert taking the pairs routed to it
     count = -(-x.max_shape[1] // TILE_TOKENS) * TILE_TOKENS
     order, counts = _bucket(ids, gate.shape[0], count, tokens * used)
     q8 = quantize_q8(tiled(x), norm, rows=tokens)
-    hidden = routed_products(q8, tokens, (gate, up), order, counts, used, by_token=True)
+    ws = (gate,) if up is None else (gate, up)
+    hidden = routed_products(q8, tokens, ws, order, counts, used, True, up is None, gelu)
     q8 = quantize_q8(hidden, rows=tokens * used)
     out = routed_products(q8, tokens, (down,), order, counts, used, by_token=False)
-    out = out.reshape(count, used, dim)[:tokens] * weights.reshape(-1, used, 1)[:tokens]
-    return x + out.sum(1).reshape(x.shape)
-
-
-def _fit(*ws: QTensor) -> bool:
-    return all(matmul_fits(w.type, *w.shape[1:]) for w in ws)
+    ids, weights = ids.reshape(-1, used)[:tokens], weights.reshape(-1, used)[:tokens]
+    if scales is not None:
+        weights = weights * scales[ids]
+    mixed = (out.reshape(count, used, dim)[:tokens] * weights.unsqueeze(-1)).sum(1).reshape(x.shape)
+    return x + mixed if residual else mixed
 
 
 def _matvecs(

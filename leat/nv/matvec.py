@@ -12,8 +12,9 @@ from leat.nv.common import (
     activation,
     dp4a,
     f16,
+    fifth_bits,
     lane_range,
-    minus_32,
+    minus,
     on_nvidia,
     storage_words,
     warp_sum,
@@ -105,7 +106,7 @@ def _q6_k_dot(w: UOp, xq: UOp, xd: UOp, xs: UOp, cols: int) -> Dot:
             qh = word16(w, base + 64 + 16 * n + 2 * m)
             for r in range(2):
                 high = (qh >> (2 * k + 4 * r).cast(dtypes.uint32)) & 0x03030303
-                q = minus_32(((ql >> (4 * r)) & 0x0F0F0F0F) | (high << 4))
+                q = minus(((ql >> (4 * r)) & 0x0F0F0F0F) | (high << 4), 32)
                 dots[r][m // 4] = dp4a(q, xq[(g + 2 * r) * 8 + m].load(), dots[r][m // 4])
         total = UOp.const(0.0, dtypes.float32)
         for r in range(2):
@@ -150,18 +151,15 @@ def _q5_0_dot(w: UOp, xq: UOp, xd: UOp, xs: UOp, cols: int) -> Dot:
             for m in range(4):
                 word = word16(w, base + 3 + 2 * m)
                 for h in range(2):  # values 4m.. and 16 + 4m..
-                    q = ((word >> (4 * h)) & 0x0F0F0F0F) | _spread((high >> (16 * h + 4 * m)) & 15)
+                    q = ((word >> (4 * h)) & 0x0F0F0F0F) | fifth_bits(
+                        (high >> (16 * h + 4 * m)) & 15
+                    )
                     acc = dp4a(q.bitcast(dtypes.int32), xq[g * 8 + 4 * h + m].load(), acc)
             d = f16(w[base].load().cast(dtypes.uint32))
             total = total + d * (xd[g].load() * acc.float() - 16 * xs[g].load())
         return total
 
     return dot
-
-
-def _spread(bits: UOp) -> UOp:
-    # 4 bits to bit 4 of each byte of a word
-    return ((bits & 1) | ((bits & 2) << 7) | ((bits & 4) << 14) | ((bits & 8) << 21)) << 4
 
 
 DOTS: dict[GGMLType, Callable[[UOp, UOp, UOp, UOp, int], Dot]] = {

@@ -72,10 +72,16 @@ def f16(bits: UOp) -> UOp:
     return (bits & 0xFFFF).cast(dtypes.uint16).bitcast(dtypes.float16).float()
 
 
-def minus_32(q: UOp) -> UOp:
-    # Q6_K's unsigned 0..63 to signed -32..31, in each byte of a word: b + 96 stays in its byte,
-    # and flipping its top bit makes it b - 32 in two's complement
-    return ((q + 0x60606060) ^ 0x80808080).bitcast(dtypes.int32)
+def minus(q: UOp, offset: int) -> UOp:
+    # each byte of a word less `offset`, as signed bytes, for unsigned bytes below 2 * offset, as
+    # Q6_K's 0..63 to -32..31: b + 128 - offset stays in its byte, and flipping its top bit makes
+    # it b - offset in two's complement
+    return ((q + (128 - offset) * 0x01010101) ^ 0x80808080).bitcast(dtypes.int32)
+
+
+def fifth_bits(bits: UOp) -> UOp:
+    # 4 bits to bit 4 of each byte of a word
+    return ((bits & 1) | ((bits & 2) << 7) | ((bits & 4) << 14) | ((bits & 8) << 21)) << 4
 
 
 def silu(x: UOp) -> UOp:

@@ -46,10 +46,8 @@ def feed_forward(
     paired = _fast() and gate.type == up.type and gate.shape == up.shape
     if paired and nv.supports_matvec(x, gate):
         hidden = nv.swiglu(x, gate, up, norm, gelu)
-    elif (
-        paired and not gelu and residual and all(nv.supports_matmul(x, w) for w in (gate, up, down))
-    ):
-        return nv.feed_forward(x, gate, up, down, norm)
+    elif paired and all(nv.supports_matmul(x, w) for w in (gate, up, down)):
+        return nv.feed_forward(x, gate, up, down, norm, gelu, residual)
     else:
         g, u = linears(x, gate, up, norm=norm)
         hidden = (g.gelu() if gelu else g.silu()) * u
