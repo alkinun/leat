@@ -77,6 +77,27 @@ def test_sentencepiece_style():
     assert tok.decode(tok.encode(text)) == text and tok.eog_ids == {tokens.index("<turn|>")}
 
 
+def test_sentencepiece():
+    # Mistral: merges the pair whose token scores highest, the leftmost on ties, from characters
+    # with spaces as U+2581 and a space before text at the start or after a special token
+    tokens = ["<unk>", "<s>", "</s>"] + [f"<0x{b:02X}>" for b in range(256)]
+    tokens += ["\u2581", "a", "b", "\u2581a", "ab", "\u2581ab"]
+    scores = [0.0] * 259 + [-9.0, -9.0, -9.0, -1.0, -2.0, -0.5]
+    types = [2, CONTROL, CONTROL] + [BYTE] * 256 + [NORMAL] * 6
+    tok = Tokenizer(
+        {"tokenizer.ggml.model": "llama", "tokenizer.ggml.tokens": tokens,
+         "tokenizer.ggml.scores": scores, "tokenizer.ggml.token_type": types,
+         "tokenizer.ggml.bos_token_id": 1, "tokenizer.ggml.eos_token_id": 2}
+    )  # fmt: skip
+    # "\u2581a" (-1) beats "ab" (-2), and then "\u2581ab" (-0.5) takes its b
+    assert tok.encode("ab ab") == [1] + [tokens.index("\u2581ab")] * 2
+    pieces = ["<s>", "\u2581", "b", "</s>", "\u2581", "<0xC3>", "<0xA9>"]  # é is not in the vocab
+    assert tok.encode("b</s>é", special=True) == [tokens.index(t) for t in pieces]
+    # decoding drops the space it puts before text, as llama.cpp, unless the text starts with BOS
+    assert tok.decode(tok.encode("ab ab", bos=False)) == "ab ab"
+    assert tok.decode(tok.encode("ab ab")) == " ab ab"
+
+
 def test_unsupported():
     with pytest.raises(NotImplementedError, match="spm"):
         tiny_tokenizer(**{"tokenizer.ggml.model": "spm"})
