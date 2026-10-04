@@ -7,6 +7,7 @@ import gguf
 import numpy as np
 from gguf.quants import dequantize
 
+from leat.gguf import GGUF
 from leat.quant import BLOCK, GGMLType
 from leat.tokenizer import _BYTE_CHAR, CONTROL, NORMAL, USER_DEFINED, Tokenizer
 
@@ -43,6 +44,11 @@ def tiny_metadata(**overrides) -> dict:
         "tokenizer.ggml.eos_token_id": tokens.index("<|eot|>"),
     }
     return metadata | overrides
+
+
+def chat_template(model_path: Path) -> str:
+    # the model's chat template, which says what its chats can hold: a system prompt, tools
+    return GGUF.open(model_path).metadata.get("tokenizer.chat_template", "")
 
 
 def ids(tok: Tokenizer, *pieces: str) -> list[int]:

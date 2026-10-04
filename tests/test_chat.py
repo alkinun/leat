@@ -124,7 +124,7 @@ def test_no_template():
 @pytest.mark.model
 def test_llama3(model_path):
     metadata = GGUF.open(model_path).metadata
-    if metadata["general.architecture"] != "llama":
+    if "<|start_header_id|>" not in metadata.get("tokenizer.chat_template", ""):
         pytest.skip("checks Llama 3's template")
     c = ChatTemplate(metadata, Tokenizer(metadata))
     messages = [{"role": "system", "content": "Be brief."}, {"role": "user", "content": "Hi"}]

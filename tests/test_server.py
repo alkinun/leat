@@ -10,7 +10,7 @@ import pytest
 
 from leat.engine import Engine
 from leat.server import Server
-from tests.helpers import CONTEXT
+from tests.helpers import CONTEXT, chat_template
 
 WEATHER = {
     "type": "function",
@@ -209,7 +209,9 @@ def served(model_path) -> Iterator[openai.OpenAI]:
 
 @pytest.mark.gpu
 @pytest.mark.model
-def test_calls_tools(served):
+def test_calls_tools(served, model_path):
+    if "tools" not in chat_template(model_path):
+        pytest.skip("the model's chat template takes no tools")
     messages = [{"role": "user", "content": "What is the weather in Paris right now?"}]
     response = served.chat.completions.create(
         model="real", messages=messages, tools=[WEATHER], temperature=0
@@ -221,9 +223,12 @@ def test_calls_tools(served):
 
 @pytest.mark.gpu
 @pytest.mark.model
-def test_shared_system_prompt(served):
+def test_shared_system_prompt(served, model_path):
     # a system prompt that another conversation cached cuts the time to the first token by 5x or
     # more: from 463 to 53 ms for these 2141 tokens on the 3090
+    if "system" not in chat_template(model_path):
+        pytest.skip("the model's chat template takes no system prompt")
+
     def system(name: str) -> str:
         rule = "{} {}: answer plainly, cite source {}, and keep replies under {} words."
         return " ".join(rule.format(name, i, i, i + 50) for i in range(100))
