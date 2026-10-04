@@ -342,25 +342,27 @@ def test_norm_and_residual(tokens):
 
 # one token takes the matrix-vector kernels where the matrices are wide enough, else as several
 # tokens do, with gate and up in tiles of 256 rows or, for few rows, 128, or 64 where 128 do not
-# divide them, and 5 in tiles of 16 tokens: Gemma 4's MLP, of GELU and Q5_0 rows of 2112, without
-# the residual
+# divide them, and 5 in tiles of 16 tokens, of 64 rows for Q6_K: Gemma 4's MLP, of GELU and Q5_0
+# rows of 2112, without the residual
 @pytest.mark.parametrize(
-    "tokens, hidden, down_type, gelu",
-    [(1, 4096, Q6_K, False), (1, 1024, Q6_K, False), (70, 4096, Q6_K, False),
-     (70, 1024, Q6_K, False), (5, 4096, Q6_K, False), (1, 2112, Q5_0, True),
-     (70, 2112, Q5_0, True), (5, 2112, Q5_0, True)],
+    "tokens, hidden, gate_type, down_type, gelu",
+    [(1, 4096, Q4_K, Q6_K, False), (1, 1024, Q4_K, Q6_K, False), (70, 4096, Q4_K, Q6_K, False),
+     (70, 1024, Q4_K, Q6_K, False), (5, 4096, Q4_K, Q6_K, False), (5, 1024, Q6_K, Q4_K, False),
+     (1, 2112, Q4_K, Q5_0, True), (70, 2112, Q4_K, Q5_0, True), (5, 2112, Q4_K, Q5_0, True)],
 )  # fmt: skip
-def test_feed_forward(tokens, hidden, down_type, gelu):
+def test_feed_forward(tokens, hidden, gate_type, down_type, gelu):
     rng = np.random.default_rng(12)
     dim = 2048
-    (gate, gate_blocks), (up, up_blocks) = (random_matrix(Q4_K, hidden, dim, rng) for _ in "gu")
+    (gate, gate_blocks), (up, up_blocks) = (
+        random_matrix(gate_type, hidden, dim, rng) for _ in "gu"
+    )
     down, down_blocks = random_matrix(down_type, dim, hidden, rng)
     x = (rng.standard_normal((1, tokens, dim)) * 3).astype(np.float32)
     weight = rng.uniform(0.5, 1.5, dim).astype(np.float32)
     norm = (Tensor(weight), 1e-5)
     got = ops.feed_forward(Tensor(x), gate, up, down, norm, gelu, residual=not gelu).numpy()[0]
     normed = rms_norm(x[0], weight, 1e-5)
-    g, u = (reference_matmul(normed, b, Q4_K) for b in (gate_blocks, up_blocks))
+    g, u = (reference_matmul(normed, b, gate_type) for b in (gate_blocks, up_blocks))
     hidden_ = (activation(g, gelu) * u).astype(np.float32)
     expected = reference_matmul(hidden_, down_blocks, down_type) + (0 if gelu else x[0])
     # f32 rounding inside the kernels may move a few activations across a quantization step

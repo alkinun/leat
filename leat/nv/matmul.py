@@ -39,7 +39,7 @@ FEW_TOKENS = 16  # tokens per tile where there are at most that many
 WARP_ROWS = 32  # a warp per 32 rows of the tile, and a thread per row to load its scales
 STEP = 128  # weights per row per step
 SUBTILES_M = WARP_ROWS // 16  # of 16 rows per warp, by subtiles of 8 tokens
-BLOCKS = 80  # blocks that split steps aim for, about the 3090's 82 SMs
+SMS = 82  # the 3090's
 
 # mma.sync on int8: a 16 x k tile of weights times a k x 8 tile of activations, for k = 32 or 16.
 # {0} points at 4 int32 registers for the lane's share of the result, then come the lane's 4 or 2
@@ -571,9 +571,14 @@ def tiled(x: Tensor) -> Tensor:
     return x.reshape(x.shape[-2], n).float().pad_to((count, n)).contiguous()
 
 
-def _tile(ggml_type: GGMLType, heights: list[int], gated: bool) -> int:
+def _tile(ggml_type: GGMLType, heights: list[int], gated: bool, few: bool = False) -> int:
     # rows per tile: 256 where there are many, to reach more TOPS, else 128 to occupy more SMs, or
-    # 64 where 128 do not divide the matrices; a gated tile holds half its rows of each
+    # 64 where 128 do not divide the matrices; a gated tile holds half its rows of each. Few
+    # tokens of Q6_K take 64: a tile of 256 rows takes 39 KB of shared memory and 145 registers a
+    # thread, a block per SM, where tiles of 64 fit two, which ran Llama 3.1 8B's down projection
+    # for 16 tokens in about 110 us rather than 150.
+    if few and ggml_type == GGMLType.Q6_K:
+        return 64
     per = 2 if gated else 1
     big = sum(heights) >= 4096 and all(h % (256 // per) == 0 for h in heights)
     if big and _TILES[ggml_type].max_rows == 256:
@@ -581,28 +586,27 @@ def _tile(ggml_type: GGMLType, heights: list[int], gated: bool) -> int:
     return 128 if all(h % (128 // per) == 0 for h in heights) else 64
 
 
-def _splits(blocks: int, steps: int) -> int:
-    # blocks per tile, each taking an even share of its steps, where the tiles alone would leave
-    # SMs idle: few tiles of tokens by few of rows. With the 3090's 16 tiles of 256 rows on
-    # Llama 3.1 8B's down projection, a split in 4 runs a tile of 16 tokens 2.4 times as fast.
-    splits = 1
-    while blocks * splits * 2 <= BLOCKS and steps % (splits * 2) == 0:
-        splits *= 2
-    return splits
+def _splits(tiles: int, rows: int, steps: int) -> int:
+    # blocks per tile of rows, each taking an even share of its steps, for a single tile of
+    # tokens: the split that leaves the fewest steps to the busiest SM, counting a block's start
+    # as 2 steps, and an SM taking 256 rows' worth of tiles at a time. On Llama 3.1 8B's matrices
+    # for 16 tokens it picks splits within a quarter of the best measured, 1.3 to 4.7 times as fast
+    # as none.
+    def cost(s: int) -> int:
+        return -(-tiles * s // (SMS * 256 // rows)) * (steps // s + 2)
+
+    return min((s for s in (1, 2, 4, 8, 16) if steps % s == 0), key=cost)
 
 
-def _summed(parts: Tensor, tokens: int | UOp, gated: bool, gelu: bool,
-            residual: Tensor | None) -> Tensor:  # fmt: skip
+def _summed(parts: Tensor, gated: bool, gelu: bool, residual: Tensor | None = None) -> Tensor:
     # the splits' sums (splits, count, n) added up, as act(gate) * up if gated and plus the
-    # residual if given, in a buffer of count rows as the kernel's own output
-    count = parts.shape[1]
-    out = parts[:, :tokens].sum(0)
+    # residual (count, n) if given: over every row, as the kernel writes them, rather than a bound
+    # number of them, over which tinygrad's own kernel took 60 us rather than 5 for gate and up
+    out = parts.sum(0)
     if gated:
         g, u = out.chunk(2, dim=1)
         out = (g.gelu() if gelu else g.silu()) * u
-    if residual is not None:
-        out = out + residual.reshape(out.shape)
-    return out.pad_to((count, out.shape[1])).contiguous()
+    return (out if residual is None else out + residual).contiguous()
 
 
 def _products(
@@ -620,24 +624,23 @@ def _products(
     for _, group in itertools.groupby(ws, key=lambda w: w.type):
         stack = tuple(group)
         heights = [w.shape[0] for w in stack]
-        tile = _tile(stack[0].type, heights, gated)
+        tile = _tile(stack[0].type, heights, gated, tile_tokens == FEW_TOKENS)
         width = heights[0] if gated else sum(heights)
-        blocks = count // tile_tokens * width // (tile // 2 if gated else tile)
-        splits = _splits(blocks, -(-stack[0].shape[1] // STEP))
+        tiles, steps = width // (tile // 2 if gated else tile), -(-stack[0].shape[1] // STEP)
+        splits = _splits(tiles, tile, steps) if count == tile_tokens else 1
         fxn = functools.partial(
             _matmul_kernel, tokens=bound, ggml_type=stack[0].type, rows=tile,
             heights=tuple(heights), gated=gated, gelu=gelu, tile_tokens=tile_tokens,
             splits=splits,
         )  # fmt: skip
-        words = map(storage_words, stack)
+        words, res = map(storage_words, stack), () if residual is None else (tiled(residual),)
         if splits == 1:
-            res = () if residual is None else (tiled(residual),)
             out = Tensor.empty(count, width, dtype=dtypes.float32, device=xq.device)
             out = Tensor.custom_kernel(out, *words, xq, xd, xs, *res, fxn=fxn)[0]
         else:
             parts = Tensor.empty(splits, count, width * (2 if gated else 1), device=xq.device)
             parts = Tensor.custom_kernel(parts, *words, xq, xd, xs, fxn=fxn)[0]
-            out = _summed(parts, tokens, gated, gelu, residual)
+            out = _summed(parts, gated, gelu, *res)
         outs.append((out, [width] if gated else heights))
     return outs
 
