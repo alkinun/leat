@@ -16,6 +16,7 @@ from leat.nv.common import (
     lane_range,
     minus,
     on_nvidia,
+    register,
     storage_words,
     warp_sum,
     word16,
@@ -29,23 +30,28 @@ Dot = Callable[[UOp, UOp, UOp | int], UOp]  # (row, unit, x) -> a unit's share o
 def rows_kernel(out: UOp, units: int, name: str, dots: list[Callable[[UOp, UOp], UOp]],
                 combine: Callable[..., UOp], rows: int | UOp | None = None) -> UOp:  # fmt: skip
     # one block of one warp per output row, of the first `rows` if given: lanes take the row's
-    # `units` in turn, the warp sums each dot product, and out[row] = combine(row, *sums). Where a
-    # last turn has fewer units than lanes, the others repeat the last unit, whose loads hit in
-    # cache, and drop its share. Grouping rows into wider blocks measured slower on the 3090, by up
-    # to a quarter for Q6_K.
+    # `units` in turn, the warp sums each dot product, and out[row] = combine(row, *sums). Whole
+    # turns run in a loop; where a last turn has fewer units than lanes, the others repeat the
+    # last unit, whose loads hit in cache, and drop its share. Grouping rows into wider blocks
+    # measured slower on the 3090, by up to a quarter for Q6_K.
     row = UOp.range(out.shape[0] if rows is None else rows, 0, AxisType.GLOBAL)
     lane = lane_range()
     zero = UOp.const(0.0, dtypes.float32)
-
-    def share(dot: Callable[[UOp, UOp], UOp], turn: int) -> UOp:
-        unit = turn * WARP + lane
-        if (turn + 1) * WARP <= units:
-            return dot(row, unit)
-        return (unit < units).where(dot(row, unit.minimum(units - 1)), zero)
-
-    turns = range(-(-units // WARP))
-    sums = [warp_sum(sum((share(dot, t) for t in turns), zero)) for dot in dots]
-    store = out[row.valid(lane.eq(0))].store(combine(row, *sums))
+    whole, rest = divmod(units, WARP)
+    acc = register((len(dots),), 0.0)
+    if whole:
+        turn = UOp.range(whole, 1, AxisType.LOOP)
+        prev = acc.after(turn)
+        shares = [prev[i].load() + dot(row, turn * WARP + lane) for i, dot in enumerate(dots)]
+        acc = acc.after(acc.store(UOp.stack(*shares)).end(turn))
+    totals = [acc[i].load() for i in range(len(dots))]
+    if rest:
+        unit = whole * WARP + lane
+        totals = [
+            t + (unit < units).where(dot(row, unit.minimum(units - 1)), zero)
+            for t, dot in zip(totals, dots, strict=True)
+        ]
+    store = out[row.valid(lane.eq(0))].store(combine(row, *(warp_sum(t) for t in totals)))
     info = KernelInfo(name=f"{name}_{out.shape[0]}_{units}", opts_to_apply=())
     return store.end(row, lane).sink(arg=info)
 
