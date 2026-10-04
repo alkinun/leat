@@ -64,19 +64,113 @@ def _f16(b: Tensor) -> Tensor:
     return b.bitcast(dtypes.float16).cast(dtypes.float32)
 
 
-def _q8_0(b: Tensor) -> Tensor:
-    # d:f16, qs:i8[32]
-    return _f16(b[:, :2]) * b[:, 2:].bitcast(dtypes.int8).cast(dtypes.float32)
+def _fields(b: Tensor, width: int) -> Tensor:
+    # each byte of b split into its fields of `width` bits, least significant first, along a new
+    # last axis
+    shifts = Tensor(list(range(0, 8, width)), dtype=dtypes.uint8, device=b.device)
+    return (b.unsqueeze(-1) >> shifts) & ((1 << width) - 1)
+
+
+def _nibbles(b: Tensor) -> Tensor:
+    # bytes (n, 16) to their 32 nibbles: the low ones are values 0..15, the high ones 16..31
+    return _fields(b, 4).transpose(1, 2).reshape(b.shape[0], -1)
+
+
+def _lookup(table: tuple[int, ...], index: Tensor) -> Tensor:
+    # table[index] for 4-bit indices, as f32
+    out = Tensor.zeros(*index.shape, device=index.device)
+    for i, v in enumerate(table):
+        if v:
+            out = (index == i).where(float(v), out)
+    return out
+
+
+def _q4_0(b: Tensor) -> Tensor:
+    # d:f16, qs:u8[16]; minus 8
+    return _f16(b[:, :2]) * (_nibbles(b[:, 2:]).cast(dtypes.int8) - 8).cast(dtypes.float32)
+
+
+def _q4_1(b: Tensor) -> Tensor:
+    # d:f16, m:f16, qs:u8[16]
+    return _f16(b[:, :2]) * _nibbles(b[:, 4:]).cast(dtypes.float32) + _f16(b[:, 2:4])
 
 
 def _q5_0(b: Tensor) -> Tensor:
     # d:f16, qh:u8[4], qs:u8[16]; value i < 16 is the low nibble of qs[i] and i + 16 its high one,
     # with bit i of qh as bit 4; minus 16
-    n = b.shape[0]
-    shifts = Tensor([1 << s for s in range(8)], dtype=dtypes.uint8, device=b.device)
-    high = ((b[:, 2:6].reshape(n, 4, 1) // shifts.reshape(1, 1, 8)) & 1).reshape(n, 32)
-    q = ((b[:, 6:] & 15).cat(b[:, 6:] >> 4, dim=1) | (high << 4)).cast(dtypes.float32)
+    q = (_nibbles(b[:, 6:]) | (_fields(b[:, 2:6], 1).flatten(1) << 4)).cast(dtypes.float32)
     return _f16(b[:, :2]) * (q - 16)
+
+
+def _q5_1(b: Tensor) -> Tensor:
+    # d:f16, m:f16, qh:u8[4], qs:u8[16]; Q5_0's values, plus m
+    q = (_nibbles(b[:, 8:]) | (_fields(b[:, 4:8], 1).flatten(1) << 4)).cast(dtypes.float32)
+    return _f16(b[:, :2]) * q + _f16(b[:, 2:4])
+
+
+def _q8_0(b: Tensor) -> Tensor:
+    # d:f16, qs:i8[32]
+    return _f16(b[:, :2]) * b[:, 2:].bitcast(dtypes.int8).cast(dtypes.float32)
+
+
+# IQ4_NL's and IQ4_XS's values, and MXFP4's E2M1 ones, doubled
+IQ4_VALUES = (-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113)
+FP4_VALUES = (0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12)
+
+
+def _iq4_nl(b: Tensor) -> Tensor:
+    # d:f16, qs:u8[16] of indices into IQ4_VALUES
+    return _f16(b[:, :2]) * _lookup(IQ4_VALUES, _nibbles(b[:, 2:]))
+
+
+def _mxfp4(b: Tensor) -> Tensor:
+    # e:u8, qs:u8[16] of indices into FP4_VALUES; the scale is 2^(e - 128), as ggml's
+    # e8m0_to_fp32_half writes it, with denormals for e < 2
+    e = b[:, :1].cast(dtypes.uint32)
+    denormal = Tensor(0x00200000, dtype=dtypes.uint32, device=b.device) << e
+    scale = (e < 2).where(denormal, (e - 1) << 23).bitcast(dtypes.float32)
+    return scale * _lookup(FP4_VALUES, _nibbles(b[:, 1:]))
+
+
+def _iq4_xs(b: Tensor) -> Tensor:
+    # d:f16, scales_h:u16, scales_l:u8[4], qs:u8[128]; sub-block j of 32 takes 16 bytes of qs, as
+    # IQ4_NL, with scale d * (s - 32) of 6 bits: nibble j of scales_l, and bits 2j of scales_h
+    n = b.shape[0]
+    low = _fields(b[:, 4:8], 4).reshape(n, 8)
+    high = _fields(b[:, 2:4], 2).reshape(n, 8)
+    scales = ((low | (high << 4)).cast(dtypes.int8) - 32).cast(dtypes.float32)
+    q = _lookup(IQ4_VALUES, _nibbles(b[:, 8:].reshape(n * 8, 16))).reshape(n, 8, 32)
+    return ((_f16(b[:, :2]) * scales).reshape(n, 8, 1) * q).reshape(n, 256)
+
+
+def _crumbs(qs: Tensor) -> Tensor:
+    # Q2_K's and Q3_K's 64 bytes of 2-bit values: each half of 128 values takes 32 bytes, its rows
+    # k of 32 their bits 2k: (n, 16, 16), by groups of 16 values
+    n = qs.shape[0]
+    return _fields(qs.reshape(n, 2, 32), 2).permute(0, 1, 3, 2).reshape(n, 16, 16)
+
+
+def _q2_k(b: Tensor) -> Tensor:
+    # scales:u8[16], qs:u8[64], d:f16, dmin:f16; each 16 values a scale d * (s & 15) and a min
+    # dmin * (s >> 4)
+    n, sc = b.shape[0], b[:, :16]
+    dl = (_f16(b[:, 80:82]) * (sc & 15).cast(dtypes.float32)).reshape(n, 16, 1)
+    ml = (_f16(b[:, 82:84]) * (sc >> 4).cast(dtypes.float32)).reshape(n, 16, 1)
+    return (dl * _crumbs(b[:, 16:80]).cast(dtypes.float32) - ml).reshape(n, 256)
+
+
+def _q3_k(b: Tensor) -> Tensor:
+    # hmask:u8[32], qs:u8[64], scales:u8[12], d:f16; Q2_K's 2 bits, minus 4 where hmask's bit for
+    # the value (bit j of byte l for value l of row j of 32) is clear; 16 scales of 6 bits, minus
+    # 32: nibbles of the first 8 bytes, the low first, and bits 2(j / 4) of byte 8 + j % 4
+    n = b.shape[0]
+    low = _fields(b[:, 96:104], 4).transpose(1, 2).reshape(n, 16)
+    high = _fields(b[:, 104:108], 2).transpose(1, 2).reshape(n, 16)
+    scales = ((low | (high << 4)).cast(dtypes.int8) - 32).cast(dtypes.float32)
+    dl = (_f16(b[:, 108:110]) * scales).reshape(n, 16, 1)
+    clear = (_fields(b[:, :32], 1).permute(0, 2, 1) ^ 1).reshape(n, 16, 16)
+    q = _crumbs(b[:, 32:96]).cast(dtypes.int8) - (clear << 2).cast(dtypes.int8)
+    return (dl * q.cast(dtypes.float32)).reshape(n, 256)
 
 
 def _k_scales(s: Tensor) -> tuple[Tensor, Tensor]:
@@ -124,8 +218,10 @@ def _q6_k(b: Tensor) -> Tensor:
 
 
 DEQUANT = {
-    GGMLType.Q5_0: _q5_0, GGMLType.Q8_0: _q8_0, GGMLType.Q4_K: _q4_k, GGMLType.Q5_K: _q5_k,
-    GGMLType.Q6_K: _q6_k,
+    GGMLType.Q4_0: _q4_0, GGMLType.Q4_1: _q4_1, GGMLType.Q5_0: _q5_0, GGMLType.Q5_1: _q5_1,
+    GGMLType.Q8_0: _q8_0, GGMLType.Q2_K: _q2_k, GGMLType.Q3_K: _q3_k, GGMLType.Q4_K: _q4_k,
+    GGMLType.Q5_K: _q5_k, GGMLType.Q6_K: _q6_k, GGMLType.IQ4_NL: _iq4_nl,
+    GGMLType.IQ4_XS: _iq4_xs, GGMLType.MXFP4: _mxfp4,
 }  # fmt: skip
 
 

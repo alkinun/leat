@@ -13,11 +13,19 @@ from leat.tokenizer import _BYTE_CHAR, CONTROL, NORMAL, USER_DEFINED, Tokenizer
 
 # byte offsets of each block's f16 scales; random bytes there would be inf/nan
 F16_FIELDS = {
+    GGMLType.Q4_0: (0,),
+    GGMLType.Q4_1: (0, 2),
     GGMLType.Q5_0: (0,),
+    GGMLType.Q5_1: (0, 2),
     GGMLType.Q8_0: (0,),
+    GGMLType.Q2_K: (80, 82),
+    GGMLType.Q3_K: (108,),
     GGMLType.Q4_K: (0, 2),
     GGMLType.Q5_K: (0, 2),
     GGMLType.Q6_K: (208,),
+    GGMLType.IQ4_NL: (0,),
+    GGMLType.IQ4_XS: (0,),
+    GGMLType.MXFP4: (),
 }
 
 
@@ -25,6 +33,9 @@ def random_blocks(
     ggml_type: GGMLType, n: int, rng: np.random.Generator, scale: float = 1.0
 ) -> np.ndarray:
     blocks = rng.integers(0, 256, (n, BLOCK[ggml_type][1]), dtype=np.uint8)
+    if ggml_type == GGMLType.MXFP4:  # an exponent byte: scales of 2^-10 to 2^-1 times `scale`
+        e = 128 + np.round(np.log2(scale)) + rng.integers(-10, 0, n)
+        blocks[:, 0] = np.clip(e, 0, 254).astype(np.uint8)
     for offset in F16_FIELDS[ggml_type]:
         d = rng.uniform(-scale, scale, (n, 1)).astype(np.float16)
         blocks[:, offset : offset + 2] = d.view(np.uint8)
