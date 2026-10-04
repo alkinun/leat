@@ -70,7 +70,8 @@ def test_kl_divergence(tiny_model, tmp_path, capsys, mode):
     path, weights = tiny_model
     vocab = weights["output.weight"].shape[0]
     write_kl_base(base := tmp_path / "base.kld", weights, chunks(path), vocab)
-    result = run_json(capsys, "perplexity", path, "--kl-base", base, "--ctx", CTX, *mode)
+    # the file's chunks set the context: the default --ctx is over the tiny model's
+    result = run_json(capsys, "perplexity", path, "--kl-base", base, *mode)
     assert result["kl_mean"] < 1e-4 and result["top1"] == 1.0
 
 

@@ -52,8 +52,9 @@ def main(argv: list[str] | None = None) -> None:
         "--kl-base", type=Path, help="logits from llama-perplexity --kl-divergence-base"
     )
     quality.add_argument(
-        "--ctx", type=int, default=512, help="chunk size, as in llama-perplexity -c"
-    )
+        "--ctx", type=int, default=512,
+        help="chunk size, as in llama-perplexity -c; a --kl-base file has its own",
+    )  # fmt: skip
     quality.add_argument("--chunks", type=int, help="score only the first N chunks")
     quality.add_argument(
         "--decode", action="store_true", help="score one token at a time, as generation runs"
@@ -125,7 +126,8 @@ def _bench(args: argparse.Namespace) -> None:
 
 
 def _perplexity(args: argparse.Namespace) -> None:
-    engine = Engine(args.model, max_context=args.ctx)
+    ctx = bench.base_chunk(args.kl_base) if args.kl_base else args.ctx
+    engine = Engine(args.model, max_context=ctx)
     if args.kl_base:
         result = bench.kl_divergence(engine, args.kl_base, args.chunks, args.decode)
     else:

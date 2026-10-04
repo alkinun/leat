@@ -11,7 +11,7 @@ import struct
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import BinaryIO, cast
 
 from tinygrad import Tensor, TinyJit, UOp, dtypes
 
@@ -79,14 +79,18 @@ def perplexity(
     return Quality(math.exp(nll / (n * (ctx - 1 - ctx // 2))))
 
 
+def base_chunk(base: Path) -> int:
+    """The chunk size of logits saved by llama-perplexity, which max_context must hold."""
+    with open(base, "rb") as f:
+        return _header(f, base)[0]
+
+
 def kl_divergence(
     engine: Engine, base: Path, chunks: int | None = None, decode: bool = False
 ) -> Quality:
     """Compares against logits saved by `llama-perplexity --kl-divergence-base`."""
     with open(base, "rb") as f:
-        magic, ctx, vocab, n_chunks = struct.unpack("<8s3i", f.read(20))
-        if magic != b"_logits_":
-            raise ValueError(f"{base} is not a llama-perplexity logits file")
+        ctx, vocab, n_chunks = _header(f, base)
         if vocab != engine.config.vocab_size:
             raise ValueError(f"{base} has a vocab of {vocab}, the model {engine.config.vocab_size}")
         if ctx > engine.max_context:
@@ -111,6 +115,14 @@ def kl_divergence(
     kls.sort()
     n = len(kls)
     return Quality(math.exp(nll / n), sum(kls) / n, kls[int(0.99 * (n - 1))], kls[-1], same / n)
+
+
+def _header(f: BinaryIO, base: Path) -> tuple[int, int, int]:
+    # a llama-perplexity logits file's chunk size, vocab size and number of chunks
+    magic, ctx, vocab, n_chunks = struct.unpack("<8s3i", f.read(20))
+    if magic != b"_logits_":
+        raise ValueError(f"{base} is not a llama-perplexity logits file")
+    return ctx, vocab, n_chunks
 
 
 def _logprobs(engine: Engine, chunk: list[int], decode: bool) -> Tensor:
