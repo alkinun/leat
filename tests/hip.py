@@ -37,7 +37,7 @@ def install() -> None:
     class ClangHIPCompiler(Compiler):
         def __init__(self, arch: str):
             self.arch = arch
-            super().__init__(f"compile_clang_hip_{arch}")
+            super().__init__(f"compile_clang_hip_aligned_{arch}")  # a cache key of these flags
 
         def compile(self, src: str) -> bytes:
             # the device libraries' declarations, which PRELUDE's macros stand in for

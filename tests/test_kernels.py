@@ -336,6 +336,8 @@ def test_add_normed(monkeypatch, parts, normed, tokens):
 
 @pytest.mark.parametrize("tokens", [1, 80, 5])
 def test_norm_and_residual(tokens):
+    if tokens > 1 and not NVIDIA:
+        pytest.skip("several tokens take the tensor-core kernels, NVIDIA's alone")
     rng = np.random.default_rng(9)
     w, blocks = random_matrix(Q4_K, 256, 4096, rng)
     x = (rng.standard_normal((1, tokens, 4096)) * 3).astype(np.float32)
@@ -360,6 +362,8 @@ def test_norm_and_residual(tokens):
      (70, 1024, Q8_0, Q8_0, "oai")],
 )  # fmt: skip
 def test_feed_forward(tokens, hidden, gate_type, down_type, kind):
+    if tokens > 1 and not NVIDIA:
+        pytest.skip("several tokens take the tensor-core kernels, NVIDIA's alone")
     rng = np.random.default_rng(12)
     dim = 2048
     (gate, gate_blocks), (up, up_blocks) = (

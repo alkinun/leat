@@ -34,6 +34,8 @@ KEYS = 64  # keys per chunk
 PARTIALS = 48  # most blocks per kv head; longer caches loop over several chunks per block
 GROUP_SPLIT = 4  # query heads per block at most: a block's time grows with them, 5.7 us for 4
 # and 10 us for 8 at short context, while reading keys and values once per block costs little
+GROUP_DIMS = 512  # and their dimensions: 2 heads of 512, Gemma 4's, spill registers on RDNA,
+# while 1 decodes as fast on NVIDIA
 
 
 @functools.cache
@@ -178,9 +180,11 @@ def _since(length: int | UOp, window: int) -> int | UOp:
     return (length - window).maximum(0) if isinstance(length, UOp) else max(length - window, 0)
 
 
-def _per_block(group: int) -> int:
-    # query heads per block, of a GQA group: as many as GROUP_SPLIT, and a divisor of the group
-    return max(n for n in range(1, GROUP_SPLIT + 1) if group % n == 0)
+def _per_block(group: int, dim: int) -> int:
+    # query heads per block, of a GQA group: as many as GROUP_SPLIT and GROUP_DIMS allow, and a
+    # divisor of the group
+    most = max(min(GROUP_SPLIT, GROUP_DIMS // dim), 1)
+    return max(n for n in range(1, most + 1) if group % n == 0)
 
 
 def supports_attention(q: Tensor, cache: Tensor) -> bool:
@@ -188,7 +192,7 @@ def supports_attention(q: Tensor, cache: Tensor) -> bool:
     if not on_gpu(q) or not all(isinstance(x, int) for x in shape):
         return False
     kv_heads, n, dim, batch, heads, tokens = (int(x) for x in shape)
-    group = _per_block(heads // kv_heads)
+    group = _per_block(heads // kv_heads, dim)
     fits = group * dim * 2 + group * 8 <= SHARED  # one warp's share of shared memory
     return batch == 1 and tokens == 1 and dim % 64 == 0 and n % KEYS == 0 and fits
 
@@ -202,7 +206,7 @@ def attention(
     q.k * scale, and a sink (H,) per head if given, a score that adds no value."""
     heads, dim = q.shape[1], cache.shape[4]
     kv_heads = int(cache.shape[2])
-    group = _per_block(int(heads) // kv_heads)
+    group = _per_block(int(heads) // kv_heads, int(dim))
     split = int(heads) // kv_heads // group  # blocks per kv head
     q, slot = carry(q.float().contiguous(), slot)
     cache, length = carry(cache, length)
