@@ -523,10 +523,10 @@ def test_rotate(monkeypatch, halves, normed, v_norm, kv_heads, symbolic):
     assert np.abs(results[0][1][:, SLOT, :, pos]).sum() > 0
 
 
-# heads too wide for flash attention, Gemma 4's of 512, with and without a window
+# heads too wide for registers, Gemma 4's of 512: blocks take parts of their outputs
 @pytest.mark.parametrize("tokens, start, window", [(37, 0, 0), (100, 1000, 0), (512, 1500, 1024)])
 @pytest.mark.parametrize("symbolic", [False, True])
-def test_wide_attention(tokens, start, window, symbolic):
+def test_flash_attention_wide(tokens, start, window, symbolic):
     rng = np.random.default_rng(tokens + start)
     cache = rng.standard_normal((2, SLOTS, 2, 2048, 512)).astype(np.float16) * np.float16(0.2)
     q = rng.standard_normal((1, 16, 512, 512)).astype(np.float32) * 0.2
@@ -536,8 +536,8 @@ def test_wide_attention(tokens, start, window, symbolic):
         q_t = q_t[:, :, : UOp.variable("chunk_len", 1, 512).bind(tokens)]
     else:
         pos, q_t = start, q_t[:, :, :tokens]
-    assert not nv.supports_flash_attention(q_t, cache_t) and nv.supports_wide_attention(q_t)
-    got = nv.wide_attention(q_t, cache_t, slot(symbolic), pos, 1.0, window)
+    assert nv.supports_flash_attention(q_t, cache_t)
+    got = nv.flash_attention(q_t, cache_t, slot(symbolic), pos, 1.0, window)
     got = got.pad_to((1, 512, 16 * 512)).numpy()[0, :tokens]
     expected = reference_attention(q[0, :, :tokens], cache, start, window, 1.0)
     np.testing.assert_allclose(got.reshape(expected.shape), expected, rtol=3e-3, atol=3e-3)

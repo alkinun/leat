@@ -174,8 +174,6 @@ def attention(
         return nv.attention(q, cache, slot, start_pos + T, scale, window).reshape(B, T, H * D)
     if _fast() and nv.supports_flash_attention(q, cache):
         return nv.flash_attention(q, cache, slot, start_pos, scale, window)
-    if _fast() and nv.supports_wide_attention(q):
-        return nv.wide_attention(q, cache, slot, start_pos, scale, window)
     k, v = (cache[i, slot : slot + 1, :, : start_pos + T].cast(q.dtype) for i in (0, 1))
     mask = None
     if window or not (isinstance(T, int) and T == 1):
