@@ -16,6 +16,7 @@ from leat.kernels.common import (
     WARP,
     at_most,
     carry,
+    carry_all,
     lane_range,
     load_vector,
     on_gpu,
@@ -240,11 +241,8 @@ def attention(
     group = _per_block(heads // kv_heads, dim)
     split = heads // kv_heads // group  # blocks per kv head
     q = q.reshape(heads, rows, dim).float().contiguous()
-    bound = []
-    for value in (*slots, *lengths):
-        q, value = carry(q, value)
-        bound.append(value)
-    slots_, lengths_ = tuple(bound[:rows]), tuple(bound[rows:])
+    q, slot_vars = carry_all(q, slots)
+    q, length_vars = carry_all(q, lengths)
     waves = 16
     while waves * (group * dim * 2 + group * 8) > SHARED:
         waves //= 2
@@ -252,11 +250,11 @@ def attention(
     partial = Tensor.empty(rows * heads, chunks, dim, dtype=dtypes.float32, device=q.device)
     stats = Tensor.empty(rows * heads, chunks, 2, dtype=dtypes.float32, device=q.device)
     fxn = functools.partial(
-        _attention_partial_kernel, slots=slots_, lengths=lengths_, waves=waves, scale=scale,
-        window=window, split=split,
+        _attention_partial_kernel, slots=slot_vars, lengths=length_vars, waves=waves,
+        scale=scale, window=window, split=split,
     )  # fmt: skip
     outs = Tensor.custom_kernel(partial, stats, q, cache, fxn=fxn)
-    live = at_most(_most(lengths_, window), chunks)
+    live = at_most(_most(length_vars, window), chunks)
     out = Tensor.empty(rows * heads, dim, dtype=dtypes.float32, device=q.device)
     fxn = functools.partial(_attention_combine_kernel, live=live)
     extra = () if sinks is None else (sinks.float().contiguous(),)
@@ -623,23 +621,15 @@ def rotate(
     _, tokens, heads, dim = (int(x) for x in q.shape)
     out = Tensor.empty(tokens * heads * dim, dtype=dtypes.float32, device=q.device)
     q, k, v = (t.reshape(-1).float().contiguous() for t in (q, k, v))
-    unbound = []
-    for value in (*_listed(slots), *_listed(positions)):
-        q, value = carry(q, value)
-        unbound.append(value)
-    rows = len(_listed(slots))
-    slots_, positions_ = unbound[:rows], unbound[rows:]
+    q, slot_vars = carry_all(q, slots if isinstance(slots, list) else [slots])
+    q, position_vars = carry_all(q, positions if isinstance(positions, list) else [positions])
     tables = () if rope is None else rope[0]
     extra = tuple(w.float().contiguous() for w in (*(biases or ()), *(norms or ())))
     fxn = functools.partial(
-        _rotate_kernel, slots=tuple(slots_) if isinstance(slots, list) else slots_[0],
-        positions=tuple(positions_) if isinstance(positions, list) else positions_[0],
+        _rotate_kernel, slots=slot_vars if isinstance(slots, list) else slot_vars[0],
+        positions=position_vars if isinstance(positions, list) else position_vars[0],
         rotated=0 if rope is None else rope[1], halves=halves, biased=biases is not None,
         v_norm=v_norm, eps=eps,
     )  # fmt: skip
     out, cache = Tensor.custom_kernel(out, cache, q, k, v, *tables, *extra, fxn=fxn)[:2]
     return out.reshape(1, heads, tokens, dim), cache
-
-
-def _listed(x: list[int | UOp] | int | UOp) -> list[int | UOp]:
-    return x if isinstance(x, list) else [x]

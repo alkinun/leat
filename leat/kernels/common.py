@@ -267,6 +267,15 @@ def carry(t: Tensor, value: int | UOp) -> tuple[Tensor, int | UOp]:
     return t, value
 
 
+def carry_all(t: Tensor, values: list[int | UOp]) -> tuple[Tensor, tuple[int | UOp, ...]]:
+    # carry() for each of several values, on the same buffer
+    unbound = []
+    for value in values:
+        t, value = carry(t, value)
+        unbound.append(value)
+    return t, tuple(unbound)
+
+
 def storage_words(w: QTensor) -> Tensor:
     # .contiguous() on a bitcast of contiguous storage is a view; without it tinygrad copies
     return w.data.flatten().bitcast(WORD_TYPE[w.type]).contiguous()
