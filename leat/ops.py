@@ -37,21 +37,28 @@ def linears(
 
 def feed_forward(
     x: Tensor, gate: QTensor, up: QTensor, down: QTensor, norm: tuple[Tensor, float],
-    gelu: bool = False, residual: bool = True,
+    kind: str = "silu", residual: bool = True,
 ) -> Tensor:  # fmt: skip
-    # x + (act(n @ gate.T) * (n @ up.T)) @ down.T for n = rms_norm(x, *norm) and act SiLU, or GELU
-    # if gelu; without x if not residual. Kernels take gate and up together where they share a
-    # type and shape; one token takes the matrix-vector kernels, though the matrix kernels would
-    # also accept it.
+    # x + glu(kind, n @ gate.T, n @ up.T) @ down.T for n = rms_norm(x, *norm); without x if not
+    # residual. Kernels take gate and up together where they share a type and shape; one token
+    # takes the matrix-vector kernels, though the matrix kernels would also accept it.
     paired = _fast() and gate.type == up.type and gate.shape == up.shape
     if paired and nv.supports_matvec(x, gate):
-        hidden = nv.swiglu(x, gate, up, norm, gelu)
+        hidden = nv.swiglu(x, gate, up, norm, kind)
     elif paired and all(nv.supports_matmul(x, w) for w in (gate, up, down)):
-        return nv.feed_forward(x, gate, up, down, norm, gelu, residual)
+        return nv.feed_forward(x, gate, up, down, norm, kind, residual)
     else:
-        g, u = linears(x, gate, up, norm=norm)
-        hidden = (g.gelu() if gelu else g.silu()) * u
+        hidden = glu(kind, *linears(x, gate, up, norm=norm))
     return linear(hidden, down, residual=x if residual else None)
+
+
+def glu(kind: str, g: Tensor, u: Tensor) -> Tensor:
+    # how an MLP's gate and up combine: act(g) * u for act SiLU or GELU, tanh's approximation, or
+    # gpt-oss's clamped SwiGLU, "oai", as ggml's swiglu_oai
+    if kind == "oai":
+        g, u = g.minimum(7.0), u.clip(-7.0, 7.0)
+        return g * (g * 1.702).sigmoid() * (u + 1)
+    return (g.gelu() if kind == "gelu" else g.silu()) * u
 
 
 def add_normed(
@@ -67,35 +74,70 @@ def add_normed(
     return out if scale is None else out * scale
 
 
-def router(x: Tensor, norm: tuple[Tensor, float], w: QTensor) -> Tensor:
-    # the scores a mixture of experts' router gives each expert: rms_norm(x, *norm) @ w.T
+def router(x: Tensor, norm: tuple[Tensor, float], w: QTensor, bias: Tensor | None = None) -> Tensor:
+    # the scores a mixture of experts' router gives each expert: rms_norm(x, *norm) @ w.T, plus
+    # the bias if given
     if _fast() and nv.supports_scores(x, w):
-        return nv.scores(x, norm, w)
-    return linear(rms_norm(x, *norm), w)
+        scores = nv.scores(x, norm, w)
+    else:
+        scores = linear(rms_norm(x, *norm), w)
+    return scores if bias is None else scores + bias
 
 
 def mixture(
     x: Tensor, scores: Tensor, gate: QTensor, up: QTensor | None, down: QTensor, used: int,
-    norm: tuple[Tensor, float], gelu: bool = False, scales: Tensor | None = None,
-    residual: bool = True,
+    norm: tuple[Tensor, float], kind: str = "silu", scales: Tensor | None = None,
+    residual: bool = True, biases: tuple[Tensor, Tensor, Tensor] | None = None,
 ) -> Tensor:  # fmt: skip
     # x + a mixture of experts for n = rms_norm(x, *norm), as feed_forward, given the router's
     # scores (B, T, experts): each token takes the MLPs of the `used` experts it scores highest,
     # weighted by the softmax of their scores and by each expert's scale if given. Experts are
-    # stacked matrices (experts, rows, cols); where up is None, gate stacks both, the gate's rows
-    # first in each. Only the chosen experts are read.
+    # stacked matrices (experts, rows, cols), with biases (experts, rows) of gate, up and down if
+    # given; where up is None, gate stacks both, the gate's rows first in each. Only the chosen
+    # experts are read.
     if _fast() and nv.supports_mixture(x, gate, up, down):
-        return nv.mixture(x, scores, gate, up, down, used, norm, gelu, scales, residual)
+        return nv.mixture(x, scores, gate, up, down, used, norm, kind, scales, residual, biases)
     top, experts = scores.topk(used)
     weights = top.softmax(-1) if scales is None else top.softmax(-1) * scales[experts]
     B, T, dim = x.shape
+    if math.prod(x.max_shape[:-1]) * used > gate.shape[0]:  # more pairs than experts
+        chosen = (experts.unsqueeze(-1) == Tensor.arange(gate.shape[0])).float()
+        each = (chosen * weights.unsqueeze(-1)).sum(-2)  # (B, T, experts): 0 but for the chosen
+        mixed = _every_expert(rms_norm(x, *norm), each, gate, up, down, kind, biases)
+        return x + mixed if residual else mixed
     ids = experts.flatten()
     n = rms_norm(x, *norm).unsqueeze(2).expand(B, T, used, dim).reshape(-1, 1, dim)
     g = n @ _take(gate, ids).dequant().transpose(1, 2)
     g, u = g.chunk(2, dim=-1) if up is None else (g, n @ _take(up, ids).dequant().transpose(1, 2))
-    out = ((g.gelu() if gelu else g.silu()) * u) @ _take(down, ids).dequant().transpose(1, 2)
+    if biases is not None:
+        g, u = g + biases[0][ids].unsqueeze(1), u + biases[1][ids].unsqueeze(1)
+    out = glu(kind, g, u) @ _take(down, ids).dequant().transpose(1, 2)
+    if biases is not None:
+        out = out + biases[2][ids].unsqueeze(1)
     mixed = (out.reshape(B, T, used, dim) * weights.reshape(B, T, used, 1)).sum(2)
     return x + mixed if residual else mixed
+
+
+def _every_expert(
+    n: Tensor, each: Tensor, gate: QTensor, up: QTensor | None, down: QTensor, kind: str,
+    biases: tuple[Tensor, Tensor, Tensor] | None,
+) -> Tensor:  # fmt: skip
+    # the sum over experts of each token's weight `each` (B, T, experts) of the expert times its
+    # MLP of n: every expert runs every token, as many tokens choose most experts, rather than a
+    # copy of the chosen ones' matrices for each pair
+    total = None
+    for e in range(gate.shape[0]):
+        g = n @ _take(gate, Tensor([e])).dequant()[0].T
+        g, u = g.chunk(2, dim=-1) if up is None else (g, n @ _take(up, Tensor([e])).dequant()[0].T)
+        if biases is not None:
+            g, u = g + biases[0][e], u + biases[1][e]
+        out = glu(kind, g, u) @ _take(down, Tensor([e])).dequant()[0].T
+        if biases is not None:
+            out = out + biases[2][e]
+        out = out * each[..., e : e + 1]
+        total = out if total is None else total + out
+    assert total is not None
+    return total
 
 
 def _take(w: QTensor, index: Tensor) -> QTensor:
@@ -129,25 +171,31 @@ def rms_norm(x: Tensor, weight: Tensor | None, eps: float) -> Tensor:
 
 
 def _rope(x: Tensor, cos: Tensor, sin: Tensor, halves: bool) -> Tensor:
-    # rotates adjacent pairs of dimensions, or with halves dimension i with i + D/2.
-    # x: (B, H, T, D); cos, sin: (T, D/2)
+    # rotates the first R dimensions: adjacent pairs, or with halves dimension i with i + R/2; the
+    # others stay. x: (B, H, T, D); cos, sin: (T, R/2)
+    rotated = 2 * cos.shape[-1]
+    x, rest = x[..., :rotated], x[..., rotated:]
     if halves:
         x0, x1 = x.chunk(2, dim=-1)
-        return (x0 * cos - x1 * sin).cat(x0 * sin + x1 * cos, dim=-1)
-    pairs = x.reshape(*x.shape[:-1], -1, 2)
-    x0, x1 = pairs[..., 0], pairs[..., 1]
-    return Tensor.stack(x0 * cos - x1 * sin, x0 * sin + x1 * cos, dim=-1).flatten(-2)
+        out = (x0 * cos - x1 * sin).cat(x0 * sin + x1 * cos, dim=-1)
+    else:
+        pairs = x.reshape(*x.shape[:-1], -1, 2)
+        x0, x1 = pairs[..., 0], pairs[..., 1]
+        out = Tensor.stack(x0 * cos - x1 * sin, x0 * sin + x1 * cos, dim=-1).flatten(-2)
+    return out if rest.shape[-1] == 0 else out.cat(rest, dim=-1)
 
 
 def rotate(
     q: Tensor, k: Tensor, v: Tensor, cache: Tensor, slot: int | UOp, start_pos: int | UOp,
-    rope: tuple[Tensor, Tensor], halves: bool, biases: tuple[Tensor, Tensor, Tensor] | None,
-    norms: tuple[Tensor, Tensor] | None, v_norm: bool, eps: float,
+    rope: tuple[tuple[Tensor, Tensor], int] | None, halves: bool,
+    biases: tuple[Tensor, Tensor, Tensor] | None, norms: tuple[Tensor, Tensor] | None,
+    v_norm: bool, eps: float,
 ) -> tuple[Tensor, Tensor]:  # fmt: skip
     # q (1, T, H, D), k and v (1, T, KV_H, D): plus their biases (H * D or KV_H * D), if given;
-    # each head of q and k normed with its weight, if given, and of v without, if v_norm; q and k
-    # rotated by RoPE's tables (positions, D/2) from start_pos, and k and v stored there in a slot
-    # of the cache. Returns q (1, H, T, D) and the cache.
+    # each head of q and k normed with its weight, if given, and of v without, if v_norm; the
+    # first R dimensions of q and k rotated by RoPE's tables (positions, R/2) from start_pos, for
+    # rope ((cos, sin), R), if given; and k and v stored there in a slot of the cache. Returns q
+    # (1, H, T, D) and the cache.
     if _fast() and nv.supports_rotate(q, cache):
         args = (rope, halves, biases, norms, v_norm, eps)
         return nv.rotate(q, k, v, cache, slot, start_pos, *args)
@@ -158,25 +206,30 @@ def rotate(
         q, k = rms_norm(q, norms[0], eps), rms_norm(k, norms[1], eps)
     if v_norm:
         v = rms_norm(v, None, eps)
-    cos, sin = (table[start_pos : start_pos + T] for table in rope)
-    q, k = (_rope(t.transpose(1, 2), cos, sin, halves) for t in (q, k))
+    q, k = q.transpose(1, 2), k.transpose(1, 2)
+    if rope is not None:
+        cos, sin = (table[start_pos : start_pos + T] for table in rope[0])
+        q, k = (_rope(t, cos, sin, halves) for t in (q, k))
     new = Tensor.stack(k, v.transpose(1, 2)).cast(cache.dtype)
     cache[:, slot : slot + 1, :, start_pos : start_pos + T].assign(new)
     return q, cache
 
 
 def attention(
-    q: Tensor, cache: Tensor, slot: int | UOp, start_pos: int | UOp, scale: float, window: int = 0
-) -> Tensor:
+    q: Tensor, cache: Tensor, slot: int | UOp, start_pos: int | UOp, scale: float, window: int = 0,
+    sinks: Tensor | None = None,
+) -> Tensor:  # fmt: skip
     # q: (1, H, T, D) at positions start_pos.. ; cache: (2, slots, KV_H, positions, D), causal
     # over the slot's positions, and over only the last `window` of them if given, with scores
-    # q.k * scale. Returns (1, T, H * D), the layout the output projection reads.
+    # q.k * scale; with a sink per head, if given, a score that takes its share of the softmax and
+    # adds no value, as gpt-oss's. Returns (1, T, H * D), the layout the output projection reads.
     B, H, T, D = q.shape
     if _fast() and nv.supports_attention(q, cache):
         # one token: the heads already follow each other; a transpose here would cost a copy
-        return nv.attention(q, cache, slot, start_pos + T, scale, window).reshape(B, T, H * D)
+        out = nv.attention(q, cache, slot, start_pos + T, scale, window, sinks)
+        return out.reshape(B, T, H * D)
     if _fast() and nv.supports_flash_attention(q, cache):
-        return nv.flash_attention(q, cache, slot, start_pos, scale, window)
+        return nv.flash_attention(q, cache, slot, start_pos, scale, window, sinks)
     k, v = (cache[i, slot : slot + 1, :, : start_pos + T].cast(q.dtype) for i in (0, 1))
     mask = None
     if window or not (isinstance(T, int) and T == 1):
@@ -184,7 +237,13 @@ def attention(
         mask = full.triu(start_pos + 1)  # later positions
         if window:  # and positions `window` or more back
             mask = mask + full.tril(start_pos - window)
-    out = (q * (scale * math.sqrt(D))).scaled_dot_product_attention(k, v, mask, enable_gqa=True)
+    if sinks is None:
+        out = (q * (scale * math.sqrt(D))).scaled_dot_product_attention(k, v, mask, enable_gqa=True)
+        return out.transpose(1, 2).reshape(B, T, H * D)
+    k, v = (z.repeat_interleave(int(H) // int(z.shape[1]), dim=1) for z in (k, v))
+    scores = q @ k.transpose(-1, -2) * scale + (0 if mask is None else mask)
+    scores = scores.cat(sinks.reshape(1, H, 1, 1).expand(B, H, T, 1), dim=-1)
+    out = scores.softmax(-1)[..., :-1] @ v
     return out.transpose(1, 2).reshape(B, T, H * D)
 
 

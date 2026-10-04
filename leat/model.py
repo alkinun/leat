@@ -1,13 +1,13 @@
 """Decoder-only transformer, configured entirely from GGUF metadata."""
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from tinygrad import Tensor, UOp, dtypes
 
 from leat import ops
-from leat.quant import QTensor
+from leat.quant import BLOCK, NATIVE, QTensor
 
 CACHE_TILE = 256  # positions
 _LAYER = ("attn_norm", "attn_q", "attn_k", "attn_output", "ffn_norm")
@@ -15,11 +15,36 @@ _MLP = ("ffn_gate", "ffn_up", "ffn_down")
 _EXPERTS = ("ffn_gate_inp", "ffn_down_exps")  # the router, and the experts' down projections
 # the supported architectures, and whether their RoPE rotates dimension i with i + D/2, ggml's
 # "neox" mode, rather than adjacent pairs, its "normal" mode, as GGUF lays out llama's q and k
-_ROPE_HALVES = {"llama": False, "qwen2": True, "qwen3": True, "qwen3moe": True, "gemma4": True}
+_ROPE_HALVES = {
+    "llama": False, "qwen2": True, "qwen3": True, "qwen3moe": True, "gemma3": True,
+    "gemma4": True, "gpt-oss": True, "phi3": True,
+}  # fmt: skip
+# where a GGUF has no attention.sliding_window_pattern, as llama.cpp: every n-th layer sees all
+# positions, the others the window
+_SLIDING_EVERY = {"gemma3": 6, "gpt-oss": 2}
+
+
+@dataclass(frozen=True)
+class Rope:
+    """How a layer rotates its queries and keys: RoPE of base `theta` over the first `dims`
+    dimensions of each head, none for 0, as ggml's rope ops: frequencies divided by rope_freqs'
+    factors where `freqs` and the GGUF has them, or by LongRoPE's, its long ones for contexts
+    past `longrope` tokens, if given; positions scaled by `scale`; YaRN's blend of scaled and
+    unscaled frequencies if `yarn`, (original context, beta_fast, beta_slow); and cos and sin
+    times `mscale`."""
+
+    theta: float
+    dims: int
+    freqs: bool = False
+    longrope: int = 0
+    scale: float = 1.0
+    yarn: tuple[int, float, float] | None = None
+    mscale: float = 1.0
 
 
 @dataclass(frozen=True)
 class Config:
+    arch: str
     n_layers: int
     dim: int
     hidden_dim: int
@@ -28,17 +53,18 @@ class Config:
     norm_eps: float
     context_length: int
     rope_halves: bool
-    # each layer's attention: kv heads, head size, how many positions back it sees (0 for all)
-    # and the base of its RoPE frequencies
+    # each layer's attention: kv heads, head size, how many positions back it sees (0 for all),
+    # its RoPE and the scale of its scores
     kv_heads: tuple[int, ...]
     head_dims: tuple[int, ...]
     windows: tuple[int, ...]
-    rope_thetas: tuple[float, ...]
+    ropes: tuple[Rope, ...]
+    scales: tuple[float, ...]
     experts: int = 0  # MLPs per layer of a mixture of experts, 0 for one MLP
     experts_used: int = 0  # experts each token takes
-    # Gemma 4: embeddings scaled by sqrt(dim), unit attention scale rather than 1/sqrt(head
-    # size), values normed like keys, GELU rather than SiLU gating its MLPs, and logits capped
-    gemma: bool = False
+    glu: str = "silu"  # how an MLP's gate and up combine, as ops.glu has it
+    embed_scale: float = 1.0
+    v_norm: bool = False  # values RMSNormed without a weight, as Gemma 4's
     logit_cap: float = 0.0
 
     @staticmethod
@@ -46,21 +72,36 @@ class Config:
         if (arch := metadata["general.architecture"]) not in _ROPE_HALVES:
             raise NotImplementedError(f"architecture {arch!r} is not supported")
         m = {k.removeprefix(f"{arch}."): v for k, v in metadata.items()}
-        n_layers, n_heads = m["block_count"], m["attention.head_count"]
+        n_layers, n_heads, dim = m["block_count"], m["attention.head_count"], m["embedding_length"]
 
         def per_layer(value: Any) -> tuple:
             return tuple(value) if isinstance(value, list) else (value,) * n_layers
 
+        pattern = m.get("attention.sliding_window_pattern")
+        if pattern is None and m.get("attention.sliding_window") and arch in _SLIDING_EVERY:
+            n = _SLIDING_EVERY[arch]
+            pattern = [i % n < n - 1 for i in range(n_layers)]
+        sliding = per_layer(bool(pattern) if not isinstance(pattern, list) else pattern)
+        head_dim = m.get("attention.key_length", dim // n_heads)
         # Gemma 4's sliding-window layers have their own head size and RoPE
-        sliding = per_layer(m.get("attention.sliding_window_pattern", False))
-        head_dim = m.get("attention.key_length", m["embedding_length"] // n_heads)
-        rotated = m.get("rope.dimension_count", head_dim), m.get("rope.dimension_count_swa")
-        if rotated[0] != head_dim or rotated[1] not in (None, m.get("attention.key_length_swa")):
-            raise NotImplementedError("partial rotary embeddings are not supported")
-        theta = m.get("rope.freq_base", 10000.0)
+        swa_dim = m.get("attention.key_length_swa", head_dim)
+        head_dims = tuple(swa_dim if s else head_dim for s in sliding)
+        rotated = m.get("rope.dimension_count", head_dim)
+        if m.get("rope.dimension_count_swa", swa_dim) != swa_dim:
+            raise NotImplementedError("partial rotary embeddings of sliding layers")
+        ropes = [
+            _rope(m, arch, s, d if s else rotated) for s, d in zip(sliding, head_dims, strict=True)
+        ]
+        if arch == "gemma4":  # unit attention scale, as its q and k are normed
+            scales = (1.0,) * n_layers
+        elif arch == "gemma3" and n_layers == 62:  # 27B's query_pre_attn_scalar, as llama.cpp
+            scales = (1 / math.sqrt(dim / n_heads),) * n_layers
+        else:
+            scales = tuple(1 / math.sqrt(d) for d in head_dims)
         return Config(
+            arch=arch,
             n_layers=n_layers,
-            dim=m["embedding_length"],
+            dim=dim,
             hidden_dim=m["feed_forward_length"],
             n_heads=n_heads,
             vocab_size=len(metadata["tokenizer.ggml.tokens"]),
@@ -68,22 +109,56 @@ class Config:
             context_length=m["context_length"],
             rope_halves=_ROPE_HALVES[arch],
             kv_heads=per_layer(m.get("attention.head_count_kv", n_heads)),
-            head_dims=tuple(m["attention.key_length_swa"] if s else head_dim for s in sliding),
+            head_dims=head_dims,
             windows=tuple(m["attention.sliding_window"] if s else 0 for s in sliding),
-            rope_thetas=tuple(m["rope.freq_base_swa"] if s else theta for s in sliding),
+            ropes=tuple(ropes),
+            scales=scales,
             experts=m.get("expert_count", 0),
             experts_used=m.get("expert_used_count", 0),
-            gemma=arch == "gemma4",
+            glu={"gemma3": "gelu", "gemma4": "gelu", "gpt-oss": "oai"}.get(arch, "silu"),
+            embed_scale=math.sqrt(dim) if arch in ("gemma3", "gemma4") else 1.0,
+            v_norm=arch == "gemma4",
             logit_cap=m.get("final_logit_softcapping", 0.0),
         )
+
+
+def _rope(m: dict[str, Any], arch: str, sliding: bool, dims: int) -> Rope:
+    # a layer's RoPE, of a sliding-window layer or else one that sees all positions
+    swa_theta = m.get("rope.freq_base_swa", 10000.0)
+    if sliding and arch != "gpt-oss":  # their own base, unscaled; gpt-oss's are as the others
+        return Rope(swa_theta, dims)
+    # rope_freqs divides the frequencies of the layers that see all positions: all of Llama
+    # 3.1's, few of Gemma 4's
+    rope = Rope(m.get("rope.freq_base", 10000.0), dims, freqs=not sliding)
+    kind, factor = m.get("rope.scaling.type"), m.get("rope.scaling.factor", 0.0)
+    original = m.get("rope.scaling.original_context_length", m["context_length"])
+    if arch == "phi3" and original < m["context_length"]:  # LongRoPE
+        return replace(rope, longrope=original, mscale=m.get("rope.scaling.attn_factor", 1.0))
+    if kind == "linear" and factor:
+        return replace(rope, scale=1 / factor)
+    if kind == "yarn" and factor:
+        beta = m.get("rope.scaling.yarn_beta_fast", 32.0), m.get("rope.scaling.yarn_beta_slow", 1.0)
+        # llama.cpp's attention factor, which with no log multiplier leaves ggml's own
+        # 1 + 0.1 ln(factor), times rope.scaling.attn_factor
+        mscale = m.get("rope.scaling.attn_factor", 1.0)
+        if log_mul := m.get("rope.scaling.yarn_log_multiplier", 0.0):
+            mscale *= _yarn_mscale(factor, 1) / _yarn_mscale(factor, log_mul)
+            mscale /= 1 + 0.1 * math.log(factor)
+        return replace(rope, scale=1 / factor, yarn=(original, *beta), mscale=mscale)
+    return rope
+
+
+def _yarn_mscale(scale: float, multiplier: float) -> float:
+    return 1.0 if scale <= 1 else 0.1 * multiplier * math.log(scale) + 1
 
 
 class Transformer:
     """Weights, RoPE tables and a KV cache of `slots` sequences of up to `max_context` tokens.
 
-    Optional parts are used where the GGUF has their tensors: biases of q, k and v, RMSNorms of q
-    and k, of the attention and MLP outputs, a shared MLP beside the experts, and a scale per layer
-    output.
+    Optional parts are used where the GGUF has their tensors: biases of q, k, v and the attention
+    output, RMSNorms of q and k, of the attention and MLP outputs, attention sinks, a shared MLP
+    beside the experts, the router's and experts' biases, and a scale per layer output. Fused
+    tensors, q, k and v in one or gate and up in one, are split.
     """
 
     def __init__(
@@ -100,15 +175,18 @@ class Transformer:
             if name.startswith("blk."):
                 i, part = name.removeprefix("blk.").split(".", 1)
                 self.layers[int(i)][part.removesuffix(".weight")] = w
+        for n, layer in enumerate(self.layers):
+            _unfuse(layer, config, n)
         needed = _LAYER + (_EXPERTS if config.experts else _MLP)
         missing = [
             f"blk.{i}.{n}" for i, layer in enumerate(self.layers) for n in needed if n not in layer
         ]
         if missing:
             raise ValueError(f"missing {len(missing)} tensors, first: {missing[0]}")
-        # norm weights and scales, decoded once
+        # norm weights, biases, sinks and scales, decoded once
         self.small = [
-            {n: w.dequant() for n, w in layer.items() if len(w.shape) == 1} for layer in self.layers
+            {n: w.dequant().realize() for n, w in layer.items() if _small(n, w)}
+            for layer in self.layers
         ]
         # Gemma 4 routes from x normed with a weight of its own, over sqrt(dim)
         for s in self.small:
@@ -117,17 +195,12 @@ class Transformer:
         self.embed = weights["token_embd.weight"]
         self.output = weights.get("output.weight", self.embed)  # tied embeddings when absent
         self.output_norm = weights["output_norm.weight"].dequant()
-        # RoPE tables by base and head size; rope_freqs, where there is one, divides the
-        # frequencies of the layers that see all positions: all of Llama 3.1's, few of Gemma 4's
-        factors = weights.get("rope_freqs.weight")
-        tables: dict[tuple, tuple[Tensor, Tensor]] = {}
-        self.rope: list[tuple[Tensor, Tensor]] = []
-        layers = zip(config.rope_thetas, config.head_dims, config.windows, strict=True)
-        for theta, dim, window in layers:
-            scaled = None if factors is None or window else factors.dequant()
-            if (key := (theta, dim, scaled is None)) not in tables:
-                tables[key] = _rope_table(theta, dim, max_context, scaled)
-            self.rope.append(tables[key])
+        # RoPE tables by base, rotated dimensions and scaling
+        tables: dict[Rope, tuple[Tensor, Tensor]] = {}
+        for rope in config.ropes:
+            if rope.dims and rope not in tables:
+                tables[rope] = _rope_table(rope, max_context, _factors(rope, weights, max_context))
+        self.rope = [tables.get(rope) for rope in config.ropes]
         # whole tiles of positions, which the attention kernels need; the rest stay unused
         positions = -(-max_context // CACHE_TILE) * CACHE_TILE
         self.cache = [
@@ -141,8 +214,8 @@ class Transformer:
         """Runs `tokens` (1, T) at positions `start_pos...` of cache slot `slot` and returns normed
         hidden states."""
         x = ops.embedding(tokens, self.embed)
-        if self.config.gemma:
-            x = x * math.sqrt(self.config.dim)
+        if (scale := self.config.embed_scale) != 1:
+            x = x * scale
         for i in range(self.config.n_layers):
             x = self._feed_forward(i, self._attention(i, x, start_pos, slot))
         return ops.rms_norm(x, self.output_norm, self.config.norm_eps)
@@ -172,17 +245,21 @@ class Transformer:
         q, k = q.reshape(B, T, c.n_heads, dim), k.reshape(B, T, kv_heads, dim)
         v = (values[0] if values else k).reshape(B, T, kv_heads, dim)
         biases = None
-        if "attn_q.bias" in s:  # Qwen2's
+        if "attn_q.bias" in s:  # Qwen2's and gpt-oss's
             biases = (s["attn_q.bias"], s["attn_k.bias"], s["attn_v.bias"])
         norms = (s["attn_q_norm"], s["attn_k_norm"]) if "attn_q_norm" in s else None
-        q, cache = ops.rotate(q, k, v, self.cache[i], slot, start_pos, self.rope[i],
-                              c.rope_halves, biases, norms, c.gemma, eps)  # fmt: skip
-        scale = 1.0 if c.gemma else 1 / math.sqrt(dim)
-        out = ops.attention(q, cache, slot, start_pos, scale, c.windows[i])
+        table = self.rope[i]
+        rope = None if table is None else (table, c.ropes[i].dims)
+        q, cache = ops.rotate(q, k, v, self.cache[i], slot, start_pos, rope,
+                              c.rope_halves, biases, norms, c.v_norm, eps)  # fmt: skip
+        sinks = s.get("attn_sinks")
+        out = ops.attention(q, cache, slot, start_pos, c.scales[i], c.windows[i], sinks)
+        # gpt-oss's output bias joins the residual
+        residual = x + s["attn_output.bias"] if "attn_output.bias" in s else x
         if "post_attention_norm" not in s:
-            return ops.linear(out, w["attn_output"], residual=x)
+            return ops.linear(out, w["attn_output"], residual=residual)
         return ops.add_normed(
-            x, [(ops.linear(out, w["attn_output"]), s["post_attention_norm"])], None, eps
+            residual, [(ops.linear(out, w["attn_output"]), s["post_attention_norm"])], None, eps
         )
 
     def _feed_forward(self, i: int, x: Tensor) -> Tensor:
@@ -193,29 +270,90 @@ class Transformer:
         mlp = (w["ffn_gate"], w["ffn_up"], w["ffn_down"]) if "ffn_gate" in w else None
         if mlp and not c.experts:
             if "post_ffw_norm" not in s:
-                return ops.feed_forward(x, *mlp, norm)
-            out = ops.feed_forward(x, *mlp, norm, c.gemma, residual=False)
+                return ops.feed_forward(x, *mlp, norm, c.glu)
+            out = ops.feed_forward(x, *mlp, norm, c.glu, residual=False)
             return ops.add_normed(x, [(out, s["post_ffw_norm"])], None, eps, scale)
-        scores = ops.router(x, (s.get("router_norm", s["ffn_norm"]), eps), w["ffn_gate_inp"])
+        router = (s.get("router_norm", s["ffn_norm"]), eps)
+        scores = ops.router(x, router, w["ffn_gate_inp"], s.get("ffn_gate_inp.bias"))
         # stacked gate and up matrices, or one stack of both, the gate's rows first
         gate, up = (w["ffn_gate_up_exps"], None) if "ffn_gate_up_exps" in w else (
             w["ffn_gate_exps"], w["ffn_up_exps"])  # fmt: skip
+        biases = None
+        if "ffn_down_exps.bias" in s:  # gpt-oss's
+            biases = (s["ffn_gate_exps.bias"], s["ffn_up_exps.bias"], s["ffn_down_exps.bias"])
         experts = (scores, gate, up, w["ffn_down_exps"], c.experts_used)
         if not mlp:
-            return ops.mixture(x, *experts, norm)
+            return ops.mixture(x, *experts, norm, c.glu, biases=biases)
         scales = s["ffn_down_exps.scale"]
-        mixed = ops.mixture(x, *experts, (s["pre_ffw_norm_2"], eps), c.gemma, scales, False)
-        shared = ops.feed_forward(x, *mlp, norm, c.gemma, residual=False)
+        mixed = ops.mixture(x, *experts, (s["pre_ffw_norm_2"], eps), c.glu, scales, False)
+        shared = ops.feed_forward(x, *mlp, norm, c.glu, residual=False)
         parts = [(shared, s["post_ffw_norm_1"]), (mixed, s["post_ffw_norm_2"])]
         return ops.add_normed(x, parts, s["post_ffw_norm"], eps, scale)
 
 
-def _rope_table(
-    theta: float, dim: int, length: int, factors: Tensor | None
-) -> tuple[Tensor, Tensor]:
-    # angle = pos * theta^(-2i/d) / factor_i in f32, the order llama.cpp's rope kernels use
-    freqs = Tensor([theta ** (-2 * i / dim) for i in range(dim // 2)])
+def _factors(rope: Rope, weights: dict[str, QTensor], max_context: int) -> Tensor | None:
+    # what divides a layer's RoPE frequencies, if anything
+    name = "rope_freqs.weight" if rope.freqs else None
+    if rope.longrope:
+        name = f"rope_factors_{'long' if max_context > rope.longrope else 'short'}.weight"
+    return weights[name].dequant() if name in weights else None
+
+
+def _small(name: str, w: QTensor) -> bool:
+    # tensors decoded once: norm weights, biases, sinks and scales
+    return len(w.shape) == 1 or name.endswith((".bias", ".scale"))
+
+
+def _rows(w: QTensor, start: int, stop: int) -> QTensor:
+    # rows start..stop of a matrix, still in storage: a view
+    elements, _ = BLOCK[w.type]
+    per = w.shape[1] if w.type in NATIVE else w.shape[1] // elements  # values or blocks a row
+    return QTensor(w.data[start * per : stop * per], w.type, (stop - start, *w.shape[1:]))
+
+
+def _unfuse(layer: dict[str, QTensor], c: Config, i: int) -> None:
+    # Phi-3's q, k and v in one matrix, and its gate and up in one, gate first; gpt-oss's norm
+    # before its experts, named for after attention
+    if "attn_qkv" in layer:
+        qkv, q, kv = (
+            layer.pop("attn_qkv"),
+            c.n_heads * c.head_dims[i],
+            c.kv_heads[i] * c.head_dims[i],
+        )
+        layer["attn_q"], layer["attn_k"] = _rows(qkv, 0, q), _rows(qkv, q, q + kv)
+        layer["attn_v"] = _rows(qkv, q + kv, q + 2 * kv)
+    if "ffn_up" in layer and "ffn_gate" not in layer and not c.experts:
+        up, hidden = layer["ffn_up"], layer["ffn_up"].shape[0] // 2
+        layer["ffn_gate"], layer["ffn_up"] = _rows(up, 0, hidden), _rows(up, hidden, 2 * hidden)
+    if c.arch == "gpt-oss" and "post_attention_norm" in layer:
+        layer["ffn_norm"] = layer.pop("post_attention_norm")
+
+
+def _rope_table(rope: Rope, length: int, factors: Tensor | None) -> tuple[Tensor, Tensor]:
+    # cos and sin (length, dims / 2) of angle = pos * theta^(-2i/d) / factor_i in f32, the order
+    # llama.cpp's rope kernels use; scaled, and with YaRN's ramp from the scaled angle to the
+    # unscaled one, as ggml's rope_yarn
+    d = rope.dims
+    freqs = Tensor([rope.theta ** (-2 * i / d) for i in range(d // 2)])
     angles = Tensor.arange(length).float().unsqueeze(1) * freqs.unsqueeze(0)
     if factors is not None:
         angles = angles / factors.unsqueeze(0)
-    return angles.cos().contiguous().realize(), angles.sin().contiguous().realize()
+    mscale = rope.mscale
+    if rope.yarn is not None:
+        original, fast, slow = rope.yarn
+
+        def corr(beta: float) -> float:
+            return d * math.log(original / (beta * 2 * math.pi)) / (2 * math.log(rope.theta))
+
+        low, high = max(0.0, math.floor(corr(fast))), min(d - 1.0, math.ceil(corr(slow)))
+        ramp = [1 - min(1.0, max(0.0, (i - low) / max(0.001, high - low))) for i in range(d // 2)]
+        # theta * scale * (1 - mix) + theta * mix, with mix the ramp
+        blend = Tensor([rope.scale * (1 - r) + r for r in ramp])
+        angles = angles * blend.unsqueeze(0)
+        mscale *= 1 + 0.1 * math.log(1 / rope.scale)
+    elif rope.scale != 1:
+        angles = angles * rope.scale
+    cos, sin = angles.cos(), angles.sin()
+    if mscale != 1:
+        cos, sin = cos * mscale, sin * mscale
+    return cos.contiguous().realize(), sin.contiguous().realize()

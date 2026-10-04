@@ -11,7 +11,17 @@ from leat.model import CACHE_TILE, Config, Transformer
 from tests.helpers import CONTEXT, reference_logits
 
 PROMPT = [5, 77, 120, 3, 299, 42, 8, 150, 61, 200, 9, 33]
-ARCHS = ["llama", "qwen2", "qwen3", "qwen3moe", "gemma4", "gemma4-dense"]
+ARCHS = [
+    "llama",
+    "qwen2",
+    "qwen3",
+    "qwen3moe",
+    "gemma4",
+    "gemma4-dense",
+    "gemma3",
+    "gpt-oss",
+    "phi3",
+]
 
 
 @pytest.fixture

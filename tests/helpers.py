@@ -96,6 +96,8 @@ def write_tiny_model(path: Path, arch: str = "llama") -> dict[str, np.ndarray]:
     # and k, and qwen3moe also a mixture of experts for MLP.
     if arch.startswith("gemma4"):
         return _write_gemma4(path, experts=arch == "gemma4")
+    if arch in _WRITERS:
+        return _WRITERS[arch](path)
     w, weights, add = _writer(path, arch)
     for key, value in [("block_count", LAYERS),
                        ("embedding_length", D), ("feed_forward_length", HIDDEN),
@@ -229,6 +231,8 @@ def reference_logits(
     # an independent float64 model, with keys and values rounded to f16 like leat's cache
     if arch.startswith("gemma4"):
         return _reference_gemma4(w, tokens)
+    if arch in _REFERENCES:
+        return _REFERENCES[arch](w, tokens)
 
     T = len(tokens)
     freqs = 10000.0 ** (-np.arange(0, HEAD_DIM, 2) / HEAD_DIM) / w.get("rope_freqs.weight", 1.0)
@@ -269,14 +273,18 @@ def norm(x, weight=1.0):
     return x / np.sqrt((x * x).mean(-1, keepdims=True) + 1e-5) * weight
 
 
-def mlp(h, gate, up, down, gelu=False):
-    g = h @ gate.T
-    act = (
-        0.5 * g * (1 + np.tanh(np.sqrt(2 / np.pi) * (g + 0.044715 * g**3)))
-        if gelu
-        else g / (1 + np.exp(-g))
-    )
-    return (act * (h @ up.T)) @ down.T
+def mlp(h, gate, up, down, kind="silu"):
+    return glu(kind, h @ gate.T, h @ up.T) @ down.T
+
+
+def glu(kind, g, u):
+    # act(g) * u for SiLU or GELU, tanh's approximation, or gpt-oss's clamped SwiGLU, "oai"
+    if kind == "oai":
+        g, u = np.minimum(g, 7.0), np.clip(u, -7.0, 7.0)
+        return g / (1 + np.exp(-1.702 * g)) * (u + 1)
+    if kind == "gelu":
+        return 0.5 * g * (1 + np.tanh(np.sqrt(2 / np.pi) * (g + 0.044715 * g**3))) * u
+    return g / (1 + np.exp(-g)) * u
 
 
 def experts(h, scores, expert):
@@ -291,15 +299,18 @@ def experts(h, scores, expert):
     return out
 
 
-def attention(q, k, v, mask, scale):
+def attention(q, k, v, mask, scale, sinks=None):
     # q (T, heads, dim) and k, v (T, kv heads, dim), with keys and values rounded to f16 as in
-    # leat's cache: (T, heads * dim)
+    # leat's cache: (T, heads * dim); with a sink per head, a score that takes its share of the
+    # softmax and adds no value
     k, v = (z.astype(np.float16).astype(np.float64) for z in (k, v))
     group, heads = q.shape[1] // k.shape[1], []
     for hd in range(q.shape[1]):
         scores = q[:, hd] @ k[:, hd // group].T * scale + mask
-        p = np.exp(scores - scores.max(-1, keepdims=True))
-        heads.append((p / p.sum(-1, keepdims=True)) @ v[:, hd // group])
+        sink = -np.inf if sinks is None else sinks[hd]
+        top = np.maximum(scores.max(-1, keepdims=True), sink)
+        p = np.exp(scores - top)
+        heads.append(p / (p.sum(-1, keepdims=True) + np.exp(sink - top)) @ v[:, hd // group])
     return np.concatenate(heads, -1)
 
 
@@ -331,7 +342,7 @@ def _reference_gemma4(w: dict[str, np.ndarray], tokens: list[int]) -> np.ndarray
         out = attention(q, k, v, mask, 1.0) @ lw["attn_output"].T
         x = x + norm(out, lw["post_attention_norm"])
 
-        out = mlp(norm(x, lw["ffn_norm"]), lw["ffn_gate"], lw["ffn_up"], lw["ffn_down"], True)
+        out = mlp(norm(x, lw["ffn_norm"]), lw["ffn_gate"], lw["ffn_up"], lw["ffn_down"], "gelu")
         if "ffn_gate_inp" in lw:  # experts beside the MLP, each output normed
             scores = (norm(x) / np.sqrt(D) * lw["ffn_gate_inp.scale"]) @ lw["ffn_gate_inp"].T
             expert = functools.partial(_gemma4_expert, lw)
@@ -350,4 +361,227 @@ def rotate_halves(z, cos, sin):
 
 def _gemma4_expert(lw, e, h):
     g, u = np.split(lw["ffn_gate_up_exps"][e], 2)
-    return mlp(h, g, u, lw["ffn_down_exps"][e], True) * lw["ffn_down_exps.scale"][e]
+    return mlp(h, g, u, lw["ffn_down_exps"][e], "gelu") * lw["ffn_down_exps.scale"][e]
+
+
+# Gemma 3: six layers, the last of which sees all positions and the others a window of 4; the
+# full layer's RoPE of another base, its positions scaled by 1/8; q, k and output norms; GELU
+G3_LAYERS, G3_WINDOW, G3_THETAS, G3_SCALE = 6, 4, (10000.0, 1e6), 8.0
+
+
+def _write_gemma3(path: Path) -> dict[str, np.ndarray]:
+    w, weights, add = _writer(path, "gemma3")
+    a = "gemma3."
+    for key, value in [("block_count", G3_LAYERS), ("embedding_length", D),
+                       ("feed_forward_length", HIDDEN), ("attention.head_count", HEADS),
+                       ("attention.head_count_kv", KV_HEADS), ("attention.key_length", HEAD_DIM),
+                       ("attention.value_length", HEAD_DIM),
+                       ("attention.sliding_window", G3_WINDOW)]:  # fmt: skip
+        w.add_uint32(a + key, value)
+    w.add_float32(a + "rope.freq_base", G3_THETAS[1])
+    w.add_string(a + "rope.scaling.type", "linear")
+    w.add_float32(a + "rope.scaling.factor", G3_SCALE)
+    add("token_embd.weight", *TENSORS["token_embd.weight"])  # also the output, tied
+    add("output_norm.weight", (D,))
+    for i in range(G3_LAYERS):
+        b = f"blk.{i}."
+        for name in ATTENTION + MLP:
+            add(b + name + ".weight", *TENSORS[name])
+        for name in ("attn_norm", "post_attention_norm", "ffn_norm", "post_ffw_norm"):
+            add(b + name + ".weight", (D,))
+        for name in ("attn_q_norm", "attn_k_norm"):
+            add(b + name + ".weight", (HEAD_DIM,))
+    _finish(w)
+    return weights
+
+
+def _reference_gemma3(w: dict[str, np.ndarray], tokens: list[int]) -> np.ndarray:
+    T, positions = len(tokens), np.arange(len(tokens))
+    x = w["token_embd.weight"][tokens].astype(np.float64) * np.sqrt(D)
+    for i in range(G3_LAYERS):
+        sliding = i % 6 < 5
+        lw = _layer(w, i)
+        freqs = G3_THETAS[not sliding] ** (-np.arange(0, HEAD_DIM, 2) / HEAD_DIM)
+        angles = positions[:, None, None] * freqs / (1.0 if sliding else G3_SCALE)
+        cos, sin = np.cos(angles), np.sin(angles)
+        h = norm(x, lw["attn_norm"])
+        q = (h @ lw["attn_q"].T).reshape(T, HEADS, HEAD_DIM)
+        k, v = ((h @ lw[n].T).reshape(T, KV_HEADS, HEAD_DIM) for n in ("attn_k", "attn_v"))
+        q, k = (
+            rotate_halves(norm(z, lw[f"attn_{n}_norm"]), cos, sin) for z, n in ((q, "q"), (k, "k"))
+        )
+        out = attention(q, k, v, _mask(T, G3_WINDOW if sliding else 0), 1 / np.sqrt(HEAD_DIM))
+        x = x + norm(out @ lw["attn_output"].T, lw["post_attention_norm"])
+        out = mlp(norm(x, lw["ffn_norm"]), lw["ffn_gate"], lw["ffn_up"], lw["ffn_down"], "gelu")
+        x = x + norm(out, lw["post_ffw_norm"])
+    return norm(x, w["output_norm.weight"]) @ w["token_embd.weight"].T
+
+
+# gpt-oss: a layer that sees a window of 4 positions and one that sees all, both with YaRN's RoPE;
+# biases of q, k, v and the output, attention sinks; experts of MXFP4 with biases, clamped SwiGLU
+# and a router with a bias, the softmax over each token's chosen ones
+OSS_WINDOW, OSS_THETA, OSS_YARN = 4, 150000.0, (8.0, 16)  # factor, original context
+
+
+def _write_gpt_oss(path: Path) -> dict[str, np.ndarray]:
+    w, weights, add = _writer(path, "gpt-oss")
+    a = "gpt-oss."
+    for key, value in [("block_count", LAYERS), ("embedding_length", D),
+                       ("feed_forward_length", EXPERT_HIDDEN), ("attention.head_count", HEADS),
+                       ("attention.head_count_kv", KV_HEADS), ("attention.key_length", HEAD_DIM),
+                       ("attention.value_length", HEAD_DIM),
+                       ("attention.sliding_window", OSS_WINDOW), ("expert_count", EXPERTS),
+                       ("expert_used_count", USED),
+                       ("expert_feed_forward_length", EXPERT_HIDDEN)]:  # fmt: skip
+        w.add_uint32(a + key, value)
+    w.add_float32(a + "rope.freq_base", OSS_THETA)
+    w.add_string(a + "rope.scaling.type", "yarn")
+    w.add_float32(a + "rope.scaling.factor", OSS_YARN[0])
+    w.add_uint32(a + "rope.scaling.original_context_length", OSS_YARN[1])
+    add("token_embd.weight", (V, D), GGMLType.Q8_0, 1e-3)
+    add("output.weight", (V, D), GGMLType.Q8_0, 1e-3)
+    add("output_norm.weight", (D,))
+    for i in range(LAYERS):
+        b = f"blk.{i}."
+        add(b + "attn_norm.weight", (D,))
+        add(b + "post_attention_norm.weight", (D,))  # the experts' input norm, despite its name
+        for name, rows in (
+            ("attn_q", D),
+            ("attn_k", KV_HEADS * HEAD_DIM),
+            ("attn_v", KV_HEADS * HEAD_DIM),
+        ):
+            add(b + name + ".weight", (rows, D), GGMLType.Q8_0, 1e-3)
+            add(b + name + ".bias", (1, rows), GGMLType.F32, 0.5)
+        add(b + "attn_output.weight", (D, D), GGMLType.Q8_0, 1e-3)
+        add(b + "attn_output.bias", (1, D), GGMLType.F32, 0.5)
+        add(b + "attn_sinks.weight", (HEADS,), GGMLType.F32, 2.0)
+        add(b + "ffn_gate_inp.weight", (EXPERTS, D), GGMLType.F32, 0.05)
+        add(b + "ffn_gate_inp.bias", (1, EXPERTS), GGMLType.F32, 0.5)
+        for name, shape in (
+            ("gate", (EXPERT_HIDDEN, D)),
+            ("up", (EXPERT_HIDDEN, D)),
+            ("down", (D, EXPERT_HIDDEN)),
+        ):
+            add(b + f"ffn_{name}_exps.weight", (EXPERTS, *shape), GGMLType.MXFP4, 0.25)
+            add(b + f"ffn_{name}_exps.bias", (EXPERTS, shape[0]), GGMLType.F32, 0.2)
+    _finish(w)
+    for name in [n for n in weights if n.endswith(".bias") and weights[n].shape[0] == 1]:
+        weights[name] = weights[name][0]
+    return weights
+
+
+def _yarn(positions: np.ndarray, dim: int, theta: float, factor: float, original: int):
+    # cos and sin of YaRN's angles, scaled as llama.cpp's: a blend of the scaled and unscaled
+    # frequencies by a ramp over the dimensions, and both times 1 + 0.1 ln(factor)
+    freqs = theta ** (-np.arange(0, dim, 2) / dim)
+
+    def corr(beta):
+        return dim * np.log(original / (beta * 2 * np.pi)) / (2 * np.log(theta))
+
+    low, high = max(0.0, np.floor(corr(32.0))), min(dim - 1.0, np.ceil(corr(1.0)))
+    ramp = 1 - np.clip((np.arange(dim // 2) - low) / max(0.001, high - low), 0, 1)
+    freqs = freqs / factor * (1 - ramp) + freqs * ramp
+    angles, mscale = positions[:, None, None] * freqs, 1 + 0.1 * np.log(factor)
+    return np.cos(angles) * mscale, np.sin(angles) * mscale
+
+
+def _reference_gpt_oss(w: dict[str, np.ndarray], tokens: list[int]) -> np.ndarray:
+    T, positions = len(tokens), np.arange(len(tokens))
+    cos, sin = _yarn(positions, HEAD_DIM, OSS_THETA, *OSS_YARN)
+    x = w["token_embd.weight"][tokens].astype(np.float64)
+    for i in range(LAYERS):
+        lw = _layer(w, i)
+        h = norm(x, lw["attn_norm"])
+        q, k, v = (h @ lw[n].T + lw[f"{n}.bias"] for n in ("attn_q", "attn_k", "attn_v"))
+        q = rotate_halves(q.reshape(T, HEADS, HEAD_DIM), cos, sin)
+        k = rotate_halves(k.reshape(T, KV_HEADS, HEAD_DIM), cos, sin)
+        v = v.reshape(T, KV_HEADS, HEAD_DIM)
+        mask = _mask(T, OSS_WINDOW if i % 2 == 0 else 0)
+        out = attention(q, k, v, mask, 1 / np.sqrt(HEAD_DIM), lw["attn_sinks"])
+        x = x + out @ lw["attn_output"].T + lw["attn_output.bias"]
+        h = norm(x, lw["post_attention_norm"])
+        scores = h @ lw["ffn_gate_inp"].T + lw["ffn_gate_inp.bias"]
+
+        def expert(e, row, lw=lw):
+            g, u = (
+                row @ lw[f"ffn_{n}_exps"][e].T + lw[f"ffn_{n}_exps.bias"][e] for n in ("gate", "up")
+            )
+            return glu("oai", g, u) @ lw["ffn_down_exps"][e].T + lw["ffn_down_exps.bias"][e]
+
+        x = x + experts(h, scores, expert)
+    return norm(x, w["output_norm.weight"]) @ w["output.weight"].T
+
+
+# Phi-3: q, k and v in one matrix and gate and up in one; RoPE over 3/4 of each head, with
+# LongRoPE's long factors past an original context of 16 and its cos and sin scaled
+P3_ROTATED, P3_ORIGINAL, P3_MSCALE = 3 * HEAD_DIM // 4, 16, 1.19
+
+
+def _write_phi3(path: Path) -> dict[str, np.ndarray]:
+    w, weights, add = _writer(path, "phi3")
+    a = "phi3."
+    for key, value in [("block_count", LAYERS), ("embedding_length", D),
+                       ("feed_forward_length", HIDDEN), ("attention.head_count", HEADS),
+                       ("attention.head_count_kv", KV_HEADS), ("rope.dimension_count", P3_ROTATED),
+                       ("rope.scaling.original_context_length", P3_ORIGINAL)]:  # fmt: skip
+        w.add_uint32(a + key, value)
+    w.add_float32(a + "rope.freq_base", 10000.0)
+    w.add_float32(a + "rope.scaling.attn_factor", P3_MSCALE)
+    add("token_embd.weight", *TENSORS["token_embd.weight"])  # also the output, tied
+    add("output_norm.weight", (D,))
+    for kind in ("long", "short"):
+        add(f"rope_factors_{kind}.weight", (P3_ROTATED // 2,), GGMLType.F32, 4.0)
+    for i in range(LAYERS):
+        b = f"blk.{i}."
+        add(b + "attn_norm.weight", (D,))
+        add(b + "ffn_norm.weight", (D,))
+        add(b + "attn_qkv.weight", (D + 2 * KV_HEADS * HEAD_DIM, D), GGMLType.Q4_K, 2e-4)
+        add(b + "attn_output.weight", *TENSORS["attn_output"])
+        add(b + "ffn_up.weight", (2 * HIDDEN, D), GGMLType.Q4_K, 2e-4)  # gate's rows, then up's
+        add(b + "ffn_down.weight", *TENSORS["ffn_down"])
+    _finish(w)
+    return weights
+
+
+def _reference_phi3(w: dict[str, np.ndarray], tokens: list[int]) -> np.ndarray:
+    # with max_context 64, past the original 16: the long factors
+    T, positions = len(tokens), np.arange(len(tokens))
+    freqs = 10000.0 ** (-np.arange(0, P3_ROTATED, 2) / P3_ROTATED) / w["rope_factors_long.weight"]
+    angles = positions[:, None, None] * freqs
+    cos, sin = np.cos(angles) * P3_MSCALE, np.sin(angles) * P3_MSCALE
+
+    def rope(z):  # the first P3_ROTATED dimensions, i with i + P3_ROTATED / 2
+        return np.concatenate(
+            [rotate_halves(z[..., :P3_ROTATED], cos, sin), z[..., P3_ROTATED:]], -1
+        )
+
+    x = w["token_embd.weight"][tokens].astype(np.float64)
+    kv = KV_HEADS * HEAD_DIM
+    for i in range(LAYERS):
+        lw = _layer(w, i)
+        q, k, v = np.split(norm(x, lw["attn_norm"]) @ lw["attn_qkv"].T, [D, D + kv], -1)
+        q, k = rope(q.reshape(T, HEADS, HEAD_DIM)), rope(k.reshape(T, KV_HEADS, HEAD_DIM))
+        out = attention(q, k, v.reshape(T, KV_HEADS, HEAD_DIM), _mask(T, 0), 1 / np.sqrt(HEAD_DIM))
+        x = x + out @ lw["attn_output"].T
+        gate, up = np.split(lw["ffn_up"], 2)
+        x = x + mlp(norm(x, lw["ffn_norm"]), gate, up, lw["ffn_down"])
+    return norm(x, w["output_norm.weight"]) @ w["token_embd.weight"].T
+
+
+def _layer(w: dict[str, np.ndarray], i: int) -> dict[str, np.ndarray]:
+    # a layer's tensors by name, without "blk.{i}." and ".weight"
+    return {
+        n.removeprefix(f"blk.{i}.").removesuffix(".weight"): v
+        for n, v in w.items()
+        if n.startswith(f"blk.{i}.")
+    }
+
+
+def _mask(T: int, window: int) -> np.ndarray:
+    # causal, and over the last `window` positions if given
+    back = np.arange(T)[:, None] - np.arange(T)
+    return np.where((back < 0) | (window > 0) & (back >= window), -np.inf, 0)
+
+
+_WRITERS = {"gemma3": _write_gemma3, "gpt-oss": _write_gpt_oss, "phi3": _write_phi3}
+_REFERENCES = {"gemma3": _reference_gemma3, "gpt-oss": _reference_gpt_oss, "phi3": _reference_phi3}

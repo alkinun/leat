@@ -134,8 +134,12 @@ def _attention_partial_kernel(
 
 
 @functools.cache
-def _attention_combine_kernel(o: UOp, partial: UOp, stats: UOp, live: int | UOp) -> UOp:
-    # one warp per query head and 64 dimensions: weights each block's partial by exp(max - max)
+def _attention_combine_kernel(
+    o: UOp, partial: UOp, stats: UOp, *sinks: UOp, live: int | UOp
+) -> UOp:
+    # one warp per query head and 64 dimensions: weights each block's partial by exp(max - max),
+    # counting each head's sink, if given, once: a score that adds no value. Rows of several
+    # queries' heads take the sink of row % heads.
     heads, _, dim = partial.shape
     tile, per_lane = 64, 64 // WARP
     head, part = UOp.range(heads, 0, AxisType.GLOBAL), UOp.range(dim // tile, 1, AxisType.GLOBAL)
@@ -145,9 +149,14 @@ def _attention_combine_kernel(o: UOp, partial: UOp, stats: UOp, live: int | UOp)
     top = UOp.alloc((1,), dtypes.float32, addrspace=AddrSpace.REG)
     top = top.after(top.store(top.const_like(-math.inf)))
     top = top.after(top.store(top.after(c1).maximum(stats[head, c1, 0].load())).end(c1))
+    sink = sinks[0][head % int(sinks[0].shape[0])].load() if sinks else None
+    best = top[0].load() if sink is None else top[0].load().maximum(sink)
     c2 = UOp.range(live, 101, AxisType.LOOP)
-    acc, total = register((per_lane,), 0.0), register((1,), 0.0)
-    weight = ((stats[head, c2, 0].load() - top) * LOG2E).exp2()
+    acc = register((per_lane,), 0.0)
+    total = UOp.alloc((1,), dtypes.float32, addrspace=AddrSpace.REG)
+    start = 0.0 if sink is None else ((sink - best) * LOG2E).exp2()
+    total = total.after(total[0].store(start))
+    weight = ((stats[head, c2, 0].load() - best) * LOG2E).exp2()
     update = UOp.group(
         *[
             acc[i].store(acc.after(c2)[i].load() + weight * partial[head, c2, d].load())
@@ -184,11 +193,12 @@ def supports_attention(q: Tensor, cache: Tensor) -> bool:
 
 
 def attention(
-    q: Tensor, cache: Tensor, slot: int | UOp, length: int | UOp, scale: float, window: int = 0
-) -> Tensor:
+    q: Tensor, cache: Tensor, slot: int | UOp, length: int | UOp, scale: float, window: int = 0,
+    sinks: Tensor | None = None,
+) -> Tensor:  # fmt: skip
     """Attention of one query token (1, H, 1, D) over the first `length` positions of a slot of
     the cache (2, slots, KV_H, positions, D), or the last `window` of them, with scores
-    q.k * scale."""
+    q.k * scale, and a sink (H,) per head if given, a score that adds no value."""
     heads, dim = q.shape[1], cache.shape[4]
     kv_heads = int(cache.shape[2])
     group = _per_block(int(heads) // kv_heads)
@@ -209,7 +219,8 @@ def attention(
     live = at_most((length + KEYS - 1) // KEYS - _since(length, window) // KEYS, chunks)
     out = Tensor.empty(1, heads, 1, dim, dtype=dtypes.float32, device=q.device)
     fxn = functools.partial(_attention_combine_kernel, live=live)
-    return Tensor.custom_kernel(out, outs[0], outs[1], fxn=fxn)[0]
+    extra = () if sinks is None else (sinks.float().contiguous(),)
+    return Tensor.custom_kernel(out, outs[0], outs[1], *extra, fxn=fxn)[0]
 
 
 # ******** several query tokens: FlashAttention-2 ********
@@ -275,8 +286,9 @@ def _flash_attention_kernel(
     # positions up to it, or the last `window` of them. Blocks take key_tile keys at a time, and
     # 1 / parts of their outputs. Split, the queries are one tile, whose key tiles blocks take in
     # turn, each writing out (count * heads, splits, dim) unnormalized and first in srcs the max
-    # and sum of each row's weights, for _attention_combine_kernel to merge.
-    stats, (q, cache) = (srcs[0], srcs[1:]) if splits > 1 else (None, srcs)
+    # and sum of each row's weights, for _attention_combine_kernel to merge. A sink per head,
+    # last in srcs if given, starts each row's max and sum where one block takes all its keys.
+    stats, (q, cache, *sinks) = (srcs[0], srcs[1:]) if splits > 1 else (None, srcs)
     heads, dim = int(q.shape[1]), int(q.shape[2])
     _, slots, kv_heads, positions, _ = (int(d) for d in cache.shape)
     words, width = dim // 2, dim // parts  # the part's dimensions of the output
@@ -338,6 +350,12 @@ def _flash_attention_kernel(
 
     # a finite initial max keeps exp2 from seeing -inf - -inf
     acc, mx, total = register((width // 2,), 0.0), register((2,), -1e30), register((2,), 0.0)
+    if sinks and splits == 1:  # in the scores' units, of exp2
+        sink = sinks[0][head].load() * LOG2E
+        mx = UOp.alloc((2,), dtypes.float32, addrspace=AddrSpace.REG)
+        mx = mx.after(mx.store(UOp.stack(sink, sink)))
+        total = UOp.alloc((2,), dtypes.float32, addrspace=AddrSpace.REG)
+        total = total.after(total.store(UOp.stack(*(UOp.const(1.0, dtypes.float32),) * 2)))
     prev_acc, prev_max, prev_total = acc.after(tiles), mx.after(tiles), total.after(tiles)
     zero = UOp.const(0.0, dtypes.float32)
     products = [[zero] * 4 for _ in range(key_tile // 8)]  # by tiles of 8 keys
@@ -418,11 +436,12 @@ def supports_flash_attention(q: Tensor, cache: Tensor) -> bool:
 
 
 def flash_attention(
-    q: Tensor, cache: Tensor, slot: int | UOp, start_pos: int | UOp, scale: float, window: int = 0
-) -> Tensor:
+    q: Tensor, cache: Tensor, slot: int | UOp, start_pos: int | UOp, scale: float, window: int = 0,
+    sinks: Tensor | None = None,
+) -> Tensor:  # fmt: skip
     """Causal attention of query tokens (1, H, T, D) at positions start_pos.. over a slot of the
     cache, which already holds their keys and values, or over the last `window` positions of
-    each, with scores q.k * scale. Returns (1, T, H * D)."""
+    each, with scores q.k * scale, and a sink (H,) per head if given. Returns (1, T, H * D)."""
     _, heads, tokens, dim = q.shape
     count = -(-q.max_shape[2] // QUERIES) * QUERIES
     shape = _flash_shape(int(cache.shape[3]), int(dim))
@@ -444,13 +463,14 @@ def flash_attention(
         _flash_attention_kernel, slot=slot, start=start, tokens=bound, window=window,
         key_tile=shape[0], parts=shape[1], splits=splits,
     )  # fmt: skip
-    outs = Tensor.custom_kernel(*outs, q, cache, fxn=fxn)
+    extra = () if sinks is None else (sinks.float().contiguous(),)
+    outs = Tensor.custom_kernel(*outs, q, cache, *(extra if splits == 1 else ()), fxn=fxn)
     if splits > 1:
         end = (start + at_most(bound, QUERIES) + shape[0] - 1) // shape[0]
         live = at_most(end - _since(start + 1, window) // shape[0], splits)
         out = Tensor.empty(1, rows, 1, dim, dtype=dtypes.float32, device=q.device)
         fxn = functools.partial(_attention_combine_kernel, live=live)
-        outs = Tensor.custom_kernel(out, *outs[:2], fxn=fxn)
+        outs = Tensor.custom_kernel(out, *outs[:2], *extra, fxn=fxn)
     return outs[0].reshape(count, heads * dim)[:tokens].reshape(1, tokens, heads * dim)
 
 
@@ -459,22 +479,33 @@ def flash_attention(
 
 @functools.cache
 def _rotate_kernel(
-    out: UOp, cache: UOp, q: UOp, k: UOp, v: UOp, cos: UOp, sin: UOp, *extra: UOp,
-    slot: int | UOp, pos: int | UOp, halves: bool, biased: bool, v_norm: bool, eps: float,
+    out: UOp, cache: UOp, q: UOp, k: UOp, v: UOp, *extra: UOp, slot: int | UOp, pos: int | UOp,
+    rotated: int, halves: bool, biased: bool, v_norm: bool, eps: float,
 ) -> UOp:  # fmt: skip
-    # A warp per head of q, then of k and its v. Each of q, k and v gets its bias, if biased, from
-    # the first three of extra; each head of q and k is then normed with its weight, if the rest
-    # of extra holds them, and of v without, if v_norm; q and k are rotated, q into out and k into
-    # the cache with v. Lanes take pairs of dimensions that rotate together: i and i + dim / 2, or
-    # adjacent ones, each pair i turning by angle cos[pos, i], sin[pos, i].
+    # A warp per head of q, then of k and its v. extra holds RoPE's cos and sin (positions,
+    # rotated / 2) if any dimensions rotate, then each of q's, k's and v's bias if biased, and q's
+    # and k's norm weights if any. Each of q, k and v gets its bias; each head of q and k is then
+    # normed with its weight, and of v without, if v_norm; the first `rotated` dimensions of q and
+    # k are rotated, q into out and k into the cache with v. Lanes take pairs of dimensions: those
+    # that rotate together, i and i + rotated / 2 or adjacent ones, each pair i turning by angle
+    # cos[pos, i], sin[pos, i], and the others' adjacent pairs as they are.
+    (cos, sin), extra = (extra[:2], extra[2:]) if rotated else ((None, None), extra)
     biases, norms = (extra[:3], extra[3:]) if biased else ((), extra)
     _, slots, kv_heads, positions, dim = (int(d) for d in cache.shape)
-    heads, half = int(out.shape[0]) // dim, dim // 2
+    heads, half, turning = int(out.shape[0]) // dim, dim // 2, rotated // 2
     head, lane = UOp.range(heads + kv_heads, 0, AxisType.GLOBAL), lane_range()
     is_q, is_kv, kv = head < heads, head >= heads, head - heads
     zero = UOp.const(0.0, dtypes.float32)
     pairs = [lane + WARP * m for m in range(half // WARP)]
-    dims = [(i, i + half) if halves else (2 * i, 2 * i + 1) for i in pairs]
+
+    def pair_dims(i: UOp, m: int) -> tuple[UOp, UOp]:  # the dimensions of pair i, of turn m
+        kept = (2 * i, 2 * i + 1)
+        if WARP * m >= turning or not halves:
+            return kept
+        both = i < turning
+        return both.where(i, kept[0]), both.where(i + turning, kept[1])
+
+    dims = [pair_dims(i, m) for m, i in enumerate(pairs)]
     flat = [d for pair in dims for d in pair]
 
     def of_q_or_k(qs: UOp, ks: UOp, d: UOp) -> UOp:  # dimension d of the warp's head, of q or k
@@ -500,9 +531,16 @@ def _rotate_kernel(
         x = normed(x, [is_q.where(*(w[d].load() for w in norms)) for d in flat])
     stores = []
     for n, ((d0, d1), i) in enumerate(zip(dims, pairs, strict=True)):
-        c, s = cos[pos, i].load(), sin[pos, i].load()
         x0, x1 = x[2 * n], x[2 * n + 1]
-        for d, value in ((d0, x0 * c - x1 * s), (d1, x0 * s + x1 * c)):
+        if WARP * n < turning:  # pairs past the rotated ones turn by 0
+            assert cos is not None and sin is not None
+            turns = i < turning if WARP * (n + 1) > turning else None
+            at = i.minimum(turning - 1) if turns is not None else i
+            c, s = cos[pos, at].load(), sin[pos, at].load()
+            if turns is not None:
+                c, s = turns.where(c, 1.0), turns.where(s, 0.0)
+            x0, x1 = x0 * c - x1 * s, x0 * s + x1 * c
+        for d, value in ((d0, x0), (d1, x1)):
             stores.append(out[(head * dim + d).valid(is_q)].store(value))
             stores.append(stored(0, d).store(value.cast(dtypes.half)))
     values = [of_v(v, d) + of_v(biases[2], d) if biases else of_v(v, d) for d in flat]
@@ -522,22 +560,25 @@ def supports_rotate(q: Tensor, cache: Tensor) -> bool:
 
 def rotate(
     q: Tensor, k: Tensor, v: Tensor, cache: Tensor, slot: int | UOp, start_pos: int | UOp,
-    rope: tuple[Tensor, Tensor], halves: bool, biases: tuple[Tensor, Tensor, Tensor] | None,
-    norms: tuple[Tensor, Tensor] | None, v_norm: bool, eps: float,
+    rope: tuple[tuple[Tensor, Tensor], int] | None, halves: bool,
+    biases: tuple[Tensor, Tensor, Tensor] | None, norms: tuple[Tensor, Tensor] | None,
+    v_norm: bool, eps: float,
 ) -> tuple[Tensor, Tensor]:  # fmt: skip
     """For one token's q (1, 1, H, D), k and v (1, 1, KV_H, D): adds their biases, if given;
-    norms each head of q and k with its weight, if given, and of v without, if v_norm; rotates q
-    and k by RoPE's tables at start_pos, and stores k and v at start_pos of a slot of the cache.
-    Returns q (1, H, 1, D) and the cache."""
+    norms each head of q and k with its weight, if given, and of v without, if v_norm; rotates the
+    first R dimensions of q and k by RoPE's tables (positions, R/2) at start_pos, for rope
+    ((cos, sin), R) if given, and stores k and v at start_pos of a slot of the cache. Returns q
+    (1, H, 1, D) and the cache."""
     heads, dim = q.shape[-2], q.shape[-1]
     out = Tensor.empty(heads * dim, dtype=dtypes.float32, device=q.device)
     q, k, v = (t.reshape(-1).float().contiguous() for t in (q, k, v))
     q, pos = carry(q, start_pos)
     k, slot = carry(k, slot)
+    tables = () if rope is None else rope[0]
     extra = tuple(w.float().contiguous() for w in (*(biases or ()), *(norms or ())))
     fxn = functools.partial(
-        _rotate_kernel, slot=slot, pos=pos, halves=halves, biased=biases is not None,
-        v_norm=v_norm, eps=eps,
+        _rotate_kernel, slot=slot, pos=pos, rotated=0 if rope is None else rope[1],
+        halves=halves, biased=biases is not None, v_norm=v_norm, eps=eps,
     )  # fmt: skip
-    out, cache = Tensor.custom_kernel(out, cache, q, k, v, *rope, *extra, fxn=fxn)[:2]
+    out, cache = Tensor.custom_kernel(out, cache, q, k, v, *tables, *extra, fxn=fxn)[:2]
     return out.reshape(1, heads, 1, dim), cache

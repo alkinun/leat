@@ -25,23 +25,28 @@ from tinygrad.uop.ops import AxisType, KernelInfo, Ops
 from leat.nv.common import (
     GROUP,
     WARP,
-    activation,
     at_least,
     carry,
     compute_units,
+    e8m0_half,
     f16,
     fifth_bits,
+    funnel,
+    glu,
     lane_range,
     minus,
     on_nvidia,
     opaque,
     register,
     storage_words,
+    table16,
 )
+from leat.nv.matvec import FP4_TABLE
 from leat.nv.quantize import quantize_q8
 from leat.quant import GGMLType, QTensor
 
 TILE_TOKENS = 64
+TILE_ROWS = (256, 192, 128, 96, 64)  # the heights tiles may have, warps of 32 rows
 FEW_TOKENS = 16  # tokens per tile where there are at most that many
 WARP_ROWS = 32  # a warp per 32 rows of the tile, and a thread per row to load its scales
 STEP = 128  # weights per row per step
@@ -89,9 +94,9 @@ class _Stack:
     ):  # fmt: skip
         # experts: each matrix stacks that many of `heights` rows, and the tile's rows are those
         # of `expert`; fused, the paired matrices are one stack, each expert's first rows then
-        # the other's
+        # the other's. A row's words may be a fraction: `window` then reads it by bytes.
         stacked = 2 if fused else 1
-        self.row_words = int(ws[0].shape[0]) // (heights[0] * experts * stacked)
+        self.row_words = int(ws[0].shape[0]) / (heights[0] * experts * stacked)
         self.half, first = rows // 2 if paired else 0, 0
         self.parts: list[tuple[UOp, UOp, UOp | None]] = []
         for i, (w, h) in enumerate(zip(ws, heights, strict=True)):
@@ -112,9 +117,28 @@ class _Stack:
                 mine = (row < self.half) if i == 0 else (row >= self.half)
             if inside is not None:
                 mine = inside if mine is None else mine & inside
-            index = (row0 + row) * self.row_words + at
+            index = (row0 + row) * int(self.row_words) + at
             words.append(w[index if mine is None else index.valid(mine)].load())
         return functools.reduce(UOp.__or__, words)
+
+    def window(self, row: UOp, at: UOp, count: int, inside: UOp | None = None) -> list[UOp]:
+        # the `count` aligned words from the one holding byte `at` of the tile's row on, and that
+        # byte's place in the first word, last; zeros where `inside` does not hold
+        out = [UOp.const(0, dtypes.uint32)] * (count + 1)
+        row_bytes = round(self.row_words * 4)
+        for i, (w, row0, mine) in enumerate(self.parts):
+            if self.half:
+                mine = (row < self.half) if i == 0 else (row >= self.half)
+            if inside is not None:
+                mine = inside if mine is None else mine & inside
+            byte = (row0 + row) * row_bytes + at
+            first, end = byte // 4, int(w.shape[0]) - 1
+            for k in range(count):
+                index = (first + k).minimum(end)
+                out[k] = out[k] | w[index if mine is None else index.valid(mine)].load()
+            skew = (byte % 4).cast(dtypes.uint32)
+            out[count] = out[count] | (skew if mine is None else mine.where(skew, 0))
+        return out
 
     def word16(self, row: UOp, at: UOp | int, inside: UOp | None = None) -> UOp:
         # four bytes from halfword `at` on, as common.word16
@@ -371,7 +395,10 @@ class _Q50Tile(_Q80Tile):
 
 
 def _swizzle(row: UOp, word: UOp | int) -> UOp:
-    return (row % 8 * 4) ^ word
+    # word of a row's 32 XOR-ed with 4 * (row % 8); the mask tells tinygrad it stays below 32,
+    # where it would otherwise wrap the index into the buffer, a 64-bit modulo for tiles of rows
+    # but powers of 2
+    return ((row % 8 * 4) ^ word) & 31
 
 
 def _signed_byte(word: UOp, shift: UOp) -> UOp:
@@ -392,12 +419,44 @@ def _with_mins(
     ]
 
 
+class _MXFP4Tile(_Q80Tile):
+    """MXFP4 weights, unpacked to Q8_0's layout: a block's nibbles index FP4_VALUES, doubled
+    E2M1 as int8, its exponent byte e makes a scale 2^(e - 128). Blocks are only byte aligned: a
+    thread fetches a block's 5 aligned words and where the block starts in the first."""
+
+    def fetch(self, stack: _Stack, step: UOp) -> list[UOp]:
+        words = []
+        for i in range(4):  # (row, block j) items of the step, taken in turn
+            item = i * self.rows + self.tid
+            row, j = item // 4, item % 4
+            words += stack.window(row, (step * 4 + j) * 17, 5, self.inside(step, j))
+        return words
+
+    def put(self, bufs: list[UOp], step: UOp, words: list[UOp]) -> list[UOp]:
+        quants, d = bufs
+        stores = []
+        for i in range(4):
+            item = i * self.rows + self.tid
+            row, j = item // 4, item % 4
+            *window, skew = words[6 * i : 6 * i + 6]
+            later, shift = skew.eq(3), ((skew + 1) % 4) * 8  # where the 16 bytes of values start
+            for m in range(4):  # where they start in the second word, they end in the fifth
+                lo, hi = (later.where(window[min(m + h + 1, 4)], window[m + h]) for h in (0, 1))
+                values = table16(funnel(lo, hi, shift), FP4_TABLE)
+                for h, value in enumerate(values):  # values 4m.. of the block, then 16 + 4m..
+                    at = _swizzle(row, 8 * j + 4 * h + m)
+                    stores.append(quants[row, at].store(value.bitcast(dtypes.int32)))
+            stores.append(d[j, row].store(e8m0_half((window[0] >> (skew * 8)) & 0xFF)))
+        return stores
+
+
 _TILES: dict[GGMLType, type[_Q4KTile] | type[_Q6KTile] | type[_Q80Tile]] = {
     GGMLType.Q4_K: _Q4KTile,
     GGMLType.Q5_K: _Q5KTile,
     GGMLType.Q6_K: _Q6KTile,
     GGMLType.Q5_0: _Q50Tile,
     GGMLType.Q8_0: _Q80Tile,
+    GGMLType.MXFP4: _MXFP4Tile,
 }
 
 
@@ -435,13 +494,13 @@ class _Items:
 def _matmul_kernel(
     out: UOp, *srcs: UOp, tokens: int | UOp, ggml_type: GGMLType, rows: int,
     heights: tuple[int, ...], gated: bool, routed: tuple[int, bool] | None = None,
-    fused: bool = False, gelu: bool = False, tile_tokens: int = TILE_TOKENS,
+    fused: bool = False, kind: str = "silu", tile_tokens: int = TILE_TOKENS,
     schedule: tuple[int, int] = (0, 1),
 ) -> UOp:  # fmt: skip
     # srcs: the stacked matrices, of `heights` rows, then xq, xd, xs, a residual if given and the
     # parts buffer if scheduled. Tiles hold `rows` rows by tile_tokens tokens. Gated, the matrices
     # are gate and up, a tile holds rows of both, each warp the same 16 of either, and out is
-    # act(gate) * up for SiLU, or GELU if gelu; fused, gate and up are one stack of experts, as
+    # glu(kind)(gate, up), as common.glu has it; fused, gate and up are one stack of experts, as
     # _Stack has it.
     #
     # Scheduled (blocks, chunks), as _schedule picks, `blocks` persistent blocks take the tiles
@@ -449,9 +508,9 @@ def _matmul_kernel(
     # gate's then up's sums if gated, for _fixup_kernel to add up.
     #
     # Routed, a block per tile: the matrices stack experts, and order and counts list the (token,
-    # slot) pairs routed to each, of `used` slots per token; a block takes tile_tokens pairs of an
-    # expert's list, reading activation row pair // used, by token, or else pair, and writing
-    # output row pair.
+    # slot) pairs routed to each, of `used` slots per token, followed in srcs by each matrix's
+    # biases (experts * rows) if any; a block takes tile_tokens pairs of an expert's list,
+    # reading activation row pair // used, by token, or else pair, and writing output row pair.
     ws, (xq, xd, xs, *rest) = srcs[: len(heights)], srcs[len(heights) :]
     count, n = int(out.shape[-2]), heights[0] if gated else sum(heights)
     sources = count // routed[0] if routed is not None and routed[1] else count
@@ -477,6 +536,7 @@ def _matmul_kernel(
         def where(item: UOp, at: UOp) -> tuple[UOp, UOp, UOp]:
             return token_tile, row_tile, at
 
+    biases: list[UOp] = []
     if routed is None:
         residual, parts = (rest[:-1], rest[-1]) if schedule[0] else (rest, None)
 
@@ -490,7 +550,7 @@ def _matmul_kernel(
             return out[token0 + tok, row]
 
     else:
-        (order, counts), residual = rest, []
+        (order, counts, *biases), residual = rest, []
         (used, by_token), experts = routed, int(counts.shape[0])
         ranges.append(block_expert := UOp.range(experts, 5, AxisType.GLOBAL))
         # blocks past the end of their expert's list exit at once: all else depends on the expert
@@ -615,8 +675,12 @@ def _matmul_kernel(
                         )
                         if gated and mi == 1:
                             continue
+                    if biases:  # an expert's bias of the row
+                        at = expert * n + row0 + row
+                        value = value + biases[0][at].load()
                     if gated:
-                        value = activation(gelu)(value) * summed[(subtiles_n + ni) * 4 + e].load()
+                        up = summed[(subtiles_n + ni) * 4 + e].load()
+                        value = glu(kind)(value, up + biases[1][at].load() if biases else up)
                     if residual:
                         value = value + residual[0][token0 + token, row0 + row].load()
                     if ends is None:
@@ -647,11 +711,11 @@ def _split(a: UOp, b: int) -> tuple[UOp, UOp]:
 @functools.cache
 def _fixup_kernel(
     out: UOp, parts: UOp, *residual: UOp, tokens: int | UOp, n: int, blocks: int, gated: bool,
-    gelu: bool,
+    kind: str,
 ) -> UOp:  # fmt: skip
     # Block r adds up the chunks' sums of the r-th tile that _matmul_kernel's `blocks` blocks
-    # left after their whole waves, if there is one, and stores act(gate) * up if gated, plus the
-    # residual if given. parts holds a row of chunks per tile there may be left.
+    # left after their whole waves, if there is one, and stores glu(kind)(gate, up) if gated,
+    # plus the residual if given. parts holds a row of chunks per tile there may be left.
     lefts, chunks, tile_tokens, rows = (int(d) for d in parts.shape)
     out_rows = rows // 2 if gated else rows
     token_tiles = (tokens + tile_tokens - 1) // tile_tokens
@@ -662,15 +726,28 @@ def _fixup_kernel(
     live = opaque(block) < tiles % blocks
     tile = tiles // blocks * blocks + block
     token0, row0 = tile % token_tiles * tile_tokens, tile // token_tiles * out_rows
+    cells = [
+        (token, row + h * out_rows)
+        for i in range(tile_tokens * out_rows // FIXUP_THREADS)
+        for token, row in [_split(i * FIXUP_THREADS + thread, out_rows)]
+        for h in range(2 if gated else 1)
+    ]
+    # a chunk at a time, so that few values are in flight
+    chunk = UOp.range(chunks, 2, AxisType.LOOP)
+    acc = register((len(cells),), 0.0)
+    prev = acc.after(chunk)
+    adds = [
+        prev[k].load()
+        + parts.flatten()[
+            (((block * chunks + chunk) * tile_tokens + t) * rows + r).valid(live)
+        ].load()
+        for k, (t, r) in enumerate(cells)
+    ]
+    acc = acc.after(acc.store(UOp.stack(*adds)).end(chunk))
     stores = []
-    for i in range(tile_tokens * out_rows // FIXUP_THREADS):
-        token, row = _split(i * FIXUP_THREADS + thread, out_rows)
-        cells = [((block * chunks + c) * tile_tokens + token) * rows + row for c in range(chunks)]
-        sums = [
-            sum(parts.flatten()[(at + h * out_rows).valid(live)].load() for at in cells)
-            for h in range(2 if gated else 1)
-        ]
-        value = activation(gelu)(sums[0]) * sums[1] if gated else sums[0]
+    for k in range(0, len(cells), 2 if gated else 1):
+        token, row = cells[k]
+        value = glu(kind)(acc[k].load(), acc[k + 1].load()) if gated else acc[k].load()
         at = (token0 + token) * n + row0 + row
         if residual:
             value = value + residual[0].flatten()[at.valid(live)].load()
@@ -701,19 +778,24 @@ def tiled(x: Tensor) -> Tensor:
     return x.reshape(x.shape[-2], n).float().pad_to((count, n)).contiguous()
 
 
-def _tile(ggml_type: GGMLType, heights: list[int], gated: bool, few: bool = False) -> int:
-    # rows per tile: 256 where there are many, to reach more TOPS, else 128 to occupy more SMs, or
-    # 64 where 128 do not divide the matrices; a gated tile holds half its rows of each. Few
-    # tokens of Q6_K take 64: a tile of 256 rows takes 39 KB of shared memory and 145 registers a
-    # thread, a block per SM, where tiles of 64 fit two, which ran Llama 3.1 8B's down projection
-    # for 16 tokens in about 110 us rather than 150.
+def _tile(
+    ggml_type: GGMLType, heights: list[int], gated: bool, few: bool = False, routed: bool = False
+) -> int:  # fmt: skip
+    # rows per tile, of those that divide the matrices, a gated tile holding half its rows of
+    # each: the most where there are many rows, to reach more TOPS, else at most 128, to occupy
+    # more SMs, as do a mixture of experts' tiles, which have few tokens each. Tiles of 256 rows
+    # of Q4_K reach 68 to 79 TOPS on 512 tokens, against 54 to 67 for 128; gpt-oss's 2880 rows,
+    # which 128 do not divide, take 96 or, gated, 192, where 64 ran its 512 tokens 30% slower; its
+    # experts, gated, took 85 ms in tiles of 192 and 76 in tiles of 128. Few tokens of Q6_K take
+    # 64: a tile of 256 rows takes 39 KB of shared memory and 145 registers a thread, a block per
+    # SM, where tiles of 64 fit two, which ran Llama 3.1 8B's down projection for 16 tokens in
+    # about 110 us rather than 150.
     if few and ggml_type == GGMLType.Q6_K:
         return 64
     per = 2 if gated else 1
-    big = sum(heights) >= 4096 and all(h % (256 // per) == 0 for h in heights)
-    if big and _TILES[ggml_type].max_rows == 256:
-        return 256
-    return 128 if all(h % (128 // per) == 0 for h in heights) else 64
+    most = 128 if routed or sum(heights) < 4096 else 256
+    fit = [r for r in TILE_ROWS if r <= min(most, _TILES[ggml_type].max_rows)]
+    return next(r for r in fit if all(h % (r // per) == 0 for h in heights))
 
 
 def _schedule(tiles: int, rows: int, tile_tokens: int, steps: int, device: str) -> tuple[int, int]:
@@ -739,11 +821,11 @@ def _schedule(tiles: int, rows: int, tile_tokens: int, steps: int, device: str) 
 
 def _products(
     q8: tuple[Tensor, Tensor, Tensor], tokens: int | UOp, ws: tuple[QTensor, ...],
-    residual: Tensor | None, gated: bool = False, gelu: bool = False,
+    residual: Tensor | None, gated: bool = False, kind: str = "silu",
 ) -> list[tuple[Tensor, list[int]]]:  # fmt: skip
     # the products of the quantized activations and each matrix, with consecutive matrices of one
     # type stacked in one kernel, as few rows leave SMs idle: each kernel's output and heights.
-    # Gated, ws are gate and up, and the one output is act(gate) * up, SiLU or GELU if gelu.
+    # Gated, ws are gate and up, and the one output is glu(kind)(gate, up).
     xq, xd, xs = q8
     count = int(xd.shape[0]) * GROUP // ws[0].shape[1]
     tile_tokens = _tile_tokens(count)
@@ -759,7 +841,7 @@ def _products(
         schedule = _schedule(tiles, tile, tile_tokens, steps, str(xq.device))
         fxn = functools.partial(
             _matmul_kernel, tokens=bound, ggml_type=stack[0].type, rows=tile,
-            heights=tuple(heights), gated=gated, gelu=gelu, tile_tokens=tile_tokens,
+            heights=tuple(heights), gated=gated, kind=kind, tile_tokens=tile_tokens,
             schedule=schedule,
         )  # fmt: skip
         words, res = map(storage_words, stack), () if residual is None else (tiled(residual),)
@@ -772,7 +854,7 @@ def _products(
             done = Tensor.custom_kernel(out, *words, xq, xd, xs, *res, parts, fxn=fxn)
             parts, bound_ = carry(done[-1], bound)
             fixup = functools.partial(
-                _fixup_kernel, tokens=bound_, n=width, blocks=schedule[0], gated=gated, gelu=gelu
+                _fixup_kernel, tokens=bound_, n=width, blocks=schedule[0], gated=gated, kind=kind
             )
             out = Tensor.custom_kernel(done[0], parts, *res, fxn=fixup)[0]
         outs.append((out, [width] if gated else heights))
@@ -781,18 +863,20 @@ def _products(
 
 def routed_products(
     q8: tuple[Tensor, Tensor, Tensor], tokens: int | UOp, ws: tuple[QTensor, ...], order: Tensor,
-    counts: Tensor, used: int, by_token: bool, fused: bool = False, gelu: bool = False,
+    counts: Tensor, used: int, by_token: bool, fused: bool = False, kind: str = "silu",
+    biases: tuple[Tensor, ...] | None = None,
 ) -> Tensor:  # fmt: skip
     """The products of quantized activations and the experts that (token, slot) pairs are routed
     to, a row per pair, slot p % used of token p // used: ws stack experts (experts, rows, cols),
     and `order` (experts, n) and `counts` list each expert's pairs. The activations have a row per
-    token if by_token, else per pair. Two matrices are gate and up, multiplied as act(gate) * up,
-    SiLU or GELU if gelu; fused, one stack holds both, each expert's gate rows first.
+    token if by_token, else per pair. Two matrices are gate and up, combined as common.glu has
+    the kind; fused, one stack holds both, each expert's gate rows first. biases, if given, are
+    each matrix's (experts * rows), added before gate and up combine.
     """
     experts, rows, _ = ws[0].shape
     ws = (ws[0], ws[0]) if fused else ws
     rows //= 2 if fused else 1
-    tile = _tile(ws[0].type, [rows] * len(ws), len(ws) == 2)
+    tile = _tile(ws[0].type, [rows] * len(ws), len(ws) == 2, routed=True)
     out = Tensor.empty(
         int(order.shape[0]) // experts * used, rows, dtype=dtypes.float32, device=q8[0].device
     )
@@ -800,10 +884,11 @@ def routed_products(
     fxn = functools.partial(
         _matmul_kernel, tokens=bound, ggml_type=ws[0].type, rows=tile,
         heights=(rows,) * len(ws), gated=len(ws) == 2, routed=(used, by_token),
-        fused=fused, gelu=gelu,
+        fused=fused, kind=kind,
     )  # fmt: skip
     words = map(storage_words, ws)
-    return Tensor.custom_kernel(out, *words, xq, *q8[1:], order, counts, fxn=fxn)[0]
+    extra = biases or ()
+    return Tensor.custom_kernel(out, *words, xq, *q8[1:], order, counts, *extra, fxn=fxn)[0]
 
 
 def matmul_fits(ggml_type: GGMLType, rows: int, cols: int) -> bool:
@@ -838,14 +923,14 @@ def matmuls(
 
 def feed_forward(
     x: Tensor, gate: QTensor, up: QTensor, down: QTensor, norm: tuple[Tensor, float],
-    gelu: bool = False, residual: bool = True,
+    kind: str = "silu", residual: bool = True,
 ) -> Tensor:  # fmt: skip
-    """x + act(n @ gate.T) * (n @ up.T) @ down.T for tokens x and n = rms_norm(x, *norm), act
-    SiLU or GELU if gelu, without x if not residual; gate and up, which share a type and shape,
-    in one kernel that also applies act."""
+    """x + glu(kind)(n @ gate.T, n @ up.T) @ down.T for tokens x and n = rms_norm(x, *norm), as
+    common.glu has it, without x if not residual; gate and up, which share a type and shape,
+    in one kernel that also combines them."""
     tokens = x.shape[-2]
     q8 = quantize_q8(tiled(x), norm, rows=tokens)
-    ((hidden, _),) = _products(q8, tokens, (gate, up), None, gated=True, gelu=gelu)
+    ((hidden, _),) = _products(q8, tokens, (gate, up), None, gated=True, kind=kind)
     q8 = quantize_q8(hidden, rows=tokens)
     ((out, _),) = _products(q8, tokens, (down,), x if residual else None)
     return out[:tokens].reshape(*x.shape[:-1], down.shape[0])

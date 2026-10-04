@@ -14,12 +14,15 @@ from leat.quant import GGMLType, QTensor
 WARP = 32
 GROUP = 32  # activations per int8 scale
 LOG2E = math.log2(math.e)
+OAI_ALPHA, OAI_LIMIT = 1.702, 7.0  # gpt-oss's SwiGLU
 SHARED = 49152  # bytes of shared memory a block may use without opting in to more
 
 # the word type kernels read each storage type as: some blocks are only halfword aligned
 WORD_TYPE = {
     GGMLType.Q4_K: dtypes.uint32, GGMLType.Q5_K: dtypes.uint32, GGMLType.Q6_K: dtypes.uint16,
-    GGMLType.Q5_0: dtypes.uint16, GGMLType.Q8_0: dtypes.uint16,
+    GGMLType.Q5_0: dtypes.uint16, GGMLType.Q8_0: dtypes.uint16, GGMLType.MXFP4: dtypes.uint32,
+    GGMLType.Q4_0: dtypes.uint16, GGMLType.Q4_1: dtypes.uint16, GGMLType.Q5_1: dtypes.uint16,
+    GGMLType.IQ4_NL: dtypes.uint16, GGMLType.IQ4_XS: dtypes.uint32,
 }  # fmt: skip
 
 
@@ -88,6 +91,47 @@ def word16(w: UOp, i: UOp) -> UOp:
     return w[i].load().cast(dtypes.uint32) | (w[i + 1].load().cast(dtypes.uint32) << 16)
 
 
+def byte_perm(a: UOp, b: UOp, selector: UOp | int) -> UOp:
+    # the bytes of (b, a) that the selector's nibbles pick, as CUDA's __byte_perm
+    srcs = tuple(x if isinstance(x, UOp) else UOp.const(x, dtypes.uint32) for x in (a, b, selector))
+    return UOp(Ops.CUSTOMI, src=srcs, arg=("__byte_perm({}, {}, {})", dtypes.uint32))
+
+
+def funnel(lo: UOp, hi: UOp, shift: UOp) -> UOp:
+    # the 32 bits from bit `shift` on of (hi, lo), for shift < 32, as CUDA's __funnelshift_r
+    return UOp(Ops.CUSTOMI, src=(lo, hi, shift), arg=("__funnelshift_r({}, {}, {})", dtypes.uint32))
+
+
+def table16(q: UOp, table: tuple[int, int, int, int]) -> tuple[UOp, UOp]:
+    # a word of 8 nibbles to the int8 values a 16-entry table (as 4 words) gives them: those of
+    # its low nibbles, then of its high ones, each a word of 4 bytes; as llama.cpp's
+    # get_int_from_table_16, picking from each half of the table and then by the nibble's top bit
+    halves = []
+    pick = (q & 0x88888888) >> 1 | 0x32103210
+    for shift in (0, 16):
+        low = byte_perm(
+            UOp.const(table[0], dtypes.uint32), UOp.const(table[1], dtypes.uint32), q >> shift
+        )
+        high = byte_perm(
+            UOp.const(table[2], dtypes.uint32), UOp.const(table[3], dtypes.uint32), q >> shift
+        )
+        halves.append(byte_perm(low, high, pick >> shift))
+    return byte_perm(halves[0], halves[1], 0x6420), byte_perm(halves[0], halves[1], 0x7531)
+
+
+def table_words(values: tuple[int, ...]) -> tuple[int, int, int, int]:
+    # 16 int8 values as the 4 words table16 takes
+    raw = bytes(v & 0xFF for v in values)
+    return tuple(int.from_bytes(raw[i : i + 4], "little") for i in range(0, 16, 4))  # type: ignore[return-value]
+
+
+def e8m0_half(e: UOp) -> UOp:
+    # 2^(e - 128) for an exponent byte, as f32: ggml's e8m0_to_fp32_half, denormal for e < 2
+    e = e.cast(dtypes.uint32)
+    bits = (e < 2).where(UOp.const(0x00200000, dtypes.uint32) << e, (e - 1) << 23)
+    return bits.bitcast(dtypes.float32)
+
+
 def f16(bits: UOp) -> UOp:
     # the low 16 bits of a word as an f16, widened to f32
     return (bits & 0xFFFF).cast(dtypes.uint16).bitcast(dtypes.float16).float()
@@ -109,9 +153,19 @@ def silu(x: UOp) -> UOp:
     return x * (1 + (x * -LOG2E).exp2()).reciprocal()  # as tinygrad's silu
 
 
-def activation(gelu: bool) -> Callable[[UOp], UOp]:
-    # what gates an MLP: SiLU, or GELU
-    return _gelu if gelu else silu
+def glu(kind: str) -> Callable[[UOp, UOp], UOp]:
+    # how an MLP's gate and up combine: act(gate) * up for act SiLU or GELU, or gpt-oss's
+    # clamped SwiGLU, "oai"
+    if kind == "oai":
+        return _oai
+    act = _gelu if kind == "gelu" else silu
+    return lambda g, u: act(g) * u
+
+
+def _oai(g: UOp, u: UOp) -> UOp:
+    # min(g, 7) * sigmoid(1.702 * min(g, 7)) * (clamp(u, -7, 7) + 1), as ggml's swiglu_oai
+    g, u = g.minimum(OAI_LIMIT), u.maximum(-OAI_LIMIT).minimum(OAI_LIMIT)
+    return g * (1 + (g * (-OAI_ALPHA * LOG2E)).exp2()).reciprocal() * (u + 1)
 
 
 def _gelu(x: UOp) -> UOp:

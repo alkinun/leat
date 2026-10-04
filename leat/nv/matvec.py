@@ -9,20 +9,24 @@ from tinygrad.uop.ops import AxisType, KernelInfo
 
 from leat.nv.common import (
     WARP,
-    activation,
     dp4a,
+    e8m0_half,
     f16,
     fifth_bits,
+    funnel,
+    glu,
     lane_range,
     minus,
     on_nvidia,
     register,
     storage_words,
+    table16,
+    table_words,
     warp_sum,
     word16,
 )
 from leat.nv.quantize import quantize_q8
-from leat.quant import GGMLType, QTensor
+from leat.quant import FP4_VALUES, IQ4_VALUES, GGMLType, QTensor
 
 Dot = Callable[[UOp, UOp, UOp | int], UOp]  # (row, unit, x) -> a unit's share of row . x
 
@@ -168,12 +172,110 @@ def _q5_0_dot(w: UOp, xq: UOp, xd: UOp, xs: UOp, cols: int) -> Dot:
     return dot
 
 
+FP4_TABLE, IQ4_TABLE = table_words(FP4_VALUES), table_words(IQ4_VALUES)
+
+
+def _q4_dot(w: UOp, xq: UOp, xd: UOp, xs: UOp, cols: int, kind: GGMLType) -> Dot:
+    # Blocks of 32 of 16 bytes of nibbles, the low ones values 0..15 and the high ones 16..31,
+    # after f16 fields, read as halfwords: Q4_0's d, a weight d * (q - 8), 9 halfwords; Q4_1's d
+    # and m, d * q + m, 10; IQ4_NL's d, d * IQ4_VALUES[q], 9; Q5_1's d, m and 32 high bits, a fifth
+    # bit of each value, d * q + m, 12. A unit is two blocks.
+    halves = {GGMLType.Q4_0: 9, GGMLType.Q4_1: 10, GGMLType.IQ4_NL: 9, GGMLType.Q5_1: 12}[kind]
+    first = halves - 8  # the halfword the nibbles start at
+
+    def dot(row: UOp, unit: UOp, x: UOp | int) -> UOp:
+        total = UOp.const(0.0, dtypes.float32)
+        for b in range(2):
+            block = unit * 2 + b
+            base, g = (row * (cols // 32) + block) * halves, x * (cols // 32) + block
+            acc = UOp.const(0, dtypes.int32)
+            high = word16(w, base + 2) if kind == GGMLType.Q5_1 else None
+            for m in range(4):
+                word, values = word16(w, base + first + 2 * m), list[UOp]()
+                if kind == GGMLType.IQ4_NL:
+                    values = list(table16(word, IQ4_TABLE))
+                else:
+                    values = [(word >> (4 * h)) & 0x0F0F0F0F for h in range(2)]
+                    if high is not None:  # values 4m.. and 16 + 4m..
+                        bits = [fifth_bits((high >> (16 * h + 4 * m)) & 15) for h in range(2)]
+                        values = [v | b for v, b in zip(values, bits, strict=True)]
+                    if kind == GGMLType.Q4_0:
+                        values = [minus(v, 8) for v in values]
+                for h, v in enumerate(values):
+                    acc = dp4a(v.bitcast(dtypes.int32), xq[g * 8 + 4 * h + m].load(), acc)
+            d = f16(w[base].load().cast(dtypes.uint32))
+            term = d * xd[g].load() * acc.float()
+            if kind in (GGMLType.Q4_1, GGMLType.Q5_1):  # m times the group's sum
+                term = term + f16(w[base + 1].load().cast(dtypes.uint32)) * xs[g].load()
+            total = total + term
+        return total
+
+    return dot
+
+
+def _iq4_xs_dot(w: UOp, xq: UOp, xd: UOp, xs: UOp, cols: int) -> Dot:
+    # IQ4_XS block, 34 words: d as f16 and 16 high bits of scales, 4 bytes of low ones, then
+    # 128 bytes of nibbles, IQ4_NL's of 8 sub-blocks of 32; sub-block j's scale is d * (s - 32)
+    # for s nibble j of the low bytes and bits 2j of the high ones. A unit is two sub-blocks.
+    def dot(row: UOp, unit: UOp, x: UOp | int) -> UOp:
+        block, pair = unit // 4, unit % 4
+        base = (row * (cols // 256) + block) * 34
+        head, lows = w[base].load(), w[base + 1].load()
+        total = UOp.const(0.0, dtypes.float32)
+        for b in range(2):
+            j = pair * 2 + b
+            g = x * (cols // 32) + block * 8 + j
+            acc = UOp.const(0, dtypes.int32)
+            for m in range(4):
+                for h, v in enumerate(table16(w[base + 2 + 4 * j + m].load(), IQ4_TABLE)):
+                    acc = dp4a(v.bitcast(dtypes.int32), xq[g * 8 + 4 * h + m].load(), acc)
+            low = (lows >> (j * 4).cast(dtypes.uint32)) & 15
+            high = (head >> (16 + 2 * j).cast(dtypes.uint32)) & 3
+            scale = (low | (high << 4)).cast(dtypes.int32) - 32
+            total = total + scale.float() * xd[g].load() * acc.float()
+        return f16(head) * total
+
+    return dot
+
+
+def _mxfp4_dot(w: UOp, xq: UOp, xd: UOp, xs: UOp, cols: int) -> Dot:
+    # MXFP4 block, 17 bytes: an exponent byte e, then 16 bytes whose low nibbles index values
+    # 0..15 and high ones 16..31 into FP4_VALUES, doubled E2M1 as int8; a weight is the value times
+    # 2^(e - 128). Blocks are only byte aligned: a block's 5 aligned words hold it, from byte
+    # `skew` of the first. A unit is two blocks.
+    def dot(row: UOp, unit: UOp, x: UOp | int) -> UOp:
+        total = UOp.const(0.0, dtypes.float32)
+        for b in range(2):
+            block = unit * 2 + b
+            at, g = (row * (cols // 32) + block) * 17, x * (cols // 32) + block
+            first, skew = at // 4, (at % 4).cast(dtypes.uint32)
+            window = [w[(first + i).minimum(int(w.shape[0]) - 1)].load() for i in range(5)]
+            e = (window[0] >> (skew * 8)) & 0xFF
+            later, shift = skew.eq(3), ((skew + 1) % 4) * 8  # where the 16 bytes start
+            acc = UOp.const(0, dtypes.int32)
+            for m in range(4):  # where the bytes start in the second word, they end in the fifth
+                lo, hi = (later.where(window[min(m + j + 1, 4)], window[m + j]) for j in (0, 1))
+                low, high = table16(funnel(lo, hi, shift), FP4_TABLE)
+                acc = dp4a(low.bitcast(dtypes.int32), xq[g * 8 + m].load(), acc)
+                acc = dp4a(high.bitcast(dtypes.int32), xq[g * 8 + 4 + m].load(), acc)
+            total = total + e8m0_half(e) * xd[g].load() * acc.float()
+        return total
+
+    return dot
+
+
 DOTS: dict[GGMLType, Callable[[UOp, UOp, UOp, UOp, int], Dot]] = {
     GGMLType.Q4_K: functools.partial(_k_dot, high=False),
     GGMLType.Q5_K: functools.partial(_k_dot, high=True),
     GGMLType.Q6_K: _q6_k_dot,
     GGMLType.Q5_0: _q5_0_dot,
     GGMLType.Q8_0: _q8_0_dot,
+    GGMLType.MXFP4: _mxfp4_dot,
+    GGMLType.IQ4_XS: _iq4_xs_dot,
+    **{
+        t: functools.partial(_q4_dot, kind=t)
+        for t in (GGMLType.Q4_0, GGMLType.Q4_1, GGMLType.Q5_1, GGMLType.IQ4_NL)
+    },
 }
 
 
@@ -190,14 +292,14 @@ def _matvec_kernel(
 
 @functools.cache
 def _swiglu_kernel(
-    out: UOp, gate: UOp, up: UOp, xq: UOp, xd: UOp, xs: UOp, ggml_type: GGMLType, gelu: bool
+    out: UOp, gate: UOp, up: UOp, xq: UOp, xd: UOp, xs: UOp, ggml_type: GGMLType, kind: str
 ) -> UOp:
     def combine(row: UOp, g: UOp, u: UOp) -> UOp:
-        return activation(gelu)(g) * u
+        return glu(kind)(g, u)
 
     cols = 4 * int(xq.shape[0])
     dots = [_shared_x(DOTS[ggml_type](w, xq, xd, xs, cols)) for w in (gate, up)]
-    name = f"{'geglu' if gelu else 'swiglu'}_{ggml_type.name.lower()}"
+    name = f"glu_{kind}_{ggml_type.name.lower()}"
     return rows_kernel(out, cols // 64, name, dots, combine)
 
 
@@ -233,13 +335,13 @@ def matvecs(
 
 def swiglu(
     x: Tensor, gate: QTensor, up: QTensor, norm: tuple[Tensor, float] | None = None,
-    gelu: bool = False,
+    kind: str = "silu",
 ) -> Tensor:  # fmt: skip
-    """silu(x @ gate.T) * (x @ up.T) for one token, or with GELU if gelu, after rms_norm(x, *norm)
+    """glu(kind)(x @ gate.T, x @ up.T) for one token, as common.glu has it, after rms_norm(x, *norm)
     if given, both matrices in one kernel; they share a type and shape."""
     xq, xd, xs = quantize_q8(x.reshape(1, x.shape[-1]), norm)
     out = Tensor.empty(gate.shape[0], dtype=dtypes.float32, device=x.device)
-    fxn = functools.partial(_swiglu_kernel, ggml_type=gate.type, gelu=gelu)
+    fxn = functools.partial(_swiglu_kernel, ggml_type=gate.type, kind=kind)
     words = storage_words(gate), storage_words(up)
     out = Tensor.custom_kernel(out, *words, xq, xd, xs, fxn=fxn)[0]
     return out.reshape(*x.shape[:-1], gate.shape[0])
