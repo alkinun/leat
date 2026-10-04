@@ -69,8 +69,7 @@ def _run(args: argparse.Namespace) -> None:
     engine = Engine(args.model, max_context=args.max_context)
     chat, tok = ChatTemplate(engine.gguf.metadata, engine.tokenizer), engine.tokenizer
     messages = [{"role": "system", "content": args.system}] if args.system else []
-    name = engine.gguf.metadata.get("general.name", args.model.name)
-    print(f"{name} on {Device.DEFAULT}, compiling...", end="", flush=True)
+    print(f"{engine.gguf.path.stem} on {Device.DEFAULT}, compiling...", end="", flush=True)
     engine.warm_up()
     print(" ready. Ctrl-D quits.")
     while True:
@@ -116,10 +115,11 @@ def _serve(args: argparse.Namespace) -> None:
 def _bench(args: argparse.Namespace) -> None:
     engine = Engine(args.model, max_context=args.prompt + args.generate, prefill_chunk=args.prompt)
     result = bench.speed(engine, args.prompt, args.generate, args.reps)
+    name = engine.gguf.path.stem
     if args.json:
-        print(json.dumps({"model": args.model.name, "device": Device.DEFAULT} | asdict(result)))
+        print(json.dumps({"model": name, "device": Device.DEFAULT} | asdict(result)))
         return
-    print(f"{args.model.name} on {Device.DEFAULT}")
+    print(f"{name} on {Device.DEFAULT}")
     print(f"  pp{args.prompt:<6} {result.prefill:10.1f} tok/s")
     gbs = f"{result.weight_gbs:.0f} GB/s of weights"
     print(f"  tg{args.generate:<6} {result.decode:10.1f} tok/s   {gbs}")
@@ -133,7 +133,7 @@ def _perplexity(args: argparse.Namespace) -> None:
     else:
         result = bench.perplexity(engine, args.text.read_text(), args.ctx, args.chunks, args.decode)
     if args.json:
-        print(json.dumps({"model": args.model.name} | asdict(result)))
+        print(json.dumps({"model": engine.gguf.path.stem} | asdict(result)))
         return
     print(f"perplexity {result.perplexity:.4f}")
     if result.kl_mean is not None:

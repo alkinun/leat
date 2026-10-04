@@ -409,11 +409,11 @@ def flash_attention(
     q = (q.transpose(1, 2).reshape(tokens, heads, dim).float() * (LOG2E * scale)).half()
     q = q.pad_to((count, heads, dim)).contiguous()
     q, start = carry(q, start_pos)
-    cache, length = carry(cache, tokens)
+    cache, bound = carry(cache, tokens)
     out = Tensor.empty(count, heads * dim, dtype=dtypes.float32, device=q.device)
     out, slot = carry(out, slot)
     fxn = functools.partial(
-        _flash_attention_kernel, slot=slot, start=start, tokens=length, window=window,
+        _flash_attention_kernel, slot=slot, start=start, tokens=bound, window=window,
         key_tile=shape[0], parts=shape[1],
     )  # fmt: skip
     out = Tensor.custom_kernel(out, q, cache, fxn=fxn)[0]

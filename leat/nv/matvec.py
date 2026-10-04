@@ -197,7 +197,8 @@ def _swiglu_kernel(
 
     cols = 4 * int(xq.shape[0])
     dots = [_shared_x(DOTS[ggml_type](w, xq, xd, xs, cols)) for w in (gate, up)]
-    return rows_kernel(out, cols // 64, f"swiglu_{ggml_type.name.lower()}", dots, combine)
+    name = f"{'geglu' if gelu else 'swiglu'}_{ggml_type.name.lower()}"
+    return rows_kernel(out, cols // 64, name, dots, combine)
 
 
 def _shared_x(dot: Dot) -> Callable[[UOp, UOp], UOp]:

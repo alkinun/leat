@@ -90,7 +90,9 @@ class Transformer:
         self, config: Config, weights: dict[str, QTensor], max_context: int, slots: int = 1
     ):
         if not 0 < max_context <= config.context_length:
-            raise ValueError(f"max_context must be in [1, {config.context_length}]")
+            raise ValueError(
+                f"max_context must be in [1, {config.context_length}], got {max_context}"
+            )
         self.config, self.max_context = config, max_context
         # each layer's tensors by name, without "blk.{i}." and ".weight"
         self.layers: list[dict[str, QTensor]] = [{} for _ in range(config.n_layers)]
