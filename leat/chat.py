@@ -56,7 +56,7 @@ class ChatTemplate:
         return self._tokenizer.encode(text, bos=bos, special=True)
 
 
-# Qwen3 and Gemma 4 mark their tool calls, which may follow other text
+# Qwen and Gemma 4 mark their tool calls, which may follow other text
 _MARKERS = ("<tool_call>", "<|tool_call>")
 _CALLS = re.compile(
     r"<tool_call>(.*?)</tool_call>|<\|tool_call>call:([^{]+)(\{.*?\})<tool_call\|>", re.S
@@ -68,7 +68,7 @@ def parse_tool_calls(reply: str, tools: list[dict[str, Any]]) -> tuple[str, list
     """The text of a reply before its calls to `tools`, and those calls, each {"name": ...,
     "arguments": {...}}; or the whole reply and no calls, if one is malformed or names no tool.
 
-    Llama 3 calls a tool by replying with nothing but {"name": ..., "parameters": {...}}, Qwen3
+    Llama 3 calls a tool by replying with nothing but {"name": ..., "parameters": {...}}, Qwen
     with <tool_call>{"name": ..., "arguments": {...}}</tool_call> after any text, and Gemma 4
     with <|tool_call>call:name{key:value,...}<tool_call|>.
     """

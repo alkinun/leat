@@ -1,6 +1,6 @@
 """Attention over the KV cache: FlashDecoding for one query token, FlashAttention-2 on f16 tensor
-cores for several, and one token's queries, keys and values readied for it: normed, rotated by
-RoPE, and the keys and values stored in the cache."""
+cores for several, and one token's queries, keys and values readied for it: biased, normed,
+rotated by RoPE, and the keys and values stored in the cache."""
 
 import functools
 import math
@@ -416,7 +416,7 @@ def flash_attention(
     return out[:tokens].reshape(1, tokens, heads * dim)
 
 
-# ******** one token's queries, keys and values: norms, RoPE, and the cache ********
+# ******** one token's queries, keys and values: biases, norms, RoPE, and the cache ********
 
 
 @functools.cache
