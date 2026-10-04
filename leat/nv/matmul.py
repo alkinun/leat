@@ -1,10 +1,11 @@
 """Linear layers for several tokens on int8 tensor cores, llama.cpp's MMQ.
 
 The activations are quantized as for one token. A block stages a tile of weights, unpacked to
-int8, and 64 tokens in shared memory, half a weight block per step, while it fetches the next step
-into registers. Each of its warps multiplies 32 rows by the 64 tokens on tensor cores and scales
-every group of 32 in f32. Tiles of 256 rows reach 68 to 79 TOPS on 512 tokens, against 47 to 61
-for 128; matrices with few rows take 128, to occupy more SMs.
+int8, and 64 tokens in shared memory, 128 weights of each row per step, while it fetches the next
+step into registers. Each of its warps multiplies 32 rows by the 64 tokens on tensor cores and
+scales every group of 32 in f32. Tiles of 256 rows reach 68 to 79 TOPS on 512 tokens, against 47
+to 61 for 128; matrices with few rows take 128, to occupy more SMs, and 64 where 128 do not divide
+them. A mixture of experts' tokens take the same kernel, a block per tile of an expert's tokens.
 """
 
 import functools
@@ -280,7 +281,7 @@ class _Q80Tile:
     """Q8_0 weights, 4 blocks per step: 32 words of int8 per row, swizzled as for Q6_K, and the 4
     blocks' d. Rows of whole blocks but not whole steps read zeros past their end."""
 
-    max_rows, block, words = 256, 32, 17  # the last two: per block
+    max_rows, block, words = 256, 32, 17  # weights and halfwords per block
 
     def __init__(self, stack: _Stack, rows: int, tid: UOp, cols: int):
         self.stack, self.rows, self.tid = stack, rows, tid
@@ -297,13 +298,11 @@ class _Q80Tile:
 
     def fetch(self, step: UOp) -> list[UOp]:
         # the thread's words of the step's blocks of 17 halfwords, then the d of its row's 4
-        words, base = [], step * 4 * 17
+        words, base = [], step * 4 * self.words
         for i in range(32):
             row, at = (i * self.rows + self.tid) // 32, (i * self.rows + self.tid) % 32
-            j = at // 8
-            words.append(
-                self.stack.word16(row, base + j * 17 + 1 + 2 * (at % 8), self.inside(step, j))
-            )
+            at, inside = base + at // 8 * self.words + 1 + 2 * (at % 8), self.inside(step, at // 8)
+            words.append(self.stack.word16(row, at, inside))
         return words + self.scales(step)
 
     def scales(self, step: UOp) -> list[UOp]:
@@ -340,11 +339,11 @@ class _Q50Tile(_Q80Tile):
     def fetch(self, step: UOp) -> list[UOp]:
         # for each of the thread's (row, block j, word k) of the step, a word of the block's
         # nibbles and its high bits; then the d of its row's 4 blocks
-        words, base = [], step * 4 * 11
+        words, base = [], step * 4 * self.words
         for i in range(16):
             item = i * self.rows + self.tid
             row, j, k = item // 16, item % 16 // 4, item % 4
-            at, inside = base + 11 * j, self.inside(step, j)
+            at, inside = base + self.words * j, self.inside(step, j)
             words += [
                 self.stack.word16(row, at + 3 + 2 * k, inside),
                 self.stack.word16(row, at + 1, inside),
@@ -359,9 +358,8 @@ class _Q50Tile(_Q80Tile):
             row, j, k = item // 16, item % 16 // 4, item % 4
             nibbles, high = words[2 * i], words[2 * i + 1]
             for h in range(2):  # values 4k.. of the block, then 16 + 4k..
-                q = ((nibbles >> (4 * h)) & 0x0F0F0F0F) | fifth_bits(
-                    (high >> (16 * h + 4 * k)) & 15
-                )
+                fifth = fifth_bits((high >> (16 * h + 4 * k)) & 15)
+                q = ((nibbles >> (4 * h)) & 0x0F0F0F0F) | fifth
                 stores.append(quants[row, _swizzle(row, 8 * j + 4 * h + k)].store(minus(q, 16)))
         return stores + [d[j, self.tid].store(f16(word)) for j, word in enumerate(words[-4:])]
 
