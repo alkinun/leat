@@ -1,9 +1,11 @@
 """What the NVIDIA kernels share: warp intrinsics, loads, conversions and bound variables."""
 
+import functools
 import math
 from collections.abc import Callable
+from typing import Any
 
-from tinygrad import Tensor, UOp, dtypes
+from tinygrad import Device, Tensor, UOp, dtypes
 from tinygrad.dtype import AddrSpace
 from tinygrad.uop.ops import AxisType, Ops
 
@@ -23,6 +25,25 @@ WORD_TYPE = {
 
 def on_nvidia(t: Tensor) -> bool:
     return isinstance(t.device, str) and t.device.split(":")[0] in ("NV", "CUDA")
+
+
+@functools.cache
+def compute_units(device: str) -> int:
+    # the GPU's SMs: those of the TPCs each GPC has enabled; the 3090's 82 where the backend
+    # does not say
+    dev: Any = Device[device]
+    if not hasattr(dev, "num_gpcs"):
+        return 82
+    from tinygrad.runtime.ops_nv import nv_gpu
+
+    masks = (
+        dev.iface.rm_control(
+            dev.subdevice, nv_gpu.NV2080_CTRL_CMD_GR_GET_TPC_MASK,
+            nv_gpu.NV2080_CTRL_GR_GET_TPC_MASK_PARAMS(gpcId=i),
+        ).tpcMask
+        for i in range(dev.num_gpcs)
+    )  # fmt: skip
+    return sum(bin(m).count("1") for m in masks) * dev.num_sm_per_tpc
 
 
 def lane_range() -> UOp:
@@ -112,6 +133,10 @@ def opaque(x: UOp) -> UOp:
 
 def at_most(a: int | UOp, b: int) -> int | UOp:
     return a.minimum(b) if isinstance(a, UOp) else min(a, b)
+
+
+def at_least(a: int | UOp, b: int) -> int | UOp:
+    return a.maximum(b) if isinstance(a, UOp) else max(a, b)
 
 
 def carry(t: Tensor, value: int | UOp) -> tuple[Tensor, int | UOp]:

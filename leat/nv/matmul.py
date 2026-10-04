@@ -5,10 +5,14 @@ int8, and 64 tokens in shared memory, 128 weights of each row per step, while it
 step into registers. Each of its warps multiplies 32 rows by the 64 tokens on tensor cores and
 scales every group of 32 in f32. Tiles of 256 rows of Q4_K reach 68 to 79 TOPS on 512 tokens,
 against 54 to 67 for 128; matrices with few rows take 128, to occupy more SMs, and 64 where 128
-do not divide them. Up to 16 tokens take tiles of 16, to waste fewer products, and where tiles
-are too few to occupy the SMs, several blocks split each one's steps, then a reduction adds up
-their sums. A mixture of experts' tokens take the same kernel, a block per tile of an expert's
-tokens.
+do not divide them. Up to 16 tokens take tiles of 16, to waste fewer products.
+
+Where the tiles' last wave would leave SMs idle, a block per SM takes whole tiles in turn and
+then the tiles left over, split into chunks of their steps, and a fixup kernel adds up the chunks'
+sums: llama.cpp's stream-K, but with blocks that work at once on the same steps, which read them
+through L2. With each block taking its own run of steps, as stream-K has it, the weights' rows
+streamed from DRAM 2.5 times as slowly. A mixture of experts' tokens take the same kernel, a block
+per tile of an expert's tokens.
 """
 
 import functools
@@ -22,12 +26,15 @@ from leat.nv.common import (
     GROUP,
     WARP,
     activation,
+    at_least,
     carry,
+    compute_units,
     f16,
     fifth_bits,
     lane_range,
     minus,
     on_nvidia,
+    opaque,
     register,
     storage_words,
 )
@@ -39,7 +46,7 @@ FEW_TOKENS = 16  # tokens per tile where there are at most that many
 WARP_ROWS = 32  # a warp per 32 rows of the tile, and a thread per row to load its scales
 STEP = 128  # weights per row per step
 SUBTILES_M = WARP_ROWS // 16  # of 16 rows per warp, by subtiles of 8 tokens
-SMS = 82  # the 3090's
+FIXUP_THREADS = 256
 
 # mma.sync on int8: a 16 x k tile of weights times a k x 8 tile of activations, for k = 32 or 16.
 # {0} points at 4 int32 registers for the lane's share of the result, then come the lane's 4 or 2
@@ -128,21 +135,21 @@ class _Q4KTile:
 
     max_rows, block = 256, 256  # rows per tile at most, for shared memory; weights per block
 
-    def __init__(self, stack: _Stack, rows: int, tid: UOp, cols: int):
-        self.stack, self.rows, self.tid = stack, rows, tid
+    def __init__(self, rows: int, tid: UOp, cols: int):
+        self.rows, self.tid = rows, tid
         self.quants = UOp.alloc((rows, 16 + 4), dtypes.uint32, addrspace=AddrSpace.LOCAL)
         self.scales = UOp.alloc((2, 4, rows), dtypes.float32, addrspace=AddrSpace.LOCAL)
 
     def shared(self) -> list[UOp]:
         return [self.quants, self.scales]
 
-    def fetch(self, step: UOp) -> list[UOp]:
+    def fetch(self, stack: _Stack, step: UOp) -> list[UOp]:
         # the thread's words of the step: nibbles, then d and dmin and the scale bytes of its row
         words, block = [], step // 2 * 36
         for i in range(16):
             row, word = (i * self.rows + self.tid) // 16, (i * self.rows + self.tid) % 16
-            words.append(self.stack.load(row, block + 4 + 16 * (step % 2) + word))
-        return words + [self.stack.load(self.tid, block + i) for i in range(4)]
+            words.append(stack.load(row, block + 4 + 16 * (step % 2) + word))
+        return words + [stack.load(self.tid, block + i) for i in range(4)]
 
     def put(self, bufs: list[UOp], step: UOp, words: list[UOp]) -> list[UOp]:
         quants, scales = bufs
@@ -183,20 +190,20 @@ class _Q5KTile(_Q4KTile):
 
     max_rows = 128
 
-    def __init__(self, stack: _Stack, rows: int, tid: UOp, cols: int):
-        self.stack, self.rows, self.tid = stack, rows, tid
+    def __init__(self, rows: int, tid: UOp, cols: int):
+        self.rows, self.tid = rows, tid
         self.quants = UOp.alloc((rows, 32), dtypes.int32, addrspace=AddrSpace.LOCAL)
         self.scales = UOp.alloc((2, 4, rows), dtypes.float32, addrspace=AddrSpace.LOCAL)
 
-    def fetch(self, step: UOp) -> list[UOp]:
+    def fetch(self, stack: _Stack, step: UOp) -> list[UOp]:
         # each of the thread's words of nibbles and the word of high bits behind it; then d and
         # dmin and the scale bytes of its row
         words, block = [], step // 2 * 44
         for i in range(16):
             row, word = (i * self.rows + self.tid) // 16, (i * self.rows + self.tid) % 16
-            words.append(self.stack.load(row, block + 12 + 16 * (step % 2) + word))
-            words.append(self.stack.load(row, block + 4 + word % 8))
-        return words + [self.stack.load(self.tid, block + i) for i in range(4)]
+            words.append(stack.load(row, block + 12 + 16 * (step % 2) + word))
+            words.append(stack.load(row, block + 4 + word % 8))
+        return words + [stack.load(self.tid, block + i) for i in range(4)]
 
     def put(self, bufs: list[UOp], step: UOp, words: list[UOp]) -> list[UOp]:
         quants, scales = bufs
@@ -228,8 +235,8 @@ class _Q6KTile:
 
     max_rows, block = 256, 256
 
-    def __init__(self, stack: _Stack, rows: int, tid: UOp, cols: int):
-        self.stack, self.rows, self.tid = stack, rows, tid
+    def __init__(self, rows: int, tid: UOp, cols: int):
+        self.rows, self.tid = rows, tid
         self.quants = UOp.alloc((rows, 32), dtypes.int32, addrspace=AddrSpace.LOCAL)
         self.scales = UOp.alloc((2, rows), dtypes.uint32, addrspace=AddrSpace.LOCAL)
         self.d = UOp.alloc((rows,), dtypes.float32, addrspace=AddrSpace.LOCAL)
@@ -237,16 +244,16 @@ class _Q6KTile:
     def shared(self) -> list[UOp]:
         return [self.quants, self.scales, self.d]
 
-    def fetch(self, step: UOp) -> list[UOp]:
+    def fetch(self, stack: _Stack, step: UOp) -> list[UOp]:
         # for each of the thread's (row, word) pairs, the words of low and high bits behind it;
         # then the 8 scale bytes and d of its row
         words, block, half = [], step // 2 * 105, 32 * (step % 2)
         for i in range(8):
             row, m = (i * self.rows + self.tid) // 8, (i * self.rows + self.tid) % 8
             for at in (half + 2 * m, half + 16 + 2 * m, 64 + half // 2 + 2 * m):
-                words.append(self.stack.word16(row, block + at))
-        words += [self.stack.word16(self.tid, block + 96 + half // 8 + 2 * j) for j in range(2)]
-        return words + [self.stack.load(self.tid, block + 104).cast(dtypes.uint32)]
+                words.append(stack.word16(row, block + at))
+        words += [stack.word16(self.tid, block + 96 + half // 8 + 2 * j) for j in range(2)]
+        return words + [stack.load(self.tid, block + 104).cast(dtypes.uint32)]
 
     def put(self, bufs: list[UOp], step: UOp, words: list[UOp]) -> list[UOp]:
         quants, scales, d = bufs
@@ -282,8 +289,8 @@ class _Q80Tile:
 
     max_rows, block, words = 256, 32, 17  # weights and halfwords per block
 
-    def __init__(self, stack: _Stack, rows: int, tid: UOp, cols: int):
-        self.stack, self.rows, self.tid = stack, rows, tid
+    def __init__(self, rows: int, tid: UOp, cols: int):
+        self.rows, self.tid = rows, tid
         self.blocks, self.ragged = cols // 32, cols % STEP != 0
         self.quants = UOp.alloc((rows, 32), dtypes.int32, addrspace=AddrSpace.LOCAL)
         self.d = UOp.alloc((4, rows), dtypes.float32, addrspace=AddrSpace.LOCAL)
@@ -295,20 +302,20 @@ class _Q80Tile:
         # whether the row holds the step's block j
         return step * 4 + j < self.blocks if self.ragged else None
 
-    def fetch(self, step: UOp) -> list[UOp]:
+    def fetch(self, stack: _Stack, step: UOp) -> list[UOp]:
         # the thread's words of the step's blocks of 17 halfwords, then the d of its row's 4
         words, base = [], step * 4 * self.words
         for i in range(32):
             row, at = (i * self.rows + self.tid) // 32, (i * self.rows + self.tid) % 32
             at, inside = base + at // 8 * self.words + 1 + 2 * (at % 8), self.inside(step, at // 8)
-            words.append(self.stack.word16(row, at, inside))
-        return words + self.scales(step)
+            words.append(stack.word16(row, at, inside))
+        return words + self.scales(stack, step)
 
-    def scales(self, step: UOp) -> list[UOp]:
+    def scales(self, stack: _Stack, step: UOp) -> list[UOp]:
         # the d of the thread's row's 4 blocks of the step
         at = step * 4 * self.words
         return [
-            self.stack.load(self.tid, at + self.words * j, self.inside(step, j)).cast(dtypes.uint32)
+            stack.load(self.tid, at + self.words * j, self.inside(step, j)).cast(dtypes.uint32)
             for j in range(4)
         ]
 
@@ -335,7 +342,7 @@ class _Q50Tile(_Q80Tile):
 
     words = 11
 
-    def fetch(self, step: UOp) -> list[UOp]:
+    def fetch(self, stack: _Stack, step: UOp) -> list[UOp]:
         # for each of the thread's (row, block j, word k) of the step, a word of the block's
         # nibbles and its high bits; then the d of its row's 4 blocks
         words, base = [], step * 4 * self.words
@@ -344,10 +351,10 @@ class _Q50Tile(_Q80Tile):
             row, j, k = item // 16, item % 16 // 4, item % 4
             at, inside = base + self.words * j, self.inside(step, j)
             words += [
-                self.stack.word16(row, at + 3 + 2 * k, inside),
-                self.stack.word16(row, at + 1, inside),
+                stack.word16(row, at + 3 + 2 * k, inside),
+                stack.word16(row, at + 1, inside),
             ]
-        return words + self.scales(step)
+        return words + self.scales(stack, step)
 
     def put(self, bufs: list[UOp], step: UOp, words: list[UOp]) -> list[UOp]:
         quants, d = bufs
@@ -394,43 +401,92 @@ _TILES: dict[GGMLType, type[_Q4KTile] | type[_Q6KTile] | type[_Q80Tile]] = {
 }
 
 
+class _Items:
+    """The items a persistent block takes, of a schedule (blocks, chunks): whole tiles in turn,
+    `chunks` items each, while there are as many tiles left as blocks, as a block per tile would
+    take them; then the chunks of the tiles left, k-major, again in turn, so that the blocks at
+    work at once read the same steps' rows and tokens through L2. An item is `span` steps."""
+
+    def __init__(self, block: UOp, tiles: int | UOp, schedule: tuple[int, int], steps: int):
+        self.block, (self.blocks, self.chunks) = block, schedule
+        self.tiles, self.span = tiles, steps // self.chunks
+        self.waves, self.left = tiles // self.blocks, tiles % self.blocks
+        units = self.left * self.chunks  # of the left tiles' chunks, unit u is chunk u // left
+        self.whole = self.waves * self.chunks  # items of whole tiles
+        theirs = (units > block).where((units - 1 - block) // self.blocks + 1, 0)
+        self.count = self.whole + theirs
+
+    def decode(self, item: UOp) -> tuple[UOp, UOp, UOp]:
+        # whether the item is a chunk of a whole tile, its tile, and its chunk; a block with no
+        # items still fetches its first, which stays in bounds
+        whole, unit = item < self.whole, (item - self.whole) * self.blocks + self.block
+        left = at_least(self.left, 1)
+        tile = whole.where(item // self.chunks * self.blocks + self.block,
+                           self.waves * self.blocks + unit % left)  # fmt: skip
+        chunk = whole.where(item % self.chunks, unit // left)
+        return whole, tile.minimum(self.tiles - 1), chunk.minimum(self.chunks - 1)
+
+    def ends(self, item: UOp) -> UOp:
+        # whether the item ends its sums: a whole tile's last chunk, or a unit
+        return (item >= self.whole) | (item % self.chunks).eq(self.chunks - 1)
+
+
 @functools.cache
 def _matmul_kernel(
     out: UOp, *srcs: UOp, tokens: int | UOp, ggml_type: GGMLType, rows: int,
     heights: tuple[int, ...], gated: bool, routed: tuple[int, bool] | None = None,
-    fused: bool = False, gelu: bool = False, tile_tokens: int = TILE_TOKENS, splits: int = 1,
+    fused: bool = False, gelu: bool = False, tile_tokens: int = TILE_TOKENS,
+    schedule: tuple[int, int] = (0, 1),
 ) -> UOp:  # fmt: skip
-    # srcs: the stacked matrices, of `heights` rows, then xq, xd, xs and a residual; a
-    # block per tile of `rows` rows by tile_tokens tokens, and per `splits`-th of the steps along
-    # the rows. Gated, the matrices are gate and up, a tile holds rows of both, each warp the same
-    # 16 of either, and out is act(gate) * up for SiLU, or GELU if gelu; fused, gate and up are
-    # one stack of experts, as _Stack has it. Split, out (splits, count, n) holds each split's
-    # sums, gate's then up's if gated, for _summed to add up. Routed, the matrices stack experts,
-    # and order and counts list the (token, slot) pairs routed to each, of `used` slots per
-    # token: a block takes tile_tokens pairs of an expert's list, reading activation row
-    # pair // used, by token, or else pair, and writing output row pair.
+    # srcs: the stacked matrices, of `heights` rows, then xq, xd, xs, a residual if given and the
+    # parts buffer if scheduled. Tiles hold `rows` rows by tile_tokens tokens. Gated, the matrices
+    # are gate and up, a tile holds rows of both, each warp the same 16 of either, and out is
+    # act(gate) * up for SiLU, or GELU if gelu; fused, gate and up are one stack of experts, as
+    # _Stack has it.
+    #
+    # Scheduled (blocks, chunks), as _schedule picks, `blocks` persistent blocks take the tiles
+    # as _Items has it; a left tile's chunks go to parts (left tiles, chunks, tile_tokens, rows),
+    # gate's then up's sums if gated, for _fixup_kernel to add up.
+    #
+    # Routed, a block per tile: the matrices stack experts, and order and counts list the (token,
+    # slot) pairs routed to each, of `used` slots per token; a block takes tile_tokens pairs of an
+    # expert's list, reading activation row pair // used, by token, or else pair, and writing
+    # output row pair.
     ws, (xq, xd, xs, *rest) = srcs[: len(heights)], srcs[len(heights) :]
     count, n = int(out.shape[-2]), heights[0] if gated else sum(heights)
     sources = count // routed[0] if routed is not None and routed[1] else count
     cols, threads = 4 * int(xq.shape[0]) // sources, rows
     # rows of whole blocks but not whole steps: the last step reads zeros past their end
     out_rows, steps, ragged = rows // 2 if gated else rows, -(-cols // STEP), cols % STEP != 0
-    token_tile = UOp.range((tokens + tile_tokens - 1) // tile_tokens, 0, AxisType.GLOBAL)
-    row_tile = UOp.range(n // out_rows, 1, AxisType.GLOBAL)
+    token_tiles, row_tiles = (tokens + tile_tokens - 1) // tile_tokens, n // out_rows
     lane, warp = lane_range(), UOp.range(rows // WARP_ROWS, 2, AxisType.LOCAL)
     tid, g, t4 = warp * WARP + lane, lane // 4, lane % 4
-    row0, token0 = row_tile * out_rows, token_tile * tile_tokens
-    ranges, start = [token_tile, row_tile, lane, warp], UOp.const(0, dtypes.weakint)
-    if splits > 1:  # the block's steps, from start on
-        ranges.append(split := UOp.range(splits, 6, AxisType.GLOBAL))
-        start = split * (steps // splits)
-    if routed is None:
-        residual, stack = rest, _Stack(ws, heights, row_tile, rows, gated)
+    if schedule[0]:
+        block = UOp.range(schedule[0], 0, AxisType.GLOBAL)
+        items, ranges = _Items(block, token_tiles * row_tiles, schedule, steps), [block, lane, warp]
 
-        def source(tok: UOp | int) -> UOp:  # the activation row of the tile's token tok
+        def where(item: UOp, at: UOp) -> tuple[UOp, UOp, UOp]:  # item's tiles, and its step at
+            _, tile, chunk = items.decode(item)
+            return tile % token_tiles, tile // token_tiles, chunk * items.span + at
+
+    else:
+        token_tile = UOp.range(token_tiles, 0, AxisType.GLOBAL)
+        row_tile = UOp.range(row_tiles, 1, AxisType.GLOBAL)
+        ranges = [token_tile, row_tile, lane, warp]
+
+        def where(item: UOp, at: UOp) -> tuple[UOp, UOp, UOp]:
+            return token_tile, row_tile, at
+
+    if routed is None:
+        residual, parts = (rest[:-1], rest[-1]) if schedule[0] else (rest, None)
+
+        def stack(row_tile: UOp) -> _Stack:
+            return _Stack(ws, heights, row_tile, rows, gated)
+
+        def source(token0: UOp, tok: UOp | int) -> UOp:  # the activation row of token tok
             return token0 + tok
 
-        def target(tok: UOp | int, row: UOp) -> UOp:  # where its output for a row goes
+        def target(token0: UOp, tok: UOp | int, row: UOp) -> UOp:  # where its output goes
             return out[token0 + tok, row]
 
     else:
@@ -438,22 +494,24 @@ def _matmul_kernel(
         (used, by_token), experts = routed, int(counts.shape[0])
         ranges.append(block_expert := UOp.range(experts, 5, AxisType.GLOBAL))
         # blocks past the end of their expert's list exit at once: all else depends on the expert
-        expert = block_expert + UOp(Ops.CUSTOM, src=(token0 >= counts[block_expert].load(),),
-                                    arg=(_EXIT, dtypes.int32))  # fmt: skip
+        past = token_tile * tile_tokens >= counts[block_expert].load()
+        expert = block_expert + UOp(Ops.CUSTOM, src=(past,), arg=(_EXIT, dtypes.int32))
         listed, per = counts[expert].load(), count // used
-        stack = _Stack(ws, heights, row_tile, rows, gated, expert, experts, fused)
 
-        def pair(tok: UOp | int) -> UOp:
+        def stack(row_tile: UOp) -> _Stack:
+            return _Stack(ws, heights, row_tile, rows, gated, expert, experts, fused)
+
+        def pair(token0: UOp, tok: UOp | int) -> UOp:
             at = token0 + tok
             return (at < listed).where(order[expert * per + at].load(), 0)
 
-        def source(tok: UOp | int) -> UOp:
-            return pair(tok) // used if by_token else pair(tok)
+        def source(token0: UOp, tok: UOp | int) -> UOp:
+            return pair(token0, tok) // used if by_token else pair(token0, tok)
 
-        def target(tok: UOp | int, row: UOp) -> UOp:
-            return out.flatten()[(pair(tok) * n + row).valid(token0 + tok < listed)]
+        def target(token0: UOp, tok: UOp | int, row: UOp) -> UOp:
+            return out.flatten()[(pair(token0, tok) * n + row).valid(token0 + tok < listed)]
 
-    weights = _TILES[ggml_type](stack, rows, tid, cols)
+    weights = _TILES[ggml_type](rows, tid, cols)
     # the first rows of the warp's two subtiles of 16 rows, within the tile
     firsts = [warp * 16 + mi * out_rows if gated else warp * WARP_ROWS + mi * 16 for mi in (0, 1)]
     # the tile's tokens for a step: 32 words each, and the d and d * sum(q) of 4 groups
@@ -469,84 +527,156 @@ def _matmul_kernel(
     pairs = [_split(i, 32) for i in turns(32 * tile_tokens)]
     groups = [_split(i, tile_tokens) for i in turns(4 * tile_tokens)]
 
-    def fetch(step: UOp) -> list[UOp]:
-        words = weights.fetch(step)
+    def fetch(item: UOp, at: UOp) -> list[UOp]:  # an item's step `at`, into registers
+        token_tile, row_tile, step = where(item, at)
+        words, token0 = weights.fetch(stack(row_tile), step), token_tile * tile_tokens
         for tok, word in pairs:
-            at = source(tok) * (cols // 4) + step * 32 + word
+            at = source(token0, tok) * (cols // 4) + step * 32 + word
             at = at.valid(step * 32 + word < cols // 4) if ragged else at
             words.append(xq[at].load().bitcast(dtypes.uint32))
         for grp, tok in groups:
-            at = source(tok) * (cols // GROUP) + step * 4 + grp
+            at = source(token0, tok) * (cols // GROUP) + step * 4 + grp
             at = at.valid(step * 4 + grp < cols // GROUP) if ragged else at
             words += [xd[at].load().bitcast(dtypes.uint32), xs[at].load().bitcast(dtypes.uint32)]
         return words
 
-    def put(bufs: list[UOp], step: UOp, words: list[UOp]) -> list[UOp]:
+    def put(bufs: list[UOp], step: UOp, words: list[UOp]) -> list[UOp]:  # and to shared memory
         *mine, act, act_scales = bufs
         theirs = len(words) - len(pairs) - 2 * len(groups)
         stores = weights.put(mine, step, words[:theirs])
         quants, scales = words[theirs : theirs + len(pairs)], words[theirs + len(pairs) :]
         for (tok, word), value in zip(pairs, quants, strict=True):
             stores.append(act[tok, word].store(value.bitcast(dtypes.int32)))
-        for i, (grp, tok) in enumerate(groups):
+        for k, (grp, tok) in enumerate(groups):
             for j in (0, 1):
-                value = scales[2 * i + j].bitcast(dtypes.float32)
+                value = scales[2 * k + j].bitcast(dtypes.float32)
                 stores.append(act_scales[j, grp, tok].store(value))
         return stores
 
-    # step 0 before the loop; in step i, the fetch of step i + 1 is staged in registers before
-    # the products, so that its loads are in flight meanwhile, and stored after them. tinygrad
-    # orders operations by their dependencies alone, so the products depend on the staging.
+    # The first step before the loop; in each step, the fetch of the next is staged in registers
+    # before the products, so that its loads are in flight meanwhile, and stored after them.
+    # tinygrad orders operations by their dependencies alone, so the products depend on the
+    # staging.
+    zero = UOp.const(0, dtypes.weakint)
     bufs = [*weights.shared(), act, act_scales]
-    first = put(bufs, start, fetch(start))
-    step = UOp.range(steps // splits, 3, AxisType.LOOP)
-    following = fetch(start + (step + 1).minimum(steps // splits - 1))
+    first = put(bufs, where(zero, zero)[2], fetch(zero, zero))
+    if schedule[0]:  # each item a loop of its steps; the next step may be the next item's first
+        item, at = UOp.range(items.count, 3, AxisType.LOOP), UOp.range(items.span, 8, AxisType.LOOP)
+        loops, crossing = [item, at], at.eq(items.span - 1) & (item < items.count - 1)
+        upcoming = (
+            item + crossing.cast(dtypes.weakint),
+            crossing.where(0, at + 1).minimum(items.span - 1),
+        )
+    else:
+        item, at = zero, UOp.range(steps, 3, AxisType.LOOP)
+        loops, upcoming = [at], (zero, (at + 1).minimum(steps - 1))
+    following = fetch(*upcoming)
     stage = UOp.alloc((len(following),), dtypes.uint32, addrspace=AddrSpace.REG)
-    staged = UOp.group(*(stage[i].store(v) for i, v in enumerate(following)))
-    bufs = [buf.after(*first).after(step).after(staged) for buf in bufs]
+    staged = UOp.group(*(stage[k].store(v) for k, v in enumerate(following)))
+    bufs = [buf.after(*first).after(*loops).after(staged) for buf in bufs]
     *mine, act, act_scales = bufs
 
     subtiles_n = tile_tokens // 8
     acc = register((SUBTILES_M * subtiles_n * 4,), 0.0)
     s = UOp.range(STEP // GROUP, 4, AxisType.LOOP)
-    prev, vals = acc.after(step, s), list[UOp]()
+    prev, vals = acc.after(*loops, s), list[UOp]()
     for mi in range(SUBTILES_M):
         r = firsts[mi] + g
         for ni in range(subtiles_n):
             tok = ni * 8
             b = [act[tok + g, 8 * s + 4 * h + t4].load() for h in range(2)]
-            xd_, xs_ = ([act_scales[i, s, tok + 2 * t4 + j].load() for j in (0, 1)] for i in (0, 1))
+            xd_, xs_ = ([act_scales[k, s, tok + 2 * t4 + j].load() for j in (0, 1)] for k in (0, 1))
             sums = [prev[len(vals) + e].load() for e in range(4)]
             vals += weights.products(mine, s, (r, r + 8), t4, b, xd_, xs_, sums)
     computed = acc.store(UOp.stack(*vals)).end(s)
     # every warp is done with this step's tiles before they are overwritten
     done = UOp(Ops.BARRIER, src=(computed,))
-    staged_words = [stage.after(staged)[i].load() for i in range(len(following))]
-    later = put([buf.after(done) for buf in bufs], start + step + 1, staged_words)
-    acc = acc.after(UOp.group(computed, *later).end(step))
+    staged_words = [stage.after(staged)[k].load() for k in range(len(following))]
+    later = put([buf.after(done) for buf in bufs], where(*upcoming)[2], staged_words)
+    summed = acc.after(UOp.group(computed, *later).end(at))
 
-    results = []
-    for mi in range(1 if gated and splits == 1 else SUBTILES_M):
-        for ni in range(subtiles_n):
-            for e in range(4):
-                row = row0 + firsts[mi] + g + 8 * (e // 2)
-                token = ni * 8 + 2 * t4 + e % 2
-                value = acc[(mi * subtiles_n + ni) * 4 + e].load()
-                if splits > 1:  # up's sums after gate's
-                    at = row + mi * (n - out_rows) if gated else row
-                    results.append(out[split, token0 + token, at].store(value))
-                    continue
-                if gated:
-                    value = activation(gelu)(value) * acc[(subtiles_n + ni) * 4 + e].load()
-                if residual:
-                    value = value + residual[0][token0 + token, row].load()
-                results.append(target(token, row).store(value))
+    def results(token0: UOp, row0: UOp, ends: UOp | None = None) -> list[UOp]:
+        # the stores of a tile's outputs; scheduled, those of an item that `ends` its sums: a
+        # whole tile's outputs, or a left tile's sums of a chunk to their part
+        stores = []
+        if ends is not None:
+            whole, tile, chunk = items.decode(item)
+            part = (tile - items.waves * items.blocks) * items.chunks + chunk
+        for mi in range(1 if gated and ends is None else SUBTILES_M):
+            for ni in range(subtiles_n):
+                for e in range(4):
+                    row = firsts[mi] + g + 8 * (e // 2)  # of the tile
+                    token = ni * 8 + 2 * t4 + e % 2
+                    value = summed[(mi * subtiles_n + ni) * 4 + e].load()
+                    if ends is not None and parts is not None:
+                        at = (part * tile_tokens + token) * rows + row
+                        stores.append(
+                            parts.flatten()[at.valid(ends & whole.eq(False))].store(value)
+                        )
+                        if gated and mi == 1:
+                            continue
+                    if gated:
+                        value = activation(gelu)(value) * summed[(subtiles_n + ni) * 4 + e].load()
+                    if residual:
+                        value = value + residual[0][token0 + token, row0 + row].load()
+                    if ends is None:
+                        stores.append(target(token0, token, row0 + row).store(value))
+                        continue
+                    # flat: tinygrad simplifies a valid on one of several indices wrongly
+                    at = (token0 + token) * n + row0 + row
+                    stores.append(out.flatten()[at.valid(ends & whole)].store(value))
+        return stores
+
     info = KernelInfo(name=f"matmul_{ggml_type.name.lower()}_{n}_{cols}", opts_to_apply=())
-    return UOp.group(*results).end(*ranges).sink(arg=info)
+    if not schedule[0]:
+        stores = results(token_tile * tile_tokens, row_tile * out_rows)
+        return UOp.group(*stores).end(*ranges).sink(arg=info)
+    # after an item that ends its sums, they go out and start again from 0
+    ends = items.ends(item)
+    token_tile, row_tile, _ = where(item, zero)
+    flushes = results(token_tile * tile_tokens, row_tile * out_rows, ends)
+    held = acc.after(summed, *flushes)
+    zeroed = held.store(UOp.stack(*(ends.where(0.0, held[k].load()) for k in range(len(vals)))))
+    return zeroed.end(item).end(*ranges).sink(arg=info)
 
 
 def _split(a: UOp, b: int) -> tuple[UOp, UOp]:
     return a // b, a % b
+
+
+@functools.cache
+def _fixup_kernel(
+    out: UOp, parts: UOp, *residual: UOp, tokens: int | UOp, n: int, blocks: int, gated: bool,
+    gelu: bool,
+) -> UOp:  # fmt: skip
+    # Block r adds up the chunks' sums of the r-th tile that _matmul_kernel's `blocks` blocks
+    # left after their whole waves, if there is one, and stores act(gate) * up if gated, plus the
+    # residual if given. parts holds a row of chunks per tile there may be left.
+    lefts, chunks, tile_tokens, rows = (int(d) for d in parts.shape)
+    out_rows = rows // 2 if gated else rows
+    token_tiles = (tokens + tile_tokens - 1) // tile_tokens
+    tiles = token_tiles * (n // out_rows)
+    block = UOp.range(lefts, 0, AxisType.GLOBAL)
+    thread = UOp.range(FIXUP_THREADS, 1, AxisType.LOCAL)
+    # opaque: tinygrad would put the block a constant bound pins into the index, and drop it
+    live = opaque(block) < tiles % blocks
+    tile = tiles // blocks * blocks + block
+    token0, row0 = tile % token_tiles * tile_tokens, tile // token_tiles * out_rows
+    stores = []
+    for i in range(tile_tokens * out_rows // FIXUP_THREADS):
+        token, row = _split(i * FIXUP_THREADS + thread, out_rows)
+        cells = [((block * chunks + c) * tile_tokens + token) * rows + row for c in range(chunks)]
+        sums = [
+            sum(parts.flatten()[(at + h * out_rows).valid(live)].load() for at in cells)
+            for h in range(2 if gated else 1)
+        ]
+        value = activation(gelu)(sums[0]) * sums[1] if gated else sums[0]
+        at = (token0 + token) * n + row0 + row
+        if residual:
+            value = value + residual[0].flatten()[at.valid(live)].load()
+        stores.append(out.flatten()[at.valid(live)].store(value))
+    info = KernelInfo(name=f"matmul_fixup_{n}", opts_to_apply=())
+    return UOp.group(*stores).end(block, thread).sink(arg=info)
 
 
 def _tile_tokens(count: int) -> int:
@@ -586,27 +716,25 @@ def _tile(ggml_type: GGMLType, heights: list[int], gated: bool, few: bool = Fals
     return 128 if all(h % (128 // per) == 0 for h in heights) else 64
 
 
-def _splits(tiles: int, rows: int, steps: int) -> int:
-    # blocks per tile of rows, each taking an even share of its steps, for a single tile of
-    # tokens: the split that leaves the fewest steps to the busiest SM, counting a block's start
-    # as 2 steps, and an SM taking 256 rows' worth of tiles at a time. On Llama 3.1 8B's matrices
-    # for 16 tokens it picks splits within a quarter of the best measured, 1.3 to 4.7 times as fast
-    # as none.
-    def cost(s: int) -> int:
-        return -(-tiles * s // (SMS * 256 // rows)) * (steps // s + 2)
+def _schedule(tiles: int, rows: int, tile_tokens: int, steps: int, device: str) -> tuple[int, int]:
+    # (blocks, chunks) for _matmul_kernel with at most `tiles` tiles, or (0, 1) for a block per
+    # tile: as many blocks as fit at once, taking tiles of 256 rows' worth per SM, and the chunks,
+    # among divisors of `steps`, that finish soonest. That is the busiest block's steps, counting
+    # 2 more for each chunk it starts, plus _fixup_kernel's time to read the chunks' sums back.
+    # On the 3090, a block's step takes about 1 us per million products, and the fixup reads
+    # 800 KB per us and takes 2 us more. Split thus, Llama 3.1 8B's Q4_K down projection of 512
+    # tokens took 730 to 750 us rather than 846, and of 16 tokens, splitting its one tile of
+    # tokens, 61 rather than 187.
+    blocks = compute_units(device) * (max(256 // rows, 1) if tile_tokens == FEW_TOKENS else 1)
+    left = tiles % blocks
+    step_us = 2 * STEP * tile_tokens * rows / 1e6
 
-    return min((s for s in (1, 2, 4, 8, 16) if steps % s == 0), key=cost)
+    def time(c: int) -> float:
+        fixup = 2 + c * left * tile_tokens * rows * 4 / 8e5 if c > 1 else 0
+        return -(-left * c // blocks) * (steps // c + 2) * step_us + fixup
 
-
-def _summed(parts: Tensor, gated: bool, gelu: bool, residual: Tensor | None = None) -> Tensor:
-    # the splits' sums (splits, count, n) added up, as act(gate) * up if gated and plus the
-    # residual (count, n) if given: over every row, as the kernel writes them, rather than a bound
-    # number of them, over which tinygrad's own kernel took 60 us rather than 5 for gate and up
-    out = parts.sum(0)
-    if gated:
-        g, u = out.chunk(2, dim=1)
-        out = (g.gelu() if gelu else g.silu()) * u
-    return (out if residual is None else out + residual).contiguous()
+    chunks = min((c for c in (1, 2, 4, 7, 8, 16) if steps % c == 0), key=time)
+    return (blocks, chunks) if chunks > 1 else (0, 1)
 
 
 def _products(
@@ -626,21 +754,27 @@ def _products(
         heights = [w.shape[0] for w in stack]
         tile = _tile(stack[0].type, heights, gated, tile_tokens == FEW_TOKENS)
         width = heights[0] if gated else sum(heights)
-        tiles, steps = width // (tile // 2 if gated else tile), -(-stack[0].shape[1] // STEP)
-        splits = _splits(tiles, tile, steps) if count == tile_tokens else 1
+        tiles = count // tile_tokens * (width // (tile // 2 if gated else tile))
+        steps = -(-stack[0].shape[1] // STEP)
+        schedule = _schedule(tiles, tile, tile_tokens, steps, str(xq.device))
         fxn = functools.partial(
             _matmul_kernel, tokens=bound, ggml_type=stack[0].type, rows=tile,
             heights=tuple(heights), gated=gated, gelu=gelu, tile_tokens=tile_tokens,
-            splits=splits,
+            schedule=schedule,
         )  # fmt: skip
         words, res = map(storage_words, stack), () if residual is None else (tiled(residual),)
-        if splits == 1:
-            out = Tensor.empty(count, width, dtype=dtypes.float32, device=xq.device)
+        out = Tensor.empty(count, width, dtype=dtypes.float32, device=xq.device)
+        if schedule[0] == 0:
             out = Tensor.custom_kernel(out, *words, xq, xd, xs, *res, fxn=fxn)[0]
-        else:
-            parts = Tensor.empty(splits, count, width * (2 if gated else 1), device=xq.device)
-            parts = Tensor.custom_kernel(parts, *words, xq, xd, xs, fxn=fxn)[0]
-            out = _summed(parts, gated, gelu, *res)
+        else:  # and the chunks' sums of the tiles left after whole waves
+            lefts = min(schedule[0], tiles)  # the most tiles the whole waves may leave
+            parts = Tensor.empty(lefts, schedule[1], tile_tokens, tile, device=xq.device)
+            done = Tensor.custom_kernel(out, *words, xq, xd, xs, *res, parts, fxn=fxn)
+            parts, bound_ = carry(done[-1], bound)
+            fixup = functools.partial(
+                _fixup_kernel, tokens=bound_, n=width, blocks=schedule[0], gated=gated, gelu=gelu
+            )
+            out = Tensor.custom_kernel(done[0], parts, *res, fxn=fixup)[0]
         outs.append((out, [width] if gated else heights))
     return outs
 
