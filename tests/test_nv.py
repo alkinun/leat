@@ -135,8 +135,12 @@ def activation(x: np.ndarray, gelu: bool) -> np.ndarray:
 # ******** several tokens ********
 
 
+# up to 16 tokens take tiles of 16; with few tiles, blocks split the steps along the rows
+FEW = [5, UOp.variable("tokens", 1, 16).bind(11)]
+
+
 @pytest.mark.parametrize("ggml_type", [Q4_K, Q5_K, Q6_K, Q8_0])
-@pytest.mark.parametrize("tokens", [64, 100, UOp.variable("tokens", 1, 128).bind(70)])
+@pytest.mark.parametrize("tokens", [64, 100, UOp.variable("tokens", 1, 128).bind(70), *FEW])
 @pytest.mark.parametrize("shape", [(256, 2048), (4096, 512)])  # tiles of 128 and 256 rows
 def test_matmul(ggml_type, tokens, shape):
     rng = np.random.default_rng(8)
@@ -154,20 +158,21 @@ def test_matmul(ggml_type, tokens, shape):
 
 # rows of whole blocks of 32 but not whole steps of 128, as Gemma 4's of 704 and 2112 weights
 @pytest.mark.parametrize("ggml_type", [Q5_0, Q8_0])
-@pytest.mark.parametrize("tokens", [64, UOp.variable("tokens", 1, 128).bind(70)])
+@pytest.mark.parametrize("tokens", [64, UOp.variable("tokens", 1, 128).bind(70), FEW[1]])
 @pytest.mark.parametrize("shape", [(256, 704), (128, 2112), (4096, 512)])
 def test_matmul_blocks_of_32(ggml_type, tokens, shape):
     test_matmul(ggml_type, tokens, shape)
 
 
 @pytest.mark.parametrize("heights", [(256, 128, 128), (4096, 1024, 1024)])  # tiles of 128, 256
-def test_matmul_stacked(heights):
+@pytest.mark.parametrize("tokens", [70, 5])
+def test_matmul_stacked(heights, tokens):
     # consecutive matrices of one type share a kernel: here the first two, as q and k
     rng = np.random.default_rng(10)
     types = (Q4_K, Q4_K, Q6_K)
     matrices = [random_matrix(t, h, 512, rng) for t, h in zip(types, heights, strict=True)]
     ws, blocks = zip(*matrices, strict=True)
-    x = rng.standard_normal((1, 70, 512)).astype(np.float32)
+    x = rng.standard_normal((1, tokens, 512)).astype(np.float32)
     for got, b, t in zip(ops.linears(Tensor(x), *ws), blocks, types, strict=True):
         assert_close(got.numpy()[0], reference_matmul(x[0], b, t), 1e-4)
 
@@ -235,9 +240,9 @@ def expected_mixture(normed: np.ndarray, scores: np.ndarray, used: int, expert) 
     return out
 
 
-# up to FEW tokens take the matrix-vector kernels, more the tensor cores; favored experts get
-# more than a tile of tokens
-@pytest.mark.parametrize("tokens", [1, 3, 70, UOp.variable("tokens", 1, 128).bind(37), 128])
+# up to FEW tokens take the matrix-vector kernels, more the tensor cores, as do a bound number
+# of up to 16, padded to 16 rows; favored experts get more than a tile of tokens
+@pytest.mark.parametrize("tokens", [1, 3, 70, UOp.variable("tokens", 1, 128).bind(37), 128, FEW[1]])
 @pytest.mark.parametrize("favored", [0, 3])
 def test_mixture(tokens, favored):
     rng = np.random.default_rng(15)
@@ -321,7 +326,7 @@ def test_add_normed(monkeypatch, parts, normed, tokens):
 # ******** ops on the kernels ********
 
 
-@pytest.mark.parametrize("tokens", [1, 80])
+@pytest.mark.parametrize("tokens", [1, 80, 5])
 def test_norm_and_residual(tokens):
     rng = np.random.default_rng(9)
     w, blocks = random_matrix(Q4_K, 256, 4096, rng)
@@ -337,11 +342,13 @@ def test_norm_and_residual(tokens):
 
 # one token takes the matrix-vector kernels where the matrices are wide enough, else as several
 # tokens do, with gate and up in tiles of 256 rows or, for few rows, 128, or 64 where 128 do not
-# divide them: Gemma 4's MLP, of GELU and Q5_0 rows of 2112, without the residual
+# divide them, and 5 in tiles of 16 tokens: Gemma 4's MLP, of GELU and Q5_0 rows of 2112, without
+# the residual
 @pytest.mark.parametrize(
     "tokens, hidden, down_type, gelu",
     [(1, 4096, Q6_K, False), (1, 1024, Q6_K, False), (70, 4096, Q6_K, False),
-     (70, 1024, Q6_K, False), (1, 2112, Q5_0, True), (70, 2112, Q5_0, True)],
+     (70, 1024, Q6_K, False), (5, 4096, Q6_K, False), (1, 2112, Q5_0, True),
+     (70, 2112, Q5_0, True), (5, 2112, Q5_0, True)],
 )  # fmt: skip
 def test_feed_forward(tokens, hidden, down_type, gelu):
     rng = np.random.default_rng(12)

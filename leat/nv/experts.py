@@ -24,7 +24,7 @@ from leat.nv.common import (
     storage_words,
     warp_sum,
 )
-from leat.nv.matmul import TILE_TOKENS, matmul_fits, routed_products, tiled
+from leat.nv.matmul import matmul_fits, routed_products, tiled
 from leat.nv.matvec import DOTS, rows_kernel
 from leat.nv.quantize import quantize_q8
 from leat.quant import GGMLType, QTensor
@@ -269,9 +269,10 @@ def mixture(
     if few or not fit:
         return _matvecs(x, ids, weights, gate, up, down, used, norm, gelu, scales, residual)
     # many tokens: on tensor cores, each expert taking the pairs routed to it
-    count = -(-x.max_shape[1] // TILE_TOKENS) * TILE_TOKENS
+    xt = tiled(x)
+    count = int(xt.shape[0])
     order, counts = _bucket(ids, gate.shape[0], count, tokens * used)
-    q8 = quantize_q8(tiled(x), norm, rows=tokens)
+    q8 = quantize_q8(xt, norm, rows=tokens)
     ws = (gate,) if up is None else (gate, up)
     hidden = routed_products(q8, tokens, ws, order, counts, used, True, up is None, gelu)
     q8 = quantize_q8(hidden, rows=tokens * used)
