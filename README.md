@@ -63,7 +63,7 @@ RTX 3090, Q4_K_M files, one sequence, in tokens per second. llama.cpp is b11372 
 | Qwen3 30B A3B | 4681 | 4927 | 211.1 | 224.8 |
 | Gemma 4 26B A4B it | 4844 | 4762 | 157.6 | 186.2 |
 
-After 8192 tokens of context, Llama 3.1 8B decodes at 122.3 tok/s against llama.cpp's 125.0.
+After 8192 tokens of context, Llama 3.1 8B decodes at 120.9 tok/s against llama.cpp's 125.0.
 
 Through `leat serve`, the first token of a 2141-token prompt to Llama 3.1 8B arrives after 463 ms, or after 53 ms when another conversation has cached its 2130-token system prompt.
 
