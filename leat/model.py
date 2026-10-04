@@ -15,7 +15,7 @@ _MLP = ("ffn_gate", "ffn_up", "ffn_down")
 _EXPERTS = ("ffn_gate_inp", "ffn_down_exps")  # the router, and the experts' down projections
 # the supported architectures, and whether their RoPE rotates dimension i with i + D/2, ggml's
 # "neox" mode, rather than adjacent pairs, its "normal" mode, as GGUF lays out llama's q and k
-_ROPE_HALVES = {"llama": False, "qwen3": True, "qwen3moe": True, "gemma4": True}
+_ROPE_HALVES = {"llama": False, "qwen2": True, "qwen3": True, "qwen3moe": True, "gemma4": True}
 
 
 @dataclass(frozen=True)
@@ -107,9 +107,8 @@ class Transformer:
         self.small = [
             {n: w.dequant() for n, w in layer.items() if len(w.shape) == 1} for layer in self.layers
         ]
-        for (
-            s
-        ) in self.small:  # Gemma 4 routes from x normed with a weight of its own, over sqrt(dim)
+        # Gemma 4 routes from x normed with a weight of its own, over sqrt(dim)
+        for s in self.small:
             if "ffn_gate_inp.scale" in s:
                 s["router_norm"] = (s["ffn_gate_inp.scale"] / math.sqrt(config.dim)).realize()
         self.embed = weights["token_embd.weight"]
@@ -169,9 +168,12 @@ class Transformer:
         q, k, *values = ops.linears(x, *proj, norm=(s["attn_norm"], eps))
         q, k = q.reshape(B, T, c.n_heads, dim), k.reshape(B, T, kv_heads, dim)
         v = (values[0] if values else k).reshape(B, T, kv_heads, dim)
+        biases = None
+        if "attn_q.bias" in s:  # Qwen2's
+            biases = (s["attn_q.bias"], s["attn_k.bias"], s["attn_v.bias"])
         norms = (s["attn_q_norm"], s["attn_k_norm"]) if "attn_q_norm" in s else None
         q, cache = ops.rotate(q, k, v, self.cache[i], slot, start_pos, self.rope[i],
-                              c.rope_halves, norms, c.gemma, eps)  # fmt: skip
+                              c.rope_halves, biases, norms, c.gemma, eps)  # fmt: skip
         scale = 1.0 if c.gemma else 1 / math.sqrt(dim)
         out = ops.attention(q, cache, slot, start_pos, scale, c.windows[i])
         if "post_attention_norm" not in s:

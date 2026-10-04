@@ -75,8 +75,8 @@ MOE = ("ffn_gate_inp", "ffn_gate_exps", "ffn_up_exps", "ffn_down_exps")
 
 def write_tiny_model(path: Path, arch: str = "llama") -> dict[str, np.ndarray]:
     # a random GGUF of a supported architecture; returns its weights as decoded independently by
-    # gguf-py. llama has rope frequency factors, qwen3 RMSNorms of q and k, and qwen3moe also
-    # a mixture of experts for MLP.
+    # gguf-py. llama has rope frequency factors, qwen2 biases of q, k and v, qwen3 RMSNorms of q
+    # and k, and qwen3moe also a mixture of experts for MLP.
     if arch.startswith("gemma4"):
         return _write_gemma4(path, experts=arch == "gemma4")
     w, weights, add = _writer(path, arch)
@@ -96,11 +96,14 @@ def write_tiny_model(path: Path, arch: str = "llama") -> dict[str, np.ndarray]:
     if arch == "llama":
         add("rope_freqs.weight", (HEAD_DIM // 2,), GGMLType.F32, 4.0)
     for i in range(LAYERS):
-        qk = ("attn_q_norm", "attn_k_norm") if arch != "llama" else ()
+        qk = ("attn_q_norm", "attn_k_norm") if arch.startswith("qwen3") else ()
         for name in ("attn_norm", "ffn_norm", *qk):
             add(f"blk.{i}.{name}.weight", (HEAD_DIM if name in qk else D,))
         for name in ATTENTION + (MOE if arch == "qwen3moe" else MLP):
             add(f"blk.{i}.{name}.weight", *TENSORS[name])
+        if arch == "qwen2":
+            for name in ("attn_q", "attn_k", "attn_v"):
+                add(f"blk.{i}.{name}.bias", (TENSORS[name][0][0],), GGMLType.F32, 2.0)
     _finish(w)
     return weights
 
@@ -214,7 +217,7 @@ def reference_logits(
     angles = np.arange(T)[:, None, None] * freqs
     cos, sin = np.cos(angles), np.sin(angles)
 
-    # llama rotates adjacent pairs of dimensions, qwen3 dimension i with i + HEAD_DIM / 2
+    # llama rotates adjacent pairs of dimensions, the others dimension i with i + HEAD_DIM / 2
     half = HEAD_DIM // 2
     first, second = (np.s_[0::2], np.s_[1::2]) if arch == "llama" else (np.s_[:half], np.s_[half:])
 
@@ -232,12 +235,11 @@ def reference_logits(
     for i in range(LAYERS):
         lw = {n: w[f"blk.{i}.{n}.weight"] for n in ATTENTION + (MOE if arch == "qwen3moe" else MLP)}
         h = norm(x, w[f"blk.{i}.attn_norm.weight"])
-        q = (h @ lw["attn_q"].T).reshape(T, HEADS, HEAD_DIM)
-        k = (h @ lw["attn_k"].T).reshape(T, KV_HEADS, HEAD_DIM)
-        if arch != "llama":
+        q, k, v = (h @ lw[n].T + w.get(f"blk.{i}.{n}.bias", 0.0) for n in ATTENTION[:3])
+        q, k, v = q.reshape(T, HEADS, HEAD_DIM), *(z.reshape(T, KV_HEADS, HEAD_DIM) for z in (k, v))
+        if arch.startswith("qwen3"):
             q = norm(q, w[f"blk.{i}.attn_q_norm.weight"])
             k = norm(k, w[f"blk.{i}.attn_k_norm.weight"])
-        v = (h @ lw["attn_v"].T).reshape(T, KV_HEADS, HEAD_DIM)
         out = attention(rope(q), rope(k), v, causal, 1 / np.sqrt(HEAD_DIM))
         x = x + out @ lw["attn_output"].T
         h = norm(x, w[f"blk.{i}.ffn_norm.weight"])

@@ -487,13 +487,19 @@ def test_flash_attention_window(tokens, start, dim, window, symbolic):
     np.testing.assert_allclose(got.reshape(expected.shape), expected, rtol=3e-3, atol=3e-3)
 
 
-# llama: adjacent pairs; qwen3: halves and norms of q and k; gemma4: v normed too, two kv heads
+# llama: adjacent pairs; qwen2: halves and biases; qwen3: halves and norms of q and k; gemma4: v
+# normed too, two kv heads
 @pytest.mark.parametrize(
-    "halves, normed, v_norm, kv_heads",
-    [(False, False, False, 8), (True, True, False, 8), (True, True, True, 2)],
+    "halves, biased, normed, v_norm, kv_heads",
+    [
+        (False, False, False, False, 8),
+        (True, True, False, False, 8),
+        (True, False, True, False, 8),
+        (True, False, True, True, 2),
+    ],
 )
 @pytest.mark.parametrize("symbolic", [False, True])
-def test_rotate(monkeypatch, halves, normed, v_norm, kv_heads, symbolic):
+def test_rotate(monkeypatch, halves, biased, normed, v_norm, kv_heads, symbolic):
     rng = np.random.default_rng(18)
     dim, pos = 128, 300
     q, k, v = (
@@ -507,6 +513,14 @@ def test_rotate(monkeypatch, halves, normed, v_norm, kv_heads, symbolic):
         if normed
         else None
     )
+    biases = (
+        tuple(
+            Tensor(rng.standard_normal(h * dim).astype(np.float32))
+            for h in (32, kv_heads, kv_heads)
+        )
+        if biased
+        else None
+    )
     start = UOp.variable("start_pos", 0, 511).bind(pos) if symbolic else pos
     results = []
     for kernels in ("auto", "ref"):
@@ -514,7 +528,7 @@ def test_rotate(monkeypatch, halves, normed, v_norm, kv_heads, symbolic):
         cache = Tensor.zeros(2, SLOTS, kv_heads, 512, dim, dtype=dtypes.half).contiguous().realize()
         assert nv.supports_rotate(q, cache)
         out, cache = ops.rotate(
-            q, k, v, cache, slot(symbolic), start, rope, halves, norms, v_norm, 1e-6
+            q, k, v, cache, slot(symbolic), start, rope, halves, biases, norms, v_norm, 1e-6
         )
         Tensor.realize(out, cache)  # in one schedule, as in the model: alone, either loses vars
         results.append((out.numpy(), cache.numpy()))

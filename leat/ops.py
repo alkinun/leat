@@ -141,16 +141,19 @@ def _rope(x: Tensor, cos: Tensor, sin: Tensor, halves: bool) -> Tensor:
 
 def rotate(
     q: Tensor, k: Tensor, v: Tensor, cache: Tensor, slot: int | UOp, start_pos: int | UOp,
-    rope: tuple[Tensor, Tensor], halves: bool, norms: tuple[Tensor, Tensor] | None,
-    v_norm: bool, eps: float,
+    rope: tuple[Tensor, Tensor], halves: bool, biases: tuple[Tensor, Tensor, Tensor] | None,
+    norms: tuple[Tensor, Tensor] | None, v_norm: bool, eps: float,
 ) -> tuple[Tensor, Tensor]:  # fmt: skip
-    # q (1, T, H, D), k and v (1, T, KV_H, D): each head of q and k normed with its weight, if
-    # given, and of v without, if v_norm; q and k rotated by RoPE's tables (positions, D/2) from
-    # start_pos, and k and v stored there in a slot of the cache. Returns q (1, H, T, D) and the
-    # cache.
+    # q (1, T, H, D), k and v (1, T, KV_H, D): plus their biases (H * D or KV_H * D), if given;
+    # each head of q and k normed with its weight, if given, and of v without, if v_norm; q and k
+    # rotated by RoPE's tables (positions, D/2) from start_pos, and k and v stored there in a slot
+    # of the cache. Returns q (1, H, T, D) and the cache.
     if _fast() and nv.supports_rotate(q, cache):
-        return nv.rotate(q, k, v, cache, slot, start_pos, rope, halves, norms, v_norm, eps)
+        args = (rope, halves, biases, norms, v_norm, eps)
+        return nv.rotate(q, k, v, cache, slot, start_pos, *args)
     T = q.shape[1]
+    if biases is not None:
+        q, k, v = (t + b.reshape(t.shape[2:]) for t, b in zip((q, k, v), biases, strict=True))
     if norms is not None:
         q, k = rms_norm(q, norms[0], eps), rms_norm(k, norms[1], eps)
     if v_norm:

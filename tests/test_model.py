@@ -11,7 +11,7 @@ from leat.model import CACHE_TILE, Config, Transformer
 from tests.helpers import CONTEXT, reference_logits
 
 PROMPT = [5, 77, 120, 3, 299, 42, 8, 150, 61, 200, 9, 33]
-ARCHS = ["llama", "qwen3", "qwen3moe", "gemma4", "gemma4-dense"]
+ARCHS = ["llama", "qwen2", "qwen3", "qwen3moe", "gemma4", "gemma4-dense"]
 
 
 @pytest.fixture
@@ -145,10 +145,14 @@ def test_seeded_sampling(tiny_model):
 # architecture allows. Both paths score about 0.0012 and 98% on Llama 3.1 8B, int8 activations
 # adding noise as in llama.cpp; for scale, dropping its rope frequency factors, a subtle bug, scored
 # 0.0026 on the reference ops. Qwen3 8B, more sensitive, scores 0.0025 and 98% on those too,
-# and Qwen3 30B A3B 0.003 to 0.0053, where noise also flips a token's choice of experts. The top
-# token is the noisier measure: on the 1020 positions here, a change of rounding in the matrix
-# kernels took the decode path's KL from 0.00128 to 0.00126 and its agreement from 98.2 to 97.9%.
-LIMITS = {"llama": (0.0015, 0.975), "qwen3": (0.0035, 0.97), "qwen3moe": (0.007, 0.97)}
+# Qwen2.5 7B 0.0031 and both paths 0.0036, and Qwen3 30B A3B 0.003 to 0.0053, where noise also
+# flips a token's choice of experts. The top token is the noisier measure: on the 1020 positions
+# here, a change of rounding in the matrix kernels took Llama's decode path's KL from 0.00128 to
+# 0.00126 and its agreement from 98.2 to 97.9%.
+LIMITS = {
+    "llama": (0.0015, 0.975), "qwen2": (0.0045, 0.97), "qwen3": (0.0035, 0.97),
+    "qwen3moe": (0.007, 0.97),
+}  # fmt: skip
 
 
 @pytest.mark.gpu

@@ -421,13 +421,15 @@ def flash_attention(
 
 @functools.cache
 def _rotate_kernel(
-    out: UOp, cache: UOp, q: UOp, k: UOp, v: UOp, cos: UOp, sin: UOp, *norms: UOp,
-    slot: int | UOp, pos: int | UOp, halves: bool, v_norm: bool, eps: float,
+    out: UOp, cache: UOp, q: UOp, k: UOp, v: UOp, cos: UOp, sin: UOp, *extra: UOp,
+    slot: int | UOp, pos: int | UOp, halves: bool, biased: bool, v_norm: bool, eps: float,
 ) -> UOp:  # fmt: skip
-    # A warp per head of q, then of k and its v. Each head of q and k is normed with its weight,
-    # if norms holds them, and of v without, if v_norm; q and k are rotated, q into out and k into
+    # A warp per head of q, then of k and its v. Each of q, k and v gets its bias, if biased, from
+    # the first three of extra; each head of q and k is then normed with its weight, if the rest
+    # of extra holds them, and of v without, if v_norm; q and k are rotated, q into out and k into
     # the cache with v. Lanes take pairs of dimensions that rotate together: i and i + dim / 2, or
     # adjacent ones, each pair i turning by angle cos[pos, i], sin[pos, i].
+    biases, norms = (extra[:3], extra[3:]) if biased else ((), extra)
     _, slots, kv_heads, positions, dim = (int(d) for d in cache.shape)
     heads, half = int(out.shape[0]) // dim, dim // 2
     head, lane = UOp.range(heads + kv_heads, 0, AxisType.GLOBAL), lane_range()
@@ -435,9 +437,13 @@ def _rotate_kernel(
     zero = UOp.const(0.0, dtypes.float32)
     pairs = [lane + WARP * m for m in range(half // WARP)]
     dims = [(i, i + half) if halves else (2 * i, 2 * i + 1) for i in pairs]
+    flat = [d for pair in dims for d in pair]
 
-    def load(d: UOp) -> UOp:  # dimension d of the warp's head of q or k
-        return q[(head * dim + d).valid(is_q)].load() + k[(kv * dim + d).valid(is_kv)].load()
+    def of_q_or_k(qs: UOp, ks: UOp, d: UOp) -> UOp:  # dimension d of the warp's head, of q or k
+        return qs[(head * dim + d).valid(is_q)].load() + ks[(kv * dim + d).valid(is_kv)].load()
+
+    def of_v(vs: UOp, d: UOp) -> UOp:
+        return vs[(kv * dim + d).valid(is_kv)].load()
 
     def normed(values: list[UOp], weights: list[UOp] | None = None) -> list[UOp]:
         inv = (warp_sum(sum((x * x for x in values), zero)) / dim + eps).rsqrt()
@@ -449,9 +455,11 @@ def _rotate_kernel(
         at = (((kind * slots + slot) * kv_heads + kv) * positions + pos) * dim + d
         return cache.flatten()[at.valid(is_kv)]
 
-    x = [load(d) for pair in dims for d in pair]
+    x = [of_q_or_k(q, k, d) for d in flat]
+    if biases:
+        x = [a + of_q_or_k(biases[0], biases[1], d) for a, d in zip(x, flat, strict=True)]
     if norms:
-        x = normed(x, [is_q.where(*(w[d].load() for w in norms)) for pair in dims for d in pair])
+        x = normed(x, [is_q.where(*(w[d].load() for w in norms)) for d in flat])
     stores = []
     for n, ((d0, d1), i) in enumerate(zip(dims, pairs, strict=True)):
         c, s = cos[pos, i].load(), sin[pos, i].load()
@@ -459,10 +467,10 @@ def _rotate_kernel(
         for d, value in ((d0, x0 * c - x1 * s), (d1, x0 * s + x1 * c)):
             stores.append(out[(head * dim + d).valid(is_q)].store(value))
             stores.append(stored(0, d).store(value.cast(dtypes.half)))
-    values = [v[(kv * dim + d).valid(is_kv)].load() for pair in dims for d in pair]
+    values = [of_v(v, d) + of_v(biases[2], d) if biases else of_v(v, d) for d in flat]
     if v_norm:
         values = normed(values)
-    for value, d in zip(values, (d for pair in dims for d in pair), strict=True):
+    for value, d in zip(values, flat, strict=True):
         stores.append(stored(1, d).store(value.cast(dtypes.half)))
     info = KernelInfo(name="rotate", opts_to_apply=())
     return UOp.group(*stores).end(head, lane).sink(arg=info)
@@ -476,21 +484,22 @@ def supports_rotate(q: Tensor, cache: Tensor) -> bool:
 
 def rotate(
     q: Tensor, k: Tensor, v: Tensor, cache: Tensor, slot: int | UOp, start_pos: int | UOp,
-    rope: tuple[Tensor, Tensor], halves: bool, norms: tuple[Tensor, Tensor] | None,
-    v_norm: bool, eps: float,
+    rope: tuple[Tensor, Tensor], halves: bool, biases: tuple[Tensor, Tensor, Tensor] | None,
+    norms: tuple[Tensor, Tensor] | None, v_norm: bool, eps: float,
 ) -> tuple[Tensor, Tensor]:  # fmt: skip
-    """For one token's q (1, 1, H, D), k and v (1, 1, KV_H, D): norms each head of q and k with
-    its weight, if given, and of v without, if v_norm; rotates q and k by RoPE's tables at
-    start_pos, and stores k and v at start_pos of a slot of the cache. Returns q (1, H, 1, D) and
-    the cache."""
+    """For one token's q (1, 1, H, D), k and v (1, 1, KV_H, D): adds their biases, if given;
+    norms each head of q and k with its weight, if given, and of v without, if v_norm; rotates q
+    and k by RoPE's tables at start_pos, and stores k and v at start_pos of a slot of the cache.
+    Returns q (1, H, 1, D) and the cache."""
     heads, dim = q.shape[-2], q.shape[-1]
     out = Tensor.empty(heads * dim, dtype=dtypes.float32, device=q.device)
     q, k, v = (t.reshape(-1).float().contiguous() for t in (q, k, v))
     q, pos = carry(q, start_pos)
     k, slot = carry(k, slot)
-    weights = () if norms is None else tuple(w.float().contiguous() for w in norms)
+    extra = tuple(w.float().contiguous() for w in (*(biases or ()), *(norms or ())))
     fxn = functools.partial(
-        _rotate_kernel, slot=slot, pos=pos, halves=halves, v_norm=v_norm, eps=eps
-    )
-    out, cache = Tensor.custom_kernel(out, cache, q, k, v, *rope, *weights, fxn=fxn)[:2]
+        _rotate_kernel, slot=slot, pos=pos, halves=halves, biased=biases is not None,
+        v_norm=v_norm, eps=eps,
+    )  # fmt: skip
+    out, cache = Tensor.custom_kernel(out, cache, q, k, v, *rope, *extra, fxn=fxn)[:2]
     return out.reshape(1, heads, 1, dim), cache
