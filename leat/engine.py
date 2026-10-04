@@ -189,9 +189,11 @@ class Engine:
             self.reset()
             for _ in self.generate(prompt, n, ignore_eog=True):
                 pass
-        for n in self._batches[1:]:  # decode steps of several, each in a slot of its own
+        for n in self._batches[1:]:  # decode steps of several, each first in a slot of its own
             sampling = Tensor([0.0] * n), Tensor([0] * n, dtype=dtypes.uint32)
-            rows = [v.bind(i) for i in range(n) for v in (self._slot_vars[i], self._pos_vars[i])]
+            rows = [
+                x for i in range(n) for x in (self._slot_vars[i].bind(i), self._pos_vars[i].bind(0))
+            ]
             live = self._live.bind(n) if self._live is not None and n in self._padded else None
             self._decode[n](_ids([0] * n, n), *sampling, *rows, live=live)
         self._last = {}
