@@ -28,11 +28,10 @@ from leat.kernels.common import (
     warp_sum,
 )
 from leat.kernels.matmul import matmul_fits, routed_products, tiled
-from leat.kernels.matvec import DOTS, rows_kernel
+from leat.kernels.matvec import DOTS, MATVEC_TOKENS, rows_kernel
 from leat.kernels.quantize import quantize_q8
 from leat.quant import GGMLType, QTensor
 
-MATVEC_TOKENS = 8  # tokens up to which the matrix-vector kernels run a mixture
 TILE = 8  # tokens and experts per warp scoring many tokens
 
 

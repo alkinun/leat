@@ -7,6 +7,7 @@ The kernels on tensor cores, matmul's and FlashAttention's, are NVIDIA's alone.
 
 import functools
 import math
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -52,9 +53,16 @@ def _rdna(device: str) -> bool:
 
 
 def either(cuda: str, amd: str) -> str:
-    # an expression of each backend's intrinsics: HIP's clang defines __AMDGCN__ for AMD GPUs.
-    # Directives need lines of their own, which the lambda's newlines give them.
-    return f"[&]{{{{\n#if defined(__AMDGCN__)\nreturn {amd};\n#else\nreturn {cuda};\n#endif\n}}}}()"
+    # an expression of each backend's intrinsics over operands {0}, {1}...: HIP's clang defines
+    # __AMDGCN__ for AMD GPUs. The operands render once, as the arguments of a lambda that picks:
+    # written into both branches, an operand that is itself such an expression would double at
+    # each level of nesting, as dp4a's accumulators do. Directives need lines of their own.
+    n = 1 + max(int(i) for i in re.findall(r"\{(\d+)\}", cuda + amd))
+    names = [f"_{i}" for i in range(n)]
+    params, args = ", ".join(f"auto {x}" for x in names), ", ".join(f"{{{i}}}" for i in range(n))
+    amd, cuda = amd.format(*names), cuda.format(*names)
+    body = f"\n#if defined(__AMDGCN__)\nreturn {amd};\n#else\nreturn {cuda};\n#endif\n"
+    return f"[]({params}) {{{{{body}}}}}({args})"
 
 
 @functools.cache
@@ -136,8 +144,15 @@ def load_vector(ptr: UOp, lanes: int) -> tuple[UOp, ...]:
     # `lanes` consecutive values from an index, as one vector load, widened to f32
     buf, coords = ptr.src[0], ptr.src[1:]
     start = sum((c * math.prod(buf.shape[i + 1 :]) for i, c in enumerate(coords)), UOp.const(0))
+    return tuple(v.float() for v in load_words(buf, start, lanes))
+
+
+def load_words(buf: UOp, start: UOp | int, lanes: int) -> tuple[UOp, ...]:
+    # `lanes` consecutive values of a buffer, flat, from `start`, as one vector load: start must
+    # be a multiple of the vector's size
+    start = start if isinstance(start, UOp) else UOp.const(start)
     vec = UOp(Ops.SHRINK, src=(buf.flatten(), start, UOp.const(lanes))).load()
-    return tuple(vec[i].float() for i in range(lanes))
+    return tuple(vec[i] for i in range(lanes))
 
 
 def word16(w: UOp, i: UOp) -> UOp:

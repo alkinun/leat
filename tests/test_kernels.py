@@ -7,6 +7,7 @@ from gguf.quants import dequantize
 from tinygrad import Tensor, UOp, dtypes
 
 from leat import kernels, ops
+from leat.kernels.matvec import MATVEC_TOKENS
 from leat.quant import BLOCK, GGMLType, QTensor
 from tests.helpers import glu, random_blocks
 
@@ -97,7 +98,7 @@ def test_norm_quantize_q8(width):
     np.testing.assert_array_equal(s, (d * sums).astype(np.float32))
 
 
-# ******** one token ********
+# ******** a few tokens: matrix-vector products ********
 
 
 # rows of 768 weights leave lanes idle, and of 2816 some in a second turn
@@ -113,6 +114,20 @@ def test_matvec(ggml_type, shape):
     assert_close(got[0], reference_matmul(x[0], blocks, ggml_type), 1e-4)
 
 
+@pytest.mark.parametrize("ggml_type", [Q4_K, Q5_K, Q6_K, Q5_0, Q8_0, MXFP4, *LEGACY])
+@pytest.mark.parametrize("tokens", [3, MATVEC_TOKENS])
+def test_matvec_tokens(ggml_type, tokens):
+    # each row's weights read once for every token, a residual added per token
+    rng = np.random.default_rng(4)
+    w, blocks = random_matrix(ggml_type, 24, 2816, rng)
+    x = rng.standard_normal((1, tokens, 2816)).astype(np.float32)
+    r = rng.standard_normal((1, tokens, 24)).astype(np.float32)
+    assert kernels.supports_matvec(Tensor(x), w)
+    got = ops.linear(Tensor(x), w, residual=Tensor(r)).numpy()
+    assert got.shape == (1, tokens, 24)
+    assert_close(got[0], reference_matmul(x[0], blocks, ggml_type) + r[0], 1e-4)
+
+
 def test_shared_input():
     # matrices of different types share one quantization of x
     rng = np.random.default_rng(3)
@@ -124,10 +139,11 @@ def test_shared_input():
 
 @pytest.mark.parametrize("ggml_type", [Q4_K, Q6_K])
 @pytest.mark.parametrize("kind", ["silu", "gelu", "oai"])
-def test_swiglu(ggml_type, kind):
+@pytest.mark.parametrize("tokens", [1, 4])
+def test_swiglu(ggml_type, kind, tokens):
     rng = np.random.default_rng(7)
     (gate, gate_blocks), (up, up_blocks) = (random_matrix(ggml_type, 16, 4096, rng) for _ in "gu")
-    x = (rng.standard_normal((1, 1, 4096)) * 3).astype(np.float32)
+    x = (rng.standard_normal((1, tokens, 4096)) * 3).astype(np.float32)
     g, u = (reference_matmul(x[0], b, ggml_type) for b in (gate_blocks, up_blocks))
     got = kernels.swiglu(Tensor(x), gate, up, kind=kind).numpy()[0]
     assert_close(got, glu(kind, g, u), 1e-4)
@@ -336,8 +352,8 @@ def test_add_normed(monkeypatch, parts, normed, tokens):
 
 @pytest.mark.parametrize("tokens", [1, 80, 5])
 def test_norm_and_residual(tokens):
-    if tokens > 1 and not NVIDIA:
-        pytest.skip("several tokens take the tensor-core kernels, NVIDIA's alone")
+    if tokens > MATVEC_TOKENS and not NVIDIA:
+        pytest.skip("many tokens take the tensor-core kernels, NVIDIA's alone")
     rng = np.random.default_rng(9)
     w, blocks = random_matrix(Q4_K, 256, 4096, rng)
     x = (rng.standard_normal((1, tokens, 4096)) * 3).astype(np.float32)
@@ -362,8 +378,8 @@ def test_norm_and_residual(tokens):
      (70, 1024, Q8_0, Q8_0, "oai")],
 )  # fmt: skip
 def test_feed_forward(tokens, hidden, gate_type, down_type, kind):
-    if tokens > 1 and not NVIDIA:
-        pytest.skip("several tokens take the tensor-core kernels, NVIDIA's alone")
+    if tokens > MATVEC_TOKENS and not NVIDIA:
+        pytest.skip("many tokens take the tensor-core kernels, NVIDIA's alone")
     rng = np.random.default_rng(12)
     dim = 2048
     (gate, gate_blocks), (up, up_blocks) = (
@@ -383,16 +399,18 @@ def test_feed_forward(tokens, hidden, gate_type, down_type, kind):
     assert_close(got, expected, 2e-3)
 
 
-def test_one_token_takes_matvec(monkeypatch):
-    # the matrix kernels take one token too, several times slower than the matrix-vector kernels
+@pytest.mark.parametrize("tokens", [1, MATVEC_TOKENS])
+def test_few_tokens_take_matvec(monkeypatch, tokens):
+    # the matrix kernels take a few tokens too, several times slower than the matrix-vector
+    # kernels, which read the weights once for all of them
     def fail(*args, **kwargs):
-        raise AssertionError("one token went to a matrix kernel")
+        raise AssertionError("a few tokens went to a matrix kernel")
 
     monkeypatch.setattr(kernels, "matmuls", fail)
     monkeypatch.setattr(kernels, "feed_forward", fail)
     rng = np.random.default_rng(13)
     ws = [random_matrix(Q4_K, 2048, 2048, rng)[0] for _ in range(3)]
-    x = Tensor(rng.standard_normal((1, 1, 2048)).astype(np.float32))
+    x = Tensor(rng.standard_normal((1, tokens, 2048)).astype(np.float32))
     norm = (Tensor.ones(2048), 1e-5)
     Tensor.realize(ops.linears(x, *ws, norm=norm)[0], ops.feed_forward(x, *ws, norm=norm))
 

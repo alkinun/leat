@@ -1,5 +1,7 @@
-"""Linear layers for one token, llama.cpp's MMVQ: the activation vector is quantized to int8, then
-a warp computes each output row with __dp4a over the weights in their storage format."""
+"""Linear layers for a few tokens, llama.cpp's MMVQ: the activations are quantized to int8, then a
+warp computes each output row with __dp4a over the weights in their storage format, for every
+token at once, so that each weight is read once however many tokens there are: a decode step of
+several sequences costs little more than one's."""
 
 import functools
 from collections.abc import Callable
@@ -16,6 +18,7 @@ from leat.kernels.common import (
     funnel,
     glu,
     lane_range,
+    load_words,
     minus,
     on_gpu,
     register,
@@ -29,16 +32,27 @@ from leat.kernels.quantize import quantize_q8
 from leat.quant import FP4_VALUES, IQ4_VALUES, GGMLType, QTensor
 
 Dot = Callable[[UOp, UOp, UOp | int], UOp]  # (row, unit, x) -> a unit's share of row . x
+MATVEC_TOKENS = 8  # tokens up to which the matrix-vector kernels run a layer
 
 
-def rows_kernel(out: UOp, units: int, name: str, dots: list[Callable[[UOp, UOp], UOp]],
-                combine: Callable[..., UOp], rows: int | UOp | None = None) -> UOp:  # fmt: skip
-    # one block of one warp per output row, of the first `rows` if given: lanes take the row's
-    # `units` in turn, the warp sums each dot product, and out[row] = combine(row, *sums). Whole
-    # turns run in a loop; where a last turn has fewer units than lanes, the others repeat the
-    # last unit, whose loads hit in cache, and drop its share. Grouping rows into wider blocks
-    # measured slower on the 3090, by up to a quarter for Q6_K.
-    row = UOp.range(out.shape[0] if rows is None else rows, 0, AxisType.GLOBAL)
+def _group(xq: UOp, g: UOp) -> list[UOp]:
+    # the 8 words of int8 activations of group g, as two 16-byte loads rather than 8 of a word:
+    # with several tokens, a unit loads more words of activations than of weights
+    return [*load_words(xq, g * 8, 4), *load_words(xq, g * 8 + 4, 4)]
+
+
+def rows_kernel(
+    out: UOp, units: int, name: str, dots: list[Callable[[UOp, UOp], UOp]],
+    combine: Callable[..., UOp | list[UOp]], rows: int | UOp | None = None,
+) -> UOp:  # fmt: skip
+    # one block of one warp per output row, of `rows` if given: lanes take the row's `units` in
+    # turn, the warp sums each dot product, and out[row] = combine(row, *sums); where combine gives
+    # a list, out[k * rows + row] its k-th value. Whole turns run in a loop; where a last turn has
+    # fewer units than lanes, the others repeat the last unit, whose loads hit in cache, and drop
+    # its share. Grouping rows into wider blocks measured slower on the 3090, by up to a quarter
+    # for Q6_K.
+    count = out.shape[0] if rows is None else rows
+    row = UOp.range(count, 0, AxisType.GLOBAL)
     lane = lane_range()
     zero = UOp.const(0.0, dtypes.float32)
     whole, rest = divmod(units, WARP)
@@ -55,7 +69,13 @@ def rows_kernel(out: UOp, units: int, name: str, dots: list[Callable[[UOp, UOp],
             t + (unit < units).where(dot(row, unit.minimum(units - 1)), zero)
             for t, dot in zip(totals, dots, strict=True)
         ]
-    store = out[row.valid(lane.eq(0))].store(combine(row, *(warp_sum(t) for t in totals)))
+    values = combine(row, *(warp_sum(t) for t in totals))
+    if isinstance(values, UOp):
+        store = out[row.valid(lane.eq(0))].store(values)
+    else:
+        store = UOp.group(
+            *(out[(k * count + row).valid(lane.eq(0))].store(v) for k, v in enumerate(values))
+        )
     info = KernelInfo(name=f"{name}_{out.shape[0]}_{units}", opts_to_apply=())
     return store.end(row, lane).sink(arg=info)
 
@@ -85,6 +105,7 @@ def _k_dot(w: UOp, xq: UOp, xd: UOp, xs: UOp, cols: int, high: bool) -> Dot:
         dm = w[base].load()
         g = x * (cols // 32) + block * 8 + 2 * j  # activation group of the low sub-block
         dots = [UOp.const(0, dtypes.int32), UOp.const(0, dtypes.int32)]
+        groups = _group(xq, g), _group(xq, g + 1)
         for k in range(8):
             word = w[base + nibbles + 8 * j + k].load()
             for h in range(2):
@@ -92,7 +113,7 @@ def _k_dot(w: UOp, xq: UOp, xd: UOp, xs: UOp, cols: int, high: bool) -> Dot:
                 if high:
                     bits = w[base + 4 + k].load() >> (2 * j + h).cast(dtypes.uint32)
                     weights = weights | ((bits & 0x01010101) << 4)
-                dots[h] = dp4a(weights.bitcast(dtypes.int32), xq[(g + h) * 8 + k].load(), dots[h])
+                dots[h] = dp4a(weights.bitcast(dtypes.int32), groups[h][k], dots[h])
         (sc0, m0), (sc1, m1) = _k_scale_min(w, base, 2 * j), _k_scale_min(w, base, 2 * j + 1)
         scaled = sc0 * xd[g].load() * dots[0].float() + sc1 * xd[g + 1].load() * dots[1].float()
         mins = m0 * xs[g].load() + m1 * xs[g + 1].load()
@@ -111,13 +132,14 @@ def _q6_k_dot(w: UOp, xq: UOp, xd: UOp, xs: UOp, cols: int) -> Dot:
         base = (row * (cols // 256) + block) * 105
         g = x * (cols // 32) + block * 8 + 4 * n + k  # group of row k; row k + 2 is group g + 2
         dots = [[UOp.const(0, dtypes.int32)] * 2 for _ in range(2)]  # [row k, k + 2][16 weights]
+        groups = _group(xq, g), _group(xq, g + 2)
         for m in range(8):
             ql = word16(w, base + 32 * n + 16 * k + 2 * m)
             qh = word16(w, base + 64 + 16 * n + 2 * m)
             for r in range(2):
                 high = (qh >> (2 * k + 4 * r).cast(dtypes.uint32)) & 0x03030303
                 q = minus(((ql >> (4 * r)) & 0x0F0F0F0F) | (high << 4), 32)
-                dots[r][m // 4] = dp4a(q, xq[(g + 2 * r) * 8 + m].load(), dots[r][m // 4])
+                dots[r][m // 4] = dp4a(q, groups[r][m], dots[r][m // 4])
         total = UOp.const(0.0, dtypes.float32)
         for r in range(2):
             scales = w[base + 96 + 4 * n + k + 2 * r].load()  # both scales of row k + 2r
@@ -137,11 +159,9 @@ def _q8_0_dot(w: UOp, xq: UOp, xd: UOp, xs: UOp, cols: int) -> Dot:
         for b in range(2):
             block = unit * 2 + b
             base, g = (row * (cols // 32) + block) * 17, x * (cols // 32) + block
-            acc = UOp.const(0, dtypes.int32)
+            acc, group = UOp.const(0, dtypes.int32), _group(xq, g)
             for m in range(8):
-                acc = dp4a(
-                    word16(w, base + 1 + 2 * m).bitcast(dtypes.int32), xq[g * 8 + m].load(), acc
-                )
+                acc = dp4a(word16(w, base + 1 + 2 * m).bitcast(dtypes.int32), group[m], acc)
             d = f16(w[base].load().cast(dtypes.uint32))
             total = total + d * xd[g].load() * acc.float()
         return total
@@ -157,14 +177,14 @@ def _q5_0_dot(w: UOp, xq: UOp, xd: UOp, xs: UOp, cols: int) -> Dot:
         for b in range(2):
             block = unit * 2 + b
             base, g = (row * (cols // 32) + block) * 11, x * (cols // 32) + block
-            high, acc = word16(w, base + 1), UOp.const(0, dtypes.int32)
+            high, acc, group = word16(w, base + 1), UOp.const(0, dtypes.int32), _group(xq, g)
             for m in range(4):
                 word = word16(w, base + 3 + 2 * m)
                 for h in range(2):  # values 4m.. and 16 + 4m..
                     q = ((word >> (4 * h)) & 0x0F0F0F0F) | fifth_bits(
                         (high >> (16 * h + 4 * m)) & 15
                     )
-                    acc = dp4a(q.bitcast(dtypes.int32), xq[g * 8 + 4 * h + m].load(), acc)
+                    acc = dp4a(q.bitcast(dtypes.int32), group[4 * h + m], acc)
             d = f16(w[base].load().cast(dtypes.uint32))
             total = total + d * (xd[g].load() * acc.float() - 16 * xs[g].load())
         return total
@@ -188,7 +208,7 @@ def _q4_dot(w: UOp, xq: UOp, xd: UOp, xs: UOp, cols: int, kind: GGMLType) -> Dot
         for b in range(2):
             block = unit * 2 + b
             base, g = (row * (cols // 32) + block) * halves, x * (cols // 32) + block
-            acc = UOp.const(0, dtypes.int32)
+            acc, group = UOp.const(0, dtypes.int32), _group(xq, g)
             high = word16(w, base + 2) if kind == GGMLType.Q5_1 else None
             for m in range(4):
                 word, values = word16(w, base + first + 2 * m), list[UOp]()
@@ -202,7 +222,7 @@ def _q4_dot(w: UOp, xq: UOp, xd: UOp, xs: UOp, cols: int, kind: GGMLType) -> Dot
                     if kind == GGMLType.Q4_0:
                         values = [minus(v, 8) for v in values]
                 for h, v in enumerate(values):
-                    acc = dp4a(v.bitcast(dtypes.int32), xq[g * 8 + 4 * h + m].load(), acc)
+                    acc = dp4a(v.bitcast(dtypes.int32), group[4 * h + m], acc)
             d = f16(w[base].load().cast(dtypes.uint32))
             term = d * xd[g].load() * acc.float()
             if kind in (GGMLType.Q4_1, GGMLType.Q5_1):  # m times the group's sum
@@ -225,10 +245,10 @@ def _iq4_xs_dot(w: UOp, xq: UOp, xd: UOp, xs: UOp, cols: int) -> Dot:
         for b in range(2):
             j = pair * 2 + b
             g = x * (cols // 32) + block * 8 + j
-            acc = UOp.const(0, dtypes.int32)
+            acc, group = UOp.const(0, dtypes.int32), _group(xq, g)
             for m in range(4):
                 for h, v in enumerate(table16(w[base + 2 + 4 * j + m].load(), IQ4_TABLE)):
-                    acc = dp4a(v.bitcast(dtypes.int32), xq[g * 8 + 4 * h + m].load(), acc)
+                    acc = dp4a(v.bitcast(dtypes.int32), group[4 * h + m], acc)
             low = (lows >> (j * 4).cast(dtypes.uint32)) & 15
             high = (head >> (16 + 2 * j).cast(dtypes.uint32)) & 3
             scale = (low | (high << 4)).cast(dtypes.int32) - 32
@@ -252,12 +272,12 @@ def _mxfp4_dot(w: UOp, xq: UOp, xd: UOp, xs: UOp, cols: int) -> Dot:
             window = [w[(first + i).minimum(int(w.shape[0]) - 1)].load() for i in range(5)]
             e = (window[0] >> (skew * 8)) & 0xFF
             later, shift = skew.eq(3), ((skew + 1) % 4) * 8  # where the 16 bytes start
-            acc = UOp.const(0, dtypes.int32)
+            acc, group = UOp.const(0, dtypes.int32), _group(xq, g)
             for m in range(4):  # where the bytes start in the second word, they end in the fifth
                 lo, hi = (later.where(window[min(m + j + 1, 4)], window[m + j]) for j in (0, 1))
                 low, high = table16(funnel(lo, hi, shift), FP4_TABLE)
-                acc = dp4a(low.bitcast(dtypes.int32), xq[g * 8 + m].load(), acc)
-                acc = dp4a(high.bitcast(dtypes.int32), xq[g * 8 + 4 + m].load(), acc)
+                acc = dp4a(low.bitcast(dtypes.int32), group[m], acc)
+                acc = dp4a(high.bitcast(dtypes.int32), group[4 + m], acc)
             total = total + e8m0_half(e) * xd[g].load() * acc.float()
         return total
 
@@ -276,36 +296,47 @@ DOTS: dict[GGMLType, Callable[[UOp, UOp, UOp, UOp, int], Dot]] = {
 
 @functools.cache
 def _matvec_kernel(
-    out: UOp, w: UOp, xq: UOp, xd: UOp, xs: UOp, *residual: UOp, ggml_type: GGMLType
+    out: UOp, w: UOp, xq: UOp, xd: UOp, xs: UOp, *residual: UOp, ggml_type: GGMLType, tokens: int
 ) -> UOp:
-    def combine(row: UOp, total: UOp) -> UOp:
-        return total + residual[0][row].load() if residual else total
+    # out[t * rows + row] = w[row] . x[t], plus residual[t * rows + row] if given
+    rows = int(out.shape[0]) // tokens
 
-    dot = DOTS[ggml_type](w, xq, xd, xs, cols := 4 * int(xq.shape[0]))
-    return rows_kernel(out, cols // 64, ggml_type.name.lower(), [_shared_x(dot)], combine)
+    def combine(row: UOp, *totals: UOp) -> list[UOp]:
+        if residual:
+            totals = tuple(t + residual[0][i * rows + row].load() for i, t in enumerate(totals))
+        return list(totals)
+
+    dot = DOTS[ggml_type](w, xq, xd, xs, cols := 4 * int(xq.shape[0]) // tokens)
+    dots = [_token(dot, t) for t in range(tokens)]
+    return rows_kernel(out, cols // 64, ggml_type.name.lower(), dots, combine, rows)
 
 
 @functools.cache
 def _swiglu_kernel(
-    out: UOp, gate: UOp, up: UOp, xq: UOp, xd: UOp, xs: UOp, ggml_type: GGMLType, kind: str
-) -> UOp:
-    def combine(row: UOp, g: UOp, u: UOp) -> UOp:
-        return glu(kind)(g, u)
+    out: UOp, gate: UOp, up: UOp, xq: UOp, xd: UOp, xs: UOp, ggml_type: GGMLType, kind: str,
+    tokens: int,
+) -> UOp:  # fmt: skip
+    # out[t * rows + row] = glu(kind)(gate[row] . x[t], up[row] . x[t])
+    def combine(row: UOp, *totals: UOp) -> list[UOp]:
+        return [glu(kind)(g, u) for g, u in zip(totals[::2], totals[1::2], strict=True)]
 
-    cols = 4 * int(xq.shape[0])
-    dots = [_shared_x(DOTS[ggml_type](w, xq, xd, xs, cols)) for w in (gate, up)]
+    cols = 4 * int(xq.shape[0]) // tokens
+    gate_dot, up_dot = (DOTS[ggml_type](w, xq, xd, xs, cols) for w in (gate, up))
+    dots = [_token(dot, t) for t in range(tokens) for dot in (gate_dot, up_dot)]
     name = f"glu_{kind}_{ggml_type.name.lower()}"
-    return rows_kernel(out, cols // 64, name, dots, combine)
+    return rows_kernel(out, cols // 64, name, dots, combine, int(out.shape[0]) // tokens)
 
 
-def _shared_x(dot: Dot) -> Callable[[UOp, UOp], UOp]:
-    return lambda row, unit: dot(row, unit, 0)
+def _token(dot: Dot, t: int) -> Callable[[UOp, UOp], UOp]:
+    # a dot product with token t's activations
+    return lambda row, unit: dot(row, unit, t)
 
 
 def supports_matvec(x: Tensor, w: QTensor) -> bool:
-    # one token, and whole units of 64 weights
-    one = isinstance(x.numel(), int) and x.numel() == x.shape[-1]
-    return on_gpu(x) and one and w.type in DOTS and w.shape[1] % 64 == 0
+    # up to MATVEC_TOKENS tokens, known in advance, and whole units of 64 weights
+    tokens = x.numel() // x.shape[-1] if isinstance(x.numel(), int) else None
+    few = isinstance(tokens, int) and 0 < tokens <= MATVEC_TOKENS
+    return on_gpu(x) and few and w.type in DOTS and w.shape[1] % 64 == 0
 
 
 def matvecs(
@@ -314,15 +345,16 @@ def matvecs(
     norm: tuple[Tensor, float] | None = None,
     residual: Tensor | None = None,
 ) -> list[Tensor]:
-    """x @ w.T for one token and each w, with the activations quantized to int8 once, after
+    """x @ w.T for a few tokens and each w, with the activations quantized to int8 once, after
     rms_norm(x, *norm) if given. `residual` is added inside the kernel; it needs a single w."""
     assert residual is None or len(ws) == 1, "a residual goes with one matrix"
-    xq, xd, xs = quantize_q8(x.reshape(1, x.shape[-1]), norm)
-    res = () if residual is None else (residual.reshape(ws[0].shape[0]).float().contiguous(),)
+    tokens = x.numel() // x.shape[-1]
+    xq, xd, xs = quantize_q8(x.reshape(tokens, x.shape[-1]), norm)
+    res = () if residual is None else (residual.flatten().float().contiguous(),)
     outs = []
     for w in ws:
-        out = Tensor.empty(w.shape[0], dtype=dtypes.float32, device=x.device)
-        fxn = functools.partial(_matvec_kernel, ggml_type=w.type)
+        out = Tensor.empty(tokens * w.shape[0], dtype=dtypes.float32, device=x.device)
+        fxn = functools.partial(_matvec_kernel, ggml_type=w.type, tokens=tokens)
         out = Tensor.custom_kernel(out, storage_words(w), xq, xd, xs, *res, fxn=fxn)[0]
         outs.append(out.reshape(*x.shape[:-1], w.shape[0]))
     return outs
@@ -332,11 +364,12 @@ def swiglu(
     x: Tensor, gate: QTensor, up: QTensor, norm: tuple[Tensor, float] | None = None,
     kind: str = "silu",
 ) -> Tensor:  # fmt: skip
-    """glu(kind)(x @ gate.T, x @ up.T) for one token, as common.glu has it, after rms_norm(x, *norm)
-    if given, both matrices in one kernel; they share a type and shape."""
-    xq, xd, xs = quantize_q8(x.reshape(1, x.shape[-1]), norm)
-    out = Tensor.empty(gate.shape[0], dtype=dtypes.float32, device=x.device)
-    fxn = functools.partial(_swiglu_kernel, ggml_type=gate.type, kind=kind)
+    """glu(kind)(x @ gate.T, x @ up.T) for a few tokens, as common.glu has it, after
+    rms_norm(x, *norm) if given, both matrices in one kernel; they share a type and shape."""
+    tokens = x.numel() // x.shape[-1]
+    xq, xd, xs = quantize_q8(x.reshape(tokens, x.shape[-1]), norm)
+    out = Tensor.empty(tokens * gate.shape[0], dtype=dtypes.float32, device=x.device)
+    fxn = functools.partial(_swiglu_kernel, ggml_type=gate.type, kind=kind, tokens=tokens)
     words = storage_words(gate), storage_words(up)
     out = Tensor.custom_kernel(out, *words, xq, xd, xs, fxn=fxn)[0]
     return out.reshape(*x.shape[:-1], gate.shape[0])
