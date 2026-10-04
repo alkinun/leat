@@ -46,7 +46,7 @@ print(engine.tokenizer.decode(list(engine.generate(prompt, max_tokens=256))))
 - Architectures: `llama` (Llama 3.x), `qwen3` and `qwen3moe` (Qwen3 and its mixtures of experts) and `gemma4` (Gemma 4, text only), with their tokenizers
 - Storage types: F32, F16, BF16, Q5_0, Q8_0, Q4_K, Q5_K, Q6_K, which covers Q4_K_M, Q5_K_M, Q6_K and Q8_0 files
 - Devices: any tinygrad backend; developed on NVIDIA with `DEV=NV`
-- Server: `/v1/chat/completions`, whole or streamed, with stop strings, seeds and tool calls in Llama 3's, Qwen3's and Gemma 4's syntax, and `/v1/models`. Sampling is greedy or by temperature; requests for `top_p`, penalties, `logprobs` or several choices are refused. Completions run one at a time.
+- Server: `/v1/chat/completions`, whole or streamed, with stop strings, seeds, tool calls in Llama 3's, Qwen3's and Gemma 4's syntax and `chat_template_kwargs` such as `{"enable_thinking": false}`, and `/v1/models`. Sampling is greedy or by temperature; requests for `top_p`, penalties, `logprobs` or several choices are refused. Completions run one at a time.
 - Prefix caching: the KV cache keeps `--slots` sequences. A conversation continues in its slot, and a prompt that shares a prefix with any slot, such as a system prompt, starts from a copy of it.
 
 ## Measurements

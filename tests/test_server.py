@@ -110,6 +110,14 @@ def test_cached_tokens(client):
     assert response.usage.prompt_tokens_details.cached_tokens == len("a shared start, then ")
 
 
+def test_chat_template_kwargs(client):
+    # options for the template, which the tiny model's writes before the last message
+    response = chat(
+        client, "hello", max_tokens=1, extra_body={"chat_template_kwargs": {"prefix": "ab"}}
+    )
+    assert response.usage.prompt_tokens == len("abhello")
+
+
 @pytest.fixture
 def replies_with(engine, monkeypatch):
     # makes the engine reply with the given text, which the tiny model would never write
@@ -172,6 +180,7 @@ def test_text_is_not_a_tool_call(client, replies_with, stream, text, choice):
         ({"tools": [WEATHER], "tool_choice": "required"}, "tool_choice='required' is not"),
         ({"messages": []}, "messages must be a non-empty list of objects"),
         ({"messages": [{"role": "user", "content": "x" * CONTEXT}]}, "the prompt has 64 tokens"),
+        ({"extra_body": {"chat_template_kwargs": "x"}}, "chat_template_kwargs must be an object"),
     ],
 )
 def test_bad_request(client, kwargs, error):

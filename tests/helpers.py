@@ -118,7 +118,7 @@ def _writer(path: Path, arch: str):
     w.add_array("tokenizer.ggml.tokens", [*_BYTE_CHAR.values()] + [f"t{i}" for i in range(V - 256)])
     w.add_array("tokenizer.ggml.token_type", [1] * V)
     w.add_array("tokenizer.ggml.merges", [])
-    w.add_chat_template("{{ messages[-1]['content'] }}")
+    w.add_chat_template("{{ prefix | default('') }}{{ messages[-1]['content'] }}")
     weights: dict[str, np.ndarray] = {}
 
     def add(name: str, shape: tuple[int, ...], ggml_type=GGMLType.F32, scale: float = 1.5) -> None:

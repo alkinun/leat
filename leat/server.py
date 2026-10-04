@@ -40,6 +40,7 @@ _FIELDS: dict[str, tuple[Callable[[Any], bool], str]] = {
     "stream_options": (lambda v: isinstance(v, dict), "an object"),
     "tools": (lambda v: isinstance(v, list) and all(isinstance(t, dict) for t in v),
               "a list of objects"),
+    "chat_template_kwargs": (lambda v: isinstance(v, dict), "an object"),
 }  # fmt: skip
 
 # what leat does not implement, each with the value that asks for nothing more
@@ -252,7 +253,9 @@ def _completion(body: Any, server: Server) -> _Completion:
     if (choice := body.get("tool_choice") or "auto") not in ("auto", "none"):
         raise ValueError(f"tool_choice={choice!r} is not supported, only 'auto' and 'none'")
     tools = (body.get("tools") or None) if choice == "auto" else None
-    prompt = server.chat.encode(body["messages"], **({"tools": tools} if tools else {}))
+    # options for the template too, such as Qwen3's enable_thinking, as llama.cpp and vLLM take
+    options = (body.get("chat_template_kwargs") or {}) | ({"tools": tools} if tools else {})
+    prompt = server.chat.encode(body["messages"], **options)
     if len(prompt) >= (context := server.engine.max_context):
         raise ValueError(f"the prompt has {len(prompt)} tokens, too many for {context} of context")
     stop, temperature = body.get("stop") or [], body.get("temperature")
