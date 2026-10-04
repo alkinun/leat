@@ -37,14 +37,14 @@ def _scores_kernel(
 ) -> UOp:
     # a warp per token and expert: the router's row . rms_norm(x, weight, eps), the norm worked
     # out by each warp from the token's row, which stays in cache; lanes take 4 values at a time
-    experts, dim = (int(d) for d in router.shape)
+    experts, dim = int(out.shape[1]), int(x.shape[1])
     token, expert = UOp.range(tokens, 0, AxisType.GLOBAL), UOp.range(experts, 1, AxisType.GLOBAL)
     lane, zero = lane_range(), UOp.const(0.0, dtypes.float32)
     ats = [(i * WARP + lane) * 4 for i in range(dim // (4 * WARP))]
     xs = [v for at in ats for v in load_vector(x[token, at], 4)]
     inv = (warp_sum(sum((v * v for v in xs), zero)) / dim + eps).rsqrt()
     ws = [v for at in ats for v in load_vector(weight[at], 4)]
-    rs = [v for at in ats for v in load_vector(router[expert, at], 4)]
+    rs = [v for at in ats for v in load_vector(router[expert * dim + at], 4)]
     dot = warp_sum(sum((a * b * c for a, b, c in zip(xs, ws, rs, strict=True)), zero))
     store = out[token, expert.valid(lane.eq(0))].store(dot * inv)
     return store.end(token, expert, lane).sink(arg=KernelInfo(name="router", opts_to_apply=()))
@@ -62,7 +62,8 @@ def scores(x: Tensor, norm: tuple[Tensor, float], router: QTensor) -> Tensor:
     out = Tensor.empty(count, experts, dtype=dtypes.float32, device=x.device)
     x, bound = carry(x.reshape(tokens, dim).float().pad_to((count, dim)).contiguous(), tokens)
     fxn = functools.partial(_scores_kernel, tokens=bound, eps=norm[1])
-    weights = norm[0].float().contiguous(), router.data.reshape(experts, dim)
+    # .contiguous() on the router's storage is a view; a reshape of it tinygrad would copy
+    weights = norm[0].float().contiguous(), router.data.contiguous()
     out = Tensor.custom_kernel(out, x, *weights, fxn=fxn)[0]
     return out[:tokens].reshape(1, tokens, experts)
 
