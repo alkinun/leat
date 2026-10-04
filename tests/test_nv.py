@@ -288,6 +288,31 @@ def test_mixture_gemma(tokens):
     assert_close(got, expected_mixture(normed, scores[0, :n], used, expert), 2e-3)
 
 
+# ******** norms ********
+
+
+# as Gemma 4's attention block ends, and its MLP block with experts, with the layer's scale
+@pytest.mark.parametrize("parts, normed", [(1, False), (2, True)])
+@pytest.mark.parametrize("tokens", [1, 5, UOp.variable("tokens", 1, 8).bind(3)])
+def test_add_normed(monkeypatch, parts, normed, tokens):
+    rng = np.random.default_rng(19)
+    dim = 2816
+    x, *ys = (
+        Tensor((rng.standard_normal((1, 8, dim)) * 3).astype(np.float32)) for _ in range(parts + 1)
+    )
+    ws = [Tensor(rng.uniform(0.5, 1.5, dim).astype(np.float32)) for _ in range(parts + 1)]
+    scale = Tensor(np.array([0.7], dtype=np.float32))
+    n = tokens if isinstance(tokens, int) else tokens.unbind()[1]
+    results = []
+    for kernels in ("auto", "ref"):
+        monkeypatch.setenv("LEAT_KERNELS", kernels)
+        parts_ = [(y[:, :tokens], w) for y, w in zip(ys, ws, strict=False)]
+        out = ops.add_normed(x[:, :tokens], parts_, ws[-1] if normed else None, 1e-6, scale)
+        results.append(out.pad_to((1, 8, dim)).numpy()[0, :n])
+    assert nv.supports_add_normed(x)
+    np.testing.assert_allclose(results[0], results[1], rtol=1e-5, atol=1e-5)
+
+
 # ******** ops on the kernels ********
 
 

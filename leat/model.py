@@ -138,8 +138,6 @@ class Transformer:
             x = x * math.sqrt(self.config.dim)
         for i in range(self.config.n_layers):
             x = self._feed_forward(i, self._attention(i, x, start_pos, slot))
-            if "layer_output_scale" in self.small[i]:
-                x = x * self.small[i]["layer_output_scale"]
         return ops.rms_norm(x, self.output_norm, self.config.norm_eps)
 
     def logits(self, hidden: Tensor) -> Tensor:
@@ -173,19 +171,21 @@ class Transformer:
         out = ops.attention(q, cache, slot, start_pos, scale, c.windows[i])
         if "post_attention_norm" not in s:
             return ops.linear(out, w["attn_output"], residual=x)
-        return x + ops.rms_norm(ops.linear(out, w["attn_output"]), s["post_attention_norm"], eps)
+        return ops.add_normed(
+            x, [(ops.linear(out, w["attn_output"]), s["post_attention_norm"])], None, eps
+        )
 
     def _feed_forward(self, i: int, x: Tensor) -> Tensor:
         # x + the MLP block's output: an MLP, a mixture of experts, or as in Gemma 4 both, each
-        # output normed and then their sum
+        # output normed and then their sum, and the layer's output scaled
         c, w, s = self.config, self.layers[i], self.small[i]
-        norm, eps = (s["ffn_norm"], c.norm_eps), c.norm_eps
+        norm, eps, scale = (s["ffn_norm"], c.norm_eps), c.norm_eps, s.get("layer_output_scale")
         mlp = (w["ffn_gate"], w["ffn_up"], w["ffn_down"]) if "ffn_gate" in w else None
         if mlp and not c.experts:
             if "post_ffw_norm" not in s:
                 return ops.feed_forward(x, *mlp, norm)
             out = ops.feed_forward(x, *mlp, norm, c.gemma, residual=False)
-            return x + ops.rms_norm(out, s["post_ffw_norm"], eps)
+            return ops.add_normed(x, [(out, s["post_ffw_norm"])], None, eps, scale)
         # Gemma 4 routes from x normed with a weight of its own, over sqrt(dim)
         router = s["ffn_gate_inp.scale"] / math.sqrt(c.dim) if c.gemma else s["ffn_norm"]
         scores = ops.router(x, (router, eps), w["ffn_gate_inp"])
@@ -198,9 +198,8 @@ class Transformer:
         scales = s["ffn_down_exps.scale"]
         mixed = ops.mixture(x, *experts, (s["pre_ffw_norm_2"], eps), c.gemma, scales, False)
         shared = ops.feed_forward(x, *mlp, norm, c.gemma, residual=False)
-        out = ops.rms_norm(shared, s["post_ffw_norm_1"], eps)
-        out = out + ops.rms_norm(mixed, s["post_ffw_norm_2"], eps)
-        return x + ops.rms_norm(out, s["post_ffw_norm"], eps)
+        parts = [(shared, s["post_ffw_norm_1"]), (mixed, s["post_ffw_norm_2"])]
+        return ops.add_normed(x, parts, s["post_ffw_norm"], eps, scale)
 
 
 def _rope_table(

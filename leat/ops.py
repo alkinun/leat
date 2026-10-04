@@ -54,6 +54,19 @@ def feed_forward(
     return linear(hidden, down, residual=x if residual else None)
 
 
+def add_normed(
+    x: Tensor, parts: list[tuple[Tensor, Tensor]], weight: Tensor | None, eps: float,
+    scale: Tensor | None = None,
+) -> Tensor:  # fmt: skip
+    # (x + the sum of rms_norm(part, its weight) over parts, normed again with `weight` if given)
+    # times `scale` if given: how Gemma 4's blocks add their outputs to the residual
+    if _fast() and nv.supports_add_normed(x):
+        return nv.add_normed(x, parts, weight, eps, scale)
+    total = sum((rms_norm(part, w, eps) for part, w in parts[1:]), rms_norm(*parts[0], eps))
+    out = x + (total if weight is None else rms_norm(total, weight, eps))
+    return out if scale is None else out * scale
+
+
 def router(x: Tensor, norm: tuple[Tensor, float], w: QTensor) -> Tensor:
     # the scores a mixture of experts' router gives each expert: rms_norm(x, *norm) @ w.T
     if _fast() and nv.supports_scores(x, w):
