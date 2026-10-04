@@ -21,8 +21,9 @@ from leat.engine import Engine
 @dataclass(frozen=True)
 class Speed:
     prefill: float  # tokens/s over a prompt, including sampling the first token
-    decode: float  # tokens/s generating after a one-token prompt
-    weight_gbs: float  # weight bytes streamed per second while decoding
+    decode: float  # tokens/s in all generating after one-token prompts, `sequences` at once
+    weight_gbs: float  # weight bytes streamed per second while decoding, a step's read once
+    sequences: int = 1
 
 
 @dataclass(frozen=True)
@@ -36,9 +37,13 @@ class Quality:
     top1: float | None = None
 
 
-def speed(engine: Engine, prompt_tokens: int = 512, gen_tokens: int = 128, reps: int = 3) -> Speed:
+def speed(
+    engine: Engine, prompt_tokens: int = 512, gen_tokens: int = 128, reps: int = 3,
+    sequences: int = 1,
+) -> Speed:  # fmt: skip
     # as llama-bench: all prompt runs, then all generation runs, each after two warm-up runs, the
-    # first of which captures the graph
+    # first of which captures the graph. Generation runs `sequences` at once, timed while all
+    # are past their prompts, as llama-batched-bench's.
     rng = random.Random(0)
     prompt = [rng.randrange(engine.config.vocab_size) for _ in range(prompt_tokens)]
     prefill, decode = [], []
@@ -49,10 +54,16 @@ def speed(engine: Engine, prompt_tokens: int = 512, gen_tokens: int = 128, reps:
         prefill.append(prompt_tokens / (time.perf_counter() - start))
     for _ in range(reps + 2):
         engine.reset()
-        tokens = engine.generate(prompt[:1], gen_tokens, ignore_eog=True)
-        next(tokens)
-        start = time.perf_counter()
-        decode.append(sum(1 for _ in tokens) / (time.perf_counter() - start))
+        started = [
+            engine.start(prompt[i : i + 1], gen_tokens, ignore_eog=True) for i in range(sequences)
+        ]
+        while not all(s.tokens for s in started):
+            engine.step()
+        start, made = time.perf_counter(), 0
+        while len(engine.active) == sequences:
+            made += len(engine.step())
+        decode.append(made / (time.perf_counter() - start))
+    engine.reset()
     # the bytes a token reads: the embedding only where it is also the output layer, and of a
     # mixture of experts, only the share each token uses
     tensors, c = engine.gguf.tensors, engine.config
@@ -62,7 +73,7 @@ def speed(engine: Engine, prompt_tokens: int = 512, gen_tokens: int = 128, reps:
         t.nbytes * share[n] for n, t in tensors.items() if n != "token_embd.weight" or tied
     )
     tg = statistics.median(decode[2:])
-    return Speed(statistics.median(prefill[2:]), tg, streamed * tg / 1e9)
+    return Speed(statistics.median(prefill[2:]), tg, streamed * tg / sequences / 1e9, sequences)
 
 
 def perplexity(

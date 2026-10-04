@@ -46,9 +46,12 @@ def run_json(capsys, *args) -> dict:
     return json.loads(capsys.readouterr().out)
 
 
-def test_bench(tiny_model, capsys):
-    result = run_json(capsys, "bench", tiny_model[0], "-p", 8, "-n", 4, "-r", 1)
+@pytest.mark.parametrize("sequences", [1, 3])
+def test_bench(tiny_model, capsys, sequences):
+    args = ("-p", 8, "-n", 6, "-r", 1, "-s", sequences)
+    result = run_json(capsys, "bench", tiny_model[0], *args)
     assert result["prefill"] > 0 and result["decode"] > 0 and result["weight_gbs"] > 0
+    assert result["sequences"] == sequences
 
 
 @pytest.mark.parametrize("mode", [[], ["--decode"]])

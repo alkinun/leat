@@ -40,6 +40,9 @@ def main(argv: list[str] | None = None) -> None:
     speed.add_argument("-p", "--prompt", type=int, default=512, help="prompt tokens")
     speed.add_argument("-n", "--generate", type=int, default=128, help="generated tokens")
     speed.add_argument("-r", "--reps", type=int, default=3)
+    speed.add_argument(
+        "-s", "--sequences", type=int, default=1, help="sequences generating at once"
+    )
     speed.add_argument("--json", action="store_true", help="print one JSON object")
 
     quality = commands.add_parser(
@@ -130,8 +133,9 @@ def _serve(args: argparse.Namespace) -> None:
 
 
 def _bench(args: argparse.Namespace) -> None:
-    engine = Engine(args.model, max_context=args.prompt + args.generate, prefill_chunk=args.prompt)
-    result = bench.speed(engine, args.prompt, args.generate, args.reps)
+    context, n = args.prompt + args.generate, args.sequences
+    engine = Engine(args.model, max_context=context, prefill_chunk=args.prompt, slots=n)
+    result = bench.speed(engine, args.prompt, args.generate, args.reps, n)
     name = engine.gguf.path.stem
     if args.json:
         print(json.dumps({"model": name, "device": Device.DEFAULT} | asdict(result)))
@@ -139,7 +143,8 @@ def _bench(args: argparse.Namespace) -> None:
     print(f"{name} on {Device.DEFAULT}")
     print(f"  pp{args.prompt:<6} {result.prefill:10.1f} tok/s")
     gbs = f"{result.weight_gbs:.0f} GB/s of weights"
-    print(f"  tg{args.generate:<6} {result.decode:10.1f} tok/s   {gbs}")
+    each = f", {n} at once, {result.decode / n:.1f} each" if n > 1 else ""
+    print(f"  tg{args.generate:<6} {result.decode:10.1f} tok/s   {gbs}{each}")
 
 
 def _perplexity(args: argparse.Namespace) -> None:
