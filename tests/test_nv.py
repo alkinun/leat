@@ -175,10 +175,14 @@ def test_matmul_stacked(heights):
 # ******** mixtures of experts ********
 
 
-@pytest.mark.parametrize("tokens", [1, 7, UOp.variable("tokens", 1, 16).bind(5)])
+# a warp per token and expert, then for more than 8 tokens a warp per tile of them
+@pytest.mark.parametrize(
+    "tokens",
+    [1, 7, UOp.variable("tokens", 1, 8).bind(5), 37, UOp.variable("tokens", 1, 64).bind(45)],
+)
 def test_scores(tokens):
     rng = np.random.default_rng(17)
-    x = (rng.standard_normal((1, 16, 2048)) * 3).astype(np.float32)
+    x = (rng.standard_normal((1, 64, 2048)) * 3).astype(np.float32)
     weight = rng.uniform(0.5, 1.5, 2048).astype(np.float32)
     router = QTensor(
         Tensor(rng.standard_normal((128, 2048)).astype(np.float32)).flatten(),
@@ -188,7 +192,7 @@ def test_scores(tokens):
     n = tokens if isinstance(tokens, int) else tokens.unbind()[1]
     x_t = Tensor(x)[:, :tokens]
     assert nv.supports_scores(x_t, router)
-    got = nv.scores(x_t, (Tensor(weight), 1e-6), router).pad_to((1, 16, 128)).numpy()[0, :n]
+    got = nv.scores(x_t, (Tensor(weight), 1e-6), router).pad_to((1, 64, 128)).numpy()[0, :n]
     expected = (
         rms_norm(x[0, :n], weight, 1e-6).astype(np.float64)
         @ router.data.numpy().reshape(128, 2048).T

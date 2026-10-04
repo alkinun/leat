@@ -20,6 +20,7 @@ from leat.nv.common import (
     lane_range,
     load_vector,
     on_nvidia,
+    register,
     storage_words,
     warp_sum,
 )
@@ -29,6 +30,7 @@ from leat.nv.quantize import quantize_q8
 from leat.quant import GGMLType, QTensor
 
 FEW = 8  # tokens up to which the matrix-vector kernels run a mixture
+TILE = 8  # tokens and experts per warp scoring many tokens
 
 
 @functools.cache
@@ -50,6 +52,42 @@ def _scores_kernel(
     return store.end(token, expert, lane).sink(arg=KernelInfo(name="router", opts_to_apply=()))
 
 
+@functools.cache
+def _scores_tiles_kernel(
+    out: UOp, x: UOp, weight: UOp, router: UOp, tokens: int | UOp, eps: float
+) -> UOp:
+    # _scores_kernel for many tokens: a warp per tile of TILE tokens by TILE experts, so that each
+    # row is read once per tile rather than once per pair, as the reads bound the kernel. Lanes
+    # take 4 values of each row at a time, 128 a step, and sum the squares of the tokens' rows as
+    # they go.
+    experts, dim = int(out.shape[1]), int(x.shape[1])
+    tile_t = UOp.range((tokens + TILE - 1) // TILE, 0, AxisType.GLOBAL)
+    tile_e, lane = UOp.range(experts // TILE, 1, AxisType.GLOBAL), lane_range()
+    step = UOp.range(dim // (4 * WARP), 2, AxisType.LOOP)
+    at = (step * WARP + lane) * 4
+    acc = register((TILE * TILE + TILE,), 0.0)
+    prev, ws = acc.after(step), load_vector(weight[at], 4)
+    xs = [load_vector(x[tile_t * TILE + t, at], 4) for t in range(TILE)]
+    rs = [load_vector(router[(tile_e * TILE + e) * dim + at], 4) for e in range(TILE)]
+    weighted = [[v * w for v, w in zip(row, ws, strict=True)] for row in xs]
+    vals = [
+        prev[t * TILE + e].load() + sum(a * b for a, b in zip(weighted[t], rs[e], strict=True))
+        for t in range(TILE)
+        for e in range(TILE)
+    ]
+    vals += [prev[TILE * TILE + t].load() + sum(v * v for v in xs[t]) for t in range(TILE)]
+    acc = acc.after(acc.store(UOp.stack(*vals)).end(step))
+    stores = []
+    for t in range(TILE):
+        inv = (warp_sum(acc[TILE * TILE + t].load()) / dim + eps).rsqrt()
+        for e in range(TILE):
+            at = (tile_t * TILE + t) * experts + tile_e * TILE + e
+            dot = warp_sum(acc[t * TILE + e].load())
+            stores.append(out.flatten()[at.valid(lane.eq(0))].store(dot * inv))
+    info = KernelInfo(name="router_tiles", opts_to_apply=())
+    return UOp.group(*stores).end(tile_t, tile_e, lane).sink(arg=info)
+
+
 def supports_scores(x: Tensor, router: QTensor) -> bool:
     return on_nvidia(x) and router.type == GGMLType.F32 and router.shape[1] % (4 * WARP) == 0
 
@@ -59,9 +97,12 @@ def scores(x: Tensor, norm: tuple[Tensor, float], router: QTensor) -> Tensor:
     in f32, the precision llama.cpp scores in, where routing is sensitive to rounding."""
     _, tokens, dim = x.shape
     count, experts = x.max_shape[1], router.shape[0]
+    tiles = count > FEW and experts % TILE == 0
+    count = -(-count // TILE) * TILE if tiles else count
     out = Tensor.empty(count, experts, dtype=dtypes.float32, device=x.device)
     x, bound = carry(x.reshape(tokens, dim).float().pad_to((count, dim)).contiguous(), tokens)
-    fxn = functools.partial(_scores_kernel, tokens=bound, eps=norm[1])
+    kernel = _scores_tiles_kernel if tiles else _scores_kernel
+    fxn = functools.partial(kernel, tokens=bound, eps=norm[1])
     # .contiguous() on the router's storage is a view; a reshape of it tinygrad would copy
     weights = norm[0].float().contiguous(), router.data.contiguous()
     out = Tensor.custom_kernel(out, x, *weights, fxn=fxn)[0]
