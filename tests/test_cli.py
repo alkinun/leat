@@ -54,6 +54,14 @@ def test_bench(tiny_model, capsys, sequences):
     assert result["sequences"] == sequences
 
 
+@pytest.fixture
+def reference_ops(monkeypatch):
+    # exact comparisons with the f64 reference: the kernels quantize activations to int8, and on
+    # the GPU, the logits of up to 8 positions take them
+    monkeypatch.setenv("LEAT_KERNELS", "ref")
+
+
+@pytest.mark.usefixtures("reference_ops")
 @pytest.mark.parametrize("mode", [[], ["--decode"]])
 def test_perplexity(tiny_model, tmp_path, capsys, mode):
     path, weights = tiny_model
@@ -68,6 +76,7 @@ def test_perplexity(tiny_model, tmp_path, capsys, mode):
     assert result["perplexity"] == pytest.approx(np.exp(-scored.mean()), rel=1e-3)
 
 
+@pytest.mark.usefixtures("reference_ops")
 @pytest.mark.parametrize("mode", [[], ["--decode"]])
 def test_kl_divergence(tiny_model, tmp_path, capsys, mode):
     path, weights = tiny_model
