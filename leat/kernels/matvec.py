@@ -43,41 +43,50 @@ def _group(xq: UOp, g: UOp) -> list[UOp]:
 
 def rows_kernel(
     out: UOp, units: int, name: str, dots: list[Callable[[UOp, UOp], UOp]],
-    combine: Callable[..., UOp | list[UOp]], rows: int | UOp | None = None,
+    combine: Callable[..., UOp | list[UOp]], rows: int | UOp | None = None, per_warp: int = 1,
 ) -> UOp:  # fmt: skip
-    # one block of one warp per output row, of `rows` if given: lanes take the row's `units` in
-    # turn, the warp sums each dot product, and out[row] = combine(row, *sums); where combine gives
-    # a list, out[k * rows + row] its k-th value. Whole turns run in a loop; where a last turn has
-    # fewer units than lanes, the others repeat the last unit, whose loads hit in cache, and drop
-    # its share. Grouping rows into wider blocks measured slower on the 3090, by up to a quarter
-    # for Q6_K.
+    # one block of one warp per `per_warp` output rows, of `rows` if given: lanes take the rows'
+    # `units` in turn, the warp sums each dot product, and out[row] = combine(row, *sums); where
+    # combine gives a list, out[k * rows + row] its k-th value. A warp's rows share the loads of
+    # their units' activations, which with several tokens cost more than the weights' reads. Whole
+    # turns run in a loop; where a last turn has fewer units than lanes, the others repeat the
+    # last unit, whose loads hit in cache, and drop its share, as rows past the last repeat it.
+    # Grouping rows into wider blocks, a warp each, measured slower on the 3090, by up to a
+    # quarter for Q6_K.
     count = out.shape[0] if rows is None else rows
-    row = UOp.range(count, 0, AxisType.GLOBAL)
+    warp = UOp.range(-(-count // per_warp), 0, AxisType.GLOBAL)
+    ragged = isinstance(count, int) and count % per_warp != 0
+    owned = [warp * per_warp + r for r in range(per_warp)] if per_warp > 1 else [warp]
+    clamped = [r.minimum(count - 1) for r in owned] if ragged else owned
     lane = lane_range()
     zero = UOp.const(0.0, dtypes.float32)
     whole, rest = divmod(units, WARP)
-    acc = register((len(dots),), 0.0)
+    pairs = [(row, dot) for row in clamped for dot in dots]
+    acc = register((len(pairs),), 0.0)
     if whole:
         turn = UOp.range(whole, 1, AxisType.LOOP)
         prev = acc.after(turn)
-        shares = [prev[i].load() + dot(row, turn * WARP + lane) for i, dot in enumerate(dots)]
+        shares = [
+            prev[i].load() + dot(row, turn * WARP + lane) for i, (row, dot) in enumerate(pairs)
+        ]
         acc = acc.after(acc.store(UOp.stack(*shares)).end(turn))
-    totals = [acc[i].load() for i in range(len(dots))]
+    totals = [acc[i].load() for i in range(len(pairs))]
     if rest:
         unit = whole * WARP + lane
         totals = [
             t + (unit < units).where(dot(row, unit.minimum(units - 1)), zero)
-            for t, dot in zip(totals, dots, strict=True)
+            for t, (row, dot) in zip(totals, pairs, strict=True)
         ]
-    values = combine(row, *(warp_sum(t) for t in totals))
-    if isinstance(values, UOp):
-        store = out[row.valid(lane.eq(0))].store(values)
-    else:
-        store = UOp.group(
-            *(out[(k * count + row).valid(lane.eq(0))].store(v) for k, v in enumerate(values))
-        )
+    sums, stores = [warp_sum(t) for t in totals], []
+    for i, (row, own) in enumerate(zip(clamped, owned, strict=True)):
+        live = lane.eq(0) & (own < count) if ragged else lane.eq(0)
+        values = combine(row, *sums[i * len(dots) : (i + 1) * len(dots)])
+        if isinstance(values, UOp):
+            stores.append(out[row.valid(live)].store(values))
+        else:
+            stores += [out[(k * count + row).valid(live)].store(v) for k, v in enumerate(values)]
     info = KernelInfo(name=f"{name}_{out.shape[0]}_{units}", opts_to_apply=())
-    return store.end(row, lane).sink(arg=info)
+    return UOp.group(*stores).end(warp, lane).sink(arg=info)
 
 
 def _k_scale_min(w: UOp, base: UOp, sub: UOp) -> tuple[UOp, UOp]:
@@ -308,7 +317,8 @@ def _matvec_kernel(
 
     dot = DOTS[ggml_type](w, xq, xd, xs, cols := 4 * int(xq.shape[0]) // tokens)
     dots = [_token(dot, t) for t in range(tokens)]
-    return rows_kernel(out, cols // 64, ggml_type.name.lower(), dots, combine, rows)
+    name = ggml_type.name.lower()
+    return rows_kernel(out, cols // 64, name, dots, combine, rows, _per_warp(tokens))
 
 
 @functools.cache
@@ -323,8 +333,18 @@ def _swiglu_kernel(
     cols = 4 * int(xq.shape[0]) // tokens
     gate_dot, up_dot = (DOTS[ggml_type](w, xq, xd, xs, cols) for w in (gate, up))
     dots = [_token(dot, t) for t in range(tokens) for dot in (gate_dot, up_dot)]
-    name = f"glu_{kind}_{ggml_type.name.lower()}"
-    return rows_kernel(out, cols // 64, name, dots, combine, int(out.shape[0]) // tokens)
+    name, rows = f"glu_{kind}_{ggml_type.name.lower()}", int(out.shape[0]) // tokens
+    return rows_kernel(out, cols // 64, name, dots, combine, rows, _per_warp(tokens, 2))
+
+
+def _per_warp(tokens: int, matrices: int = 1) -> int:
+    # rows a warp takes, of each of `matrices` that share the activations: the more tokens, the
+    # more their activations' reads are worth sharing, against the registers each row's sums
+    # take. Q4_K's and Q6_K's rows of 4096 and 14336 for 4 tokens took 0.66 to 0.77 as long with
+    # 2 rows a warp, and for 8, 0.47 to 0.65 with 4; gate and up, 2 matrices, for 8 tokens 0.76
+    # to 0.92 as long with 2, and spilled registers with 4.
+    shared = 1 if tokens == 1 else 2 if tokens <= 4 else 4  # matrices' rows per activation load
+    return max(shared // matrices, 1)
 
 
 def _token(dot: Dot, t: int) -> Callable[[UOp, UOp], UOp]:
