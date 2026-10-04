@@ -409,7 +409,7 @@ def reference_attention(
 
 
 # cache sizes matter too: some strides trip a tinygrad codegen bug with symbolic lengths, see
-# attention.PAD
+# common.opaque
 @pytest.mark.parametrize(
     "n, length",
     [(64, 1), (64, 64), (1024, 63), (1024, 65), (1024, 1000), (3072, 3072), (4096, 3079),
@@ -467,7 +467,7 @@ def test_flash_attention(tokens, start, heads, kv_heads, symbolic):
 
 
 # Gemma 4's shapes: sliding-window layers of 8 kv heads of 256, the others of 2 kv heads of 512;
-# caches of 2048 positions tripped the codegen bug that attention.PAD avoids
+# caches of 2048 positions tripped the codegen bug that common.opaque avoids
 @pytest.mark.parametrize("kv_heads, dim, window", [(8, 256, 1024), (2, 512, 0), (8, 128, 100)])
 @pytest.mark.parametrize("n, length", [(4096, 70), (4096, 1100), (4096, 3079), (2048, 1500)])
 @pytest.mark.parametrize("symbolic", [False, True])

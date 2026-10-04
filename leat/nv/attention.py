@@ -31,7 +31,6 @@ from leat.nv.common import (
 
 KEYS = 64  # keys per chunk
 PARTIALS = 48  # most blocks per kv head; longer caches loop over several chunks per block
-PAD = 8  # halves of shared memory after each warp's outputs, see _attention_partial_kernel
 GROUP_SPLIT = 4  # query heads per block at most: a block's time grows with them, 5.7 us for 4
 # and 10 us for 8 at short context, while reading keys and values once per block costs little
 
@@ -92,14 +91,13 @@ def _attention_partial_kernel(
     acc, mx, total = acc.after(update), mx.after(update), total.after(update)
 
     # merge the warps through shared memory: each writes its output normalized to f16 (sum >= 1
-    # unless empty), as [head, dimension within lane, lane] plus PAD, then its max and sum.
+    # unless empty), as [head, dimension within lane, lane], then its max and sum.
     # tinygrad's codegen declares an index at its first use in the rounds loop and reuses it after
     # the loop, out of scope, if the same expression recurs there: indices from here on are made
     # of opaque copies of the block's and thread's coordinates, which it cannot match.
     ranges = (lane, wave, block, head)
     lane, wave, block, head = (opaque(u) for u in ranges)
-    width = group * dim + PAD
-    shared = UOp.alloc((waves, width), dtypes.half, addrspace=AddrSpace.LOCAL)
+    shared = UOp.alloc((waves, group * dim), dtypes.half, addrspace=AddrSpace.LOCAL)
     stat = UOp.alloc((waves, group, 2), dtypes.float32, addrspace=AddrSpace.LOCAL)
     stores = [
         shared[wave, (h * per_lane + i) * WARP + lane].store(
@@ -181,7 +179,7 @@ def supports_attention(q: Tensor, cache: Tensor) -> bool:
         return False
     kv_heads, n, dim, batch, heads, tokens = (int(x) for x in shape)
     group = _per_block(heads // kv_heads)
-    fits = (group * dim + PAD) * 2 + group * 8 <= SHARED  # one warp's share of shared memory
+    fits = group * dim * 2 + group * 8 <= SHARED  # one warp's share of shared memory
     return batch == 1 and tokens == 1 and dim % 64 == 0 and n % KEYS == 0 and fits
 
 
@@ -198,7 +196,7 @@ def attention(
     q, slot = carry(q.float().contiguous(), slot)
     cache, length = carry(cache, length)
     waves = 16
-    while waves * ((group * dim + PAD) * 2 + group * 8) > SHARED:
+    while waves * (group * dim * 2 + group * 8) > SHARED:
         waves //= 2
     chunks = min(PARTIALS, int(cache.shape[3]) // KEYS)
     partial = Tensor.empty(heads, chunks, dim, dtype=dtypes.float32, device=q.device)
