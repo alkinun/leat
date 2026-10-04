@@ -4,7 +4,7 @@ A minimal, fast LLM inference engine built on [tinygrad](https://github.com/tiny
 
 leat runs GGUF models with their weights kept in the quantized storage format. The goal is single-stream decode limited by memory bandwidth, not by the engine. It was developed on an NVIDIA RTX 3090 and is moving to AMD's Strix Halo.
 
-> Status: on NVIDIA, hand-written kernels decode every model below faster than llama.cpp, and process prompts at 0.79 to 1.07x its speed. On AMD's RDNA GPUs the decode kernels run, so far tested on tinygrad's emulated GPU only, and prompts take the reference ops. `leat serve` serves the OpenAI chat completions API. Every kernel is tested against an independent NumPy reference, and so are the plain tinygrad ops they replace, which run on any device; `LEAT_KERNELS=ref` runs everything that way.
+> Status: on NVIDIA, hand-written kernels decode every model below faster than llama.cpp, and process prompts at 0.79 to 1.07x its speed. On AMD's RDNA GPUs the decode kernels run, so far tested on tinygrad's emulated GPU only, and prompts take the reference ops. `leat serve` serves the OpenAI chat completions API to several clients at once, decoding their replies in batched steps that read each weight once for all of them. Every kernel is tested against an independent NumPy reference, and so are the plain tinygrad ops they replace, which run on any device; `LEAT_KERNELS=ref` runs everything that way.
 
 ## Quickstart
 
@@ -70,9 +70,11 @@ Storage types, and the kernels that take them on the GPU; the reference ops take
 
 Devices: any tinygrad backend runs the reference ops. NVIDIA GPUs (`DEV=NV` or `CUDA`) run every kernel; AMD's RDNA 3 and 4 GPUs (`DEV=AMD`), as Strix Halo's, run the warp-level ones: matrix-vector products, norms, quantization, RoPE, decode attention, the mixtures' routing and their one-token path, and sampling. Prompts there take the reference ops for now.
 
-Server: `/v1/chat/completions`, whole or streamed, and `/v1/models`. Replies split into `reasoning_content`, as Qwen3's `<think>` blocks and gpt-oss's analysis channel, text, and tool calls in Llama 3's, Qwen's, Gemma 4's and gpt-oss's syntax. Requests take stop strings, seeds and `chat_template_kwargs` such as `{"enable_thinking": false}`. Sampling is greedy or by temperature; requests for `top_p`, penalties, `logprobs` or several choices are refused. Completions run one at a time.
+Server: `/v1/chat/completions`, whole or streamed, and `/v1/models`. Replies split into `reasoning_content`, as Qwen3's `<think>` blocks and gpt-oss's analysis channel, text, and tool calls in Llama 3's, Qwen's, Gemma 4's and gpt-oss's syntax. Requests take stop strings, seeds and `chat_template_kwargs` such as `{"enable_thinking": false}`. Sampling is greedy or by temperature; requests for `top_p`, penalties, `logprobs` or several choices are refused.
 
-Prefix caching: the KV cache keeps `--slots` sequences. A conversation continues in its slot, and a prompt that shares a prefix with any slot, such as a system prompt, starts from a copy of it.
+Concurrent requests: completions run together, one in each of `--slots` slots of the KV cache, 4 by default; more wait their turn. Each step prefills a chunk of one prompt, of 256 tokens at most while others decode, then decodes a token of every running completion in one batch, of up to 8, whose matrices read each weight once for all of them. A client that hangs up frees its slot at the next step. A slot past the others holds the padding of batches of 3, 5, 6 or 7, which run in the graphs of 4 and 8.
+
+Prefix caching: a conversation continues in its slot, and a prompt that shares a prefix with any slot, such as a system prompt, starts from a copy of it.
 
 ## Measurements
 
@@ -95,7 +97,22 @@ RTX 3090, one sequence, in tokens per second; Q4_K_M files but for gpt-oss's, MX
 
 After 8192 tokens of context, Llama 3.1 8B decodes at 122.5 tok/s against llama.cpp's 125.0.
 
-Through `leat serve`, the first token of a 2141-token prompt to Llama 3.1 8B arrives after 449 ms, or after 22 ms when another conversation has cached its 2130-token system prompt. In the engine, past 2130 cached tokens, the first token after one more arrives in 8.8 ms and after 2 to 16 more in 12.7 ms, against 7.2 ms for a decode step. The server is ready 28 s after it starts, the file in the page cache, most of that spent compiling the graphs it replays: 14 s the graph for longer prompts, 7 s the graph for prompts of up to 16 new tokens.
+Several sequences decoding at once, in tokens per second in all: `leat bench -s N` against llama.cpp's `llama-batched-bench -npp 1 -ntg 128 -npl 1,2,4`.
+
+| | llama.cpp 1 | leat 1 | llama.cpp 2 | leat 2 | llama.cpp 4 | leat 4 |
+|---|---:|---:|---:|---:|---:|---:|
+| Llama 3.2 3B Instruct | 271.9 | 281.0 | 508.6 | 509.9 | 741.2 | 865.8 |
+| Llama 3.1 8B Instruct | 147.2 | 152.3 | 275.9 | 294.1 | 398.9 | 518.9 |
+| Mistral Small 3.2 24B Instruct | 54.6 | 57.7 | 105.6 | 108.8 | 140.7 | 183.5 |
+| Qwen3 8B | 140.7 | 148.4 | 263.4 | 286.2 | 383.9 | 506.2 |
+| Qwen3 30B A3B | 210.4 | 229.9 | 330.1 | 365.7 | 412.1 | 506.2 |
+| Gemma 3 12B it | 88.9 | 97.3 | 166.7 | 185.7 | 237.4 | 312.8 |
+| Gemma 4 26B A4B it | 157.9 | 190.1 | 273.3 | 310.3 | 363.0 | 443.4 |
+| gpt-oss 20B | 213.3 | 228.3 | 333.4 | 335.6 | 438.0 | 437.5 |
+
+Llama 3.2 3B decodes 1195 tok/s in all for 8 sequences, 149 each. A mixture of experts gains less from a batch, whose tokens read experts of their own.
+
+Through `leat serve`, the first token of a 2141-token prompt to Llama 3.1 8B arrives after 449 ms, or after 22 ms when another conversation has cached its 2130-token system prompt. In the engine, past 2130 cached tokens, the first token after one more arrives in 8.8 ms and after 2 to 16 more in 12.7 ms, against 7.2 ms for a decode step. The server is ready 34 s after it starts, the file in the page cache, most of that spent compiling the graphs it replays: 14 s the graph for longer prompts, 7 s the graph for prompts of up to 16 new tokens, and 6.5 s those for decode steps of 2 and 4 sequences. Under load, three clients streaming replies at once each get about 90 tokens a second, and a fourth's 3,000-token prompt sent meanwhile gets its first token after 0.9 s.
 
 Quality against llama.cpp on the same file: wikitext-2, chunks of 512 tokens with the second half of each scored, run as one prompt each. Both quantize activations to int8; the mixture's choice of experts amplifies that noise.
 
