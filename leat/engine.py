@@ -15,7 +15,7 @@ from leat.tokenizer import Tokenizer
 
 # prompt tokens up to which a chunk takes a graph bound to that many, whose kernels size their
 # work for so few: the matrix kernels take tiles of 16 tokens
-FEW = 16
+FEW_TOKENS = 16
 
 
 class Engine:
@@ -40,7 +40,7 @@ class Engine:
         self.max_context, self.prefill_chunk, self.slots = max_context, prefill_chunk, slots
         self._pos = UOp.variable("start_pos", 0, max_context - 1)
         self._len = UOp.variable("chunk_len", 1, prefill_chunk)
-        self._few = UOp.variable("few_len", 1, min(FEW, prefill_chunk))
+        self._few = UOp.variable("few_len", 1, min(FEW_TOKENS, prefill_chunk))
         self._slot = UOp.variable("slot", 0, slots - 1)
         self._source = UOp.variable("source", 0, slots - 1)
         # TinyJit runs a function once as is, then captures it on the second call: capture on the
@@ -103,8 +103,8 @@ class Engine:
     def warm_up(self) -> None:
         """Compiles the graphs generation replays, which takes seconds in a fresh process, so that
         the first prompt runs at full speed. Leaves no prefix cached."""
-        # a prefill of more than FEW tokens and a decode step, then a prefill of few
-        for prompt, n in (([0] * min(FEW + 1, self.max_context - 1), 2), ([0, 0], 1)):
+        # a prefill of more than FEW_TOKENS tokens and a decode step, then a prefill of few
+        for prompt, n in (([0] * min(FEW_TOKENS + 1, self.max_context - 1), 2), ([0, 0], 1)):
             self.reset()
             for _ in self.generate(prompt, n, ignore_eog=True):
                 pass
@@ -141,11 +141,13 @@ class Engine:
         self, chunk: list[int], pos: int, slot: UOp, temperature: Tensor, seed: Tensor
     ) -> Tensor:
         # runs prompt tokens from position pos, and samples the next: a single one as a decode
-        # step, up to FEW in the graph bound to that many, more in the one bound to prefill_chunk
+        # step, up to FEW_TOKENS in the graph bound to that many, more in the one bound to
+        # prefill_chunk
         start, sampling, n = self._pos.bind(pos), (temperature, seed), len(chunk)
         if n == 1:
             return self._decode(_ids(chunk, 1), slot, start, *sampling)
-        graph, length = (self._few_chunk, self._few) if n <= FEW else (self._chunk, self._len)
+        few = n <= FEW_TOKENS
+        graph, length = (self._few_chunk, self._few) if few else (self._chunk, self._len)
         tokens = _ids(chunk, int(length.vmax)).shrink(((0, 1), (0, length.bind(n))))
         return graph(tokens, slot, start, *sampling)
 

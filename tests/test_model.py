@@ -5,7 +5,7 @@ import pytest
 from tinygrad import Tensor, dtypes
 
 from leat import bench
-from leat.engine import FEW, Engine
+from leat.engine import FEW_TOKENS, Engine
 from leat.gguf import GGUF
 from leat.model import CACHE_TILE, Config, Transformer
 from tests.helpers import CONTEXT, reference_logits
@@ -72,11 +72,11 @@ def test_generate_fills_context(tiny_model):
 
 @pytest.mark.usefixtures("reference_ops")
 def test_prefill_graphs(tiny_model):
-    # chunks of more than FEW tokens take the graph bound to prefill_chunk, of 2 to FEW the one
-    # bound to FEW, and a single token the decode graph
+    # chunks of more than FEW_TOKENS tokens take the graph bound to prefill_chunk, of 2 to
+    # FEW_TOKENS the one bound to FEW_TOKENS, and a single token the decode graph
     path, _ = tiny_model
-    engine = Engine(path, max_context=CONTEXT, prefill_chunk=FEW + 4)
-    prompt = PROMPT * 3  # chunks of FEW + 4 and 36 - FEW - 4
+    engine = Engine(path, max_context=CONTEXT, prefill_chunk=FEW_TOKENS + 4)
+    prompt = PROMPT * 3  # chunks of FEW_TOKENS + 4 and 36 - FEW_TOKENS - 4
     out = list(engine.generate(prompt, 4))
     assert out == generated(path, prompt, 4)
     assert engine._chunk.captured is not None and engine._few_chunk.captured is not None
@@ -137,7 +137,7 @@ def test_shared_prefix_is_copied(tiny_model, monkeypatch):
 def test_warm_up(tiny_model):
     # compiles every graph, the copy's too, and leaves nothing cached that a generation could see
     path, _ = tiny_model
-    engine = Engine(path, max_context=CONTEXT, prefill_chunk=FEW + 4, slots=2)
+    engine = Engine(path, max_context=CONTEXT, prefill_chunk=FEW_TOKENS + 4, slots=2)
     engine.warm_up()
     graphs = engine._chunk, engine._few_chunk, engine._decode, engine._copy
     captured = [jit.captured for jit in graphs]

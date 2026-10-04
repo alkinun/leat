@@ -29,7 +29,7 @@ from leat.nv.matvec import DOTS, rows_kernel
 from leat.nv.quantize import quantize_q8
 from leat.quant import GGMLType, QTensor
 
-FEW = 8  # tokens up to which the matrix-vector kernels run a mixture
+MATVEC_TOKENS = 8  # tokens up to which the matrix-vector kernels run a mixture
 TILE = 8  # tokens and experts per warp scoring many tokens
 
 
@@ -97,7 +97,7 @@ def scores(x: Tensor, norm: tuple[Tensor, float], router: QTensor) -> Tensor:
     in f32, the precision llama.cpp scores in, where routing is sensitive to rounding."""
     _, tokens, dim = x.shape
     count, experts = x.max_shape[1], router.shape[0]
-    tiles = count > FEW and experts % TILE == 0
+    tiles = count > MATVEC_TOKENS and experts % TILE == 0
     count = -(-count // TILE) * TILE if tiles else count
     out = Tensor.empty(count, experts, dtype=dtypes.float32, device=x.device)
     x, bound = carry(x.reshape(tokens, dim).float().pad_to((count, dim)).contiguous(), tokens)
@@ -263,7 +263,7 @@ def mixture(
     _, tokens, dim = x.shape
     ids, weights = route(scores.reshape(tokens, gate.shape[0]), used)
     # few tokens, or matrices the tensor-core kernels do not fit, take the matrix-vector kernels
-    few = isinstance(tokens, int) and tokens <= FEW
+    few = isinstance(tokens, int) and tokens <= MATVEC_TOKENS
     _, cols, rows = down.shape  # (experts, dim, hidden)
     fit = matmul_fits(gate.type, rows, cols) and matmul_fits(down.type, cols, rows)
     if few or not fit:

@@ -139,11 +139,11 @@ def activation(x: np.ndarray, gelu: bool) -> np.ndarray:
 
 
 # up to 16 tokens take tiles of 16; with few tiles, blocks split the steps along the rows
-FEW = [5, UOp.variable("tokens", 1, 16).bind(11)]
+SHORT = [5, UOp.variable("tokens", 1, 16).bind(11)]
 
 
 @pytest.mark.parametrize("ggml_type", [Q4_K, Q5_K, Q6_K, Q8_0])
-@pytest.mark.parametrize("tokens", [64, 100, UOp.variable("tokens", 1, 128).bind(70), *FEW])
+@pytest.mark.parametrize("tokens", [64, 100, UOp.variable("tokens", 1, 128).bind(70), *SHORT])
 @pytest.mark.parametrize("shape", [(256, 2048), (4096, 512)])  # tiles of 128 and 256 rows
 def test_matmul(ggml_type, tokens, shape):
     rng = np.random.default_rng(8)
@@ -161,7 +161,7 @@ def test_matmul(ggml_type, tokens, shape):
 
 # rows of whole blocks of 32 but not whole steps of 128, as Gemma 4's of 704 and 2112 weights
 @pytest.mark.parametrize("ggml_type", [Q5_0, Q8_0])
-@pytest.mark.parametrize("tokens", [64, UOp.variable("tokens", 1, 128).bind(70), FEW[1]])
+@pytest.mark.parametrize("tokens", [64, UOp.variable("tokens", 1, 128).bind(70), SHORT[1]])
 @pytest.mark.parametrize("shape", [(256, 704), (128, 2112), (4096, 512)])
 def test_matmul_blocks_of_32(ggml_type, tokens, shape):
     test_matmul(ggml_type, tokens, shape)
@@ -243,9 +243,11 @@ def expected_mixture(normed: np.ndarray, scores: np.ndarray, used: int, expert) 
     return out
 
 
-# up to FEW tokens take the matrix-vector kernels, more the tensor cores, as do a bound number
-# of up to 16, padded to 16 rows; favored experts get more than a tile of tokens
-@pytest.mark.parametrize("tokens", [1, 3, 70, UOp.variable("tokens", 1, 128).bind(37), 128, FEW[1]])
+# up to MATVEC_TOKENS tokens take the matrix-vector kernels, more the tensor cores, as do a bound
+# number of up to 16, padded to 16 rows; favored experts get more than a tile of tokens
+@pytest.mark.parametrize(
+    "tokens", [1, 3, 70, UOp.variable("tokens", 1, 128).bind(37), 128, SHORT[1]]
+)
 @pytest.mark.parametrize("favored", [0, 3])
 def test_mixture(tokens, favored):
     rng = np.random.default_rng(15)
