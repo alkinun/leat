@@ -77,8 +77,8 @@ def write_tiny_model(path: Path, arch: str = "llama") -> dict[str, np.ndarray]:
     # a random GGUF of a supported architecture; returns its weights as decoded independently by
     # gguf-py. llama has rope frequency factors, qwen3 RMSNorms of q and k, and qwen3moe also
     # a mixture of experts for MLP.
-    if arch == "gemma4":
-        return _write_gemma4(path)
+    if arch.startswith("gemma4"):
+        return _write_gemma4(path, experts=arch == "gemma4")
     w, weights, add = _writer(path, arch)
     for key, value in [("block_count", LAYERS),
                        ("embedding_length", D), ("feed_forward_length", HIDDEN),
@@ -149,7 +149,8 @@ def _finish(w: gguf.GGUFWriter) -> None:
 G_WINDOW, G_DIMS, G_KV_HEADS, G_CAP = 4, (32, 64), (2, 1), 5.0
 
 
-def _write_gemma4(path: Path) -> dict[str, np.ndarray]:
+def _write_gemma4(path: Path, experts: bool) -> dict[str, np.ndarray]:
+    # with experts beside each MLP, as Gemma 4 26B A4B, or without, as the dense models
     w, weights, add = _writer(path, "gemma4")
     a = "gemma4."
     for key, value in [("block_count", LAYERS), ("embedding_length", D),
@@ -158,10 +159,12 @@ def _write_gemma4(path: Path) -> dict[str, np.ndarray]:
                        ("attention.value_length", G_DIMS[1]),
                        ("attention.value_length_swa", G_DIMS[0]),
                        ("rope.dimension_count", G_DIMS[1]), ("rope.dimension_count_swa", G_DIMS[0]),
-                       ("attention.sliding_window", G_WINDOW), ("expert_count", EXPERTS),
-                       ("expert_used_count", USED),
-                       ("expert_feed_forward_length", EXPERT_HIDDEN)]:  # fmt: skip
+                       ("attention.sliding_window", G_WINDOW)]:  # fmt: skip
         w.add_uint32(a + key, value)
+    if experts:
+        w.add_uint32(a + "expert_count", EXPERTS)
+        w.add_uint32(a + "expert_used_count", USED)
+        w.add_uint32(a + "expert_feed_forward_length", EXPERT_HIDDEN)
     w.add_array(a + "attention.head_count_kv", list(G_KV_HEADS))
     w.add_array(a + "attention.sliding_window_pattern", [True, False])
     w.add_float32(a + "rope.freq_base", 10000.0)
@@ -181,12 +184,15 @@ def _write_gemma4(path: Path) -> dict[str, np.ndarray]:
         add(b + "attn_output.weight", (D, HEADS * dim), GGMLType.F32, 0.05)
         for name in ("attn_q_norm", "attn_k_norm"):
             add(b + name + ".weight", (dim,))
-        for name in ("attn_norm", "post_attention_norm", "ffn_norm", "post_ffw_norm",
-                     "pre_ffw_norm_2", "post_ffw_norm_1", "post_ffw_norm_2"):  # fmt: skip
+        for name in ("attn_norm", "post_attention_norm", "ffn_norm", "post_ffw_norm"):
             add(b + name + ".weight", (D,))
         add(b + "layer_output_scale.weight", (1,))
         for name in MLP:
             add(b + name + ".weight", *TENSORS[name])
+        if not experts:
+            continue
+        for name in ("pre_ffw_norm_2", "post_ffw_norm_1", "post_ffw_norm_2"):
+            add(b + name + ".weight", (D,))
         add(b + "ffn_gate_inp.weight", (EXPERTS, D), GGMLType.F32, 0.05)
         add(b + "ffn_gate_inp.scale", (D,))
         add(b + "ffn_gate_up_exps.weight", (EXPERTS, 2 * EXPERT_HIDDEN, D), GGMLType.Q4_K, 2e-4)
@@ -200,7 +206,7 @@ def reference_logits(
     w: dict[str, np.ndarray], tokens: list[int], arch: str = "llama"
 ) -> np.ndarray:
     # an independent float64 model, with keys and values rounded to f16 like leat's cache
-    if arch == "gemma4":
+    if arch.startswith("gemma4"):
         return _reference_gemma4(w, tokens)
 
     T = len(tokens)
@@ -305,17 +311,13 @@ def _reference_gemma4(w: dict[str, np.ndarray], tokens: list[int]) -> np.ndarray
         out = attention(q, k, v, mask, 1.0) @ lw["attn_output"].T
         x = x + norm(out, lw["post_attention_norm"])
 
-        shared = norm(
-            mlp(norm(x, lw["ffn_norm"]), lw["ffn_gate"], lw["ffn_up"], lw["ffn_down"], True),
-            lw["post_ffw_norm_1"],
-        )
-        scores = (norm(x) / np.sqrt(D) * lw["ffn_gate_inp.scale"]) @ lw["ffn_gate_inp"].T
-
-        mixed = norm(
-            experts(norm(x, lw["pre_ffw_norm_2"]), scores, functools.partial(_gemma4_expert, lw)),
-            lw["post_ffw_norm_2"],
-        )
-        x = (x + norm(shared + mixed, lw["post_ffw_norm"])) * lw["layer_output_scale"]
+        out = mlp(norm(x, lw["ffn_norm"]), lw["ffn_gate"], lw["ffn_up"], lw["ffn_down"], True)
+        if "ffn_gate_inp" in lw:  # experts beside the MLP, each output normed
+            scores = (norm(x) / np.sqrt(D) * lw["ffn_gate_inp.scale"]) @ lw["ffn_gate_inp"].T
+            expert = functools.partial(_gemma4_expert, lw)
+            mixed = experts(norm(x, lw["pre_ffw_norm_2"]), scores, expert)
+            out = norm(out, lw["post_ffw_norm_1"]) + norm(mixed, lw["post_ffw_norm_2"])
+        x = (x + norm(out, lw["post_ffw_norm"])) * lw["layer_output_scale"]
     logits = norm(x, w["output_norm.weight"]) @ w["token_embd.weight"].T
     return np.tanh(logits / G_CAP) * G_CAP
 

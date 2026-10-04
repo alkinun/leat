@@ -167,26 +167,13 @@ class Transformer:
         q, k = q.reshape(B, T, c.n_heads, dim), k.reshape(B, T, kv_heads, dim)
         v = (values[0] if values else k).reshape(B, T, kv_heads, dim)
         norms = (s["attn_q_norm"], s["attn_k_norm"]) if "attn_q_norm" in s else None
-        q, cache = ops.rotate(
-            q,
-            k,
-            v,
-            self.cache[i],
-            slot,
-            start_pos,
-            self.rope[i],
-            c.rope_halves,
-            norms,
-            c.gemma,
-            eps,
-        )
+        q, cache = ops.rotate(q, k, v, self.cache[i], slot, start_pos, self.rope[i],
+                              c.rope_halves, norms, c.gemma, eps)  # fmt: skip
         scale = 1.0 if c.gemma else 1 / math.sqrt(dim)
         out = ops.attention(q, cache, slot, start_pos, scale, c.windows[i])
-        if "post_attention_norm" in s:
-            return x + ops.rms_norm(
-                ops.linear(out, w["attn_output"]), s["post_attention_norm"], eps
-            )
-        return ops.linear(out, w["attn_output"], residual=x)
+        if "post_attention_norm" not in s:
+            return ops.linear(out, w["attn_output"], residual=x)
+        return x + ops.rms_norm(ops.linear(out, w["attn_output"]), s["post_attention_norm"], eps)
 
     def _feed_forward(self, i: int, x: Tensor) -> Tensor:
         # x + the MLP block's output: an MLP, a mixture of experts, or as in Gemma 4 both, each
@@ -210,11 +197,10 @@ class Transformer:
             return ops.mixture(x, *experts, norm)
         scales = s["ffn_down_exps.scale"]
         mixed = ops.mixture(x, *experts, (s["pre_ffw_norm_2"], eps), c.gemma, scales, False)
-        out = ops.feed_forward(x, *mlp, norm, c.gemma, residual=False)
-        both = ops.rms_norm(out, s["post_ffw_norm_1"], eps) + ops.rms_norm(
-            mixed, s["post_ffw_norm_2"], eps
-        )
-        return x + ops.rms_norm(both, s["post_ffw_norm"], eps)
+        shared = ops.feed_forward(x, *mlp, norm, c.gemma, residual=False)
+        out = ops.rms_norm(shared, s["post_ffw_norm_1"], eps)
+        out = out + ops.rms_norm(mixed, s["post_ffw_norm_2"], eps)
+        return x + ops.rms_norm(out, s["post_ffw_norm"], eps)
 
 
 def _rope_table(
