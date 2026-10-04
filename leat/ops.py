@@ -41,8 +41,8 @@ def feed_forward(
     kind: str = "silu", residual: bool = True,
 ) -> Tensor:  # fmt: skip
     # x + glu(kind, n @ gate.T, n @ up.T) @ down.T for n = rms_norm(x, *norm); without x if not
-    # residual. Kernels take gate and up together where they share a type and shape; one token
-    # takes the matrix-vector kernels, though the matrix kernels would also accept it.
+    # residual. Kernels take gate and up together where they share a type and shape; a few
+    # tokens take the matrix-vector kernels, though the matrix kernels would also accept them.
     paired = _fast() and gate.type == up.type and gate.shape == up.shape
     if paired and kernels.supports_matvec(x, gate):
         hidden = kernels.swiglu(x, gate, up, norm, kind)
@@ -89,15 +89,17 @@ def mixture(
     x: Tensor, scores: Tensor, gate: QTensor, up: QTensor | None, down: QTensor, used: int,
     norm: tuple[Tensor, float], kind: str = "silu", scales: Tensor | None = None,
     residual: bool = True, biases: tuple[Tensor, Tensor, Tensor] | None = None,
+    live: int | UOp | None = None,
 ) -> Tensor:  # fmt: skip
     # x + a mixture of experts for n = rms_norm(x, *norm), as feed_forward, given the router's
     # scores (B, T, experts): each token takes the MLPs of the `used` experts it scores highest,
     # weighted by the softmax of their scores and by each expert's scale if given. Experts are
     # stacked matrices (experts, rows, cols), with biases (experts, rows) of gate, up and down if
     # given; where up is None, gate stacks both, the gate's rows first in each. Only the chosen
-    # experts are read.
+    # experts are read. Tokens past the first `live`, if given, pad a batch: the kernels give
+    # them no experts, rather than reading experts of their own, and the reference ops theirs.
     if _fast() and kernels.supports_mixture(x, gate, up, down):
-        args = (used, norm, kind, scales, residual, biases)
+        args = (used, norm, kind, scales, residual, biases, live)
         return kernels.mixture(x, scores, gate, up, down, *args)
     top, experts = scores.topk(used)
     weights = top.softmax(-1) if scales is None else top.softmax(-1) * scales[experts]

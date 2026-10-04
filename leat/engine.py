@@ -75,12 +75,14 @@ class Engine:
         self._batches = sorted(
             {1 << i for i in range(slots.bit_length()) if 1 << i < slots} | {slots}
         )
-        padded = any(n not in self._batches for n in range(1, slots))
-        self._spare = slots  # the cache's slot past the others, if a batch may be padded
+        # those that take padding, more than one past the batch before
+        pairs = zip(self._batches[1:], self._batches[:-1], strict=True)
+        self._padded = {n for n, before in pairs if n > before + 1}
+        self._spare = slots  # the padding's slot, past the others, if any batch takes padding
         self.gguf = gguf = GGUF.open(path)
         self.tokenizer = Tokenizer(gguf.metadata)
         self.config = Config.from_gguf(gguf.metadata)
-        cache_slots = slots + padded
+        cache_slots = slots + bool(self._padded)
         self.model = Transformer(self.config, gguf.load(), max_context, cache_slots)
         self.max_context, self.prefill_chunk, self.slots = max_context, prefill_chunk, slots
         self._len = UOp.variable("chunk_len", 1, prefill_chunk)
@@ -90,6 +92,9 @@ class Engine:
         self._slot_vars = [UOp.variable(f"slot{i}", 0, cache_slots - 1) for i in rows]
         self._pos_vars = [UOp.variable(f"pos{i}", 0, max_context - 1) for i in rows]
         self._source = UOp.variable("source", 0, slots - 1)
+        # the sequences of a padded decode step, whose padding a mixture of experts skips: a
+        # padding row would read experts of its own
+        self._live = UOp.variable("live", 1, slots) if self.config.experts else None
         self._chunk, self._few_chunk = _graph(self._step), _graph(self._step)
         self._decode = {n: _graph(self._step) for n in self._batches}
         self._copy = _graph(self.model.copy)
@@ -179,7 +184,8 @@ class Engine:
         for n in self._batches[1:]:  # decode steps of several, each in a slot of its own
             sampling = Tensor([0.0] * n), Tensor([0] * n, dtype=dtypes.uint32)
             rows = [v.bind(i) for i in range(n) for v in (self._slot_vars[i], self._pos_vars[i])]
-            self._decode[n](_ids([0] * n, n), *sampling, *rows)
+            live = self._live.bind(n) if self._live is not None and n in self._padded else None
+            self._decode[n](_ids([0] * n, n), *sampling, *rows, live=live)
         self._batch = None
         if self.slots > 1:  # copying a cached prefix to another slot has a graph too
             self._copy(self._source.bind(0), self._slot_vars[0].bind(1))
@@ -252,7 +258,8 @@ class Engine:
         bound = []
         for i, (slot, pos) in enumerate(rows):
             bound += [self._slot_vars[i].bind(slot), self._pos_vars[i].bind(pos)]
-        out = self._decode[n](tokens, *sampling, *bound)
+        live = self._live.bind(k) if self._live is not None and n in self._padded else None
+        out = self._decode[n](tokens, *sampling, *bound, live=live)
         self._batch = _Batch(list(sequences), out.reshape(1, n), sampling)
         for s in sequences:
             self._cached[s.slot].append(s.tokens[-1])
@@ -265,16 +272,20 @@ class Engine:
         if eog or len(sequence.tokens) == sequence.max_tokens or held >= self.max_context:
             self.cancel(sequence)
 
-    def _step(self, tokens: Tensor, temperature: Tensor, seed: Tensor, *rows: UOp) -> Tensor:
+    def _step(
+        self, tokens: Tensor, temperature: Tensor, seed: Tensor, *rows: UOp,
+        live: UOp | None = None,
+    ) -> Tensor:  # fmt: skip
         # rows: the slot and start position of each span, in turn. A single span takes every
-        # token, as a chunk of prompt; several take one each, as a decode step does.
+        # token, as a chunk of prompt; several take one each, as a decode step does, the first
+        # `live` of them its sequences' if given, the rest padding.
         pairs = list(zip(rows[::2], rows[1::2], strict=True))
         if len(pairs) == 1:
             (slot, start), length = pairs[0], tokens.shape[1]
             hidden = self.model.run(tokens, [Span(slot, start, length)])
             logits = self.model.logits(hidden[:, -1, :])
             return sample(logits, temperature, seed, start + length).realize()
-        hidden = self.model.run(tokens, [Span(slot, start) for slot, start in pairs])
+        hidden = self.model.run(tokens, [Span(slot, start) for slot, start in pairs], live)
         logits = self.model.logits(hidden).reshape(len(pairs), -1)
         positions = Tensor.stack(*(Tensor(start + 1) for _, start in pairs))
         return sample(logits, temperature, seed, positions).realize()

@@ -292,6 +292,26 @@ def test_mixture(tokens, favored):
     assert_close(got, x[0, :n] + expected_mixture(normed, scores[0, :n], used, expert), 2e-3)
 
 
+@pytest.mark.parametrize("residual", [True, False])
+def test_mixture_live(residual):
+    # a decode step's 4 rows, the last padding: the first 3 as alone, and the padding's x, or 0
+    rng = np.random.default_rng(17)
+    experts, used, dim, hidden = 32, 4, 512, 768
+    gate, up = (random_experts(Q4_K, experts, hidden, dim, rng)[0] for _ in "gu")
+    down = random_experts(Q6_K, experts, dim, hidden, rng)[0]
+    x = Tensor((rng.standard_normal((1, 4, dim)) * 3).astype(np.float32)).realize()
+    scores = Tensor(rng.standard_normal((1, 4, experts)).astype(np.float32)).realize()
+    norm, live = (
+        (Tensor(rng.uniform(0.5, 1.5, dim).astype(np.float32)), 1e-5),
+        UOp.variable("live", 1, 4),
+    )
+    args = (gate, up, down, used, norm, "silu", None, residual)
+    got = kernels.mixture(x, scores, *args, live=live.bind(3)).numpy()[0]
+    alone = kernels.mixture(x[:, :3], scores[:, :3], *args).numpy()[0]
+    np.testing.assert_allclose(got[:3], alone, rtol=1e-6, atol=1e-6)
+    np.testing.assert_array_equal(got[3], x.numpy()[0, 3] if residual else 0)
+
+
 # Gemma 4: gate and up in one stack, GELU, a scale per expert and no residual, for one token on
 # the matrix-vector kernels and for more on tensor cores; rows of 192 weights quantize in a ragged
 # turn

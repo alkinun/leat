@@ -1,6 +1,6 @@
-"""Attention over the KV cache: FlashDecoding for one query token, FlashAttention-2 on f16 tensor
-cores for several, and one token's queries, keys and values readied for it: biased, normed,
-rotated by RoPE, and the keys and values stored in the cache."""
+"""Attention over the KV cache: FlashDecoding for a query token of each sequence of a decode step,
+FlashAttention-2 on f16 tensor cores for a sequence's several, and tokens' queries, keys and values
+readied for it: biased, normed, rotated by RoPE, and the keys and values stored in the cache."""
 
 import functools
 import math
@@ -26,7 +26,7 @@ from leat.kernels.common import (
     warp_sum,
 )
 
-# ******** one query token: FlashDecoding ********
+# ******** a query token per sequence: FlashDecoding ********
 # Adapted from tinygrad/llm/kernels/amd.py: the cache is cut into chunks of KEYS keys, blocks
 # reduce chunks with an online softmax, and a second kernel combines their partials.
 
@@ -515,7 +515,7 @@ def flash_attention(
     return outs[0].reshape(count, heads * dim)[:tokens].reshape(1, tokens, heads * dim)
 
 
-# ******** one token's queries, keys and values: biases, norms, RoPE, and the cache ********
+# ******** tokens' queries, keys and values: biases, norms, RoPE, and the cache ********
 
 
 @functools.cache

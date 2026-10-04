@@ -1,11 +1,11 @@
-"""Linear layers for several tokens on int8 tensor cores, llama.cpp's MMQ.
+"""Linear layers for many tokens on int8 tensor cores, llama.cpp's MMQ.
 
-The activations are quantized as for one token. A block stages a tile of weights, unpacked to
-int8, and 64 tokens in shared memory, 128 weights of each row per step, while it fetches the next
-step into registers. Each of its warps multiplies 32 rows by the 64 tokens on tensor cores and
-scales every group of 32 in f32. Tiles of 256 rows of Q4_K reach 68 to 79 TOPS on 512 tokens,
-against 54 to 67 for 128; matrices with few rows take 128, to occupy more SMs, and 64 where 128
-do not divide them. Up to 16 tokens take tiles of 16, to waste fewer products.
+The activations are quantized as for the matrix-vector kernels. A block stages a tile of weights,
+unpacked to int8, and 64 tokens in shared memory, 128 weights of each row per step, while it fetches
+the next step into registers. Each of its warps multiplies 32 rows by the 64 tokens on tensor cores
+and scales every group of 32 in f32. Tiles of 256 rows of Q4_K reach 68 to 79 TOPS on 512 tokens,
+against 54 to 67 for 128; matrices with few rows take 128, to occupy more SMs, and 64 where 128 do
+not divide them. Up to 16 tokens take tiles of 16, to waste fewer products.
 
 Where the tiles' last wave would leave SMs idle, a block per SM takes whole tiles in turn and
 then the tiles left over, split into chunks of their steps, and a fixup kernel adds up the chunks'

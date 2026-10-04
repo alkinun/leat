@@ -269,22 +269,25 @@ def mixture(
     x: Tensor, scores: Tensor, gate: QTensor, up: QTensor | None, down: QTensor, used: int,
     norm: tuple[Tensor, float], kind: str = "silu", scales: Tensor | None = None,
     residual: bool = True, biases: tuple[Tensor, Tensor, Tensor] | None = None,
+    live: int | UOp | None = None,
 ) -> Tensor:  # fmt: skip
     """x + the mixture of experts for tokens x (1, T, dim) and their router `scores` (1, T,
     experts): each token's `used` best scoring experts, weighted by the softmax of their scores
     and by each expert's scale if given, run glu(kind)(n @ gate.T, n @ up.T) @ down.T on
     n = rms_norm(x, *norm), as common.glu has it, with biases (experts, rows) of gate, up and
     down if given; without x if not residual. Where up is None, gate stacks both, each expert's
-    gate rows first."""
+    gate rows first. Tokens past the first `live`, if given, pad a batch: on the matrix-vector
+    kernels they read no experts, and their mixture is 0."""
     _, tokens, dim = x.shape
     ids, weights = route(scores.reshape(tokens, gate.shape[0]), used)
-    # few tokens, or matrices the tensor-core kernels do not fit, take the matrix-vector kernels
-    few = isinstance(tokens, int) and tokens <= MATVEC_TOKENS
+    # few tokens, as many as known or bound to at most that many, or matrices the tensor-core
+    # kernels do not fit, take the matrix-vector kernels
+    few = int(x.max_shape[1]) <= MATVEC_TOKENS
     _, cols, rows = down.shape  # (experts, dim, hidden)
     fit = on_nvidia(x) and matmul_fits(gate.type, rows, cols) and matmul_fits(down.type, cols, rows)
     flat = None if biases is None else tuple(b.float().flatten().contiguous() for b in biases)
     if few or not fit:
-        args = (used, norm, kind, scales, residual, flat)
+        args = (used, norm, kind, scales, residual, flat, live)
         return _matvecs(x, ids, weights, gate, up, down, *args)
     # many tokens: on tensor cores, each expert taking the pairs routed to it
     xt = tiled(x)
@@ -306,31 +309,37 @@ def mixture(
 def _matvecs(
     x: Tensor, ids: Tensor, weights: Tensor, gate: QTensor, up: QTensor | None, down: QTensor,
     used: int, norm: tuple[Tensor, float], kind: str, scales: Tensor | None, residual: bool,
-    biases: tuple[Tensor, ...] | None,
+    biases: tuple[Tensor, ...] | None, live: int | UOp | None,
 ) -> Tensor:  # fmt: skip
-    # the matrix-vector kernels, reading each chosen expert's rows once per token; biases, if
-    # given, flat
+    # the matrix-vector kernels, reading each chosen expert's rows once per token, of the first
+    # `live` tokens if given; biases, if given, flat
     _, tokens, dim = x.shape
     count = x.max_shape[1]
+    real = tokens if live is None else live  # the tokens that take experts
     _, cols, rows = down.shape  # (experts, dim, hidden)
     xq, xd, xs = quantize_q8(x.reshape(tokens, dim).pad_to((count, dim)), norm, rows=tokens)
     hidden = Tensor.empty(count * used * rows, dtype=dtypes.float32, device=x.device)
-    xq, pairs = carry(xq, tokens * used)
+    xq, pairs = carry(xq, real * used)
     meta = (gate.type, cols, rows, used, kind, up is None)
     fxn = functools.partial(_experts_swiglu_kernel, pairs=pairs, meta=meta)
     words = storage_words(gate), storage_words(gate if up is None else up)
     gate_up = biases[:2] if biases else ()
     hidden = Tensor.custom_kernel(hidden, *words, xq, xd, xs, ids, *gate_up, fxn=fxn)[0]
-    hq, hd, hs = quantize_q8(hidden.reshape(count * used, rows), rows=tokens * used)
+    hq, hd, hs = quantize_q8(hidden.reshape(count * used, rows), rows=real * used)
     out = Tensor.empty(count * dim, dtype=dtypes.float32, device=x.device)
     extra = [] if scales is None else [scales.float().contiguous()]
     if biases:
         extra.append(biases[2])
     if residual:
         extra.append(x.reshape(tokens, dim).float().pad_to((count, dim)).contiguous().flatten())
-    hq, bound = carry(hq, tokens)
+    hq, bound = carry(hq, real)
     down_meta = (down.type, rows, cols, used, scales is not None, biases is not None, residual)
     fxn = functools.partial(_experts_down_kernel, tokens=bound, meta=down_meta)
     srcs = storage_words(down), hq, hd, hs, ids, weights, *extra
     out = Tensor.custom_kernel(out, *srcs, fxn=fxn)[0]
-    return out.reshape(count, dim)[:tokens].reshape(x.shape)
+    out = out.reshape(count, dim)[:tokens].reshape(x.shape)
+    if live is None:
+        return out
+    # the padding's rows, which the kernels left as they were: x, or 0
+    padding = Tensor.arange(int(tokens)).reshape(1, -1, 1) >= Tensor(live)
+    return padding.where(x if residual else 0.0, out)

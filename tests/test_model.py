@@ -198,10 +198,12 @@ def run_all(engine: Engine, starts: dict[int, tuple]) -> dict[int, list[int]]:
 
 
 @pytest.mark.usefixtures("reference_ops")
-def test_batched_matches_alone(tiny_model):
-    # sequences that join and leave a batch, 3 padded to 4 too, generate what each would alone:
-    # greedy or seeded, and with prompts as long as a chunk or shared in part
-    path, _ = tiny_model
+@pytest.mark.parametrize("arch", ["llama", "qwen3moe", "gemma4", "gpt-oss"])
+def test_batched_matches_alone(tiny, arch):
+    # sequences that join and leave a batch, 3 padded to 4 too, whose padding the mixtures of
+    # experts skip, generate what each would alone: greedy or seeded, and with prompts as long
+    # as a chunk or shared in part
+    path, _ = tiny(arch)
     engine = Engine(path, max_context=CONTEXT, prefill_chunk=8, slots=4)
     starts = {
         0: (PROMPT, 9),

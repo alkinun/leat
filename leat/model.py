@@ -216,17 +216,18 @@ class Transformer:
         hidden states."""
         return self.run(tokens, [Span(slot, start_pos, tokens.shape[1])])
 
-    def run(self, tokens: Tensor, spans: list[Span]) -> Tensor:
+    def run(self, tokens: Tensor, spans: list[Span], live: int | UOp | None = None) -> Tensor:
         """Runs `tokens` (1, T), the spans' in turn, each in its slot and at its positions, and
         returns normed hidden states. Several sequences share the reads of every weight; each
-        attends over its own slot alone."""
+        attends over its own slot alone. Tokens past the first `live`, if given, pad a batch:
+        the mixtures of experts skip them."""
         if len(spans) > 1 and not all(isinstance(s.length, int) for s in spans):
             raise ValueError("several spans need lengths known in advance")
         x = ops.embedding(tokens, self.embed)
         if (scale := self.config.embed_scale) != 1:
             x = x * scale
         for i in range(self.config.n_layers):
-            x = self._feed_forward(i, self._attention(i, x, spans))
+            x = self._feed_forward(i, self._attention(i, x, spans), live)
         return ops.rms_norm(x, self.output_norm, self.config.norm_eps)
 
     def logits(self, hidden: Tensor) -> Tensor:
@@ -270,7 +271,7 @@ class Transformer:
             residual, [(ops.linear(out, w["attn_output"]), s["post_attention_norm"])], None, eps
         )
 
-    def _feed_forward(self, i: int, x: Tensor) -> Tensor:
+    def _feed_forward(self, i: int, x: Tensor, live: int | UOp | None = None) -> Tensor:
         # x + the MLP block's output: an MLP, a mixture of experts, or as in Gemma 4 both, each
         # output normed and then their sum, and the layer's output scaled
         c, w, s = self.config, self.layers[i], self.small[i]
@@ -291,9 +292,11 @@ class Transformer:
             biases = (s["ffn_gate_exps.bias"], s["ffn_up_exps.bias"], s["ffn_down_exps.bias"])
         experts = (scores, gate, up, w["ffn_down_exps"], c.experts_used)
         if not mlp:
-            return ops.mixture(x, *experts, norm, c.glu, biases=biases)
+            return ops.mixture(x, *experts, norm, c.glu, biases=biases, live=live)
         scales = s["ffn_down_exps.scale"]
-        mixed = ops.mixture(x, *experts, (s["pre_ffw_norm_2"], eps), c.glu, scales, False)
+        mixed = ops.mixture(
+            x, *experts, (s["pre_ffw_norm_2"], eps), c.glu, scales, False, live=live
+        )
         shared = ops.feed_forward(x, *mlp, norm, c.glu, residual=False)
         parts = [(shared, s["post_ffw_norm_1"]), (mixed, s["post_ffw_norm_2"])]
         return ops.add_normed(x, parts, s["post_ffw_norm"], eps, scale)
