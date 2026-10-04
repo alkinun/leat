@@ -59,16 +59,19 @@ def assert_close(got: np.ndarray, expected: np.ndarray, tolerance: float) -> Non
 # ******** quantization ********
 
 
-# rows of 704 and 2112 values are not whole turns of the kernel's threads
+# rows of 704 and 2112 values are not whole turns of the kernel's threads; up to 16 rows spread
+# over blocks, more take one each
 @pytest.mark.parametrize("rows", [None, 5, UOp.variable("rows", 1, 8).bind(3)])
 @pytest.mark.parametrize("width", [4096, 704, 2112])
-def test_quantize_q8(rows, width):
+@pytest.mark.parametrize("count", [8, 24])
+def test_quantize_q8(rows, width, count):
     rng = np.random.default_rng(0)
-    x = (rng.standard_normal((8, width)) * rng.uniform(0.01, 10, (8, width))).astype(np.float32)
+    x = rng.standard_normal((count, width)) * rng.uniform(0.01, 10, (count, width))
+    x = x.astype(np.float32)
     x[:, 64:96] = 0  # an all-zero group must give d = 0, not nan
     q, d, s = nv.quantize_q8(Tensor(x), rows=rows)
     Tensor.realize(q, d, s)  # in one schedule, as in the model: each alone would lose rows
-    n = 8 if rows is None else rows if isinstance(rows, int) else rows.unbind()[1]
+    n = count if rows is None else rows if isinstance(rows, int) else rows.unbind()[1]
     groups = n * width // nv.GROUP
     outs = (q.numpy().view(np.int8)[: n * width], d.numpy()[:groups], s.numpy()[:groups])
     for got, want in zip(outs, quantize_q8(x[:n]), strict=True):

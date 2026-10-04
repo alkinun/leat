@@ -10,6 +10,7 @@ from tinygrad.uop.ops import AxisType, KernelInfo, Ops
 from leat.nv.common import GROUP, WARP, carry, lane_range, load_vector, warp_max, warp_sum
 
 WARPS = 8  # per block
+FEW = 16  # rows up to which a row's turns take blocks of their own
 
 
 def _quantize_group(
@@ -44,11 +45,11 @@ def _quantize_group(
 def _quantize_q8_kernel(
     q: UOp, d: UOp, s: UOp, x: UOp, *weight: UOp, rows: int | UOp, eps: float
 ) -> UOp:
-    # Each row takes a block, whose threads quantize 4 consecutive values at a time. A single row,
-    # the vector of a decode step, spreads over blocks instead, though each block then sums the
-    # squares of the whole row, from L2 after the first. Rows of whole groups but not whole turns
-    # leave the last turn's extra threads idle.
-    n, spread = int(x.shape[1]), isinstance(rows, int) and rows == 1
+    # Each row takes a block, whose threads quantize 4 consecutive values at a time. Up to FEW
+    # rows, as the vector of a decode step, spread over blocks instead, though each block then sums
+    # the squares of the whole row, from L2 after the first. Rows of whole groups but not whole
+    # turns leave the last turn's extra threads idle.
+    n, spread = int(x.shape[1]), int(x.shape[0]) <= FEW
     warps = math.gcd(WARPS, n // (4 * WARP))
     threads = warps * WARP
     turns, ragged = -(-n // (4 * threads)), n % (4 * threads) != 0
