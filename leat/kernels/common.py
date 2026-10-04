@@ -1,4 +1,9 @@
-"""What the NVIDIA kernels share: warp intrinsics, loads, conversions and bound variables."""
+"""What the kernels share: warp intrinsics, loads, conversions and bound variables.
+
+The intrinsics render as C for CUDA and for HIP alike, each choosing its own when compiled: the
+warp-level kernels run on NVIDIA GPUs and on AMD's RDNA GPUs, whose waves of 32 lanes are warps.
+The kernels on tensor cores, matmul's and FlashAttention's, are NVIDIA's alone.
+"""
 
 import functools
 import math
@@ -30,6 +35,28 @@ def on_nvidia(t: Tensor) -> bool:
     return isinstance(t.device, str) and t.device.split(":")[0] in ("NV", "CUDA")
 
 
+def on_gpu(t: Tensor) -> bool:
+    # an NVIDIA GPU, or an AMD one of waves of 32 that tinygrad renders C for: RDNA 3 and 4, as
+    # Strix Halo's
+    return isinstance(t.device, str) and (on_nvidia(t) or _rdna(t.device.split(":")[0]))
+
+
+@functools.cache
+def _rdna(device: str) -> bool:
+    if not device.endswith("AMD"):
+        return False
+    from tinygrad.renderer.cstyle import HIPRenderer
+
+    dev: Any = Device[device]
+    return isinstance(dev.renderer, HIPRenderer) and getattr(dev, "target", (0,))[0] in (11, 12)
+
+
+def either(cuda: str, amd: str) -> str:
+    # an expression of each backend's intrinsics: HIP's clang defines __AMDGCN__ for AMD GPUs.
+    # Directives need lines of their own, which the lambda's newlines give them.
+    return f"[&]{{{{\n#if defined(__AMDGCN__)\nreturn {amd};\n#else\nreturn {cuda};\n#endif\n}}}}()"
+
+
 @functools.cache
 def compute_units(device: str) -> int:
     # the GPU's SMs: those of the TPCs each GPC has enabled; the 3090's 82 where the backend
@@ -56,13 +83,45 @@ def lane_range() -> UOp:
 
 def dp4a(a: UOp, b: UOp, acc: UOp) -> UOp:
     # acc + dot product of the four signed bytes of a and b
-    return UOp(Ops.CUSTOMI, src=(a, b, acc), arg=("__dp4a({}, {}, {})", dtypes.int32))
+    code = either(
+        "__dp4a({0}, {1}, {2})", "__builtin_amdgcn_sudot4(true, {0}, true, {1}, {2}, false)"
+    )
+    return UOp(Ops.CUSTOMI, src=(a, b, acc), arg=(code, dtypes.int32))
+
+
+_C_TYPES = {dtypes.float32: "float", dtypes.int32: "int", dtypes.uint32: "unsigned int"}
 
 
 def shfl_xor(value: UOp, mask: int) -> UOp:
-    # a statement, not an inline expression: every lane of the warp must execute it
-    fmt = f"__shfl_xor_sync(0xffffffffu, {{0}}, {mask})"
-    return UOp(Ops.CUSTOM, src=(value,), arg=(fmt, value.dtype))
+    # lane i's value of lane i ^ mask; a statement, not an inline expression: every lane of the
+    # warp must execute it. AMD's ds_swizzle takes the lane as ((i & 31) | 0) ^ mask.
+    t, pattern = _C_TYPES[value.dtype], 0x1F | mask << 10
+    swizzled = f"__builtin_amdgcn_ds_swizzle(__builtin_bit_cast(int, {{0}}), {pattern})"
+    code = either(
+        f"__shfl_xor_sync(0xffffffffu, {{0}}, {mask})", f"__builtin_bit_cast({t}, {swizzled})"
+    )
+    return UOp(Ops.CUSTOM, src=(value,), arg=(code, value.dtype))
+
+
+def ballot(predicate: UOp) -> UOp:
+    # the lanes for which predicate holds, a bit each; a statement, as shfl_xor
+    code = either("__ballot_sync(0xffffffffu, {0})", "__builtin_amdgcn_ballot_w32({0})")
+    return UOp(Ops.CUSTOM, src=(predicate,), arg=(code, dtypes.uint32))
+
+
+def popcount(x: UOp) -> UOp:
+    code = either("__popc({0})", "__builtin_popcount({0})")
+    return UOp(Ops.CUSTOMI, src=(x,), arg=(code, dtypes.int32))
+
+
+def rounded(x: UOp, y: UOp) -> UOp:
+    # x / y rounded half away from zero, the division exact: tinygrad would multiply by a
+    # reciprocal
+    return UOp(
+        Ops.CUSTOMI,
+        src=(x, y),
+        arg=(either("roundf({0}/{1})", "__builtin_roundf({0}/{1})"), dtypes.float32),
+    )
 
 
 def warp_sum(value: UOp, lanes: int = WARP) -> UOp:
@@ -92,14 +151,18 @@ def word16(w: UOp, i: UOp) -> UOp:
 
 
 def byte_perm(a: UOp, b: UOp, selector: UOp | int) -> UOp:
-    # the bytes of (b, a) that the selector's nibbles pick, as CUDA's __byte_perm
+    # the bytes of (b, a) that the low 4 nibbles of the selector pick, as CUDA's __byte_perm; AMD's
+    # v_perm takes a byte per pick, from (its first, its second)
     srcs = tuple(x if isinstance(x, UOp) else UOp.const(x, dtypes.uint32) for x in (a, b, selector))
-    return UOp(Ops.CUSTOMI, src=srcs, arg=("__byte_perm({}, {}, {})", dtypes.uint32))
+    picks = "|".join(f"((({{2}}) >> {4 * i}) & 7) << {8 * i}" for i in range(4))
+    code = either("__byte_perm({0}, {1}, {2})", f"__builtin_amdgcn_perm({{1}}, {{0}}, {picks})")
+    return UOp(Ops.CUSTOMI, src=srcs, arg=(code, dtypes.uint32))
 
 
 def funnel(lo: UOp, hi: UOp, shift: UOp) -> UOp:
     # the 32 bits from bit `shift` on of (hi, lo), for shift < 32, as CUDA's __funnelshift_r
-    return UOp(Ops.CUSTOMI, src=(lo, hi, shift), arg=("__funnelshift_r({}, {}, {})", dtypes.uint32))
+    code = either("__funnelshift_r({0}, {1}, {2})", "__builtin_amdgcn_alignbit({1}, {0}, {2})")
+    return UOp(Ops.CUSTOMI, src=(lo, hi, shift), arg=(code, dtypes.uint32))
 
 
 def table16(q: UOp, table: tuple[int, int, int, int]) -> tuple[UOp, UOp]:

@@ -1,0 +1,30 @@
+"""Hand-written kernels, in tinygrad's UOp DSL, rendered as CUDA C or HIP C.
+
+The warp-level kernels, which carry decoding, run on NVIDIA GPUs (DEV=NV or CUDA) and on AMD's RDNA
+GPUs (DEV=AMD), as Strix Halo's; those on tensor cores, matmul's and FlashAttention's, on NVIDIA's
+alone. Each kernel family has a `supports_*` check and the op itself; leat.ops chooses between them
+and the reference ops.
+"""
+
+from leat.kernels.argmax import argmax, supports_argmax
+from leat.kernels.attention import (
+    attention,
+    flash_attention,
+    rotate,
+    supports_attention,
+    supports_flash_attention,
+    supports_rotate,
+)
+from leat.kernels.common import GROUP
+from leat.kernels.experts import mixture, route, scores, supports_mixture, supports_scores
+from leat.kernels.matmul import feed_forward, matmuls, supports_matmul
+from leat.kernels.matvec import matvecs, supports_matvec, swiglu
+from leat.kernels.norms import add_normed, supports_add_normed
+from leat.kernels.quantize import quantize_q8
+
+__all__ = [
+    "GROUP", "add_normed", "argmax", "attention", "feed_forward", "flash_attention", "matmuls",
+    "matvecs", "mixture", "quantize_q8", "rotate", "route", "scores", "supports_add_normed",
+    "supports_argmax", "supports_attention", "supports_flash_attention", "supports_matmul",
+    "supports_matvec", "supports_mixture", "supports_rotate", "supports_scores", "swiglu",
+]  # fmt: skip

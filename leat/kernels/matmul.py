@@ -22,7 +22,7 @@ from tinygrad import Tensor, UOp, dtypes
 from tinygrad.dtype import AddrSpace
 from tinygrad.uop.ops import AxisType, KernelInfo, Ops
 
-from leat.nv.common import (
+from leat.kernels.common import (
     GROUP,
     WARP,
     at_least,
@@ -41,8 +41,8 @@ from leat.nv.common import (
     storage_words,
     table16,
 )
-from leat.nv.matvec import FP4_TABLE
-from leat.nv.quantize import quantize_q8
+from leat.kernels.matvec import FP4_TABLE, IQ4_TABLE
+from leat.kernels.quantize import quantize_q8
 from leat.quant import GGMLType, QTensor
 
 TILE_TOKENS = 64
@@ -419,6 +419,82 @@ def _with_mins(
     ]
 
 
+class _Q40Tile(_Q80Tile):
+    """Q4_0 weights, unpacked to Q8_0's layout less 8: a block's 16 bytes hold values 0..15 in
+    their low nibbles and 16..31 in their high ones. IQ4_NL's, of the same layout, are indices into
+    IQ4_VALUES instead."""
+
+    words = 9
+
+    def fetch(self, stack: _Stack, step: UOp) -> list[UOp]:
+        # for each of the thread's (row, block j, word k) of the step, a word of the block's
+        # nibbles; then the d of its row's 4 blocks
+        words, base = [], step * 4 * self.words
+        for i in range(16):
+            item = i * self.rows + self.tid
+            row, j, k = item // 16, item % 16 // 4, item % 4
+            at = base + self.words * j + 1 + 2 * k
+            words.append(stack.word16(row, at, self.inside(step, j)))
+        return words + self.scales(stack, step)
+
+    def values(self, nibbles: UOp) -> list[UOp]:
+        # the word's values of its low nibbles, then of its high ones, as int8
+        return [minus((nibbles >> (4 * h)) & 0x0F0F0F0F, 8) for h in range(2)]
+
+    def put(self, bufs: list[UOp], step: UOp, words: list[UOp]) -> list[UOp]:
+        d = bufs[1]
+        stores = self.put_values(bufs[0], words[:16])
+        return stores + [d[j, self.tid].store(f16(word)) for j, word in enumerate(words[16:])]
+
+    def put_values(self, quants: UOp, words: list[UOp]) -> list[UOp]:
+        # the thread's words of nibbles as their values
+        stores = []
+        for i, word in enumerate(words):
+            item = i * self.rows + self.tid
+            row, j, k = item // 16, item % 16 // 4, item % 4
+            for h, value in enumerate(self.values(word)):  # values 4k.., then 16 + 4k..
+                at = _swizzle(row, 8 * j + 4 * h + k)
+                stores.append(quants[row, at].store(value.bitcast(dtypes.int32)))
+        return stores
+
+
+class _IQ4NLTile(_Q40Tile):
+    __doc__ = _Q40Tile.__doc__
+
+    def values(self, nibbles: UOp) -> list[UOp]:
+        return list(table16(nibbles, IQ4_TABLE))
+
+
+class _IQ4XSTile(_Q40Tile):
+    """IQ4_XS weights, half a block of 256 per step, unpacked to Q8_0's layout: each sub-block of
+    32 is IQ4_NL's nibbles, with a scale d * (s - 32) of 6 bits, from the block's 16 high bits of
+    scales and 4 bytes of low ones."""
+
+    max_rows, block = 256, 256
+
+    def fetch(self, stack: _Stack, step: UOp) -> list[UOp]:
+        # for each of the thread's (row, sub-block j, word k) of the step, a word of nibbles;
+        # then d and the scales of its row's block
+        words, block = [], step // 2 * 34
+        for i in range(16):
+            item = i * self.rows + self.tid
+            row, j, k = item // 16, item % 16 // 4, item % 4
+            words.append(stack.load(row, block + 2 + 4 * (4 * (step % 2) + j) + k))
+        return words + [stack.load(self.tid, block + i) for i in range(2)]
+
+    def values(self, nibbles: UOp) -> list[UOp]:
+        return list(table16(nibbles, IQ4_TABLE))
+
+    def put(self, bufs: list[UOp], step: UOp, words: list[UOp]) -> list[UOp]:
+        quants, d = bufs
+        stores, (head, lows) = self.put_values(quants, words[:16]), words[16:]
+        for j in range(4):  # the step's sub-blocks, 4 of the block's 8
+            sub = (4 * (step % 2) + j).cast(dtypes.uint32)
+            scale = ((lows >> (sub * 4)) & 15) | (((head >> (16 + 2 * sub)) & 3) << 4)
+            stores.append(d[j, self.tid].store(f16(head) * (scale.cast(dtypes.int32) - 32).float()))
+        return stores
+
+
 class _MXFP4Tile(_Q80Tile):
     """MXFP4 weights, unpacked to Q8_0's layout: a block's nibbles index FP4_VALUES, doubled
     E2M1 as int8, its exponent byte e makes a scale 2^(e - 128). Blocks are only byte aligned: a
@@ -457,6 +533,9 @@ _TILES: dict[GGMLType, type[_Q4KTile] | type[_Q6KTile] | type[_Q80Tile]] = {
     GGMLType.Q5_0: _Q50Tile,
     GGMLType.Q8_0: _Q80Tile,
     GGMLType.MXFP4: _MXFP4Tile,
+    GGMLType.Q4_0: _Q40Tile,
+    GGMLType.IQ4_NL: _IQ4NLTile,
+    GGMLType.IQ4_XS: _IQ4XSTile,
 }
 
 

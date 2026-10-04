@@ -10,7 +10,7 @@ from tinygrad import Tensor, UOp, dtypes
 from tinygrad.dtype import AddrSpace
 from tinygrad.uop.ops import AxisType, KernelInfo, Ops
 
-from leat.nv.common import (
+from leat.kernels.common import (
     LOG2E,
     SHARED,
     WARP,
@@ -18,6 +18,7 @@ from leat.nv.common import (
     carry,
     lane_range,
     load_vector,
+    on_gpu,
     on_nvidia,
     opaque,
     register,
@@ -184,7 +185,7 @@ def _per_block(group: int) -> int:
 
 def supports_attention(q: Tensor, cache: Tensor) -> bool:
     shape = (*cache.shape[2:], *q.shape[:3])
-    if not on_nvidia(q) or not all(isinstance(x, int) for x in shape):
+    if not on_gpu(q) or not all(isinstance(x, int) for x in shape):
         return False
     kv_heads, n, dim, batch, heads, tokens = (int(x) for x in shape)
     group = _per_block(heads // kv_heads)
@@ -555,7 +556,7 @@ def _rotate_kernel(
 def supports_rotate(q: Tensor, cache: Tensor) -> bool:
     # one token, and whole warps of pairs of dimensions
     one = isinstance(q.numel(), int) and q.numel() == q.shape[-2] * q.shape[-1]
-    return on_nvidia(q) and one and int(cache.shape[4]) % (2 * WARP) == 0
+    return on_gpu(q) and one and int(cache.shape[4]) % (2 * WARP) == 0
 
 
 def rotate(

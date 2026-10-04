@@ -7,7 +7,7 @@ from collections.abc import Callable
 from tinygrad import Tensor, UOp, dtypes
 from tinygrad.uop.ops import AxisType, KernelInfo
 
-from leat.nv.common import (
+from leat.kernels.common import (
     WARP,
     dp4a,
     e8m0_half,
@@ -17,7 +17,7 @@ from leat.nv.common import (
     glu,
     lane_range,
     minus,
-    on_nvidia,
+    on_gpu,
     register,
     storage_words,
     table16,
@@ -25,7 +25,7 @@ from leat.nv.common import (
     warp_sum,
     word16,
 )
-from leat.nv.quantize import quantize_q8
+from leat.kernels.quantize import quantize_q8
 from leat.quant import FP4_VALUES, IQ4_VALUES, GGMLType, QTensor
 
 Dot = Callable[[UOp, UOp, UOp | int], UOp]  # (row, unit, x) -> a unit's share of row . x
@@ -310,7 +310,7 @@ def _shared_x(dot: Dot) -> Callable[[UOp, UOp], UOp]:
 def supports_matvec(x: Tensor, w: QTensor) -> bool:
     # one token, and whole units of 64 weights
     one = isinstance(x.numel(), int) and x.numel() == x.shape[-1]
-    return on_nvidia(x) and one and w.type in DOTS and w.shape[1] % 64 == 0
+    return on_gpu(x) and one and w.type in DOTS and w.shape[1] % 64 == 0
 
 
 def matvecs(

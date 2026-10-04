@@ -8,7 +8,7 @@ import os
 
 from tinygrad import Tensor, UOp, dtypes
 
-from leat import nv
+from leat import kernels
 from leat.quant import NATIVE, QTensor
 
 
@@ -25,10 +25,10 @@ def linears(
 ) -> list[Tensor]:
     # x @ w.T for each w, after rms_norm(x, *norm) if given and plus a residual with one w;
     # kernels share one quantization of x
-    if _fast() and all(nv.supports_matvec(x, w) for w in ws):
-        return nv.matvecs(x, *ws, norm=norm, residual=residual)
-    if _fast() and all(nv.supports_matmul(x, w) for w in ws):
-        return nv.matmuls(x, *ws, norm=norm, residual=residual)
+    if _fast() and all(kernels.supports_matvec(x, w) for w in ws):
+        return kernels.matvecs(x, *ws, norm=norm, residual=residual)
+    if _fast() and all(kernels.supports_matmul(x, w) for w in ws):
+        return kernels.matmuls(x, *ws, norm=norm, residual=residual)
     if norm is not None:
         x = rms_norm(x, *norm)
     outs = [x @ w.dequant(x.dtype).T for w in ws]
@@ -43,10 +43,10 @@ def feed_forward(
     # residual. Kernels take gate and up together where they share a type and shape; one token
     # takes the matrix-vector kernels, though the matrix kernels would also accept it.
     paired = _fast() and gate.type == up.type and gate.shape == up.shape
-    if paired and nv.supports_matvec(x, gate):
-        hidden = nv.swiglu(x, gate, up, norm, kind)
-    elif paired and all(nv.supports_matmul(x, w) for w in (gate, up, down)):
-        return nv.feed_forward(x, gate, up, down, norm, kind, residual)
+    if paired and kernels.supports_matvec(x, gate):
+        hidden = kernels.swiglu(x, gate, up, norm, kind)
+    elif paired and all(kernels.supports_matmul(x, w) for w in (gate, up, down)):
+        return kernels.feed_forward(x, gate, up, down, norm, kind, residual)
     else:
         hidden = glu(kind, *linears(x, gate, up, norm=norm))
     return linear(hidden, down, residual=x if residual else None)
@@ -67,8 +67,8 @@ def add_normed(
 ) -> Tensor:  # fmt: skip
     # (x + the sum of rms_norm(part, its weight) over parts, normed again with `weight` if given)
     # times `scale` if given: how Gemma 4's blocks add their outputs to the residual
-    if _fast() and nv.supports_add_normed(x):
-        return nv.add_normed(x, parts, weight, eps, scale)
+    if _fast() and kernels.supports_add_normed(x):
+        return kernels.add_normed(x, parts, weight, eps, scale)
     total = sum((rms_norm(part, w, eps) for part, w in parts[1:]), rms_norm(*parts[0], eps))
     out = x + (total if weight is None else rms_norm(total, weight, eps))
     return out if scale is None else out * scale
@@ -77,8 +77,8 @@ def add_normed(
 def router(x: Tensor, norm: tuple[Tensor, float], w: QTensor, bias: Tensor | None = None) -> Tensor:
     # the scores a mixture of experts' router gives each expert: rms_norm(x, *norm) @ w.T, plus
     # the bias if given
-    if _fast() and nv.supports_scores(x, w):
-        scores = nv.scores(x, norm, w)
+    if _fast() and kernels.supports_scores(x, w):
+        scores = kernels.scores(x, norm, w)
     else:
         scores = linear(rms_norm(x, *norm), w)
     return scores if bias is None else scores + bias
@@ -95,8 +95,9 @@ def mixture(
     # stacked matrices (experts, rows, cols), with biases (experts, rows) of gate, up and down if
     # given; where up is None, gate stacks both, the gate's rows first in each. Only the chosen
     # experts are read.
-    if _fast() and nv.supports_mixture(x, gate, up, down):
-        return nv.mixture(x, scores, gate, up, down, used, norm, kind, scales, residual, biases)
+    if _fast() and kernels.supports_mixture(x, gate, up, down):
+        args = (used, norm, kind, scales, residual, biases)
+        return kernels.mixture(x, scores, gate, up, down, *args)
     top, experts = scores.topk(used)
     weights = top.softmax(-1) if scales is None else top.softmax(-1) * scales[experts]
     B, T, dim = x.shape
@@ -196,9 +197,9 @@ def rotate(
     # first R dimensions of q and k rotated by RoPE's tables (positions, R/2) from start_pos, for
     # rope ((cos, sin), R), if given; and k and v stored there in a slot of the cache. Returns q
     # (1, H, T, D) and the cache.
-    if _fast() and nv.supports_rotate(q, cache):
+    if _fast() and kernels.supports_rotate(q, cache):
         args = (rope, halves, biases, norms, v_norm, eps)
-        return nv.rotate(q, k, v, cache, slot, start_pos, *args)
+        return kernels.rotate(q, k, v, cache, slot, start_pos, *args)
     T = q.shape[1]
     if biases is not None:
         q, k, v = (t + b.reshape(t.shape[2:]) for t, b in zip((q, k, v), biases, strict=True))
@@ -224,12 +225,12 @@ def attention(
     # q.k * scale; with a sink per head, if given, a score that takes its share of the softmax and
     # adds no value, as gpt-oss's. Returns (1, T, H * D), the layout the output projection reads.
     B, H, T, D = q.shape
-    if _fast() and nv.supports_attention(q, cache):
+    if _fast() and kernels.supports_attention(q, cache):
         # one token: the heads already follow each other; a transpose here would cost a copy
-        out = nv.attention(q, cache, slot, start_pos + T, scale, window, sinks)
+        out = kernels.attention(q, cache, slot, start_pos + T, scale, window, sinks)
         return out.reshape(B, T, H * D)
-    if _fast() and nv.supports_flash_attention(q, cache):
-        return nv.flash_attention(q, cache, slot, start_pos, scale, window, sinks)
+    if _fast() and kernels.supports_flash_attention(q, cache):
+        return kernels.flash_attention(q, cache, slot, start_pos, scale, window, sinks)
     k, v = (cache[i, slot : slot + 1, :, : start_pos + T].cast(q.dtype) for i in (0, 1))
     mask = None
     if window or not (isinstance(T, int) and T == 1):
@@ -249,6 +250,6 @@ def attention(
 
 def argmax(x: Tensor) -> Tensor:
     # index of each row's largest value, the first on ties: (B, V) -> (B, 1) int32
-    if _fast() and nv.supports_argmax(x):
-        return nv.argmax(x)
+    if _fast() and kernels.supports_argmax(x):
+        return kernels.argmax(x)
     return x.argmax(-1, keepdim=True).cast(dtypes.int32)

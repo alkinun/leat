@@ -6,7 +6,7 @@ import math
 from tinygrad import Tensor, UOp, dtypes
 from tinygrad.uop.ops import AxisType, KernelInfo
 
-from leat.nv.common import WARP, lane_range, on_nvidia, shfl_xor
+from leat.kernels.common import WARP, lane_range, on_gpu, shfl_xor
 
 PARTS = 256  # warps per row in the first pass
 
@@ -57,7 +57,7 @@ def _argmax_final_kernel(out: UOp, values: UOp, indices: UOp) -> UOp:
 
 
 def supports_argmax(x: Tensor) -> bool:
-    return on_nvidia(x) and x.ndim == 2 and all(isinstance(d, int) for d in x.shape)
+    return on_gpu(x) and x.ndim == 2 and all(isinstance(d, int) for d in x.shape)
 
 
 def argmax(x: Tensor) -> Tensor:

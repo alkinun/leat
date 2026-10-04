@@ -8,7 +8,14 @@ import pytest
 # tinygrad would pick a GPU when it finds one: the default run stays on the CPU on any machine.
 # It reads DEV when imported, so this comes first.
 os.environ.setdefault("DEV", "CPU")
-GPU_BACKENDS = {"NV", "CUDA", "AMD"}
+GPU_BACKENDS = {"NV", "CUDA", "AMD", "MOCK+AMD"}
+if os.environ["DEV"].split(":")[0] == "MOCK+AMD":
+    # tinygrad's emulated RDNA 3 GPU, whose kernels the system's clang compiles: see tests/hip.py.
+    # Compiles run in this process, where the compiler is replaced, not in a pool of workers.
+    os.environ.setdefault("PARALLEL", "0")
+    from tests import hip
+
+    hip.install()
 
 
 @pytest.fixture(autouse=True)
@@ -25,7 +32,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     has_model = bool(os.environ.get("LEAT_MODEL"))
     for item in items:
         if "gpu" in item.keywords and not has_gpu:
-            item.add_marker(pytest.mark.skip(reason="needs DEV=NV, CUDA or AMD"))
+            item.add_marker(pytest.mark.skip(reason="needs DEV=NV, CUDA, AMD or MOCK+AMD"))
         if "model" in item.keywords and not has_model:
             item.add_marker(pytest.mark.skip(reason="needs LEAT_MODEL=path.gguf"))
 

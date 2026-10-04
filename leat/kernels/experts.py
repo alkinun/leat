@@ -9,24 +9,27 @@ from collections.abc import Callable
 
 from tinygrad import Tensor, UOp, dtypes
 from tinygrad.dtype import AddrSpace
-from tinygrad.uop.ops import AxisType, KernelInfo, Ops
+from tinygrad.uop.ops import AxisType, KernelInfo
 
-from leat.nv.argmax import argmax_step, warp_argmax
-from leat.nv.common import (
+from leat.kernels.argmax import argmax_step, warp_argmax
+from leat.kernels.common import (
     LOG2E,
     WARP,
+    ballot,
     carry,
     glu,
     lane_range,
     load_vector,
+    on_gpu,
     on_nvidia,
+    popcount,
     register,
     storage_words,
     warp_sum,
 )
-from leat.nv.matmul import matmul_fits, routed_products, tiled
-from leat.nv.matvec import DOTS, rows_kernel
-from leat.nv.quantize import quantize_q8
+from leat.kernels.matmul import matmul_fits, routed_products, tiled
+from leat.kernels.matvec import DOTS, rows_kernel
+from leat.kernels.quantize import quantize_q8
 from leat.quant import GGMLType, QTensor
 
 MATVEC_TOKENS = 8  # tokens up to which the matrix-vector kernels run a mixture
@@ -98,7 +101,7 @@ def _row(buf: UOp, start: UOp | int, at: UOp, n: int) -> tuple[UOp, ...]:
 
 
 def supports_scores(x: Tensor, router: QTensor) -> bool:
-    return on_nvidia(x) and router.type == GGMLType.F32 and router.shape[1] % 4 == 0
+    return on_gpu(x) and router.type == GGMLType.F32 and router.shape[1] % 4 == 0
 
 
 def scores(x: Tensor, norm: tuple[Tensor, float], router: QTensor) -> Tensor:
@@ -168,20 +171,16 @@ def _bucket_kernel(order: UOp, counts: UOp, ids: UOp, pairs: int | UOp) -> UOp:
     pair = turn * WARP + lane
     routed = ids[pair.minimum(int(ids.shape[0]) - 1)].load().eq(expert.cast(dtypes.int32))
     mine = routed & (pair < pairs)
-    ballot = UOp(Ops.CUSTOM, src=(mine,), arg=("__ballot_sync(0xffffffffu, {0})", dtypes.uint32))
+    votes = ballot(mine)
     below = (UOp.const(1, dtypes.uint32) << lane.cast(dtypes.uint32)) - 1
     listed = UOp.alloc((1,), dtypes.int32, addrspace=AddrSpace.REG)
     listed = listed.after(listed[0].store(0))
     before = listed.after(turn)[0].load()
-    place = before + _popc(ballot & below)
+    place = before + popcount(votes & below)
     put = order[(expert * per + place).valid(mine)].store(pair.cast(dtypes.int32))
-    listed = listed.after(UOp.group(put, listed[0].store(before + _popc(ballot))).end(turn))
+    listed = listed.after(UOp.group(put, listed[0].store(before + popcount(votes))).end(turn))
     store = counts[expert.valid(lane.eq(0))].store(listed[0].load())
     return store.end(expert, lane).sink(arg=KernelInfo(name="bucket", opts_to_apply=()))
-
-
-def _popc(x: UOp) -> UOp:
-    return UOp(Ops.CUSTOMI, src=(x,), arg=("__popc({0})", dtypes.int32))
 
 
 def _bucket(ids: Tensor, experts: int, per: int, pairs: int | UOp) -> tuple[Tensor, Tensor]:
@@ -264,7 +263,7 @@ def supports_mixture(x: Tensor, gate: QTensor, up: QTensor | None, down: QTensor
     shapes = experts % WARP == 0 and rows % 64 == 0 and cols % 64 == 0
     single = all(isinstance(b, int) and b == 1 for b in x.shape[:-2])
     types = gate.type in DOTS and down.type in DOTS and down.shape == (experts, cols, rows)
-    return on_nvidia(x) and single and same and shapes and types
+    return on_gpu(x) and single and same and shapes and types
 
 
 def mixture(
@@ -283,7 +282,7 @@ def mixture(
     # few tokens, or matrices the tensor-core kernels do not fit, take the matrix-vector kernels
     few = isinstance(tokens, int) and tokens <= MATVEC_TOKENS
     _, cols, rows = down.shape  # (experts, dim, hidden)
-    fit = matmul_fits(gate.type, rows, cols) and matmul_fits(down.type, cols, rows)
+    fit = on_nvidia(x) and matmul_fits(gate.type, rows, cols) and matmul_fits(down.type, cols, rows)
     flat = None if biases is None else tuple(b.float().flatten().contiguous() for b in biases)
     if few or not fit:
         args = (used, norm, kind, scales, residual, flat)

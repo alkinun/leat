@@ -7,7 +7,16 @@ from tinygrad import Tensor, UOp, dtypes
 from tinygrad.dtype import AddrSpace
 from tinygrad.uop.ops import AxisType, KernelInfo, Ops
 
-from leat.nv.common import GROUP, WARP, carry, lane_range, load_vector, warp_max, warp_sum
+from leat.kernels.common import (
+    GROUP,
+    WARP,
+    carry,
+    lane_range,
+    load_vector,
+    rounded,
+    warp_max,
+    warp_sum,
+)
 
 WARPS = 8  # per block
 SPREAD_ROWS = 16  # rows up to which a row's turns take blocks of their own
@@ -24,8 +33,7 @@ def _quantize_group(
     scale = UOp(Ops.CUSTOMI, src=(amax,), arg=("({}/127.0f)", dtypes.float32))
     quants = []
     for v in values:
-        rounded = UOp(Ops.CUSTOMI, src=(v, scale), arg=("roundf({}/{})", dtypes.float32))
-        quants.append((scale > 0).where(rounded, 0.0).cast(dtypes.int32))
+        quants.append((scale > 0).where(rounded(v, scale), 0.0).cast(dtypes.int32))
     word = functools.reduce(
         UOp.__or__, ((x & 0xFF).cast(dtypes.uint32) << (8 * i) for i, x in enumerate(quants))
     )

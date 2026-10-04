@@ -8,7 +8,7 @@ from tinygrad import Tensor, UOp, dtypes
 from tinygrad.dtype import AddrSpace
 from tinygrad.uop.ops import AxisType, KernelInfo
 
-from leat.nv.common import WARP, carry, lane_range, on_nvidia, warp_sum
+from leat.kernels.common import WARP, carry, lane_range, on_gpu, warp_sum
 
 WARPS = 8  # per block, at most
 
@@ -53,7 +53,7 @@ def _add_normed_kernel(
 
 def supports_add_normed(x: Tensor) -> bool:
     single = all(isinstance(b, int) and b == 1 for b in x.shape[:-2])
-    return on_nvidia(x) and single and int(x.shape[-1]) % WARP == 0
+    return on_gpu(x) and single and int(x.shape[-1]) % WARP == 0
 
 
 def add_normed(
