@@ -148,10 +148,10 @@ def test_warm_up(tiny_model):
     # compiles every graph, the copy's and every batch's too, and leaves nothing cached that a
     # generation could see
     path, _ = tiny_model
-    engine = Engine(path, max_context=CONTEXT, prefill_chunk=FEW_TOKENS + 4, slots=3)
+    engine = Engine(path, max_context=CONTEXT, prefill_chunk=FEW_TOKENS + 4, slots=5)
     engine.warm_up()
     graphs = engine._chunk, engine._few_chunk, *engine._decode.values(), engine._copy
-    assert list(engine._decode) == [1, 2, 3]
+    assert list(engine._decode) == [1, 2, 4, 5]
     captured = [jit.captured for jit in graphs]
     assert all(captured) and engine.cached_prefix(PROMPT) == 0
     assert list(engine.generate(PROMPT, 6)) == generated(path, PROMPT, 6)
@@ -199,10 +199,10 @@ def run_all(engine: Engine, starts: dict[int, tuple]) -> dict[int, list[int]]:
 
 @pytest.mark.usefixtures("reference_ops")
 def test_batched_matches_alone(tiny_model):
-    # sequences that join and leave a batch, of 3 in a graph of 4 too, generate what each would
-    # alone: greedy or seeded, and with prompts as long as a chunk or shared in part
+    # sequences that join and leave a batch, 3 padded to 4 too, generate what each would alone:
+    # greedy or seeded, and with prompts as long as a chunk or shared in part
     path, _ = tiny_model
-    engine = Engine(path, max_context=CONTEXT, prefill_chunk=8, slots=3)
+    engine = Engine(path, max_context=CONTEXT, prefill_chunk=8, slots=4)
     starts = {
         0: (PROMPT, 9),
         1: (PROMPT[:9] + [1, 2], 6, 1.0, 5),

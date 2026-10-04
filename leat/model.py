@@ -7,6 +7,7 @@ from typing import Any
 from tinygrad import Tensor, UOp, dtypes
 
 from leat import ops
+from leat.ops import Span
 from leat.quant import BLOCK, NATIVE, QTensor
 
 CACHE_TILE = 256  # positions
@@ -152,15 +153,6 @@ def _yarn_mscale(scale: float, multiplier: float) -> float:
     return 1.0 if scale <= 1 else 0.1 * multiplier * math.log(scale) + 1
 
 
-@dataclass(frozen=True)
-class Span:
-    """`length` consecutive tokens of one sequence, from position `start` of cache slot `slot`."""
-
-    slot: int | UOp
-    start: int | UOp
-    length: int | UOp = 1
-
-
 class Transformer:
     """Weights, RoPE tables and a KV cache of `slots` sequences of up to `max_context` tokens.
 
@@ -267,16 +259,9 @@ class Transformer:
         norms = (s["attn_q_norm"], s["attn_k_norm"]) if "attn_q_norm" in s else None
         table = self.rope[i]
         rope = None if table is None else (table, c.ropes[i].dims)
-        cache, outs, at, sinks = self.cache[i], [], 0, s.get("attn_sinks")
-        for span in spans:  # each its own tokens: a single span, every token
-            n = int(span.length) if len(spans) > 1 else 0
-            q_s, k_s, v_s = (q, k, v) if not n else (t[:, at : at + n] for t in (q, k, v))
-            q_s, cache = ops.rotate(q_s, k_s, v_s, cache, span.slot, span.start, rope,
-                                    c.rope_halves, biases, norms, c.v_norm, eps)  # fmt: skip
-            outs.append(ops.attention(q_s, cache, span.slot, span.start, c.scales[i],
-                                      c.windows[i], sinks))  # fmt: skip
-            at += n
-        out = outs[0] if len(outs) == 1 else outs[0].cat(*outs[1:], dim=1)
+        q, cache = ops.rotate(q, k, v, self.cache[i], spans, rope, c.rope_halves, biases, norms,
+                              c.v_norm, eps)  # fmt: skip
+        out = ops.attention(q, cache, spans, c.scales[i], c.windows[i], s.get("attn_sinks"))
         # gpt-oss's output bias joins the residual
         residual = x + s["attn_output.bias"] if "attn_output.bias" in s else x
         if "post_attention_norm" not in s:

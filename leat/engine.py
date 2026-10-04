@@ -10,7 +10,8 @@ from pathlib import Path
 from tinygrad import Tensor, TinyJit, UOp, dtypes
 
 from leat.gguf import GGUF
-from leat.model import Config, Span, Transformer
+from leat.model import Config, Transformer
+from leat.ops import Span
 from leat.sampler import sample
 from leat.tokenizer import Tokenizer
 
@@ -68,21 +69,29 @@ class Engine:
     ):
         if slots < 1:
             raise ValueError(f"slots must be at least 1, got {slots}")
+        # decode steps of powers of 2 sequences, and of `slots`: others are padded with rows in
+        # a spare slot, at its first position, which write where no sequence reads and attend
+        # over a single key
+        self._batches = sorted(
+            {1 << i for i in range(slots.bit_length()) if 1 << i < slots} | {slots}
+        )
+        padded = any(n not in self._batches for n in range(1, slots))
+        self._spare = slots  # the cache's slot past the others, if a batch may be padded
         self.gguf = gguf = GGUF.open(path)
         self.tokenizer = Tokenizer(gguf.metadata)
         self.config = Config.from_gguf(gguf.metadata)
-        self.model = Transformer(self.config, gguf.load(), max_context, slots)
+        cache_slots = slots + padded
+        self.model = Transformer(self.config, gguf.load(), max_context, cache_slots)
         self.max_context, self.prefill_chunk, self.slots = max_context, prefill_chunk, slots
         self._len = UOp.variable("chunk_len", 1, prefill_chunk)
         self._few = UOp.variable("few_len", 1, min(FEW_TOKENS, prefill_chunk))
-        # the slot and position of each sequence of a decode step, the first a chunk's too
-        self._slot_vars = [UOp.variable(f"slot{i}", 0, slots - 1) for i in range(slots)]
-        self._pos_vars = [UOp.variable(f"pos{i}", 0, max_context - 1) for i in range(slots)]
+        # the slot and position of each row of a decode step, the first a chunk's too
+        rows = range(slots)
+        self._slot_vars = [UOp.variable(f"slot{i}", 0, cache_slots - 1) for i in rows]
+        self._pos_vars = [UOp.variable(f"pos{i}", 0, max_context - 1) for i in rows]
         self._source = UOp.variable("source", 0, slots - 1)
-        # a graph for each number of sequences a decode step may run, rather than padding fewer:
-        # a sequence's attention reads all its keys and values, a repeated one's too
         self._chunk, self._few_chunk = _graph(self._step), _graph(self._step)
-        self._decode = {n: _graph(self._step) for n in range(1, slots + 1)}
+        self._decode = {n: _graph(self._step) for n in self._batches}
         self._copy = _graph(self.model.copy)
         self._batch: _Batch | None = None  # the last decode step's
         self._cached: list[list[int]] = [[] for _ in range(slots)]  # tokens each slot holds
@@ -167,7 +176,7 @@ class Engine:
             self.reset()
             for _ in self.generate(prompt, n, ignore_eog=True):
                 pass
-        for n in range(2, self.slots + 1):  # decode steps of several, each in a slot of its own
+        for n in self._batches[1:]:  # decode steps of several, each in a slot of its own
             sampling = Tensor([0.0] * n), Tensor([0] * n, dtype=dtypes.uint32)
             rows = [v.bind(i) for i in range(n) for v in (self._slot_vars[i], self._pos_vars[i])]
             self._decode[n](_ids([0] * n, n), *sampling, *rows)
@@ -224,24 +233,30 @@ class Engine:
         return int(token.item()) if len(cached) == len(sequence.prompt) else None
 
     def _decode_step(self, sequences: list[Sequence]) -> list[int]:
-        # runs each sequence's last token. The same sequences as the last step's take that step's
-        # output as their tokens, and its temperatures and seeds: nothing to upload.
-        n, last = len(sequences), self._batch
+        # runs each sequence's last token, padded to a batch's size with rows in the spare slot.
+        # The same sequences as the last step's take that step's output as their tokens, and its
+        # temperatures and seeds: nothing to upload.
+        k, last = len(sequences), self._batch
+        n = next(b for b in self._batches if b >= k)
         if last is not None and last.sequences == sequences:
             tokens, sampling = last.tokens, last.sampling
         else:
-            tokens = _ids([s.tokens[-1] for s in sequences], n)
-            temperature = Tensor([s.temperature for s in sequences], dtype=dtypes.float32)
-            sampling = temperature, Tensor([s.seed for s in sequences], dtype=dtypes.uint32)
+            pad = [0] * (n - k)
+            tokens = _ids([s.tokens[-1] for s in sequences] + pad, n)
+            temperature = Tensor([s.temperature for s in sequences] + pad, dtype=dtypes.float32)
+            seed = Tensor([s.seed for s in sequences] + pad, dtype=dtypes.uint32)
+            sampling = temperature, seed
+        rows = [(s.slot, len(self._cached[s.slot])) for s in sequences] + [(self._spare, 0)] * (
+            n - k
+        )
         bound = []
-        for i, s in enumerate(sequences):
-            held = len(self._cached[s.slot])
-            bound += [self._slot_vars[i].bind(s.slot), self._pos_vars[i].bind(held)]
+        for i, (slot, pos) in enumerate(rows):
+            bound += [self._slot_vars[i].bind(slot), self._pos_vars[i].bind(pos)]
         out = self._decode[n](tokens, *sampling, *bound)
         self._batch = _Batch(list(sequences), out.reshape(1, n), sampling)
         for s in sequences:
             self._cached[s.slot].append(s.tokens[-1])
-        return out.numpy().ravel().tolist()
+        return out.numpy().ravel()[:k].tolist()
 
     def _check(self, sequence: Sequence) -> None:
         # ends a sequence at end of generation, at max_tokens, or with the cache full

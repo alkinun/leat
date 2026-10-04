@@ -434,13 +434,13 @@ def slot(symbolic: bool) -> int | UOp:
 
 def reference_attention(
     q: np.ndarray, cache: np.ndarray, start: int, window: int = 0, scale: float | None = None,
-    sinks: np.ndarray | None = None,
+    sinks: np.ndarray | None = None, slot: int = SLOT,
 ) -> np.ndarray:  # fmt: skip
-    # q (heads, T, dim) at positions start.. against slot SLOT, causally and within the window if
+    # q (heads, T, dim) at positions start.. against a slot, causally and within the window if
     # given, with a sink per head if given, in f64: (T, heads, dim)
     heads, tokens, dim = q.shape
     group = heads // cache.shape[2]
-    k, v = (cache[i, SLOT, :, : start + tokens].astype(np.float64) for i in range(2))
+    k, v = (cache[i, slot, :, : start + tokens].astype(np.float64) for i in range(2))
     back = start + np.arange(tokens)[:, None] - np.arange(start + tokens)
     hidden = (back < 0) | (back >= window) if window else back < 0
     out = np.empty((tokens, heads, dim))
@@ -469,7 +469,8 @@ def test_attention(n, length, symbolic):
     valid = UOp.variable("start_pos", 0, n - 1).bind(length - 1) + 1 if symbolic else length
     q_t, cache_t = Tensor(q).realize(), Tensor(cache).realize()  # the model's cache is a buffer
     assert kernels.supports_attention(q_t, cache_t)
-    got = kernels.attention(q_t, cache_t, slot(symbolic), valid, 128**-0.5).numpy()[0, :, 0]
+    got = kernels.attention(q_t, cache_t, [slot(symbolic)], [valid], 128**-0.5).numpy()
+    got = got.reshape(-1, 128)
     expected = reference_attention(q[0], cache, length - 1)[0]
     np.testing.assert_allclose(got, expected, rtol=2e-3, atol=2e-3)
 
@@ -485,9 +486,36 @@ def test_attention_groups(heads, kv_heads, length, symbolic):
     valid = UOp.variable("start_pos", 0, 1023).bind(length - 1) + 1 if symbolic else length
     q_t, cache_t = Tensor(q).realize(), Tensor(cache).realize()
     assert kernels.supports_attention(q_t, cache_t)
-    got = kernels.attention(q_t, cache_t, slot(symbolic), valid, 128**-0.5).numpy()[0, :, 0]
+    got = kernels.attention(q_t, cache_t, [slot(symbolic)], [valid], 128**-0.5).numpy()
+    got = got.reshape(-1, 128)
     expected = reference_attention(q[0], cache, length - 1)[0]
     np.testing.assert_allclose(got, expected, rtol=2e-3, atol=2e-3)
+
+
+# rows of a decode step: each a token in a slot of its own, or two in one, at lengths that take
+# from one chunk to more chunks than blocks, Gemma 4's window and sinks too
+@pytest.mark.parametrize("window, sinks", [(0, False), (1024, True)])
+@pytest.mark.parametrize("symbolic", [False, True])
+def test_attention_rows(window, sinks, symbolic):
+    rows = [(0, 1), (2, 70), (1, 4000), (2, 3000)]
+    rng = np.random.default_rng(len(rows) + window)
+    cache = rng.standard_normal((2, SLOTS, 8, 4096, 128)).astype(np.float16)
+    q = rng.standard_normal((1, 32, len(rows), 128)).astype(np.float32) * 0.3
+    sink = rng.standard_normal(32).astype(np.float32) if sinks else None
+    slots: list[int | UOp] = [s for s, _ in rows]
+    lengths: list[int | UOp] = [n for _, n in rows]
+    if symbolic:
+        slots = [UOp.variable(f"slot{i}", 0, SLOTS - 1).bind(s) for i, (s, _) in enumerate(rows)]
+        lengths = [
+            UOp.variable(f"pos{i}", 0, 4095).bind(n - 1) + 1 for i, (_, n) in enumerate(rows)
+        ]
+    q_t, cache_t = Tensor(q).realize(), Tensor(cache).realize()
+    assert kernels.supports_attention(q_t, cache_t)
+    sink_t = None if sink is None else Tensor(sink)
+    got = kernels.attention(q_t, cache_t, slots, lengths, 0.1, window, sink_t).numpy()[0]
+    for t, (s, n) in enumerate(rows):
+        expected = reference_attention(q[0, :, t : t + 1], cache, n - 1, window, 0.1, sink, s)
+        np.testing.assert_allclose(got[t], expected.reshape(-1), rtol=2e-3, atol=2e-3)
 
 
 def chunk_len(tokens: int) -> UOp:
@@ -533,7 +561,8 @@ def test_attention_window(kv_heads, dim, window, n, length, symbolic):
     valid = UOp.variable("start_pos", 0, n - 1).bind(length - 1) + 1 if symbolic else length
     q_t, cache_t = Tensor(q).realize(), Tensor(cache).realize()
     assert kernels.supports_attention(q_t, cache_t)
-    got = kernels.attention(q_t, cache_t, slot(symbolic), valid, 1.0, window).numpy()[0, :, 0]
+    got = kernels.attention(q_t, cache_t, [slot(symbolic)], [valid], 1.0, window).numpy()
+    got = got.reshape(-1, dim)
     expected = reference_attention(q[0], cache, length - 1, window, 1.0)[0]
     np.testing.assert_allclose(got, expected, rtol=2e-3, atol=2e-3)
 
@@ -601,9 +630,8 @@ def test_rotate(monkeypatch, halves, biased, normed, v_norm, kv_heads, symbolic,
         monkeypatch.setenv("LEAT_KERNELS", mode)
         cache = Tensor.zeros(2, SLOTS, kv_heads, 512, dim, dtype=dtypes.half).contiguous().realize()
         assert kernels.supports_rotate(q, cache)
-        out, cache = ops.rotate(
-            q, k, v, cache, slot(symbolic), start, rope, halves, biases, norms, v_norm, 1e-6
-        )
+        spans = [ops.Span(slot(symbolic), start)]
+        out, cache = ops.rotate(q, k, v, cache, spans, rope, halves, biases, norms, v_norm, 1e-6)
         Tensor.realize(out, cache)  # in one schedule, as in the model: alone, either loses vars
         results.append((out.numpy(), cache.numpy()))
     np.testing.assert_allclose(results[0][0], results[1][0], rtol=1e-5, atol=1e-5)
@@ -611,6 +639,38 @@ def test_rotate(monkeypatch, halves, biased, normed, v_norm, kv_heads, symbolic,
         results[0][1].astype(np.float32), results[1][1], rtol=1e-3, atol=1e-3
     )
     assert np.abs(results[0][1][:, SLOT, :, pos]).sum() > 0
+
+
+@pytest.mark.parametrize("symbolic", [False, True])
+def test_rotate_rows(monkeypatch, symbolic):
+    # tokens of a decode step, each at a position of a slot of its own or two in one slot, with
+    # Qwen2's halves and biases: the kernel as the reference ops, span by span
+    rng = np.random.default_rng(19)
+    rows, dim, kv_heads = [(0, 7), (2, 300), (1, 511), (2, 3)], 128, 8
+    q, k, v = (
+        Tensor(rng.standard_normal((1, len(rows), h, dim)).astype(np.float32)).realize()
+        for h in (32, kv_heads, kv_heads)
+    )
+    angles = rng.uniform(0, 6, (512, dim // 2)).astype(np.float32)
+    rope = ((Tensor(np.cos(angles)).realize(), Tensor(np.sin(angles)).realize()), dim)
+    biases = tuple(Tensor(rng.standard_normal(h * dim).astype(np.float32)) for h in (32, 8, 8))
+    spans = [ops.Span(s, p) for s, p in rows]
+    if symbolic:
+        spans = [
+            ops.Span(UOp.variable(f"slot{i}", 0, SLOTS - 1).bind(s),
+                     UOp.variable(f"pos{i}", 0, 511).bind(p))
+            for i, (s, p) in enumerate(rows)
+        ]  # fmt: skip
+    results = []
+    for mode in ("auto", "ref"):
+        monkeypatch.setenv("LEAT_KERNELS", mode)
+        cache = Tensor.zeros(2, SLOTS, kv_heads, 512, dim, dtype=dtypes.half).contiguous().realize()
+        out, cache = ops.rotate(q, k, v, cache, spans, rope, True, biases, None, False, 1e-6)
+        Tensor.realize(out, cache)
+        results.append((out.numpy(), cache.numpy().astype(np.float32)))
+    np.testing.assert_allclose(results[0][0], results[1][0], rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(results[0][1], results[1][1], rtol=1e-3, atol=1e-3)
+    assert all(np.abs(results[0][1][:, s, :, p]).sum() > 0 for s, p in rows)
 
 
 # heads too wide for registers, Gemma 4's of 512: blocks take parts of their outputs
@@ -663,7 +723,7 @@ def test_attention_sinks(tokens, start, window):
         pytest.skip("FlashAttention is on NVIDIA's tensor cores")
     if tokens == 1:
         assert kernels.supports_attention(q_t, cache_t)
-        got = kernels.attention(q_t, cache_t, SLOT, start + 1, 0.125, window, sinks_t)
+        got = kernels.attention(q_t, cache_t, [SLOT], [start + 1], 0.125, window, sinks_t)
     else:
         assert kernels.supports_flash_attention(q_t, cache_t)
         got = kernels.flash_attention(q_t, cache_t, SLOT, start, 0.125, window, sinks_t)

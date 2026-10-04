@@ -5,6 +5,7 @@ Ops dispatch to hand-written kernels where one applies; LEAT_KERNELS=ref turns t
 
 import math
 import os
+from dataclasses import dataclass
 
 from tinygrad import Tensor, UOp, dtypes
 
@@ -186,21 +187,50 @@ def _rope(x: Tensor, cos: Tensor, sin: Tensor, halves: bool) -> Tensor:
     return out if rest.shape[-1] == 0 else out.cat(rest, dim=-1)
 
 
+@dataclass(frozen=True)
+class Span:
+    """`length` consecutive tokens of one sequence, from position `start` of cache slot `slot`."""
+
+    slot: int | UOp
+    start: int | UOp
+    length: int | UOp = 1
+
+
 def rotate(
-    q: Tensor, k: Tensor, v: Tensor, cache: Tensor, slot: int | UOp, start_pos: int | UOp,
+    q: Tensor, k: Tensor, v: Tensor, cache: Tensor, spans: list[Span],
     rope: tuple[tuple[Tensor, Tensor], int] | None, halves: bool,
     biases: tuple[Tensor, Tensor, Tensor] | None, norms: tuple[Tensor, Tensor] | None,
     v_norm: bool, eps: float,
 ) -> tuple[Tensor, Tensor]:  # fmt: skip
-    # q (1, T, H, D), k and v (1, T, KV_H, D): plus their biases (H * D or KV_H * D), if given;
-    # each head of q and k normed with its weight, if given, and of v without, if v_norm; the
-    # first R dimensions of q and k rotated by RoPE's tables (positions, R/2) from start_pos, for
-    # rope ((cos, sin), R), if given; and k and v stored there in a slot of the cache. Returns q
-    # (1, H, T, D) and the cache.
-    if _fast() and kernels.supports_rotate(q, cache):
-        args = (rope, halves, biases, norms, v_norm, eps)
-        return kernels.rotate(q, k, v, cache, slot, start_pos, *args)
-    T = q.shape[1]
+    # q (1, T, H, D), k and v (1, T, KV_H, D), the spans' tokens in turn: plus their biases (H * D
+    # or KV_H * D), if given; each head of q and k normed with its weight, if given, and of v
+    # without, if v_norm; the first R dimensions of q and k rotated by RoPE's tables (positions,
+    # R/2) at their positions, for rope ((cos, sin), R), if given; and k and v stored there in
+    # their slots of the cache. Returns q (1, H, T, D) and the cache.
+    args = (rope, halves, biases, norms, v_norm, eps)
+    if _fast() and kernels.supports_rotate(q, cache) and (rows := _rows(spans)) is not None:
+        slots, positions = rows
+        return kernels.rotate(q, k, v, cache, slots, positions, *args)
+    if len(spans) == 1:
+        return _rotate(q, k, v, cache, spans[0], *args)
+    outs, at = [], 0
+    for span in spans:
+        n = int(span.length)
+        part, cache = _rotate(q[:, at : at + n], k[:, at : at + n], v[:, at : at + n], cache,
+                              span, *args)  # fmt: skip
+        outs.append(part)
+        at += n
+    return outs[0].cat(*outs[1:], dim=2), cache
+
+
+def _rotate(
+    q: Tensor, k: Tensor, v: Tensor, cache: Tensor, span: Span,
+    rope: tuple[tuple[Tensor, Tensor], int] | None, halves: bool,
+    biases: tuple[Tensor, Tensor, Tensor] | None, norms: tuple[Tensor, Tensor] | None,
+    v_norm: bool, eps: float,
+) -> tuple[Tensor, Tensor]:  # fmt: skip
+    # rotate() for one span
+    T, slot, start_pos = q.shape[1], span.slot, span.start
     if biases is not None:
         q, k, v = (t + b.reshape(t.shape[2:]) for t, b in zip((q, k, v), biases, strict=True))
     if norms is not None:
@@ -216,21 +246,55 @@ def rotate(
     return q, cache
 
 
+Rows = list[int | UOp] | int | UOp  # one per span, or one for a single span's tokens
+
+
+def _rows(spans: list[Span]) -> tuple[Rows, Rows] | None:
+    # the slots and positions of spans of a token each, or the slot and start of a single span,
+    # as the kernels take them; None for several spans of several tokens
+    if len(spans) == 1:
+        return spans[0].slot, spans[0].start
+    if _tokens(spans):
+        return [s.slot for s in spans], [s.start for s in spans]
+    return None
+
+
+def _tokens(spans: list[Span]) -> bool:
+    # whether every span is a single token
+    return all(isinstance(s.length, int) and s.length == 1 for s in spans)
+
+
 def attention(
-    q: Tensor, cache: Tensor, slot: int | UOp, start_pos: int | UOp, scale: float, window: int = 0,
+    q: Tensor, cache: Tensor, spans: list[Span], scale: float, window: int = 0,
     sinks: Tensor | None = None,
 ) -> Tensor:  # fmt: skip
-    # q: (1, H, T, D) at positions start_pos.. ; cache: (2, slots, KV_H, positions, D), causal
-    # over the slot's positions, and over only the last `window` of them if given, with scores
-    # q.k * scale; with a sink per head, if given, a score that takes its share of the softmax and
-    # adds no value, as gpt-oss's. Returns (1, T, H * D), the layout the output projection reads.
+    # q: (1, H, T, D), the spans' tokens in turn; cache: (2, slots, KV_H, positions, D). Each
+    # token attends causally over its span's slot, and over only the last `window` positions if
+    # given, with scores q.k * scale; with a sink per head, if given, a score that takes its
+    # share of the softmax and adds no value, as gpt-oss's. Returns (1, T, H * D), the layout the
+    # output projection reads.
+    if _fast() and _tokens(spans) and kernels.supports_attention(q, cache):  # a token per span
+        slots, lengths = [s.slot for s in spans], [s.start + 1 for s in spans]
+        return kernels.attention(q, cache, slots, lengths, scale, window, sinks)
+    if len(spans) == 1:
+        span = spans[0]
+        if _fast() and kernels.supports_flash_attention(q, cache):
+            return kernels.flash_attention(q, cache, span.slot, span.start, scale, window, sinks)
+        return _attention(q, cache, span, scale, window, sinks)
+    outs, at = [], 0
+    for span in spans:
+        n = int(span.length)
+        outs.append(_attention(q[:, :, at : at + n], cache, span, scale, window, sinks))
+        at += n
+    return outs[0].cat(*outs[1:], dim=1)
+
+
+def _attention(
+    q: Tensor, cache: Tensor, span: Span, scale: float, window: int, sinks: Tensor | None
+) -> Tensor:
+    # attention() for one span, in plain ops
     B, H, T, D = q.shape
-    if _fast() and kernels.supports_attention(q, cache):
-        # one token: the heads already follow each other; a transpose here would cost a copy
-        out = kernels.attention(q, cache, slot, start_pos + T, scale, window, sinks)
-        return out.reshape(B, T, H * D)
-    if _fast() and kernels.supports_flash_attention(q, cache):
-        return kernels.flash_attention(q, cache, slot, start_pos, scale, window, sinks)
+    slot, start_pos = span.slot, span.start
     k, v = (cache[i, slot : slot + 1, :, : start_pos + T].cast(q.dtype) for i in (0, 1))
     mask = None
     if window or not (isinstance(T, int) and T == 1):
