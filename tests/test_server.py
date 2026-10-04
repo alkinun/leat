@@ -121,10 +121,21 @@ def test_chat_template_kwargs(client):
 
 @pytest.fixture
 def replies_with(engine, monkeypatch):
-    # makes the engine reply with the given text, which the tiny model would never write
+    # makes the engine reply with the given text, which the tiny model would never write: each
+    # step gives every active sequence its next token, and ends it at the last
     def reply_with(text: str) -> None:
         tokens = engine.tokenizer.encode(text)
-        monkeypatch.setattr(engine, "generate", lambda *args: (t for t in tokens))
+
+        def step():
+            out = []
+            for sequence in list(engine.active):
+                sequence.tokens.append(token := tokens[len(sequence.tokens)])
+                out.append((sequence, token))
+                if len(sequence.tokens) == len(tokens):
+                    engine.cancel(sequence)
+            return out
+
+        monkeypatch.setattr(engine, "step", step)
 
     return reply_with
 
@@ -238,6 +249,48 @@ def test_client_hangs_up(client):
     next(iter(stream))
     stream.close()
     assert complete(client, "and the next", max_tokens=2)[1] == "length"
+
+
+def test_concurrent_requests(client, engine, expected, monkeypatch):
+    # more requests at once than the engine's 2 slots, whole and streamed: each gets the reply it
+    # would alone, two in batched steps, the third once a slot is free
+    batches, decode_step = [], engine._decode_step
+    monkeypatch.setattr(engine, "_decode_step", lambda s: batches.append(len(s)) or decode_step(s))
+    contents, replies = ["hello", "a b c", "the third one"], {}
+
+    def ask(content: str, stream: bool) -> None:
+        replies[content] = complete(client, content, max_tokens=12, temperature=0, stream=stream)
+
+    threads = [threading.Thread(target=ask, args=(c, i > 0)) for i, c in enumerate(contents)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert replies == {c: (expected(c, 12), "length") for c in contents}
+    assert max(batches) == 2
+
+
+def test_hang_up_frees_the_slot(client, engine):
+    # a client that hangs up mid-reply ends its sequence, while another's carries on
+    other = chat(client, "a long reply", max_tokens=30, stream=True)
+    gone = chat(client, "another long reply", max_tokens=30, stream=True)
+    next(iter(gone))
+    gone.close()
+    choices = [chunk.choices[0] for chunk in other if chunk.choices]
+    assert choices[-1].finish_reason == "length"
+    assert not engine.active
+
+
+def test_engine_error(client, engine, monkeypatch):
+    # a failing step fails every running completion, and the server serves the next
+    def fail():
+        monkeypatch.undo()
+        raise RuntimeError("out of memory")
+
+    monkeypatch.setattr(engine, "step", fail)
+    with pytest.raises(openai.InternalServerError, match="out of memory"):
+        chat(client, "hello", max_tokens=4)
+    assert complete(client, "hello", max_tokens=2)[1] == "length"
 
 
 @pytest.fixture(scope="module")

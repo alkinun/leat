@@ -1,9 +1,11 @@
 """OpenAI-compatible HTTP server: chat completions, whole or streamed, and the model list.
 
 Handler threads parse requests, render prompts and write responses. One worker thread owns the
-engine and runs completions one at a time, in the order they arrive.
+engine and runs completions together, one per slot, a token of each per batched step; the rest
+wait their turn in the order they arrive.
 """
 
+import collections
 import contextlib
 import json
 import queue
@@ -18,7 +20,8 @@ from typing import Any
 import jinja2
 
 from leat.chat import ChatTemplate, Reply, parse_tool_calls, split_reply, tool_call_start
-from leat.engine import Engine
+from leat.engine import Engine, Sequence
+from leat.tokenizer import Tokenizer
 
 
 def _integer(v: Any) -> bool:
@@ -105,39 +108,95 @@ class Server(ThreadingHTTPServer):
         self.completions.put(None)  # the worker stops after the completions before it
 
     def _work(self) -> None:
-        while (completion := self.completions.get()) is not None:
+        # starts waiting completions while slots are free, then steps every running one; waits
+        # for a completion only when none is running or waiting, and stops after the completions
+        # that came before shutdown
+        engine = self.engine
+        waiting: collections.deque[_Completion] = collections.deque()
+        running: dict[Sequence, _Writer] = {}
+        stopping = False
+        while not stopping or waiting or running:
+            for c in self._arrivals(wait=not (waiting or running)):
+                if c is None:
+                    stopping = True
+                else:
+                    waiting.append(c)
+            while waiting and len(engine.active) < engine.slots:
+                c = waiting.popleft()
+                if c.cancelled.is_set():
+                    continue
+                try:
+                    cached = engine.cached_prefix(c.prompt)
+                    sequence = engine.start(c.prompt, c.max_tokens, c.temperature, c.seed)
+                except Exception as e:  # for the client; the server carries on
+                    c.out.put(e)
+                    continue
+                running[sequence] = _Writer(c, engine.tokenizer, cached)
+            for sequence, writer in list(running.items()):
+                if writer.c.cancelled.is_set():  # the client hung up
+                    engine.cancel(sequence)
+                    writer.finish("stop")
+                    del running[sequence]
+            if not running:
+                continue
             try:
-                completion.out.put(self._generate(completion))
-            except Exception as e:  # for the client; the server carries on
-                completion.out.put(e)
+                stepped = engine.step()
+            except Exception as e:  # for every running completion's client
+                for sequence, writer in running.items():
+                    engine.cancel(sequence)
+                    writer.c.out.put(e)
+                running.clear()
+                continue
+            for sequence, token in stepped:
+                writer = running[sequence]
+                if writer.take(token):  # end of generation or a stop string
+                    engine.cancel(sequence)
+                    writer.finish("stop")
+                elif sequence.done:  # max_tokens, or the context full
+                    writer.finish("length")
+                else:
+                    continue
+                del running[sequence]
 
-    def _generate(self, c: _Completion) -> _Finish:
-        # puts the reply into c.out piece by piece, holding back any end of it that may begin a
-        # stop string; ends at the end of generation, a stop string or the client hanging up
-        engine, tokenizer = self.engine, self.engine.tokenizer
-        cached, decode = engine.cached_prefix(c.prompt), tokenizer.stream()
-        text, sent, count, reason = "", 0, 0, "length"
-        found: list[int] = []  # where stop strings begin in the text, once one does
-        tokens = engine.generate(c.prompt, c.max_tokens, c.temperature, c.seed)
-        with contextlib.closing(tokens):
-            for token in tokens:
-                count += 1
-                if token in tokenizer.eog_ids or c.cancelled.is_set():
-                    reason = "stop"
-                    break
-                text += decode(token)
-                # sent text holds no start of a stop string, so one can only begin after it
-                if found := [i for s in c.stop if (i := text.find(s, sent)) >= 0]:
-                    text, reason = text[: min(found)], "stop"
-                    break
-                if (end := len(text) - _partial_stop(text, c.stop)) > sent:
-                    c.out.put(text[sent:end])
-                    sent = end
-        if not found:
-            text += decode(None)
-        if len(text) > sent:
-            c.out.put(text[sent:])
-        return _Finish(reason, cached, count)
+    def _arrivals(self, wait: bool) -> Iterator[_Completion | None]:
+        # the completions queued so far, after waiting for one if `wait`
+        with contextlib.suppress(queue.Empty):
+            yield self.completions.get(block=wait)
+            while True:
+                yield self.completions.get_nowait()
+
+
+class _Writer:
+    """Puts a completion's reply into its out queue piece by piece as tokens come: decoded, and
+    holding back any end of the text that may begin a stop string."""
+
+    def __init__(self, c: _Completion, tokenizer: Tokenizer, cached: int):
+        self.c, self.tokenizer, self.cached = c, tokenizer, cached
+        self.decode, self.text, self.sent, self.count = tokenizer.stream(), "", 0, 0
+        self.stopped = False  # by a stop string, the text cut where it begins
+
+    def take(self, token: int) -> bool:
+        """Takes the next token; True if it ends the reply: end of generation or a stop string."""
+        self.count += 1
+        if token in self.tokenizer.eog_ids:
+            return True
+        self.text += self.decode(token)
+        # sent text holds no start of a stop string, so one can only begin after it
+        if found := [i for s in self.c.stop if (i := self.text.find(s, self.sent)) >= 0]:
+            self.text, self.stopped = self.text[: min(found)], True
+            return True
+        if (end := len(self.text) - _partial_stop(self.text, self.c.stop)) > self.sent:
+            self.c.out.put(self.text[self.sent : end])
+            self.sent = end
+        return False
+
+    def finish(self, reason: str) -> None:
+        """Puts the rest of the text, then how the reply ended."""
+        if not self.stopped:
+            self.text += self.decode(None)
+        if len(self.text) > self.sent:
+            self.c.out.put(self.text[self.sent :])
+        self.c.out.put(_Finish(reason, self.cached, self.count))
 
 
 class _Handler(BaseHTTPRequestHandler):
