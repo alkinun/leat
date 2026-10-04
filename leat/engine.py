@@ -189,7 +189,7 @@ class Engine:
             self.reset()
             for _ in self.generate(prompt, n, ignore_eog=True):
                 pass
-        for n in self._batches[1:]:  # decode steps of several, each first in a slot of its own
+        for n in self._batches[1:]:  # decode steps of several, each at a slot's first position
             sampling = Tensor([0.0] * n), Tensor([0] * n, dtype=dtypes.uint32)
             rows = [
                 x for i in range(n) for x in (self._slot_vars[i].bind(i), self._pos_vars[i].bind(0))
