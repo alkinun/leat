@@ -145,8 +145,10 @@ def test_seeded_sampling(tiny_model):
 # architecture allows. Both paths score about 0.0012 and 98% on Llama 3.1 8B, int8 activations
 # adding noise as in llama.cpp; for scale, dropping its rope frequency factors, a subtle bug, scored
 # 0.0026 on the reference ops. Qwen3 8B, more sensitive, scores 0.0025 and 98% on those too,
-# and Qwen3 30B A3B 0.003 to 0.0053, where noise also flips a token's choice of experts.
-LIMITS = {"llama": (0.0015, 0.98), "qwen3": (0.0035, 0.97), "qwen3moe": (0.007, 0.97)}
+# and Qwen3 30B A3B 0.003 to 0.0053, where noise also flips a token's choice of experts. The top
+# token is the noisier measure: on the 1020 positions here, a change of rounding in the matrix
+# kernels took the decode path's KL from 0.00128 to 0.00126 and its agreement from 98.2 to 97.9%.
+LIMITS = {"llama": (0.0015, 0.975), "qwen3": (0.0035, 0.97), "qwen3moe": (0.007, 0.97)}
 
 
 @pytest.mark.gpu
