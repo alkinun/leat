@@ -224,8 +224,8 @@ def test_calls_tools(served, model_path):
 @pytest.mark.gpu
 @pytest.mark.model
 def test_shared_system_prompt(served, model_path):
-    # a system prompt that another conversation cached cuts the time to the first token by 5x or
-    # more: from 463 to 53 ms for these 2141 tokens on the 3090
+    # a system prompt that another conversation cached cuts the time to the first token by 10x or
+    # more: from 462 to 20 ms for these 2141 tokens on the 3090
     if "system" not in chat_template(model_path):
         pytest.skip("the model's chat template takes no system prompt")
 
@@ -248,4 +248,4 @@ def test_shared_system_prompt(served, model_path):
     for name in ("Rule", "Law", "Step"):
         cold.append(first_token(system(name), "What is rule 3?"))
         warm.append(first_token(system(name), "And rule 7?"))
-    assert statistics.median(cold) > 5 * statistics.median(warm)
+    assert statistics.median(cold) > 10 * statistics.median(warm)
