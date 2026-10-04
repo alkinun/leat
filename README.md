@@ -4,7 +4,7 @@ A minimal, fast LLM inference engine built on [tinygrad](https://github.com/tiny
 
 leat runs GGUF models with their weights kept in the quantized storage format. The goal is single-stream decode limited by memory bandwidth, not by the engine. It targets NVIDIA RTX 30-series GPUs first, then AMD Strix Halo.
 
-> Status: on NVIDIA, hand-written kernels decode Llama 3, Qwen2.5, Qwen3, Qwen3 MoE and Gemma 4 faster than llama.cpp, and process prompts at 0.83 to 1.05x its speed. `leat serve` serves the OpenAI chat completions API. Every kernel is tested against the reference ops, plain tinygrad code that runs on any device; `LEAT_KERNELS=ref` runs everything that way.
+> Status: on NVIDIA, hand-written kernels decode Llama 3, Mistral, Qwen2.5, Qwen3, Qwen3 MoE and Gemma 4 faster than llama.cpp, and process prompts at 0.83 to 1.05x its speed. `leat serve` serves the OpenAI chat completions API. Every kernel is tested against the reference ops, plain tinygrad code that runs on any device; `LEAT_KERNELS=ref` runs everything that way.
 
 ## Quickstart
 
@@ -43,7 +43,7 @@ print(engine.tokenizer.decode(list(engine.generate(prompt, max_tokens=256))))
 
 ## Supported
 
-- Architectures: `llama` (Llama 3.x), `qwen2` (Qwen2.5), `qwen3` and `qwen3moe` (Qwen3 and its mixtures of experts) and `gemma4` (Gemma 4, text only), with their tokenizers
+- Architectures: `llama` (Llama 3.x, Mistral 7B), `qwen2` (Qwen2.5), `qwen3` and `qwen3moe` (Qwen3 and its mixtures of experts) and `gemma4` (Gemma 4, text only), with their tokenizers
 - Storage types: F32, F16, BF16, Q5_0, Q8_0, Q4_K, Q5_K, Q6_K, which covers Q4_K_M, Q5_K_M, Q6_K and Q8_0 files
 - Devices: any tinygrad backend; developed on NVIDIA with `DEV=NV`
 - Server: `/v1/chat/completions`, whole or streamed, with stop strings, seeds, tool calls in Llama 3's, Qwen's and Gemma 4's syntax and `chat_template_kwargs` such as `{"enable_thinking": false}`, and `/v1/models`. Sampling is greedy or by temperature; requests for `top_p`, penalties, `logprobs` or several choices are refused. Completions run one at a time.
@@ -57,6 +57,7 @@ RTX 3090, Q4_K_M files, one sequence, in tokens per second. llama.cpp is b11372 
 |---|---:|---:|---:|---:|
 | Llama 3.2 3B Instruct | 10970 | 9151 | 275.3 | 284.0 |
 | Llama 3.1 8B Instruct | 5417 | 4658 | 147.6 | 151.8 |
+| Mistral 7B Instruct v0.3 | 5433 | 4665 | 155.2 | 161.6 |
 | Qwen2.5 7B Instruct | 5834 | 4907 | 152.8 | 158.4 |
 | Qwen3 8B | 5244 | 4460 | 141.2 | 147.7 |
 | Qwen3 30B A3B | 4681 | 4927 | 211.1 | 224.8 |
@@ -72,6 +73,7 @@ Quality against llama.cpp on the same file: wikitext-2, chunks of 512 tokens wit
 |---|---:|---:|---:|---:|
 | Llama 3.2 3B Instruct | 11.8783 | 11.8669 | 0.0012 | 98.3% |
 | Llama 3.1 8B Instruct | 8.3870 | 8.3740 | 0.0012 | 98.3% |
+| Mistral 7B Instruct v0.3 | 7.3712 | 7.3699 | 0.0009 | 98.6% |
 | Qwen2.5 7B Instruct | 7.4307 | 7.3983 | 0.0034 | 96.7% |
 | Qwen3 8B | 11.0321 | 11.0142 | 0.0031 | 97.3% |
 | Qwen3 30B A3B | 9.4920 | 9.5012 | 0.0043 | 97.6% |
