@@ -273,6 +273,22 @@ def test_prefill_shares_smaller_chunks(tiny_model, monkeypatch):
     assert second.tokens == generated(path, [9, 8, 7, 6, 5, 4, 3], 1)
 
 
+@pytest.mark.usefixtures("reference_ops")
+def test_cancel_mid_prompt(tiny_model, monkeypatch):
+    # a sequence cancelled partway through its prompt frees its slot, which keeps the chunks it
+    # prefilled: the same prompt continues from there, and generates as it would from scratch
+    path, _ = tiny_model
+    engine = Engine(path, max_context=CONTEXT, prefill_chunk=4, slots=1)
+    sequence = engine.start(PROMPT, 6)
+    engine.step()
+    engine.step()
+    engine.cancel(sequence)
+    assert not engine.active and engine.cached_prefix(PROMPT) == 8
+    starts = prefill_starts(engine, monkeypatch)
+    assert list(engine.generate(PROMPT, 6)) == generated(path, PROMPT, 6)
+    assert starts == [8]
+
+
 def test_start_needs_a_free_slot(tiny_model):
     engine = Engine(tiny_model[0], max_context=CONTEXT, prefill_chunk=8, slots=2)
     first, _ = engine.start(PROMPT, 4), engine.start([3, 1, 4], 4)
