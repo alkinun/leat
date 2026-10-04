@@ -4,7 +4,7 @@ A minimal, fast LLM inference engine built on [tinygrad](https://github.com/tiny
 
 leat runs GGUF models with their weights kept in the quantized storage format. The goal is single-stream decode limited by memory bandwidth, not by the engine. It targets NVIDIA RTX 30-series GPUs first, then AMD Strix Halo.
 
-> Status: on NVIDIA, hand-written kernels decode Llama 3.1, Qwen3, Qwen3 MoE and Gemma 4 faster than llama.cpp, and process prompts at 0.8 to 0.9x its speed, Gemma 4's still far slower. `leat serve` serves the OpenAI chat completions API. Every kernel is tested against the reference ops, plain tinygrad code that runs on any device; `LEAT_KERNELS=ref` runs everything that way.
+> Status: on NVIDIA, hand-written kernels decode Llama 3.1, Qwen3, Qwen3 MoE and Gemma 4 faster than llama.cpp, and process prompts at 0.8 to 0.9x its speed. `leat serve` serves the OpenAI chat completions API. Every kernel is tested against the reference ops, plain tinygrad code that runs on any device; `LEAT_KERNELS=ref` runs everything that way.
 
 ## Quickstart
 
@@ -58,7 +58,7 @@ RTX 3090, Q4_K_M files, one sequence, in tokens per second. llama.cpp is b11372 
 | Llama 3.1 8B Instruct | 5417 | 4329 | 147.6 | 151.1 |
 | Qwen3 8B | 5244 | 4218 | 141.2 | 147.8 |
 | Qwen3 30B A3B | 4681 | 4234 | 211.1 | 216.2 |
-| Gemma 4 26B A4B it | 4844 | 305 | 157.6 | 164.6 |
+| Gemma 4 26B A4B it | 4844 | 4154 | 157.6 | 164.8 |
 
 After 8192 tokens of context, Llama 3.1 8B decodes at 122.3 tok/s against llama.cpp's 125.0.
 
@@ -74,7 +74,7 @@ Quality against llama.cpp on the same file: wikitext-2, chunks of 512 tokens wit
 
 leat's decode path, which runs the second half of each chunk one token at a time, scores 0.0013 for Llama 3.1 8B and 0.0034 for Qwen3 30B A3B on 2 chunks. For scale, ignoring Llama 3.1's RoPE frequency factors, a subtle bug, raises the KL from 0.0010 to 0.0026 on the first 5 chunks with the reference ops; Qwen3 8B scores 0.0025 against llama.cpp on the reference ops alone.
 
-Gemma 4's instruction-tuned model does not model raw text: both engines score wikitext in the tens of thousands. On its chat format, over the 542 positions of six answers to chat prompts, leat's next-token distributions differ from llama.cpp's by a mean KL of 0.0075, with the same top token at 97.6%.
+Gemma 4's instruction-tuned model does not model raw text: both engines score wikitext in the tens of thousands. On its chat format, over the 542 positions of six answers to chat prompts, leat's next-token distributions differ from llama.cpp's by a mean KL of 0.0057, with the same top token at 98.3%.
 
 ## Requirements
 
