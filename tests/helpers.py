@@ -125,7 +125,7 @@ def _writer(path: Path, arch: str):
     w.add_string("tokenizer.ggml.model", "gpt2")
     w.add_string("tokenizer.ggml.pre", "llama-bpe")
     w.add_array("tokenizer.ggml.tokens", [*_BYTE_CHAR.values()] + [f"t{i}" for i in range(V - 256)])
-    w.add_array("tokenizer.ggml.token_type", [1] * V)
+    w.add_array("tokenizer.ggml.token_type", [NORMAL] * V)
     w.add_array("tokenizer.ggml.merges", [])
     w.add_chat_template("{{ prefix | default('') }}{{ messages[-1]['content'] }}")
     weights: dict[str, np.ndarray] = {}
@@ -154,7 +154,8 @@ def _finish(w: gguf.GGUFWriter) -> None:
 
 
 # Gemma 4: a sliding-window layer of 2 kv heads of 32, and a full-attention one of a kv head of
-# 64 whose values are its keys; both with a shared MLP beside the experts, of gate and up stacked
+# 64 whose values are its keys; both with an MLP, and beside it, as in 26B A4B, experts whose gate
+# and up are stacked
 G_WINDOW, G_DIMS, G_KV_HEADS, G_CAP = 4, (32, 64), (2, 1), 5.0
 
 

@@ -6,7 +6,7 @@ import subprocess
 import pytest
 
 from leat.gguf import GGUF
-from leat.tokenizer import BYTE, CONTROL, NORMAL, Tokenizer
+from leat.tokenizer import BYTE, CONTROL, NORMAL, UNKNOWN, Tokenizer
 from tests.helpers import ids, tiny_metadata
 
 
@@ -83,7 +83,7 @@ def test_sentencepiece():
     tokens = ["<unk>", "<s>", "</s>"] + [f"<0x{b:02X}>" for b in range(256)]
     tokens += ["\u2581", "a", "b", "\u2581a", "ab", "\u2581ab"]
     scores = [0.0] * 259 + [-9.0, -9.0, -9.0, -1.0, -2.0, -0.5]
-    types = [2, CONTROL, CONTROL] + [BYTE] * 256 + [NORMAL] * 6
+    types = [UNKNOWN, CONTROL, CONTROL] + [BYTE] * 256 + [NORMAL] * 6
     tok = Tokenizer(
         {"tokenizer.ggml.model": "llama", "tokenizer.ggml.tokens": tokens,
          "tokenizer.ggml.scores": scores, "tokenizer.ggml.token_type": types,

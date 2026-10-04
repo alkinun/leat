@@ -113,10 +113,6 @@ class Tokenizer:
         eog_text = {special[t] for t in _EOG_TEXT & special.keys()}
         self.eog_ids: set[int] = {i for i in ids if i is not None} | eog_text
 
-    @property
-    def vocab_size(self) -> int:
-        return len(self._bytes)
-
     def encode(self, text: str, bos: bool | None = None, special: bool = False) -> list[int]:
         ids = (
             [self.bos_id]
