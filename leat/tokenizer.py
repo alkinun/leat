@@ -83,9 +83,8 @@ class Tokenizer:
         self._vocab = {
             t: i for i, t in enumerate(tokens) if types[i] not in (CONTROL, USER_DEFINED)
         }
-        if self._byte_level and (
-            missing := [c for c in _BYTE_CHAR.values() if c not in self._vocab]
-        ):
+        missing = [c for c in _BYTE_CHAR.values() if c not in self._vocab and self._byte_level]
+        if missing:
             raise ValueError(f"vocab lacks {len(missing)} byte tokens, it is not byte-level BPE")
         merges = metadata.get("tokenizer.ggml.merges", [])
         self._ranks = {_pair(m): r for r, m in enumerate(merges)}
@@ -137,9 +136,9 @@ class Tokenizer:
     def _encode_ordinary(self, text: str) -> list[int]:
         out: list[int] = []
         for word in self._pattern.findall(text if self._byte_level else text.replace(" ", SPACE)):
-            out += self._bpe(
-                "".join(_BYTE_CHAR[b] for b in word.encode()) if self._byte_level else word
-            )
+            if self._byte_level:
+                word = "".join(_BYTE_CHAR[b] for b in word.encode())
+            out += self._bpe(word)
         return out
 
     def _bpe(self, word: str) -> tuple[int, ...]:
@@ -175,12 +174,10 @@ def _merge(word: str, ranks: dict[tuple[str, str], int]) -> list[str]:
     parts, after = list(word), [*range(1, len(word)), -1]
     before, heap = [*range(-1, len(word) - 1)], list[tuple[int, int, int, str]]()
 
-    def push(i: int) -> None:
-        if (
-            i >= 0
-            and (j := after[i]) >= 0
-            and (rank := ranks.get((parts[i], parts[j]))) is not None
-        ):
+    def push(i: int) -> None:  # the pair i begins, if it has a rank
+        if i < 0 or (j := after[i]) < 0:
+            return
+        if (rank := ranks.get((parts[i], parts[j]))) is not None:
             heapq.heappush(heap, (rank, i, j, parts[i] + parts[j]))
 
     for i in range(len(parts) - 1):
