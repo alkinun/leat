@@ -3,6 +3,7 @@ GPT-2's or SentencePiece-style over characters as Gemma 4's, and SentencePiece's
 which merges the pair whose token scores highest."""
 
 import codecs
+import functools
 import heapq
 import itertools
 import re
@@ -17,19 +18,28 @@ _BYTE_CHAR = {b: chr(b) for b in _PRINTABLE} | {b: chr(256 + i) for i, b in enum
 _CHAR_BYTE = {c: b for b, c in _BYTE_CHAR.items()}
 
 NORMAL, UNKNOWN, CONTROL, USER_DEFINED, UNUSED, BYTE = 1, 2, 3, 4, 5, 6
-# llama.cpp treats these as end of generation in addition to the eos/eot/eom ids
+# llama.cpp treats these as end of generation in addition to the eos/eot/eom ids, and as control
+# tokens whatever their type
 _EOG_TEXT = {"<|eot_id|>", "<|eom_id|>", "<|end_of_text|>", "<|im_end|>", "<|endoftext|>",
-             "<eos>", "<turn|>", "<|tool_response>"}  # fmt: skip
+             "<|end|>", "<|return|>", "<|call|>", "<end_of_turn>", "<eos>", "<turn|>",
+             "<|tool_response>", "<EOT>", "_<EOT>"}  # fmt: skip
+# gpt-oss's harmony format: tokens that decode as text, as llama.cpp has them, and its ends of a
+# message that do not end a generation, as llama.cpp's workaround has it
+_HARMONY = {"<|channel|>", "<|message|>", "<|start|>", "<|constrain|>"}
 SPACE = "\u2581"  # how SentencePiece spells a space
 
 
 def _category_classes() -> dict[str, str]:
     # regex class bodies for the Unicode letter, number and separator categories, as ranges so `re`
     # stays fast on long inputs. Python's own \s, \d and \w differ from llama.cpp's definitions.
+    # U and W are the letters but a-z and A-Z: those GPT-4o's pre-tokenizer takes for upper and
+    # lower case, as llama.cpp rewrites its classes
     cps: dict[str, list[int]] = {"L": [], "N": [], "Z": []}
     for cp in range(0x323B0):  # one past the last letter; numbers and separators end earlier
         if (cat := unicodedata.category(chr(cp))[0]) in cps:
             cps[cat].append(cp)
+    cps["U"] = [cp for cp in cps["L"] if not 0x61 <= cp <= 0x7A]
+    cps["W"] = [cp for cp in cps["L"] if not 0x41 <= cp <= 0x5A]
     return {cat: "".join(_range(run) for run in _runs(v)) for cat, v in cps.items()}
 
 
@@ -44,22 +54,79 @@ def _range(run: list[int]) -> str:
     return lo if len(run) == 1 else f"{lo}-{hi}"
 
 
-def _pattern(digits: str) -> re.Pattern[str]:
-    # llama.cpp's LLAMA3 pre-tokenizer, or QWEN2's, which splits numbers into single digits rather
-    # than runs of up to 3; contractions are spelled out in ASCII, as Python's (?i) would also fold
-    # characters like U+017F into 's'.
-    # (?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|
-    # \s*[\r\n]+|\s+(?!\S)|\s+
+@functools.cache
+def _patterns(kind: str) -> tuple[re.Pattern[str], ...]:
+    # llama.cpp's pre-tokenizer regexes for a kind of pre-tokenizer, each applied to the pieces of
+    # the last. Contractions are spelled out in ASCII, as Python's (?i) would also fold characters
+    # like U+017F into 's'.
     c = _category_classes()
-    L, N, S = c["L"], c["N"], r"\t\n\x0b\x0c\r\x85" + c["Z"]
+    L, N, U, W, S = c["L"], c["N"], c["U"], c["W"], r"\t\n\x0b\x0c\r\x85" + c["Z"]
     contractions = "'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD]"
-    return re.compile(
-        rf"{contractions}|[^\r\n{L}{N}]?[{L}]+|[{N}]{digits}| ?[^{S}{L}{N}]+[\r\n]*"
-        rf"|[{S}]*[\r\n]+|[{S}]+(?![^{S}])|[{S}]+"
-    )
+    # GPT-2's: 's|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)
+    gpt2 = rf"'s|'t|'re|'ve|'m|'ll|'d| ?[{L}]+| ?[{N}]+| ?[^{S}{L}{N}]+|[{S}]+(?![^{S}])"
+    if kind in ("llama3", "qwen2"):  # QWEN2's splits numbers into digits, not runs of up to 3
+        # (?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}|
+        # ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
+        digits = "{1,3}" if kind == "llama3" else ""
+        regexes = [
+            rf"{contractions}|[^\r\n{L}{N}]?[{L}]+|[{N}]{digits}| ?[^{S}{L}{N}]+[\r\n]*"
+            rf"|[{S}]*[\r\n]+|[{S}]+(?![^{S}])|[{S}]+"
+        ]
+    elif kind == "gpt2":
+        regexes = [gpt2]
+    elif kind == "digits-gpt2":  # StarCoder's and others': single digits first
+        regexes = [rf"[{N}]", gpt2]
+    elif kind in ("gpt-4o", "tekken"):  # words that run upper then lower case; Tekken's without
+        # contractions, and with single digits
+        tail = f"(?:{contractions})?" if kind == "gpt-4o" else ""
+        digits = "{1,3}" if kind == "gpt-4o" else ""
+        regexes = [
+            rf"[^\r\n{L}{N}]?[{U}]*[{W}]+{tail}|[^\r\n{L}{N}]?[{U}]+[{W}]*{tail}"
+            rf"|[{N}]{digits}| ?[^{S}{L}{N}]+[\r\n/]*|[{S}]*[\r\n]+|[{S}]+(?![^{S}])|[{S}]+"
+        ]
+    else:
+        raise ValueError(kind)
+    return tuple(re.compile(r) for r in regexes)
 
 
-_PRE_TOKENIZERS = {"llama-bpe": "{1,3}", "qwen2": ""}  # digits per number piece
+# tokenizer.ggml.pre of byte-level BPE vocabs: the kind of pre-tokenizer, whether a word the vocab
+# holds skips merging, as in tiktoken, and whether a BOS starts text by default, as llama.cpp has
+# them in llama-vocab.cpp
+_PRE_TOKENIZERS = {
+    **dict.fromkeys(("llama3", "llama-v3", "llama-bpe", "falcon3", "falcon-h1", "pixtral",
+                     "midm-2.0", "lfm2"), ("llama3", True, True)),
+    **dict.fromkeys(("dbrx", "smaug-bpe", "chatglm-bpe"), ("llama3", False, False)),
+    **dict.fromkeys(("glm4", "glm5"), ("llama3", True, False)),
+    **dict.fromkeys(("qwen2", "deepseek-r1-qwen", "kormo", "f2llmv2", "megrez", "stablelm2",
+                     "hunyuan", "solar-open", "grok-2"), ("qwen2", False, False)),
+    **dict.fromkeys(("gpt-2", "phi-2", "jina-es", "jina-de", "jina-v2-es", "jina-v2-de",
+                     "gigachat", "a.x-4.0", "mellum", "exaone4", "mpt", "olmo", "jais",
+                     "trillion", "granite-docling"), ("gpt2", False, False)),
+    **dict.fromkeys(("starcoder", "refact", "command-r", "smollm", "codeshell", "exaone",
+                     "minerva-7b", "mellum2"), ("digits-gpt2", False, False)),
+    **dict.fromkeys(("gpt-4o", "llama4", "kanana2", "talkie", "minimax-m2"),
+                    ("gpt-4o", False, False)),
+    "tekken": ("tekken", True, True),
+}  # fmt: skip
+
+
+def _split(patterns: tuple[re.Pattern[str], ...], text: str) -> list[str]:
+    # text into words: each regex splits each piece of the last into its matches and the text
+    # between them, which llama.cpp keeps as words of their own
+    pieces = [text]
+    for pattern in patterns:
+        out = []
+        for piece in pieces:
+            at = 0
+            for m in pattern.finditer(piece):
+                if m.start() > at:
+                    out.append(piece[at : m.start()])
+                out.append(m.group())
+                at = m.end()
+            if at < len(piece):
+                out.append(piece[at:])
+        pieces = out
+    return pieces
 
 
 class Tokenizer:
@@ -72,31 +139,43 @@ class Tokenizer:
     def __init__(self, metadata: dict[str, Any]):
         model, pre = metadata.get("tokenizer.ggml.model"), metadata.get("tokenizer.ggml.pre")
         tokens: list[str] = metadata["tokenizer.ggml.tokens"]
-        types: list[int] = metadata.get("tokenizer.ggml.token_type", [NORMAL] * len(tokens))
+        types = list(metadata.get("tokenizer.ggml.token_type", [NORMAL] * len(tokens)))
         # SentencePiece's: a fragment between special tokens is one word, spaces spelled SPACE
         self._scores: dict[str, float] | None = None
-        self._space_prefix = False
+        self._space_prefix, ignore_merges, default_bos = False, False, model == "llama"
+        self._patterns: tuple[re.Pattern[str], ...]
         if model == "llama":
             self._scores = dict(zip(tokens, metadata["tokenizer.ggml.scores"], strict=True))
             self._space_prefix = metadata.get("tokenizer.ggml.add_space_prefix", True)
-            self._pattern, self._byte_level = re.compile(r".+", re.S), False
+            self._patterns, self._byte_level = (re.compile(r".+", re.S),), False
         elif model == "gemma4":  # spaces as SPACE, whole lines as words, and no byte-level mapping
-            self._pattern, self._byte_level = re.compile(r"[^\n]+|\n+"), False
+            self._patterns, self._byte_level = (re.compile(r"[^\n]+|\n+"),), False
         elif model == "gpt2" and pre in _PRE_TOKENIZERS:
-            self._pattern, self._byte_level = _pattern(_PRE_TOKENIZERS[pre]), True
+            kind, ignore_merges, default_bos = _PRE_TOKENIZERS[pre]
+            self._patterns, self._byte_level = _patterns(kind), True
         else:
             raise NotImplementedError(
                 f"tokenizer {model!r} with pre-tokenizer {pre!r} is not supported"
             )
+        self._ignore_merges = ignore_merges  # whole-word vocab hits skip BPE
+        eog = {i for i, t in enumerate(tokens) if t in _EOG_TEXT}
+        harmony = {"<|return|>", "<|call|>", "<|end|>"} <= set(tokens)
+        for i, t in enumerate(tokens):  # as llama.cpp overrides them
+            if t in _HARMONY or (harmony and t == "<|end|>"):
+                types[i] = USER_DEFINED
+                eog.discard(i)
+            elif i in eog:
+                types[i] = CONTROL
         # tokens that text spells out, all of them for SentencePiece as in llama.cpp
         hidden = () if self._scores is not None else (CONTROL, USER_DEFINED)
         self._vocab = {t: i for i, t in enumerate(tokens) if types[i] not in hidden}
+        # some byte-level vocabs lack a few bytes' tokens, as MPT's and StarCoder's control
+        # characters: llama.cpp drops those bytes
         missing = [c for c in _BYTE_CHAR.values() if c not in self._vocab and self._byte_level]
-        if missing:
+        if len(missing) > 128:
             raise ValueError(f"vocab lacks {len(missing)} byte tokens, it is not byte-level BPE")
         merges = metadata.get("tokenizer.ggml.merges", [])
         self._ranks = {_pair(m): r for r, m in enumerate(merges)}
-        self._ignore_merges = pre == "llama-bpe"  # whole-word vocab hits skip BPE, as in tiktoken
         self._cache: dict[str, tuple[int, ...]] = {}
 
         self._bytes = [_spell(t, ty, self._byte_level) for t, ty in zip(tokens, types, strict=True)]
@@ -107,11 +186,11 @@ class Tokenizer:
 
         self.bos_id: int | None = metadata.get("tokenizer.ggml.bos_token_id")
         self.eos_id: int | None = metadata.get("tokenizer.ggml.eos_token_id")
-        default_bos = pre == "llama-bpe" or model == "llama"
+        if pre in ("chatglm-bpe", "glm4", "glm5"):  # llama.cpp drops their BOS
+            self.bos_id = None
         self.add_bos: bool = metadata.get("tokenizer.ggml.add_bos_token", default_bos)
         ids = (metadata.get(f"tokenizer.ggml.{k}_token_id") for k in ("eos", "eot", "eom"))
-        eog_text = {special[t] for t in _EOG_TEXT & special.keys()}
-        self.eog_ids: set[int] = {i for i in ids if i is not None} | eog_text
+        self.eog_ids: set[int] = {i for i in ids if i is not None} | eog
 
     def encode(self, text: str, bos: bool | None = None, special: bool = False) -> list[int]:
         ids = (
@@ -159,7 +238,7 @@ class Tokenizer:
         if self._space_prefix and text:
             text = " " + text
         out: list[int] = []
-        for word in self._pattern.findall(text if self._byte_level else text.replace(" ", SPACE)):
+        for word in _split(self._patterns, text if self._byte_level else text.replace(" ", SPACE)):
             if self._byte_level:
                 word = "".join(_BYTE_CHAR[b] for b in word.encode())
             out += self._bpe(word)
@@ -189,7 +268,7 @@ class Tokenizer:
         if part in self._vocab:
             return [self._vocab[part]]
         if self._byte_level:
-            return [self._vocab[c] for c in part]
+            return [self._vocab[c] for c in part if c in self._vocab]
         return [self._vocab[f"<0x{b:02X}>"] for b in part.encode()]
 
 

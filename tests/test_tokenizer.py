@@ -6,7 +6,7 @@ import subprocess
 import pytest
 
 from leat.gguf import GGUF
-from leat.tokenizer import BYTE, CONTROL, NORMAL, UNKNOWN, Tokenizer
+from leat.tokenizer import _BYTE_CHAR, BYTE, CONTROL, NORMAL, UNKNOWN, Tokenizer
 from tests.helpers import ids, tiny_metadata
 
 
@@ -134,6 +134,23 @@ def random_text(rng: random.Random) -> str:
 
 @pytest.mark.model
 def test_matches_llama_cpp(model_path, llama_cpp, tmp_path):
+    matches_llama_cpp(model_path, llama_cpp, tmp_path)
+
+
+# the vocab-only GGUFs llama.cpp tests its tokenizers with, of each pre-tokenizer leat supports
+VOCABS = ["gpt-2", "mpt", "starcoder", "refact", "command-r", "qwen2", "llama-bpe", "llama-spm",
+          "phi-3", "gemma-4"]  # fmt: skip
+
+
+@pytest.mark.parametrize("name", VOCABS)
+def test_vocab_matches_llama_cpp(llama_cpp, tmp_path, name):
+    path = llama_cpp.parents[1] / "models" / f"ggml-vocab-{name}.gguf"
+    if not path.exists():
+        pytest.skip(f"{path} is not in llama.cpp's checkout")
+    matches_llama_cpp(path, llama_cpp, tmp_path)
+
+
+def matches_llama_cpp(model_path, llama_cpp, tmp_path):
     tok = Tokenizer(GGUF.open(model_path).metadata)
     rng = random.Random(0)
     for i, text in enumerate(CORPUS + [random_text(rng) for _ in range(10)]):
@@ -146,5 +163,7 @@ def test_matches_llama_cpp(model_path, llama_cpp, tmp_path):
             # starting up beside tinygrad's hold of the GPU
             env = {**os.environ, "CUDA_VISIBLE_DEVICES": ""}
             out = subprocess.run(args, capture_output=True, text=True, check=True, env=env).stdout
-            assert tok.encode(text, bos=False, special=special) == json.loads(out.splitlines()[-1])
-        assert tok.decode(tok.encode(text, bos=False)) == text
+            got = tok.encode(text, bos=False, special=special)
+            assert got == json.loads(out.splitlines()[-1]), (text, special)
+        if all(c in tok._vocab for c in _BYTE_CHAR.values()) or not tok._byte_level:
+            assert tok.decode(tok.encode(text, bos=False)) == text
