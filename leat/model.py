@@ -81,8 +81,9 @@ class Config:
 class Transformer:
     """Weights, RoPE tables and a KV cache of `slots` sequences of up to `max_context` tokens.
 
-    Optional parts are used where the GGUF has their tensors: RMSNorms of q and k, of the
-    attention and MLP outputs, a shared MLP beside the experts, and a scale per layer output.
+    Optional parts are used where the GGUF has their tensors: biases of q, k and v, RMSNorms of q
+    and k, of the attention and MLP outputs, a shared MLP beside the experts, and a scale per layer
+    output.
     """
 
     def __init__(
