@@ -1,9 +1,10 @@
-"""Chat prompts, rendered with the model's own Jinja template from GGUF metadata, and the tool
-calls in replies, in each supported model's syntax."""
+"""Chat prompts, rendered with the model's own Jinja template from GGUF metadata, and replies
+split into their reasoning, text and tool calls, in each supported model's syntax."""
 
 import contextlib
 import json
 import re
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
@@ -35,6 +36,16 @@ class ChatTemplate:
         tokens = metadata["tokenizer.ggml.tokens"]
         self._bos = "" if tokenizer.bos_id is None else tokens[tokenizer.bos_id]
         self._eos = "" if tokenizer.eos_id is None else tokens[tokenizer.eos_id]
+        # how replies mark their reasoning: gpt-oss's harmony channels, or the <think> blocks of
+        # Qwen3 and DeepSeek-R1's distillations, whose templates write them
+        self._form = (
+            "harmony" if "<|channel|>" in tokens else "think" if "<think>" in source else None
+        )
+
+    @property
+    def form(self) -> str | None:
+        """How replies mark their reasoning: "harmony", "think", or None."""
+        return self._form
 
     def render(
         self, messages: list[dict[str, Any]], add_generation_prompt: bool = True, **kwargs
@@ -50,10 +61,74 @@ class ChatTemplate:
     def encode(
         self, messages: list[dict[str, Any]], add_generation_prompt: bool = True, **kwargs
     ) -> list[int]:
-        text = self.render(messages, add_generation_prompt, **kwargs)
+        return self.tokens(self.render(messages, add_generation_prompt, **kwargs))
+
+    def tokens(self, text: str) -> list[int]:
+        """A rendered prompt's tokens."""
         # most templates write the BOS text themselves; add it only when they don't
         bos = self._tokenizer.add_bos and not (self._bos and text.startswith(self._bos))
         return self._tokenizer.encode(text, bos=bos, special=True)
+
+    def opens_thinking(self, text: str) -> bool:
+        """Whether a rendered prompt ends inside a <think> block, which the reply then continues,
+        as DeepSeek-R1's distillations' templates open it."""
+        return self.form == "think" and text.rstrip().endswith("<think>")
+
+
+@dataclass
+class Reply:
+    """A reply split: its reasoning, its text, and the tool calls it makes in the harmony format,
+    gpt-oss's, each {"name": ..., "arguments": JSON text}. Other formats' calls are in the text,
+    for parse_tool_calls."""
+
+    reasoning: str = ""
+    content: str = ""
+    calls: list[dict[str, Any]] = field(default_factory=list)
+
+
+# the harmony format's markers, and those of <think> blocks
+_REPLY_MARKERS = ("<|start|>", "<|channel|>", "<|message|>", "<|end|>", "<|constrain|>",
+                      "<think>", "</think>")  # fmt: skip
+
+
+def split_reply(text: str, form: str | None, thinking: bool = False) -> Reply:
+    """A reply, or as much of it as there is so far: what is surely reasoning, surely text, and
+    the calls. An end that may be the start of a marker waits for more, so that what a stream
+    has split stays so. `thinking` says the prompt opened a <think> block."""
+    text = text[: len(text) - _partial(text, _REPLY_MARKERS)]
+    if form == "harmony":
+        return _harmony(text)
+    if form == "think":
+        start = text.find("<think>")
+        if start >= 0 and not text[:start].strip():
+            text, thinking = text[start + len("<think>") :], True
+        if thinking:
+            reasoning, _, content = text.partition("</think>")
+            return Reply(reasoning.lstrip(), content.lstrip() if _ else "")
+    return Reply(content=text)
+
+
+def _harmony(text: str) -> Reply:
+    # messages separated by <|start|> or <|end|>, each a header, as <|channel|>analysis or
+    # <|channel|>commentary to=functions.weather <|constrain|>json, then <|message|> and its text:
+    # analysis is reasoning, a message to a function a call, and any other text
+    reply = Reply()
+    for message in re.split(r"<\|end\|>|<\|start\|>", text):
+        header, marked, body = message.partition("<|message|>")
+        if not marked:  # a header, so far
+            continue
+        if to := re.search(r"to=functions\.([^\s<]+)", header):
+            reply.calls.append({"name": to.group(1), "arguments": body.strip()})
+        elif re.search(r"<\|channel\|>analysis", header):
+            reply.reasoning += body
+        else:
+            reply.content += body
+    return reply
+
+
+def _partial(text: str, markers: tuple[str, ...]) -> int:
+    # the length of the longest end of `text` that a marker begins with, short of the marker
+    return max((n for m in markers for n in range(1, len(m)) if text.endswith(m[:n])), default=0)
 
 
 # Qwen and Gemma 4 mark their tool calls, which may follow other text

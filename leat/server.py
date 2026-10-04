@@ -17,7 +17,7 @@ from typing import Any
 
 import jinja2
 
-from leat.chat import ChatTemplate, parse_tool_calls, tool_call_start
+from leat.chat import ChatTemplate, Reply, parse_tool_calls, split_reply, tool_call_start
 from leat.engine import Engine
 
 
@@ -69,6 +69,8 @@ class _Completion:
     tools: list[dict[str, Any]] | None
     stream: bool
     stream_usage: bool
+    form: str | None = None  # how the reply marks its reasoning, as ChatTemplate.form
+    thinking: bool = False  # the prompt opened a <think> block
     id: str = field(default_factory=lambda: f"chatcmpl-{uuid.uuid4().hex}")
     created: int = field(default_factory=lambda: int(time.time()))
     # from the worker: pieces of text, then how generation finished or the exception it raised
@@ -167,18 +169,16 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _reply(self, c: _Completion) -> None:
         try:
-            text = "".join(c.pieces())
+            reply = split_reply("".join(c.pieces()), c.form, c.thinking)
         except RuntimeError as e:
             return self._error(500, str(e))
-        message: dict[str, Any] = {"role": "assistant", "content": text}
+        message: dict[str, Any] = {"role": "assistant", "content": reply.content}
+        if reply.reasoning:
+            message["reasoning_content"] = reply.reasoning
         reason = c.finish.reason
-        content, calls = parse_tool_calls(text, c.tools) if c.tools else (text, [])
+        content, calls = _calls(reply, c.tools)
         if calls:
-            message = {
-                "role": "assistant",
-                "content": content or None,
-                "tool_calls": _tool_calls(calls),
-            }
+            message |= {"content": content or None, "tool_calls": _tool_calls(calls)}
             reason = "tool_calls"
         choice = {"index": 0, "message": message, "logprobs": None, "finish_reason": reason}
         body = self._head(c, "chat.completion") | {"choices": [choice], "usage": _usage(c)}
@@ -190,17 +190,23 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         self._chunk(c, {"role": "assistant", "content": ""})
-        text, sent = "", 0  # what may yet be part of a tool call is held back
+        # what may yet be part of a tool call is held back
+        text, reasoned, sent, reply = "", 0, 0, Reply()
         try:
             for piece in c.pieces():
                 text += piece
-                if (end := tool_call_start(text) if c.tools else len(text)) > sent:
-                    self._chunk(c, {"content": text[sent:end]})
+                reply = split_reply(text, c.form, c.thinking)
+                if len(reply.reasoning) > reasoned:
+                    self._chunk(c, {"reasoning_content": reply.reasoning[reasoned:]})
+                    reasoned = len(reply.reasoning)
+                content = reply.content
+                if (end := tool_call_start(content) if c.tools else len(content)) > sent:
+                    self._chunk(c, {"content": content[sent:end]})
                     sent = end
         except RuntimeError as e:
             return self._event({"error": {"message": str(e), "type": "server_error"}})
         reason = c.finish.reason
-        content, calls = parse_tool_calls(text, c.tools) if c.tools else (text, [])
+        content, calls = _calls(reply, c.tools)
         if len(content) > sent:
             self._chunk(c, {"content": content[sent:]})
         if calls:
@@ -255,7 +261,8 @@ def _completion(body: Any, server: Server) -> _Completion:
     tools = (body.get("tools") or None) if choice == "auto" else None
     # options for the template too, such as Qwen3's enable_thinking, as llama.cpp and vLLM take
     options = (body.get("chat_template_kwargs") or {}) | ({"tools": tools} if tools else {})
-    prompt = server.chat.encode(body["messages"], **options)
+    text = server.chat.render(body["messages"], **options)
+    prompt = server.chat.tokens(text)
     if len(prompt) >= (context := server.engine.max_context):
         raise ValueError(f"the prompt has {len(prompt)} tokens, too many for {context} of context")
     stop, temperature = body.get("stop") or [], body.get("temperature")
@@ -268,7 +275,25 @@ def _completion(body: Any, server: Server) -> _Completion:
         tools=tools,
         stream=bool(body.get("stream")),
         stream_usage=bool((body.get("stream_options") or {}).get("include_usage")),
+        form=server.chat.form,
+        thinking=server.chat.opens_thinking(text),
     )
+
+
+def _calls(reply: Reply, tools: list[dict[str, Any]] | None) -> tuple[str, list[dict[str, Any]]]:
+    # a reply's text and its calls to the tools: those of the harmony format whose arguments are
+    # JSON objects and name a tool, or those of the text
+    if not tools:
+        return reply.content, []
+    if not reply.calls:
+        return parse_tool_calls(reply.content, tools)
+    names, calls = {tool.get("function", {}).get("name") for tool in tools}, []
+    for call in reply.calls:
+        with contextlib.suppress(ValueError):
+            arguments = json.loads(call["arguments"])
+            if call["name"] in names and isinstance(arguments, dict):
+                calls.append({"name": call["name"], "arguments": arguments})
+    return reply.content, calls
 
 
 def _partial_stop(text: str, stops: list[str]) -> int:

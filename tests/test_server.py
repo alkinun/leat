@@ -8,6 +8,7 @@ from collections.abc import Iterator
 import openai
 import pytest
 
+from leat.chat import ChatTemplate
 from leat.engine import Engine
 from leat.server import Server
 from tests.helpers import CONTEXT, chat_template
@@ -152,6 +153,44 @@ def test_tool_call(client, replies_with, stream, reply, content):
         (call,) = message.tool_calls
     assert call.type == "function" and call.id.startswith("call_") and reason == "tool_calls"
     assert call.function.name == "weather"
+    assert json.loads(call.function.arguments) == {"city": "Paris"}
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    "form, reply",
+    [("think", "<think>Sunny, I recall.</think>It is sunny."),
+     ("harmony", "<|channel|>analysis<|message|>Sunny, I recall.<|end|><|start|>assistant"
+                 "<|channel|>final<|message|>It is sunny.")],
+)  # fmt: skip
+def test_reasoning(client, replies_with, monkeypatch, stream, form, reply):
+    # Qwen3's and gpt-oss's reasoning, apart from the text
+    monkeypatch.setattr(ChatTemplate, "form", property(lambda self: form))
+    replies_with(reply)
+    response = chat(client, "Weather in Paris?", stream=stream)
+    if stream:
+        deltas = [chunk.choices[0].delta for chunk in response if chunk.choices]
+        reasoning = "".join(getattr(d, "reasoning_content", None) or "" for d in deltas)
+        content = "".join(d.content or "" for d in deltas)
+    else:
+        message = response.choices[0].message
+        reasoning, content = getattr(message, "reasoning_content", None), message.content
+    assert (reasoning, content) == ("Sunny, I recall.", "It is sunny.")
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_harmony_tool_call(client, replies_with, monkeypatch, stream):
+    monkeypatch.setattr(ChatTemplate, "form", property(lambda self: "harmony"))
+    replies_with(
+        '<|channel|>commentary to=functions.weather <|constrain|>json<|message|>{"city": "Paris"}'
+    )
+    response = chat(client, "Weather in Paris?", tools=[WEATHER], stream=stream)
+    if stream:
+        choices = [chunk.choices[0] for chunk in response]
+        (call,), reason = choices[-2].delta.tool_calls, choices[-1].finish_reason
+    else:
+        (call,), reason = response.choices[0].message.tool_calls, response.choices[0].finish_reason
+    assert reason == "tool_calls" and call.function.name == "weather"
     assert json.loads(call.function.arguments) == {"city": "Paris"}
 
 

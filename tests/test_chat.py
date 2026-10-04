@@ -1,7 +1,7 @@
 import jinja2
 import pytest
 
-from leat.chat import ChatTemplate, parse_tool_calls, tool_call_start
+from leat.chat import ChatTemplate, Reply, parse_tool_calls, split_reply, tool_call_start
 from leat.gguf import GGUF
 from leat.tokenizer import Tokenizer
 from tests.helpers import ids, tiny_metadata
@@ -136,3 +136,39 @@ def test_llama3(model_path):
         "<|start_header_id|>user<|end_header_id|>\n\nHi<|eot_id|>"
         "<|start_header_id|>assistant<|end_header_id|>\n\n"
     )
+
+
+HARMONY = (
+    "<|channel|>analysis<|message|>The user wants weather.<|end|><|start|>assistant"
+    "<|channel|>final<|message|>It is sunny."
+)
+HARMONY_CALL = (
+    "<|channel|>analysis<|message|>Need a tool.<|end|><|start|>assistant<|channel|>commentary "
+    'to=functions.weather <|constrain|>json<|message|>{"city": "Paris"}'
+)
+
+
+@pytest.mark.parametrize(
+    "text, form, thinking, reply",
+    [
+        ("<think>\nhmm</think>\n\nHi.", "think", False, Reply("hmm", "Hi.")),
+        ("hmm</think>Hi.", "think", True, Reply("hmm", "Hi.")),  # the prompt opened it
+        ("Hi.", "think", False, Reply(content="Hi.")),
+        ("<think>still", "think", False, Reply("still")),
+        ("a <think>b", None, False, Reply(content="a <think>b")),
+        (HARMONY, "harmony", False, Reply("The user wants weather.", "It is sunny.")),
+        (HARMONY_CALL, "harmony", False,
+         Reply("Need a tool.", "", [{"name": "weather", "arguments": '{"city": "Paris"}'}])),
+    ],
+)  # fmt: skip
+def test_split_reply(text, form, thinking, reply):
+    assert split_reply(text, form, thinking) == reply
+
+
+@pytest.mark.parametrize("text, form", [(HARMONY, "harmony"), ("<think>a b</think> c d", "think")])
+def test_split_reply_streams(text, form):
+    # every prefix splits into prefixes of the whole reply's parts: what a stream sent stays
+    whole = split_reply(text, form)
+    for n in range(len(text)):
+        part = split_reply(text[:n], form)
+        assert whole.reasoning.startswith(part.reasoning) and whole.content.startswith(part.content)

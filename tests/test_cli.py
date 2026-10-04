@@ -94,7 +94,7 @@ def test_run_refused_chat(tiny_model, monkeypatch):
     def refuse(self, messages, **kwargs):
         raise jinja2.TemplateError("Only user and assistant roles are supported!")
 
-    monkeypatch.setattr("leat.cli.ChatTemplate.encode", refuse)
+    monkeypatch.setattr("leat.cli.ChatTemplate.render", refuse)
     monkeypatch.setattr("builtins.input", lambda prompt: "hello")
     with pytest.raises(SystemExit, match="refuses this chat: Only user and assistant"):
         main(["run", str(tiny_model[0]), "--max-context", "64", "--system", "Be brief."])

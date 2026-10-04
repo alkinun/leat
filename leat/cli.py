@@ -11,7 +11,7 @@ import jinja2
 from tinygrad import Device
 
 from leat import bench
-from leat.chat import ChatTemplate
+from leat.chat import ChatTemplate, split_reply
 from leat.engine import Engine
 from leat.server import Server
 
@@ -79,26 +79,43 @@ def _run(args: argparse.Namespace) -> None:
             print()
             return
         try:
-            prompt = chat.encode(messages)
+            rendered = chat.render(messages)
         except jinja2.TemplateError as e:  # such as a system prompt the template does not take
             raise SystemExit(f"the model's chat template refuses this chat: {e}") from None
+        prompt, thinking = chat.tokens(rendered), chat.opens_thinking(rendered)
         if len(prompt) >= engine.max_context:
             print(f"[the conversation is {len(prompt)} tokens, over --max-context; starting over]")
             messages = messages[:1] if args.system else []
             continue
         reply, step, start = [], tok.stream(), time.perf_counter()
+        text, shown = "", ("", "")  # the reply so far, and its reasoning and text printed
         try:
             for t in engine.generate(prompt, engine.max_context - len(prompt), args.temperature):
                 if t in tok.eog_ids:
                     break
                 reply.append(t)
-                print(step(t), end="", flush=True)
+                text += step(t)
+                shown = _show(split_reply(text, chat.form, thinking), shown)
         except KeyboardInterrupt:
             pass
-        print(step(None), end="")
+        text += step(None)
+        parts = split_reply(text, chat.form, thinking)
+        _show(parts, shown)
         rate = len(reply) / (time.perf_counter() - start)
         print(f"\n\033[2m[{len(reply)} tokens, {rate:.1f} tok/s]\033[0m")
-        messages.append({"role": "assistant", "content": tok.decode(reply)})
+        messages.append({"role": "assistant", "content": parts.content})
+
+
+def _show(parts, shown: tuple[str, str]) -> tuple[str, str]:
+    # prints what is new of a reply's reasoning, dimmed, and of its text
+    reasoning, content = shown
+    if len(parts.reasoning) > len(reasoning):
+        print(f"\033[2m{parts.reasoning[len(reasoning) :]}\033[0m", end="", flush=True)
+    if len(parts.content) > len(content):
+        if not content and parts.reasoning:
+            print()
+        print(parts.content[len(content) :], end="", flush=True)
+    return parts.reasoning, parts.content
 
 
 def _serve(args: argparse.Namespace) -> None:
