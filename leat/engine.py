@@ -1,5 +1,6 @@
 """Generation: chunked prefill and token-by-token decode, replayed from compiled graphs."""
 
+import array
 import itertools
 import random
 from collections.abc import Generator
@@ -83,11 +84,10 @@ class Engine:
             pos, slot_var = len(cached), self._slot.bind(slot)
             temp = Tensor([temperature], dtype=dtypes.float32)
             seeds = Tensor([seed], dtype=dtypes.uint32)
-            padded = Tensor([prompt + [0] * (self.max_context - len(prompt))], dtype=dtypes.int32)
             while pos < len(prompt):
-                n = min(self.prefill_chunk, len(prompt) - pos)
-                token = self._prefill(padded, pos, n, slot_var, temp, seeds)
-                pos += n
+                chunk = prompt[pos : pos + self.prefill_chunk]
+                token = self._prefill(chunk, pos, slot_var, temp, seeds)
+                pos += len(chunk)
             cached += prompt[len(cached) :]
             for remaining in reversed(range(max_tokens)):
                 yield (t := int(token.item()))
@@ -138,17 +138,16 @@ class Engine:
         return slot
 
     def _prefill(
-        self, padded: Tensor, pos: int, n: int, slot: UOp, temperature: Tensor, seed: Tensor
+        self, chunk: list[int], pos: int, slot: UOp, temperature: Tensor, seed: Tensor
     ) -> Tensor:
-        # runs n tokens of a padded prompt from position pos, and samples the next: a single one
-        # as a decode step, up to FEW in the graph bound to that many, more in the one bound to
-        # prefill_chunk
-        start, sampling = self._pos.bind(pos), (temperature, seed)
+        # runs prompt tokens from position pos, and samples the next: a single one as a decode
+        # step, up to FEW in the graph bound to that many, more in the one bound to prefill_chunk
+        start, sampling, n = self._pos.bind(pos), (temperature, seed), len(chunk)
         if n == 1:
-            return self._decode(padded[:, pos : pos + 1].clone(), slot, start, *sampling)
+            return self._decode(_ids(chunk, 1), slot, start, *sampling)
         graph, length = (self._few_chunk, self._few) if n <= FEW else (self._chunk, self._len)
-        length = length.bind(n)
-        return graph(padded[:, start : start + length], slot, start, *sampling)
+        tokens = _ids(chunk, int(length.vmax)).shrink(((0, 1), (0, length.bind(n))))
+        return graph(tokens, slot, start, *sampling)
 
     def _step(
         self, tokens: Tensor, slot: UOp, start_pos: UOp, temperature: Tensor, seed: Tensor
@@ -156,6 +155,12 @@ class Engine:
         hidden = self.model(tokens, start_pos, slot)
         logits = self.model.logits(hidden[:, -1, :])
         return sample(logits, temperature, seed, start_pos + tokens.shape[1]).realize()
+
+
+def _ids(tokens: list[int], size: int) -> Tensor:
+    # (1, size) token ids, padded: from bytes, as tinygrad converts a list value by value
+    padded = array.array("i", tokens + [0] * (size - len(tokens))).tobytes()
+    return Tensor(padded, dtype=dtypes.int32).reshape(1, size)
 
 
 def _shared(prompt: list[int], cached: list[int]) -> int:

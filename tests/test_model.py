@@ -93,9 +93,9 @@ def prefill_starts(engine: Engine, monkeypatch) -> list[int]:
     # records the first position of each prefilled chunk
     starts, prefill = [], engine._prefill
 
-    def spy(padded, pos, *rest):
+    def spy(chunk, pos, *rest):
         starts.append(pos)
-        return prefill(padded, pos, *rest)
+        return prefill(chunk, pos, *rest)
 
     monkeypatch.setattr(engine, "_prefill", spy)
     return starts
