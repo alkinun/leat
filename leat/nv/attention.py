@@ -218,9 +218,12 @@ def attention(
 # softmax statistics and outputs in registers. Tiles of 32 keys leave room for more blocks per SM
 # than 64: 9 to 17% faster from 0 to 8k cached tokens. Heads wider than 256, Gemma 4's of 512,
 # would not fit in registers: blocks take parts of 256 of their outputs, each working out every
-# score, and read the queries as they go, with tiles of 16 keys to fit in shared memory.
+# score, and read the queries as they go, with tiles of 16 keys to fit in shared memory. A single
+# tile of queries, as while prefilling up to 16 tokens, would leave SMs idle: blocks split its key
+# tiles, as FlashDecoding does, and FlashDecoding's combine kernel merges their outputs.
 
 QUERIES, KEY_TILE, PART = 16, 32, 256
+SPLIT_BLOCKS = 64  # blocks that split one tile of queries' keys aim for
 
 # mma.sync on f16 with f32 accumulation: c (4 f32) + a 16 x 16 tile times a 16 x 8 tile, from the
 # lane's 4 and 2 words of f16 pairs; results return as in matmul's _MMA
@@ -264,31 +267,43 @@ def _quad(value: UOp, op: Callable[[UOp, UOp], UOp]) -> UOp:
 
 @functools.cache
 def _flash_attention_kernel(
-    out: UOp, q: UOp, cache: UOp, slot: int | UOp, start: int | UOp, tokens: int | UOp,
-    window: int, key_tile: int, parts: int,
+    out: UOp, *srcs: UOp, slot: int | UOp, start: int | UOp, tokens: int | UOp, window: int,
+    key_tile: int, parts: int, splits: int = 1,
 ) -> UOp:  # fmt: skip
-    # q (count, heads, dim) in f16, scaled so that exp2 gives the softmax, and the f16 cache, read
-    # as words of f16 pairs; query i is at position start + i and sees the slot's positions up to
-    # it, or the last `window` of them. Blocks take key_tile keys at a time, and 1 / parts of
-    # their outputs.
+    # srcs: q (count, heads, dim) in f16, scaled so that exp2 gives the softmax, and the f16
+    # cache, read as words of f16 pairs; query i is at position start + i and sees the slot's
+    # positions up to it, or the last `window` of them. Blocks take key_tile keys at a time, and
+    # 1 / parts of their outputs. Split, the queries are one tile, whose key tiles blocks take in
+    # turn, each writing out (count * heads, splits, dim) unnormalized and first in srcs the max
+    # and sum of each row's weights, for _attention_combine_kernel to merge.
+    stats, (q, cache) = (srcs[0], srcs[1:]) if splits > 1 else (None, srcs)
     heads, dim = int(q.shape[1]), int(q.shape[2])
     _, slots, kv_heads, positions, _ = (int(d) for d in cache.shape)
     words, width = dim // 2, dim // parts  # the part's dimensions of the output
     cache = cache.flatten().bitcast(dtypes.uint32).reshape(2, slots, kv_heads, positions, words)
     group = heads // kv_heads
     threads = group * WARP
-    tile = UOp.range((tokens + QUERIES - 1) // QUERIES, 0, AxisType.GLOBAL)
+    tile: UOp = UOp.const(0, dtypes.weakint)
+    if splits == 1:
+        tile = UOp.range((tokens + QUERIES - 1) // QUERIES, 0, AxisType.GLOBAL)
     kv_head = UOp.range(kv_heads, 1, AxisType.GLOBAL)
     lane, warp = lane_range(), UOp.range(group, 2, AxisType.LOCAL)
-    part = UOp.range(parts, 4, AxisType.GLOBAL) if parts > 1 else 0
+    part = UOp.range(parts, 4, AxisType.GLOBAL) if parts > 1 else UOp.const(0, dtypes.weakint)
     head, tid, g, t = kv_head * group + warp, warp * WARP + lane, lane // 4, lane % 4
     rows = (tile * QUERIES + g, tile * QUERIES + g + 8)  # the lane's rows of each mma result
     # the keys and values from the tile's first query's window to its last query, key_tile at a
     # time: keys as they are in the cache, values transposed so that B fragments of keys are words
     end = start + (tile * QUERIES + QUERIES).minimum(tokens)
     first = _since(start + tile * QUERIES + 1, window) // key_tile
-    tiles = UOp.range((end + key_tile - 1) // key_tile - first, 3, AxisType.LOOP)
-    kt = first + tiles
+    seen_tiles = (end + key_tile - 1) // key_tile - first
+    split = UOp.const(0, dtypes.weakint)
+    if splits > 1:  # every splits-th of them from the split's on
+        split = UOp.range(at_most(seen_tiles, splits), 5, AxisType.GLOBAL)
+        tiles = UOp.range((seen_tiles - 1 - split) // splits + 1, 3, AxisType.LOOP)
+        kt = first + split + tiles * splits
+    else:
+        tiles = UOp.range(seen_tiles, 3, AxisType.LOOP)
+        kt = first + tiles
 
     def queries(k: int) -> list[UOp]:  # the A fragment of the queries' dimensions 16k..
         # in registers for the whole loop with one part; read again each time with more
@@ -365,14 +380,21 @@ def _flash_attention_kernel(
         mx.store(UOp.stack(*new_max)),
         total.store(UOp.stack(*(prev_total[r].load() * rescale[r] + sums[r] for r in (0, 1)))),
     ).end(tiles)
-    acc, total = acc.after(update), total.after(update)
+    acc, mx, total = acc.after(update), mx.after(update), total.after(update)
     results = []
     for n in range(width // 8):
         for e in range(4):
-            value = acc[4 * n + e].load() / total[e // 2].load()
-            at = head * dim + part * width + 8 * n + 2 * t + e % 2
-            results.append(out[rows[e // 2], at].store(value))
-    ranges = (tile, kv_head, lane, warp) + ((part,) if isinstance(part, UOp) else ())
+            value, at = acc[4 * n + e].load(), part * width + 8 * n + 2 * t + e % 2
+            if splits > 1:
+                results.append(out[rows[e // 2] * heads + head, split, at].store(value))
+                continue
+            value = value / total[e // 2].load()
+            results.append(out[rows[e // 2], head * dim + at].store(value))
+    if stats is not None:  # the max in units of e, as the combine kernel takes it
+        for r, row in enumerate(rows):
+            for i, x in enumerate((mx[r].load() / LOG2E, total[r].load())):
+                results.append(stats[(row * heads + head).valid(t.eq(0)), split, i].store(x))
+    ranges = (kv_head, lane, warp, *(x for x in (tile, part, split) if x.op is Ops.RANGE))
     info = KernelInfo(name="flash_attention", opts_to_apply=())
     return UOp.group(*results).end(*ranges).sink(arg=info)
 
@@ -410,14 +432,26 @@ def flash_attention(
     q = q.pad_to((count, heads, dim)).contiguous()
     q, start = carry(q, start_pos)
     cache, bound = carry(cache, tokens)
-    out = Tensor.empty(count, heads * dim, dtype=dtypes.float32, device=q.device)
-    out, slot = carry(out, slot)
+    # one tile of queries, while prefilling few tokens, leaves SMs idle: blocks split its keys.
+    # For Llama 3.1 8B's 8 kv heads, 8 blocks each took 27 us at 2000 positions, 16 took 29 and
+    # one 170.
+    splits = max(SPLIT_BLOCKS // (int(cache.shape[2]) * shape[1]), 1) if count == QUERIES else 1
+    rows = count * heads  # of queries and heads
+    shapes = [(rows, splits, n) for n in (dim, 2)] if splits > 1 else [(count, heads * dim)]
+    outs = [Tensor.empty(*s, dtype=dtypes.float32, device=q.device) for s in shapes]
+    outs[0], slot = carry(outs[0], slot)
     fxn = functools.partial(
         _flash_attention_kernel, slot=slot, start=start, tokens=bound, window=window,
-        key_tile=shape[0], parts=shape[1],
+        key_tile=shape[0], parts=shape[1], splits=splits,
     )  # fmt: skip
-    out = Tensor.custom_kernel(out, q, cache, fxn=fxn)[0]
-    return out[:tokens].reshape(1, tokens, heads * dim)
+    outs = Tensor.custom_kernel(*outs, q, cache, fxn=fxn)
+    if splits > 1:
+        end = (start + at_most(bound, QUERIES) + shape[0] - 1) // shape[0]
+        live = at_most(end - _since(start + 1, window) // shape[0], splits)
+        out = Tensor.empty(1, rows, 1, dim, dtype=dtypes.float32, device=q.device)
+        fxn = functools.partial(_attention_combine_kernel, live=live)
+        outs = Tensor.custom_kernel(out, *outs[:2], fxn=fxn)
+    return outs[0].reshape(count, heads * dim)[:tokens].reshape(1, tokens, heads * dim)
 
 
 # ******** one token's queries, keys and values: biases, norms, RoPE, and the cache ********

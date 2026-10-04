@@ -452,8 +452,16 @@ def test_attention_groups(heads, kv_heads, length, symbolic):
     np.testing.assert_allclose(got, expected, rtol=2e-3, atol=2e-3)
 
 
+def chunk_len(tokens: int) -> UOp:
+    # a bound number of query tokens, as while prefilling; up to 16, bound to 16, they are one tile
+    # of queries, whose keys blocks split
+    return UOp.variable("chunk_len", 1, 16 if tokens <= 16 else 512).bind(tokens)
+
+
 # Llama 3.1 8B's groups of 4 query heads, and Qwen2.5 7B's of 7, which do not divide a tile's loads
-@pytest.mark.parametrize("tokens, start", [(37, 0), (64, 0), (100, 300), (512, 3584)])
+@pytest.mark.parametrize(
+    "tokens, start", [(37, 0), (64, 0), (100, 300), (512, 3584), (5, 0), (16, 2000)]
+)
 @pytest.mark.parametrize("heads, kv_heads", [(32, 8), (28, 4)])
 @pytest.mark.parametrize("symbolic", [False, True])
 def test_flash_attention(tokens, start, heads, kv_heads, symbolic):
@@ -463,7 +471,7 @@ def test_flash_attention(tokens, start, heads, kv_heads, symbolic):
     q_t, cache_t = Tensor(q).realize(), Tensor(cache).realize()
     if symbolic:  # as while prefilling: a bound start and number of tokens
         pos = UOp.variable("start_pos", 0, 4095).bind(start)
-        q_t = q_t[:, :, : UOp.variable("chunk_len", 1, 512).bind(tokens)]
+        q_t = q_t[:, :, : chunk_len(tokens)]
     else:
         pos, q_t = start, q_t[:, :, :tokens]
     assert nv.supports_flash_attention(q_t, cache_t)
@@ -491,7 +499,7 @@ def test_attention_window(kv_heads, dim, window, n, length, symbolic):
     np.testing.assert_allclose(got, expected, rtol=2e-3, atol=2e-3)
 
 
-@pytest.mark.parametrize("tokens, start", [(37, 0), (100, 1000), (512, 3584)])
+@pytest.mark.parametrize("tokens, start", [(37, 0), (100, 1000), (512, 3584), (11, 1500)])
 @pytest.mark.parametrize("dim, window", [(256, 1024), (128, 100)])
 @pytest.mark.parametrize("symbolic", [False, True])
 def test_flash_attention_window(tokens, start, dim, window, symbolic):
@@ -501,7 +509,7 @@ def test_flash_attention_window(tokens, start, dim, window, symbolic):
     q_t, cache_t = Tensor(q).realize(), Tensor(cache).realize()
     if symbolic:
         pos = UOp.variable("start_pos", 0, 4095).bind(start)
-        q_t = q_t[:, :, : UOp.variable("chunk_len", 1, 512).bind(tokens)]
+        q_t = q_t[:, :, : chunk_len(tokens)]
     else:
         pos, q_t = start, q_t[:, :, :tokens]
     assert nv.supports_flash_attention(q_t, cache_t)
@@ -564,7 +572,10 @@ def test_rotate(monkeypatch, halves, biased, normed, v_norm, kv_heads, symbolic)
 
 
 # heads too wide for registers, Gemma 4's of 512: blocks take parts of their outputs
-@pytest.mark.parametrize("tokens, start, window", [(37, 0, 0), (100, 1000, 0), (512, 1500, 1024)])
+@pytest.mark.parametrize(
+    "tokens, start, window",
+    [(37, 0, 0), (100, 1000, 0), (512, 1500, 1024), (7, 1000, 0), (3, 1900, 1024)],
+)
 @pytest.mark.parametrize("symbolic", [False, True])
 def test_flash_attention_wide(tokens, start, window, symbolic):
     rng = np.random.default_rng(tokens + start)
@@ -573,7 +584,7 @@ def test_flash_attention_wide(tokens, start, window, symbolic):
     q_t, cache_t = Tensor(q).realize(), Tensor(cache).realize()
     if symbolic:
         pos = UOp.variable("start_pos", 0, 2047).bind(start)
-        q_t = q_t[:, :, : UOp.variable("chunk_len", 1, 512).bind(tokens)]
+        q_t = q_t[:, :, : chunk_len(tokens)]
     else:
         pos, q_t = start, q_t[:, :, :tokens]
     assert nv.supports_flash_attention(q_t, cache_t)
