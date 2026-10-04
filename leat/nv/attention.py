@@ -162,6 +162,30 @@ def _attention_combine_kernel(o: UOp, partial: UOp, stats: UOp, live: int | UOp)
     return UOp.group(*stores).end(lane, part, head).sink(arg=info)
 
 
+def supports_wide_attention(q: Tensor) -> bool:
+    return on_nvidia(q) and q.shape[0] == 1
+
+
+def wide_attention(
+    q: Tensor, cache: Tensor, slot: int | UOp, start_pos: int | UOp, scale: float, window: int = 0
+) -> Tensor:
+    """flash_attention for heads too wide for it, Gemma 4's of 512: tinygrad's own matrix kernels
+    in f16 with f32 sums, over every position of the slot with a mask, as fixed shapes let them
+    use tensor cores where a bound number of positions leaves them naive, 50x slower."""
+    _, heads, tokens, dim = q.shape
+    _, _, kv_heads, positions, _ = (int(d) for d in cache.shape)
+    count, group = q.max_shape[2], heads // kv_heads
+    k, v = (cache[i, slot : slot + 1].reshape(kv_heads, positions, dim) for i in (0, 1))
+    q = (q.float() * scale).half().pad_to((1, heads, count, dim))
+    scores = q.reshape(kv_heads, group * count, dim).matmul(k.transpose(1, 2), dtype=dtypes.float32)
+    back = (Tensor.arange(count) + Tensor(start_pos)).reshape(count, 1) - Tensor.arange(positions)
+    seen = (back >= 0) & (back < window) if window else back >= 0
+    scores = scores.reshape(kv_heads, group, count, positions) + seen.where(0.0, -math.inf)
+    probs = scores.softmax(-1).half().reshape(kv_heads, group * count, positions)
+    out = probs.matmul(v, dtype=dtypes.float32).reshape(heads, count, dim)[:, :tokens]
+    return out.transpose(0, 1).reshape(1, tokens, heads * dim)
+
+
 def _since(length: int | UOp, window: int) -> int | UOp:
     # the first of `length` positions that a window of the last `window` holds, 0 for no window
     if not window:

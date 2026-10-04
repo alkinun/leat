@@ -12,6 +12,8 @@ from leat.nv.attention import (
     supports_attention,
     supports_flash_attention,
     supports_rotate,
+    supports_wide_attention,
+    wide_attention,
 )
 from leat.nv.common import GROUP
 from leat.nv.experts import mixture, route, scores, supports_mixture, supports_scores
@@ -23,5 +25,6 @@ __all__ = [
     "GROUP", "argmax", "attention", "feed_forward", "flash_attention", "matmuls", "matvecs",
     "mixture", "quantize_q8", "rotate", "route", "scores", "supports_argmax",
     "supports_attention", "supports_flash_attention", "supports_matmul", "supports_matvec",
-    "supports_mixture", "supports_rotate", "supports_scores", "swiglu",
+    "supports_mixture", "supports_rotate", "supports_scores", "supports_wide_attention", "swiglu",
+    "wide_attention",
 ]  # fmt: skip
