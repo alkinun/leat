@@ -33,7 +33,10 @@ def main(argv: list[str] | None = None) -> None:
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8080)
     serve.add_argument("--max-context", type=int, default=4096)
-    serve.add_argument("--slots", type=int, default=4, help="sequences the KV cache keeps")
+    serve.add_argument(
+        "--slots", type=int, default=4,
+        help="sequences generating at once, each in a slot of the KV cache that keeps its tokens",
+    )  # fmt: skip
 
     speed = commands.add_parser("bench", help="measure prefill and decode speed")
     speed.add_argument("model", type=Path, help="GGUF file")

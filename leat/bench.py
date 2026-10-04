@@ -15,14 +15,14 @@ from typing import BinaryIO, cast
 
 from tinygrad import Tensor, TinyJit, UOp, dtypes
 
-from leat.engine import Engine
+from leat.engine import BATCH, Engine
 
 
 @dataclass(frozen=True)
 class Speed:
     prefill: float  # tokens/s over a prompt, including sampling the first token
     decode: float  # tokens/s in all generating after one-token prompts, `sequences` at once
-    weight_gbs: float  # weight bytes streamed per second while decoding, a step's read once
+    weight_gbs: float  # weight bytes streamed per second while decoding, once per batch
     sequences: int = 1
 
 
@@ -73,7 +73,10 @@ def speed(
         t.nbytes * share[n] for n, t in tensors.items() if n != "token_embd.weight" or tied
     )
     tg = statistics.median(decode[2:])
-    return Speed(statistics.median(prefill[2:]), tg, streamed * tg / sequences / 1e9, sequences)
+    reads = (
+        -(-sequences // BATCH) / sequences
+    )  # weight reads per token: a step reads them per batch
+    return Speed(statistics.median(prefill[2:]), tg, streamed * tg * reads / 1e9, sequences)
 
 
 def perplexity(

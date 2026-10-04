@@ -10,6 +10,7 @@ from pathlib import Path
 from tinygrad import Tensor, TinyJit, UOp, dtypes
 
 from leat.gguf import GGUF
+from leat.kernels import MATVEC_TOKENS
 from leat.model import Config, Transformer
 from leat.ops import Span
 from leat.sampler import sample
@@ -21,6 +22,9 @@ FEW_TOKENS = 16
 # prompt tokens a step prefills at most while other sequences decode, which wait for it: for Llama
 # 3.1 8B on the 3090, a chunk of 256 takes 57 ms against 111 for 512, and prefills 2.3% slower
 SHARED_CHUNK = 256
+# sequences a decode step runs at most in one graph, more in turn: as many tokens as the
+# matrix-vector kernels take, which on AMD are the only kernels for several
+BATCH = MATVEC_TOKENS
 
 
 @dataclass(eq=False)
@@ -46,7 +50,7 @@ class Sequence:
 
 @dataclass
 class _Batch:
-    # a decode step's sequences, and what the next step reuses if it runs the same ones
+    # a decode batch's sequences, and what the next with the same ones reuses
     sequences: list[Sequence]
     tokens: Tensor  # the step's output, the sequences' next tokens: (1, n)
     sampling: tuple[Tensor, Tensor]  # their temperatures and seeds
@@ -73,12 +77,11 @@ class Engine:
     ):
         if slots < 1:
             raise ValueError(f"slots must be at least 1, got {slots}")
-        # decode steps of powers of 2 sequences, and of `slots`: others are padded with rows in
-        # a spare slot, at its first position, which write where no sequence reads and attend
-        # over a single key
-        self._batches = sorted(
-            {1 << i for i in range(slots.bit_length()) if 1 << i < slots} | {slots}
-        )
+        # decode steps of powers of 2 sequences, and of `slots` or BATCH: others are padded with
+        # rows in a spare slot, at its first position, which write where no sequence reads and
+        # attend over a single key
+        most = min(slots, BATCH)
+        self._batches = sorted({1 << i for i in range(most.bit_length()) if 1 << i < most} | {most})
         # those that take padding, more than one past the batch before
         pairs = zip(self._batches[1:], self._batches[:-1], strict=True)
         self._padded = {n for n, before in pairs if n > before + 1}
@@ -92,17 +95,17 @@ class Engine:
         self._len = UOp.variable("chunk_len", 1, prefill_chunk)
         self._few = UOp.variable("few_len", 1, min(FEW_TOKENS, prefill_chunk))
         # the slot and position of each row of a decode step, the first a chunk's too
-        rows = range(slots)
+        rows = range(most)
         self._slot_vars = [UOp.variable(f"slot{i}", 0, cache_slots - 1) for i in rows]
         self._pos_vars = [UOp.variable(f"pos{i}", 0, max_context - 1) for i in rows]
         self._source = UOp.variable("source", 0, slots - 1)
         # the sequences of a padded decode step, whose padding a mixture of experts skips: a
         # padding row would read experts of its own
-        self._live = UOp.variable("live", 1, slots) if self.config.experts else None
+        self._live = UOp.variable("live", 1, most) if self.config.experts else None
         self._chunk, self._few_chunk = _graph(self._step), _graph(self._step)
         self._decode = {n: _graph(self._step) for n in self._batches}
         self._copy = _graph(self.model.copy)
-        self._batch: _Batch | None = None  # the last decode step's
+        self._last: dict[int, _Batch] = {}  # the last decode step's batches, by graph
         self._cached: list[list[int]] = [[] for _ in range(slots)]  # tokens each slot holds
         self._used = [0] * slots  # when each slot last started a generation
         self._clock = itertools.count(1)
@@ -191,7 +194,7 @@ class Engine:
             rows = [v.bind(i) for i in range(n) for v in (self._slot_vars[i], self._pos_vars[i])]
             live = self._live.bind(n) if self._live is not None and n in self._padded else None
             self._decode[n](_ids([0] * n, n), *sampling, *rows, live=live)
-        self._batch = None
+        self._last = {}
         if self.slots > 1:  # copying a cached prefix to another slot has a graph too
             self._copy(self._source.bind(0), self._slot_vars[0].bind(1))
         self.reset()
@@ -234,7 +237,7 @@ class Engine:
         row = self._slot_vars[0].bind(sequence.slot), self._pos_vars[0].bind(pos)
         if (n := len(chunk)) == 1:
             graph, tokens = self._decode[1], _ids(chunk, 1)
-            self._batch = None  # whose output this graph overwrites
+            self._last.pop(1, None)  # whose output this graph overwrites
         else:
             few = n <= FEW_TOKENS
             graph, length = (self._few_chunk, self._few) if few else (self._chunk, self._len)
@@ -244,12 +247,24 @@ class Engine:
         return int(token.item()) if len(cached) == len(sequence.prompt) else None
 
     def _decode_step(self, sequences: list[Sequence]) -> list[int]:
-        # runs each sequence's last token, padded to a batch's size with rows in the spare slot.
-        # The same sequences as the last step's take that step's output as their tokens, and its
-        # temperatures and seeds: nothing to upload.
-        k, last = len(sequences), self._batch
-        n = next(b for b in self._batches if b >= k)
-        if last is not None and last.sequences == sequences:
+        # runs each sequence's last token, in batches of BATCH at most. A batch of the same
+        # sequences as the last step's batch in its graph takes that batch's output as its
+        # tokens, and its temperatures and seeds, uploading nothing, unless another batch of this
+        # step takes the graph too, overwriting the output
+        batches = [sequences[i : i + BATCH] for i in range(0, len(sequences), BATCH)]
+        sizes = [next(n for n in self._batches if n >= len(b)) for b in batches]
+        last, self._last, out = self._last, {}, []
+        for batch, n in zip(batches, sizes, strict=True):
+            reuse = last.get(n) if sizes.count(n) == 1 else None
+            out += self._decode_batch(
+                batch, n, reuse if reuse and reuse.sequences == batch else None
+            )
+        return out
+
+    def _decode_batch(self, sequences: list[Sequence], n: int, last: _Batch | None) -> list[int]:
+        # runs each sequence's last token in the graph of n, padded with rows in the spare slot
+        k = len(sequences)
+        if last is not None:
             tokens, sampling = last.tokens, last.sampling
         else:
             pad = [0] * (n - k)
@@ -257,15 +272,13 @@ class Engine:
             temperature = Tensor([s.temperature for s in sequences] + pad, dtype=dtypes.float32)
             seed = Tensor([s.seed for s in sequences] + pad, dtype=dtypes.uint32)
             sampling = temperature, seed
-        rows = [(s.slot, len(self._cached[s.slot])) for s in sequences] + [(self._spare, 0)] * (
-            n - k
-        )
+        rows = [(s.slot, len(self._cached[s.slot])) for s in sequences]
         bound = []
-        for i, (slot, pos) in enumerate(rows):
+        for i, (slot, pos) in enumerate(rows + [(self._spare, 0)] * (n - k)):
             bound += [self._slot_vars[i].bind(slot), self._pos_vars[i].bind(pos)]
         live = self._live.bind(k) if self._live is not None and n in self._padded else None
         out = self._decode[n](tokens, *sampling, *bound, live=live)
-        self._batch = _Batch(list(sequences), out.reshape(1, n), sampling)
+        self._last[n] = _Batch(list(sequences), out.reshape(1, n), sampling)
         for s in sequences:
             self._cached[s.slot].append(s.tokens[-1])
         return out.numpy().ravel()[:k].tolist()

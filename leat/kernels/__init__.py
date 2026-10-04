@@ -18,13 +18,14 @@ from leat.kernels.attention import (
 from leat.kernels.common import GROUP
 from leat.kernels.experts import mixture, route, scores, supports_mixture, supports_scores
 from leat.kernels.matmul import feed_forward, matmuls, supports_matmul
-from leat.kernels.matvec import matvecs, supports_matvec, swiglu
+from leat.kernels.matvec import MATVEC_TOKENS, matvecs, supports_matvec, swiglu
 from leat.kernels.norms import add_normed, supports_add_normed
 from leat.kernels.quantize import quantize_q8
 
 __all__ = [
-    "GROUP", "add_normed", "argmax", "attention", "feed_forward", "flash_attention", "matmuls",
-    "matvecs", "mixture", "quantize_q8", "rotate", "route", "scores", "supports_add_normed",
-    "supports_argmax", "supports_attention", "supports_flash_attention", "supports_matmul",
-    "supports_matvec", "supports_mixture", "supports_rotate", "supports_scores", "swiglu",
+    "GROUP", "MATVEC_TOKENS", "add_normed", "argmax", "attention", "feed_forward",
+    "flash_attention", "matmuls", "matvecs", "mixture", "quantize_q8", "rotate", "route", "scores",
+    "supports_add_normed", "supports_argmax", "supports_attention", "supports_flash_attention",
+    "supports_matmul", "supports_matvec", "supports_mixture", "supports_rotate", "supports_scores",
+    "swiglu",
 ]  # fmt: skip

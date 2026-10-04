@@ -216,6 +216,25 @@ def test_batched_matches_alone(tiny, arch):
         assert got[n] == generated_with(path, *args), n
 
 
+@pytest.mark.usefixtures("reference_ops")
+def test_batches_past_the_largest(tiny_model, monkeypatch):
+    # more sequences than a decode graph takes run in batches in turn, two of the same graph
+    monkeypatch.setattr("leat.engine.BATCH", 2)
+    path, _ = tiny_model
+    engine = Engine(path, max_context=CONTEXT, prefill_chunk=8, slots=5)
+    assert list(engine._decode) == [1, 2]
+    starts = {
+        0: (PROMPT, 7),
+        1: ([4, 2], 6),
+        2: (PROMPT[3:], 5, 1.0, 3),
+        3: ([7, 7, 1], 6),
+        4: ([9], 4),
+    }
+    got = run_all(engine, starts)
+    for n, args in starts.items():
+        assert got[n] == generated_with(path, *args), n
+
+
 def generated_with(path, prompt, n, temperature=0.0, seed=None) -> list[int]:
     engine = Engine(path, max_context=CONTEXT, prefill_chunk=8)
     return list(engine.generate(prompt, n, temperature, seed))
