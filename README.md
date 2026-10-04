@@ -65,7 +65,7 @@ RTX 3090, Q4_K_M files, one sequence, in tokens per second. llama.cpp is b11372 
 
 After 8192 tokens of context, Llama 3.1 8B decodes at 120.9 tok/s against llama.cpp's 125.0.
 
-Through `leat serve`, the first token of a 2141-token prompt to Llama 3.1 8B arrives after 463 ms, or after 53 ms when another conversation has cached its 2130-token system prompt.
+Through `leat serve`, the first token of a 2141-token prompt to Llama 3.1 8B arrives after 463 ms, or after 53 ms when another conversation has cached its 2130-token system prompt. The server is ready 14.5 s after it starts, the file in the page cache, most of that spent compiling the graphs it replays.
 
 Quality against llama.cpp on the same file: wikitext-2, chunks of 512 tokens with the second half of each scored, run as one prompt each. Both quantize activations to int8; the mixture's choice of experts amplifies that noise.
 
