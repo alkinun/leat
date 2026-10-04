@@ -4,7 +4,7 @@ A minimal, fast LLM inference engine built on [tinygrad](https://github.com/tiny
 
 leat runs GGUF models with their weights kept in the quantized storage format. The goal is single-stream decode limited by memory bandwidth, not by the engine. It targets NVIDIA RTX 30-series GPUs first, then AMD Strix Halo.
 
-> Status: on NVIDIA, hand-written kernels decode Llama 3, Mistral, Qwen2.5, Qwen3, Qwen3 MoE and Gemma 4 faster than llama.cpp, and process prompts at 0.83 to 1.05x its speed. `leat serve` serves the OpenAI chat completions API. Every kernel is tested against an independent NumPy reference, and so are the plain tinygrad ops they replace, which run on any device; `LEAT_KERNELS=ref` runs everything that way.
+> Status: on NVIDIA, hand-written kernels decode Llama 3, Mistral, Qwen2.5, Qwen3, Qwen3 MoE and Gemma 4 faster than llama.cpp, and process prompts at 0.85 to 1.05x its speed. `leat serve` serves the OpenAI chat completions API. Every kernel is tested against an independent NumPy reference, and so are the plain tinygrad ops they replace, which run on any device; `LEAT_KERNELS=ref` runs everything that way.
 
 ## Quickstart
 
@@ -55,15 +55,15 @@ RTX 3090, Q4_K_M files, one sequence, in tokens per second. llama.cpp is b11372 
 
 | | llama.cpp pp512 | leat pp512 | llama.cpp tg128 | leat tg128 |
 |---|---:|---:|---:|---:|
-| Llama 3.2 3B Instruct | 10970 | 9151 | 275.3 | 284.0 |
-| Llama 3.1 8B Instruct | 5417 | 4658 | 147.6 | 151.8 |
-| Mistral 7B Instruct v0.3 | 5433 | 4665 | 155.2 | 161.6 |
-| Qwen2.5 7B Instruct | 5834 | 4907 | 152.8 | 158.4 |
-| Qwen3 8B | 5244 | 4460 | 141.2 | 147.7 |
-| Qwen3 30B A3B | 4681 | 4927 | 211.1 | 224.8 |
-| Gemma 4 26B A4B it | 4844 | 4762 | 157.6 | 186.2 |
+| Llama 3.2 3B Instruct | 10970 | 9531 | 275.3 | 281.8 |
+| Llama 3.1 8B Instruct | 5417 | 4638 | 147.6 | 152.6 |
+| Mistral 7B Instruct v0.3 | 5433 | 4692 | 155.2 | 161.8 |
+| Qwen2.5 7B Instruct | 5834 | 4947 | 152.8 | 165.7 |
+| Qwen3 8B | 5244 | 4448 | 141.2 | 148.7 |
+| Qwen3 30B A3B | 4681 | 4894 | 211.1 | 228.6 |
+| Gemma 4 26B A4B it | 4844 | 4807 | 157.6 | 186.9 |
 
-After 8192 tokens of context, Llama 3.1 8B decodes at 120.9 tok/s against llama.cpp's 125.0.
+After 8192 tokens of context, Llama 3.1 8B decodes at 122.3 tok/s against llama.cpp's 125.0.
 
 Through `leat serve`, the first token of a 2141-token prompt to Llama 3.1 8B arrives after 463 ms, or after 53 ms when another conversation has cached its 2130-token system prompt. The server is ready 14.5 s after it starts, the file in the page cache, most of that spent compiling the graphs it replays.
 
@@ -78,7 +78,7 @@ Quality against llama.cpp on the same file: wikitext-2, chunks of 512 tokens wit
 | Qwen3 8B | 11.0321 | 11.0142 | 0.0031 | 97.3% |
 | Qwen3 30B A3B | 9.4920 | 9.5012 | 0.0043 | 97.6% |
 
-leat's decode path, which runs the second half of each chunk one token at a time, scores 0.0013 for Llama 3.1 8B and 0.0033 for Qwen3 30B A3B on 2 chunks. For scale, ignoring Llama 3.1's RoPE frequency factors, a subtle bug, raises the KL from 0.0010 to 0.0026 on the first 5 chunks with the reference ops; Qwen3 8B scores 0.0025 against llama.cpp on the reference ops alone.
+leat's decode path, which runs the second half of each chunk one token at a time, scores 0.0012 for Llama 3.1 8B and 0.0031 for Qwen3 30B A3B on 2 chunks. For scale, ignoring Llama 3.1's RoPE frequency factors, a subtle bug, raises the KL from 0.0010 to 0.0026 on the first 5 chunks with the reference ops; Qwen3 8B scores 0.0025 against llama.cpp on the reference ops alone.
 
 Gemma 4's instruction-tuned model does not model raw text: both engines score wikitext in the tens of thousands. On its chat format, over the 542 positions of six answers to chat prompts, leat's next-token distributions differ from llama.cpp's by a mean KL of 0.0023, with the same top token at 98.3%.
 
