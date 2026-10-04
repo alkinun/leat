@@ -32,6 +32,42 @@ FEW = 8  # tokens up to which the matrix-vector kernels run a mixture
 
 
 @functools.cache
+def _scores_kernel(
+    out: UOp, x: UOp, weight: UOp, router: UOp, tokens: int | UOp, eps: float
+) -> UOp:
+    # a warp per token and expert: the router's row . rms_norm(x, weight, eps), the norm worked
+    # out by each warp from the token's row, which stays in cache; lanes take 4 values at a time
+    experts, dim = (int(d) for d in router.shape)
+    token, expert = UOp.range(tokens, 0, AxisType.GLOBAL), UOp.range(experts, 1, AxisType.GLOBAL)
+    lane, zero = lane_range(), UOp.const(0.0, dtypes.float32)
+    ats = [(i * WARP + lane) * 4 for i in range(dim // (4 * WARP))]
+    xs = [v for at in ats for v in load_vector(x[token, at], 4)]
+    inv = (warp_sum(sum((v * v for v in xs), zero)) / dim + eps).rsqrt()
+    ws = [v for at in ats for v in load_vector(weight[at], 4)]
+    rs = [v for at in ats for v in load_vector(router[expert, at], 4)]
+    dot = warp_sum(sum((a * b * c for a, b, c in zip(xs, ws, rs, strict=True)), zero))
+    store = out[token, expert.valid(lane.eq(0))].store(dot * inv)
+    return store.end(token, expert, lane).sink(arg=KernelInfo(name="router", opts_to_apply=()))
+
+
+def supports_scores(x: Tensor, router: QTensor) -> bool:
+    return on_nvidia(x) and router.type == GGMLType.F32 and router.shape[1] % (4 * WARP) == 0
+
+
+def scores(x: Tensor, norm: tuple[Tensor, float], router: QTensor) -> Tensor:
+    """The router's scores of the experts for tokens x (1, T, dim): rms_norm(x, *norm) @ router.T
+    in f32, the precision llama.cpp scores in, where routing is sensitive to rounding."""
+    _, tokens, dim = x.shape
+    count, experts = x.max_shape[1], router.shape[0]
+    out = Tensor.empty(count, experts, dtype=dtypes.float32, device=x.device)
+    x, bound = carry(x.reshape(tokens, dim).float().pad_to((count, dim)).contiguous(), tokens)
+    fxn = functools.partial(_scores_kernel, tokens=bound, eps=norm[1])
+    weights = norm[0].float().contiguous(), router.data.reshape(experts, dim)
+    out = Tensor.custom_kernel(out, x, *weights, fxn=fxn)[0]
+    return out[:tokens].reshape(1, tokens, experts)
+
+
+@functools.cache
 def _route_kernel(ids: UOp, weights: UOp, scores: UOp, tokens: int | UOp, used: int) -> UOp:
     # a warp per token: `used` rounds of argmax over the experts' scores, the first index on ties,
     # each taking its winner out of the next; then the softmax of the winners' scores
@@ -56,6 +92,55 @@ def _route_kernel(ids: UOp, weights: UOp, scores: UOp, tokens: int | UOp, used: 
         stores += [ids[at].store(index), weights[at].store(e / total)]
     info = KernelInfo(name=f"route_{used}", opts_to_apply=())
     return UOp.group(*stores).end(token, lane).sink(arg=info)
+
+
+def route(scores: Tensor, used: int) -> tuple[Tensor, Tensor]:
+    """The `used` best scoring experts of each row of `scores` (T, experts), as ids (T * used)
+    int32, and the softmax of their scores."""
+    count, tokens = scores.max_shape[0], scores.shape[0]
+    ids = Tensor.empty(count * used, dtype=dtypes.int32, device=scores.device)
+    weights = Tensor.empty(count * used, dtype=dtypes.float32, device=scores.device)
+    scores, tokens = carry(scores.float().pad_to(scores.max_shape).contiguous(), tokens)
+    fxn = functools.partial(_route_kernel, tokens=tokens, used=used)
+    ids, weights = Tensor.custom_kernel(ids, weights, scores, fxn=fxn)[:2]
+    return ids, weights
+
+
+@functools.cache
+def _bucket_kernel(order: UOp, counts: UOp, ids: UOp, pairs: int | UOp) -> UOp:
+    # a warp per expert lists the pairs routed to it, in order: in each turn of 32 pairs, a ballot
+    # of the lanes holding one gives each its place after those listed before
+    experts = int(counts.shape[0])
+    per = int(order.shape[0]) // experts
+    expert, lane = UOp.range(experts, 0, AxisType.GLOBAL), lane_range()
+    turn = UOp.range((pairs + WARP - 1) // WARP, 1, AxisType.LOOP)
+    pair = turn * WARP + lane
+    routed = ids[pair.minimum(int(ids.shape[0]) - 1)].load().eq(expert.cast(dtypes.int32))
+    mine = routed & (pair < pairs)
+    ballot = UOp(Ops.CUSTOM, src=(mine,), arg=("__ballot_sync(0xffffffffu, {0})", dtypes.uint32))
+    below = (UOp.const(1, dtypes.uint32) << lane.cast(dtypes.uint32)) - 1
+    listed = UOp.alloc((1,), dtypes.int32, addrspace=AddrSpace.REG)
+    listed = listed.after(listed[0].store(0))
+    before = listed.after(turn)[0].load()
+    place = before + _popc(ballot & below)
+    put = order[(expert * per + place).valid(mine)].store(pair.cast(dtypes.int32))
+    listed = listed.after(UOp.group(put, listed[0].store(before + _popc(ballot))).end(turn))
+    store = counts[expert.valid(lane.eq(0))].store(listed[0].load())
+    return store.end(expert, lane).sink(arg=KernelInfo(name="bucket", opts_to_apply=()))
+
+
+def _popc(x: UOp) -> UOp:
+    return UOp(Ops.CUSTOMI, src=(x,), arg=("__popc({0})", dtypes.int32))
+
+
+def _bucket(ids: Tensor, experts: int, per: int, pairs: int | UOp) -> tuple[Tensor, Tensor]:
+    # each expert's pairs, the first `pairs` of ids, as order (experts, per) and counts (experts,)
+    order = Tensor.empty(experts * per, dtype=dtypes.int32, device=ids.device)
+    counts = Tensor.empty(experts, dtype=dtypes.int32, device=ids.device)
+    ids, pairs = carry(ids, pairs)
+    fxn = functools.partial(_bucket_kernel, pairs=pairs)
+    order, counts = Tensor.custom_kernel(order, counts, ids, fxn=fxn)[:2]
+    return order, counts
 
 
 @functools.cache
@@ -111,57 +196,7 @@ def _experts_down_kernel(
     return rows_kernel(out, used * units, name, [mixed], combine, tokens * rows)
 
 
-@functools.cache
-def _scores_kernel(
-    out: UOp, x: UOp, weight: UOp, router: UOp, tokens: int | UOp, eps: float
-) -> UOp:
-    # a warp per token and expert: the router's row . rms_norm(x, weight, eps), the norm worked
-    # out by each warp from the token's row, which stays in cache; lanes take 4 values at a time
-    experts, dim = (int(d) for d in router.shape)
-    token, expert = UOp.range(tokens, 0, AxisType.GLOBAL), UOp.range(experts, 1, AxisType.GLOBAL)
-    lane, zero = lane_range(), UOp.const(0.0, dtypes.float32)
-    ats = [(i * WARP + lane) * 4 for i in range(dim // (4 * WARP))]
-    xs = [v for at in ats for v in load_vector(x[token, at], 4)]
-    inv = (warp_sum(sum((v * v for v in xs), zero)) / dim + eps).rsqrt()
-    ws = [v for at in ats for v in load_vector(weight[at], 4)]
-    rs = [v for at in ats for v in load_vector(router[expert, at], 4)]
-    dot = warp_sum(sum((a * b * c for a, b, c in zip(xs, ws, rs, strict=True)), zero))
-    store = out[token, expert.valid(lane.eq(0))].store(dot * inv)
-    return store.end(token, expert, lane).sink(arg=KernelInfo(name="router", opts_to_apply=()))
-
-
-def supports_scores(x: Tensor, router: QTensor) -> bool:
-    return on_nvidia(x) and router.type == GGMLType.F32 and router.shape[1] % (4 * WARP) == 0
-
-
-def scores(x: Tensor, norm: tuple[Tensor, float], router: QTensor) -> Tensor:
-    """The router's scores of the experts for tokens x (1, T, dim): rms_norm(x, *norm) @ router.T
-    in f32, the precision llama.cpp scores in, where routing is sensitive to rounding."""
-    _, tokens, dim = x.shape
-    count, experts = x.max_shape[1], router.shape[0]
-    out = Tensor.empty(count, experts, dtype=dtypes.float32, device=x.device)
-    x, bound = carry(x.reshape(tokens, dim).float().pad_to((count, dim)).contiguous(), tokens)
-    fxn = functools.partial(_scores_kernel, tokens=bound, eps=norm[1])
-    weights = norm[0].float().contiguous(), router.data.reshape(experts, dim)
-    out = Tensor.custom_kernel(out, x, *weights, fxn=fxn)[0]
-    return out[:tokens].reshape(1, tokens, experts)
-
-
-def route(scores: Tensor, used: int) -> tuple[Tensor, Tensor]:
-    """The `used` best scoring experts of each row of `scores` (T, experts), as ids (T * used)
-    int32, and the softmax of their scores."""
-    count, tokens = scores.max_shape[0], scores.shape[0]
-    ids = Tensor.empty(count * used, dtype=dtypes.int32, device=scores.device)
-    weights = Tensor.empty(count * used, dtype=dtypes.float32, device=scores.device)
-    scores, tokens = carry(scores.float().pad_to(scores.max_shape).contiguous(), tokens)
-    fxn = functools.partial(_route_kernel, tokens=tokens, used=used)
-    ids, weights = Tensor.custom_kernel(ids, weights, scores, fxn=fxn)[:2]
-    return ids, weights
-
-
-def supports_mixture(
-    x: Tensor, gate: QTensor, up: QTensor | None, down: QTensor, gelu: bool = False
-) -> bool:
+def supports_mixture(x: Tensor, gate: QTensor, up: QTensor | None, down: QTensor) -> bool:
     # whole warps of experts to route, and the matrix-vector kernels' units of 64 weights; where
     # up is None, gate stacks both
     experts, rows, cols = gate.shape
@@ -187,10 +222,8 @@ def mixture(
     ids, weights = route(scores.reshape(tokens, gate.shape[0]), used)
     # few tokens, or matrices the tensor-core kernels do not fit, take the matrix-vector kernels
     few = isinstance(tokens, int) and tokens <= FEW
-    gate_rows = gate.shape[1] // (2 if up is None else 1)
-    fit = matmul_fits(gate.type, gate_rows, gate.shape[2]) and matmul_fits(
-        down.type, *down.shape[1:]
-    )
+    _, cols, rows = down.shape  # (experts, dim, hidden)
+    fit = matmul_fits(gate.type, rows, cols) and matmul_fits(down.type, cols, rows)
     if few or not fit:
         return _matvecs(x, ids, weights, gate, up, down, used, norm, gelu, scales, residual)
     # many tokens: on tensor cores, each expert taking the pairs routed to it
@@ -234,40 +267,3 @@ def _matvecs(
     srcs = storage_words(down), hq, hd, hs, ids, weights, *extra
     out = Tensor.custom_kernel(out, *srcs, fxn=fxn)[0]
     return out.reshape(count, dim)[:tokens].reshape(x.shape)
-
-
-@functools.cache
-def _bucket_kernel(order: UOp, counts: UOp, ids: UOp, pairs: int | UOp) -> UOp:
-    # a warp per expert lists the pairs routed to it, in order: in each turn of 32 pairs, a ballot
-    # of the lanes holding one gives each its place after those listed before
-    experts = int(counts.shape[0])
-    per = int(order.shape[0]) // experts
-    expert, lane = UOp.range(experts, 0, AxisType.GLOBAL), lane_range()
-    turn = UOp.range((pairs + WARP - 1) // WARP, 1, AxisType.LOOP)
-    pair = turn * WARP + lane
-    routed = ids[pair.minimum(int(ids.shape[0]) - 1)].load().eq(expert.cast(dtypes.int32))
-    mine = routed & (pair < pairs)
-    ballot = UOp(Ops.CUSTOM, src=(mine,), arg=("__ballot_sync(0xffffffffu, {0})", dtypes.uint32))
-    below = (UOp.const(1, dtypes.uint32) << lane.cast(dtypes.uint32)) - 1
-    listed = UOp.alloc((1,), dtypes.int32, addrspace=AddrSpace.REG)
-    listed = listed.after(listed[0].store(0))
-    before = listed.after(turn)[0].load()
-    place = before + _popc(ballot & below)
-    put = order[(expert * per + place).valid(mine)].store(pair.cast(dtypes.int32))
-    listed = listed.after(UOp.group(put, listed[0].store(before + _popc(ballot))).end(turn))
-    store = counts[expert.valid(lane.eq(0))].store(listed[0].load())
-    return store.end(expert, lane).sink(arg=KernelInfo(name="bucket", opts_to_apply=()))
-
-
-def _popc(x: UOp) -> UOp:
-    return UOp(Ops.CUSTOMI, src=(x,), arg=("__popc({0})", dtypes.int32))
-
-
-def _bucket(ids: Tensor, experts: int, per: int, pairs: int | UOp) -> tuple[Tensor, Tensor]:
-    # each expert's pairs, the first `pairs` of ids, as order (experts, per) and counts (experts,)
-    order = Tensor.empty(experts * per, dtype=dtypes.int32, device=ids.device)
-    counts = Tensor.empty(experts, dtype=dtypes.int32, device=ids.device)
-    ids, pairs = carry(ids, pairs)
-    fxn = functools.partial(_bucket_kernel, pairs=pairs)
-    order, counts = Tensor.custom_kernel(order, counts, ids, fxn=fxn)[:2]
-    return order, counts
