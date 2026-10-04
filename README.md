@@ -61,14 +61,14 @@ Tokenizers: SentencePiece, as Mistral 7B's and Gemma 3's; byte-level BPE with ll
 
 Storage types, and the kernels that take them on the GPU; the reference ops take every type:
 
-| | one token, matrix-vector | several tokens, int8 tensor cores |
+| | up to 8 tokens, matrix-vector | more tokens, int8 tensor cores |
 |---|---|---|
 | Q4_K, Q5_K, Q6_K, Q8_0, Q5_0 | NVIDIA, RDNA | NVIDIA |
 | Q4_0, IQ4_NL, IQ4_XS, MXFP4 | NVIDIA, RDNA | NVIDIA |
 | Q4_1, Q5_1 | NVIDIA, RDNA | |
 | Q2_K, Q3_K, F32, F16, BF16 | | |
 
-Devices: any tinygrad backend runs the reference ops. NVIDIA GPUs (`DEV=NV` or `CUDA`) run every kernel; AMD's RDNA 3 and 4 GPUs (`DEV=AMD`), as Strix Halo's, run the warp-level ones: matrix-vector products, norms, quantization, RoPE, decode attention, the mixtures' routing and their one-token path, and sampling. Prompts there take the reference ops for now.
+Devices: any tinygrad backend runs the reference ops. NVIDIA GPUs (`DEV=NV` or `CUDA`) run every kernel; AMD's RDNA 3 and 4 GPUs (`DEV=AMD`), as Strix Halo's, run the warp-level ones: matrix-vector products, norms, quantization, RoPE, decode attention, the mixtures' routing and their few-token path, and sampling: every kernel of a decode step, batched or not. Prompts there take the reference ops for now.
 
 Server: `/v1/chat/completions`, whole or streamed, and `/v1/models`. Replies split into `reasoning_content`, as Qwen3's `<think>` blocks and gpt-oss's analysis channel, text, and tool calls in Llama 3's, Qwen's, Gemma 4's and gpt-oss's syntax. Requests take stop strings, seeds and `chat_template_kwargs` such as `{"enable_thinking": false}`. Sampling is greedy or by temperature; requests for `top_p`, penalties, `logprobs` or several choices are refused.
 
