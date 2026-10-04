@@ -1,4 +1,4 @@
-"""Generation: chunked prefill and token-by-token decode, each replayed from one compiled graph."""
+"""Generation: chunked prefill and token-by-token decode, replayed from compiled graphs."""
 
 import itertools
 import random
@@ -11,6 +11,10 @@ from leat.gguf import GGUF
 from leat.model import Config, Transformer
 from leat.sampler import sample
 from leat.tokenizer import Tokenizer
+
+# prompt tokens up to which a chunk takes a graph bound to that many, whose kernels size their
+# work for so few: the matrix kernels take tiles of 16 tokens
+FEW = 16
 
 
 class Engine:
@@ -35,13 +39,15 @@ class Engine:
         self.max_context, self.prefill_chunk, self.slots = max_context, prefill_chunk, slots
         self._pos = UOp.variable("start_pos", 0, max_context - 1)
         self._len = UOp.variable("chunk_len", 1, prefill_chunk)
+        self._few = UOp.variable("few_len", 1, min(FEW, prefill_chunk))
         self._slot = UOp.variable("slot", 0, slots - 1)
         self._source = UOp.variable("source", 0, slots - 1)
         # TinyJit runs a function once as is, then captures it on the second call: capture on the
         # first, a fresh process's slow call for each graph
-        self._prefill, self._decode = TinyJit(self._step), TinyJit(self._step)
+        self._chunk, self._few_chunk, self._decode = (TinyJit(self._step) for _ in range(3))
         self._copy = TinyJit(self.model.copy)
-        self._prefill.cnt = self._decode.cnt = self._copy.cnt = 1
+        for jit in (self._chunk, self._few_chunk, self._decode, self._copy):
+            jit.cnt = 1
         self._cached: list[list[int]] = [[] for _ in range(slots)]  # tokens each slot holds
         self._used = [0] * slots  # when each slot last started a generation
         self._clock = itertools.count(1)
@@ -80,9 +86,7 @@ class Engine:
             padded = Tensor([prompt + [0] * (self.max_context - len(prompt))], dtype=dtypes.int32)
             while pos < len(prompt):
                 n = min(self.prefill_chunk, len(prompt) - pos)
-                start, length = self._pos.bind(pos), self._len.bind(n)
-                chunk = padded[:, start : start + length]
-                token = self._prefill(chunk, slot_var, start, temp, seeds)
+                token = self._prefill(padded, pos, n, slot_var, temp, seeds)
                 pos += n
             cached += prompt[len(cached) :]
             for remaining in reversed(range(max_tokens)):
@@ -99,8 +103,11 @@ class Engine:
     def warm_up(self) -> None:
         """Compiles the graphs generation replays, which takes seconds in a fresh process, so that
         the first prompt runs at full speed. Leaves no prefix cached."""
-        for _ in self.generate([0, 0], 2, ignore_eog=True):  # a prefill, then a decode step
-            pass
+        # a prefill of more than FEW tokens and a decode step, then a prefill of few
+        for prompt, n in (([0] * min(FEW + 1, self.max_context - 1), 2), ([0, 0], 1)):
+            self.reset()
+            for _ in self.generate(prompt, n, ignore_eog=True):
+                pass
         if self.slots > 1:  # copying a cached prefix to another slot has a graph too
             self._copy(self._source.bind(0), self._slot.bind(1))
         self.reset()
@@ -129,6 +136,19 @@ class Engine:
         self._cached[slot] = prompt[:prefix]  # what stays valid if prefill is interrupted
         self._used[slot] = next(self._clock)
         return slot
+
+    def _prefill(
+        self, padded: Tensor, pos: int, n: int, slot: UOp, temperature: Tensor, seed: Tensor
+    ) -> Tensor:
+        # runs n tokens of a padded prompt from position pos, and samples the next: a single one
+        # as a decode step, up to FEW in the graph bound to that many, more in the one bound to
+        # prefill_chunk
+        start, sampling = self._pos.bind(pos), (temperature, seed)
+        if n == 1:
+            return self._decode(padded[:, pos : pos + 1].clone(), slot, start, *sampling)
+        graph, length = (self._few_chunk, self._few) if n <= FEW else (self._chunk, self._len)
+        length = length.bind(n)
+        return graph(padded[:, start : start + length], slot, start, *sampling)
 
     def _step(
         self, tokens: Tensor, slot: UOp, start_pos: UOp, temperature: Tensor, seed: Tensor
