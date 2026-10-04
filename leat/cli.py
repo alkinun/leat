@@ -7,6 +7,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
+import jinja2
 from tinygrad import Device
 
 from leat import bench
@@ -75,7 +76,10 @@ def _run(args: argparse.Namespace) -> None:
         except (EOFError, KeyboardInterrupt):
             print()
             return
-        prompt = chat.encode(messages)
+        try:
+            prompt = chat.encode(messages)
+        except jinja2.TemplateError as e:  # such as a system prompt the template does not take
+            raise SystemExit(f"the model's chat template refuses this chat: {e}") from None
         if len(prompt) >= engine.max_context:
             print(f"[the conversation is {len(prompt)} tokens, over --max-context; starting over]")
             messages = messages[:1] if args.system else []

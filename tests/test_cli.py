@@ -1,6 +1,7 @@
 import json
 import struct
 
+import jinja2
 import numpy as np
 import pytest
 
@@ -84,3 +85,15 @@ def test_run(tiny_model, monkeypatch, capsys):
     monkeypatch.setattr("builtins.input", fake_input)
     main(["run", str(tiny_model[0]), "--max-context", "64"])
     assert capsys.readouterr().out.count("tok/s]") == 2
+
+
+def test_run_refused_chat(tiny_model, monkeypatch):
+    # a chat the model's template refuses, as Mistral 7B v0.3's does a system prompt, ends the run
+    # with the template's reason rather than a traceback
+    def refuse(self, messages, **kwargs):
+        raise jinja2.TemplateError("Only user and assistant roles are supported!")
+
+    monkeypatch.setattr("leat.cli.ChatTemplate.encode", refuse)
+    monkeypatch.setattr("builtins.input", lambda prompt: "hello")
+    with pytest.raises(SystemExit, match="refuses this chat: Only user and assistant"):
+        main(["run", str(tiny_model[0]), "--max-context", "64", "--system", "Be brief."])
