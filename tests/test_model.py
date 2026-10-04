@@ -75,9 +75,9 @@ def test_generate_fills_context(tiny_model):
     assert len(out) == CONTEXT - len(PROMPT) + 1
     expected = reference_logits(weights, PROMPT + out[:-1])[len(PROMPT) - 1 :].argmax(-1)
     assert out == expected.tolist()
-    captured = engine._decode.captured
+    captured = engine._decode[1].captured
     engine.reset()
-    assert list(engine.generate(PROMPT, 1000)) == out and engine._decode.captured is captured
+    assert list(engine.generate(PROMPT, 1000)) == out and engine._decode[1].captured is captured
 
 
 @pytest.mark.usefixtures("reference_ops")
@@ -103,9 +103,9 @@ def prefill_starts(engine: Engine, monkeypatch) -> list[int]:
     # records the first position of each prefilled chunk
     starts, prefill = [], engine._prefill
 
-    def spy(chunk, pos, *rest):
-        starts.append(pos)
-        return prefill(chunk, pos, *rest)
+    def spy(sequence):
+        starts.append(len(engine._cached[sequence.slot]))
+        return prefill(sequence)
 
     monkeypatch.setattr(engine, "_prefill", spy)
     return starts
@@ -145,11 +145,13 @@ def test_shared_prefix_is_copied(tiny_model, monkeypatch):
 
 
 def test_warm_up(tiny_model):
-    # compiles every graph, the copy's too, and leaves nothing cached that a generation could see
+    # compiles every graph, the copy's and every batch's too, and leaves nothing cached that a
+    # generation could see
     path, _ = tiny_model
-    engine = Engine(path, max_context=CONTEXT, prefill_chunk=FEW_TOKENS + 4, slots=2)
+    engine = Engine(path, max_context=CONTEXT, prefill_chunk=FEW_TOKENS + 4, slots=3)
     engine.warm_up()
-    graphs = engine._chunk, engine._few_chunk, engine._decode, engine._copy
+    graphs = engine._chunk, engine._few_chunk, *engine._decode.values(), engine._copy
+    assert list(engine._decode) == [1, 2, 3]
     captured = [jit.captured for jit in graphs]
     assert all(captured) and engine.cached_prefix(PROMPT) == 0
     assert list(engine.generate(PROMPT, 6)) == generated(path, PROMPT, 6)
@@ -175,6 +177,73 @@ def test_seeded_sampling(tiny_model):
     engine.reset()
     assert list(engine.generate(PROMPT, 8, temperature=1.0, seed=1)) == first
     assert len({tuple(engine.generate(PROMPT, 8, temperature=1.0)) for _ in range(3)}) == 3
+
+
+# ******** several sequences at once ********
+
+
+def run_all(engine: Engine, starts: dict[int, tuple]) -> dict[int, list[int]]:
+    # steps until every sequence is done, starting each of `starts` {step: start() arguments} at
+    # its step; returns each one's tokens, as step() gave them, by its step
+    sequences, out, n = {}, {}, 0
+    while n == 0 or engine.active or n <= max(starts):
+        if n in starts:
+            sequences[n] = engine.start(*starts[n])
+            out[n] = []
+        for sequence, token in engine.step():
+            out[next(k for k, s in sequences.items() if s is sequence)].append(token)
+        n += 1
+    assert all(sequences[k].tokens == tokens for k, tokens in out.items())
+    return out
+
+
+@pytest.mark.usefixtures("reference_ops")
+def test_batched_matches_alone(tiny_model):
+    # sequences that join and leave a batch, of 3 in a graph of 4 too, generate what each would
+    # alone: greedy or seeded, and with prompts as long as a chunk or shared in part
+    path, _ = tiny_model
+    engine = Engine(path, max_context=CONTEXT, prefill_chunk=8, slots=3)
+    starts = {
+        0: (PROMPT, 9),
+        1: (PROMPT[:9] + [1, 2], 6, 1.0, 5),
+        3: ([4, 2], 4),
+        12: (PROMPT[::-1] * 2, 5, 0.8, 7),
+    }
+    got = run_all(engine, starts)
+    for n, args in starts.items():
+        assert got[n] == generated_with(path, *args), n
+
+
+def generated_with(path, prompt, n, temperature=0.0, seed=None) -> list[int]:
+    engine = Engine(path, max_context=CONTEXT, prefill_chunk=8)
+    return list(engine.generate(prompt, n, temperature, seed))
+
+
+@pytest.mark.usefixtures("reference_ops")
+def test_prefill_shares_steps(tiny_model):
+    # a long prompt prefills a chunk per step, while the sequences past their prompts each get a
+    # token in every one of those steps
+    path, _ = tiny_model
+    engine = Engine(path, max_context=CONTEXT, prefill_chunk=4, slots=2)
+    first = engine.start(PROMPT, 20)
+    while not first.tokens:
+        engine.step()
+    second = engine.start(PROMPT[::-1] + [3, 1], 2)  # 14 tokens: 4 chunks
+    steps = [[s for s, _ in engine.step()] for _ in range(4)]
+    assert steps == [[first]] * 3 + [[second, first]]
+    assert len(first.tokens) == 5 and len(second.tokens) == 1
+
+
+def test_start_needs_a_free_slot(tiny_model):
+    engine = Engine(tiny_model[0], max_context=CONTEXT, prefill_chunk=8, slots=2)
+    first, _ = engine.start(PROMPT, 4), engine.start([3, 1, 4], 4)
+    with pytest.raises(RuntimeError, match="all 2 slots"):
+        engine.start([1, 5, 9], 4)
+    with pytest.raises(RuntimeError, match="unfinished"):
+        next(engine.generate([1, 5, 9], 4))
+    engine.cancel(first)
+    assert first.done and first not in engine.active
+    engine.start([1, 5, 9], 4)
 
 
 # the most mean KL divergence from llama.cpp and the least agreement on the top token each
