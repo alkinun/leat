@@ -298,11 +298,17 @@ def _flash_attention_kernel(
     keys = UOp.alloc((key_tile, words + 4), dtypes.uint32, addrspace=AddrSpace.LOCAL)
     values = UOp.alloc((width, key_tile // 2 + 4), dtypes.uint32, addrspace=AddrSpace.LOCAL)
     stores = []
-    for i in range(key_tile * words // threads):
-        key, w = (i * threads + tid) // words, (i * threads + tid) % words
+
+    # threads take words in turn; where the last turn has more threads than words, the others
+    # repeat the last word, storing what its thread stores
+    def turns(words: int) -> list[UOp]:
+        return [(i * threads + tid).minimum(words - 1) for i in range(-(-words // threads))]
+
+    for item in turns(key_tile * words):
+        key, w = item // words, item % words
         stores.append(keys[key, w].store(cache[0, slot, kv_head, kt * key_tile + key, w].load()))
-    for i in range(key_tile // 2 * width // 2 // threads):
-        pair, w = (i * threads + tid) % (key_tile // 2), (i * threads + tid) // (key_tile // 2)
+    for item in turns(key_tile // 2 * width // 2):
+        pair, w = item % (key_tile // 2), item // (key_tile // 2)
         a, b = (
             cache[1, slot, kv_head, kt * key_tile + 2 * pair + j, part * width // 2 + w].load()
             for j in (0, 1)
@@ -367,24 +373,22 @@ def _flash_attention_kernel(
     return UOp.group(*results).end(*ranges).sink(arg=info)
 
 
-def _flash_shape(heads: int, kv_heads: int, positions: int, dim: int) -> tuple[int, int] | None:
+def _flash_shape(positions: int, dim: int) -> tuple[int, int] | None:
     # the key tile and parts the kernel takes for heads of `dim`, if it fits them
     parts = -(-dim // PART)
-    threads, width = heads // kv_heads * WARP, dim // parts
+    width = dim // parts
     for key_tile in (KEY_TILE, KEY_TILE // 2):
         shared = 4 * (key_tile * (dim // 2 + 4) + width * (key_tile // 2 + 4))
-        whole = key_tile * dim // 2 % threads == 0 and key_tile // 2 * width // 2 % threads == 0
-        if dim % (16 * parts) == 0 and positions % key_tile == 0 and shared <= SHARED and whole:
+        if dim % (16 * parts) == 0 and positions % key_tile == 0 and shared <= SHARED:
             return key_tile, parts
     return None
 
 
 def supports_flash_attention(q: Tensor, cache: Tensor) -> bool:
-    shape = (*cache.shape[2:], q.shape[0], q.shape[1])
-    if not on_nvidia(q) or not all(isinstance(x, int) for x in shape):
+    positions, dim = cache.shape[3:]
+    if not on_nvidia(q) or not isinstance(positions, int) or not isinstance(dim, int):
         return False
-    kv_heads, positions, dim, batch, heads = (int(x) for x in shape)
-    return batch == 1 and _flash_shape(heads, kv_heads, positions, dim) is not None
+    return q.shape[0] == 1 and _flash_shape(positions, dim) is not None
 
 
 def flash_attention(
@@ -395,7 +399,7 @@ def flash_attention(
     each, with scores q.k * scale. Returns (1, T, H * D)."""
     _, heads, tokens, dim = q.shape
     count = -(-q.max_shape[2] // QUERIES) * QUERIES
-    shape = _flash_shape(int(heads), int(cache.shape[2]), int(cache.shape[3]), int(dim))
+    shape = _flash_shape(int(cache.shape[3]), int(dim))
     assert shape is not None, "flash_attention needs supports_flash_attention"
     # in the layout of the projection that made q, where scaling and rounding it is a plain copy
     q = (q.transpose(1, 2).reshape(tokens, heads, dim).float() * (LOG2E * scale)).half()
