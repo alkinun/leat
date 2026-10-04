@@ -18,6 +18,9 @@ from leat.tokenizer import Tokenizer
 # prompt tokens up to which a chunk takes a graph bound to that many, whose kernels size their
 # work for so few: the matrix kernels take tiles of 16 tokens
 FEW_TOKENS = 16
+# prompt tokens a step prefills at most while other sequences decode, which wait for it: for Llama
+# 3.1 8B on the 3090, a chunk of 256 takes 57 ms against 111 for 512, and prefills 2.3% slower
+SHARED_CHUNK = 256
 
 
 @dataclass(eq=False)
@@ -52,11 +55,12 @@ class _Batch:
 class Engine:
     """A loaded model, ready to generate.
 
-    Several sequences generate at once, one per slot of the KV cache: each step prefills a chunk
-    of at most one prompt and then decodes a token of every other sequence in one batch, which
-    reads each weight once for all of them. On the reference ops a sequence generates as it would
-    alone; the kernels for several tokens round differently from those for one, so a batched
-    sequence may take another token where two are close.
+    Several sequences generate at once, one per slot of the KV cache: each step prefills a chunk of
+    at most one prompt, of SHARED_CHUNK tokens at most while others decode, and then decodes a token
+    of every other sequence in one batch, which reads each weight once for all of them. On the
+    reference ops a sequence generates as it would alone; the kernels for several tokens round
+    differently from those for one, so a batched sequence may take another token where two are
+    close.
 
     A prompt is prefilled only past the longest prefix any slot shares with it. A prompt that
     extends a slot's tokens continues in that slot, so multi-turn chat costs only the latest turn.
@@ -157,7 +161,8 @@ class Engine:
         decoding = [s for s in self.active if s.tokens]
         out = []
         prefilling = next((s for s in self.active if not s.tokens), None)
-        if prefilling and (token := self._prefill(prefilling)) is not None:
+        size = min(self.prefill_chunk, SHARED_CHUNK) if decoding else self.prefill_chunk
+        if prefilling and (token := self._prefill(prefilling, size)) is not None:
             out.append((prefilling, token))
         if decoding:
             tokens = self._decode_step(decoding)
@@ -220,12 +225,12 @@ class Engine:
         self._used[slot] = next(self._clock)
         return slot
 
-    def _prefill(self, sequence: Sequence) -> int | None:
-        # runs the next chunk of the sequence's prompt: a single token as a decode step, up to
-        # FEW_TOKENS in the graph bound to that many, more in the one bound to prefill_chunk.
-        # Returns the token sampled after the prompt's last chunk.
+    def _prefill(self, sequence: Sequence, size: int) -> int | None:
+        # runs the next chunk of the sequence's prompt, of up to `size` tokens: a single token as
+        # a decode step, up to FEW_TOKENS in the graph bound to that many, more in the one bound
+        # to prefill_chunk. Returns the token sampled after the prompt's last chunk.
         cached = self._cached[sequence.slot]
-        pos, chunk = len(cached), sequence.prompt[len(cached) : len(cached) + self.prefill_chunk]
+        pos, chunk = len(cached), sequence.prompt[len(cached) : len(cached) + size]
         row = self._slot_vars[0].bind(sequence.slot), self._pos_vars[0].bind(pos)
         if (n := len(chunk)) == 1:
             graph, tokens = self._decode[1], _ids(chunk, 1)

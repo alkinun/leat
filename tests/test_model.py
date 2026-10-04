@@ -103,9 +103,9 @@ def prefill_starts(engine: Engine, monkeypatch) -> list[int]:
     # records the first position of each prefilled chunk
     starts, prefill = [], engine._prefill
 
-    def spy(sequence):
+    def spy(sequence, size):
         starts.append(len(engine._cached[sequence.slot]))
-        return prefill(sequence)
+        return prefill(sequence, size)
 
     monkeypatch.setattr(engine, "_prefill", spy)
     return starts
@@ -234,6 +234,24 @@ def test_prefill_shares_steps(tiny_model):
     steps = [[s for s, _ in engine.step()] for _ in range(4)]
     assert steps == [[first]] * 3 + [[second, first]]
     assert len(first.tokens) == 5 and len(second.tokens) == 1
+
+
+@pytest.mark.usefixtures("reference_ops")
+def test_prefill_shares_smaller_chunks(tiny_model, monkeypatch):
+    # while others decode, a prompt prefills in chunks of SHARED_CHUNK at most, and alone in
+    # chunks of prefill_chunk
+    monkeypatch.setattr("leat.engine.SHARED_CHUNK", 3)
+    path, _ = tiny_model
+    engine = Engine(path, max_context=CONTEXT, prefill_chunk=8, slots=2)
+    starts = prefill_starts(engine, monkeypatch)
+    first = engine.start(PROMPT, 20)  # 12 tokens: chunks of 8 and 4, alone
+    while not first.tokens:
+        engine.step()
+    second = engine.start([9, 8, 7, 6, 5, 4, 3], 2)  # chunks of 3, 3 and 1, beside the first
+    while not second.tokens:
+        engine.step()
+    assert starts == [0, 8, 0, 3, 6]
+    assert second.tokens == generated(path, [9, 8, 7, 6, 5, 4, 3], 1)
 
 
 def test_start_needs_a_free_slot(tiny_model):
