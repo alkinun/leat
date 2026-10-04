@@ -4,7 +4,7 @@ A minimal, fast LLM inference engine built on [tinygrad](https://github.com/tiny
 
 leat runs GGUF models with their weights kept in the quantized storage format. The goal is single-stream decode limited by memory bandwidth, not by the engine. It targets NVIDIA RTX 30-series GPUs first, then AMD Strix Halo.
 
-> Status: on NVIDIA, hand-written kernels decode Llama 3.1, Qwen2.5, Qwen3, Qwen3 MoE and Gemma 4 faster than llama.cpp, and process prompts at 0.84 to 1.05x its speed. `leat serve` serves the OpenAI chat completions API. Every kernel is tested against the reference ops, plain tinygrad code that runs on any device; `LEAT_KERNELS=ref` runs everything that way.
+> Status: on NVIDIA, hand-written kernels decode Llama 3, Qwen2.5, Qwen3, Qwen3 MoE and Gemma 4 faster than llama.cpp, and process prompts at 0.83 to 1.05x its speed. `leat serve` serves the OpenAI chat completions API. Every kernel is tested against the reference ops, plain tinygrad code that runs on any device; `LEAT_KERNELS=ref` runs everything that way.
 
 ## Quickstart
 
@@ -55,6 +55,7 @@ RTX 3090, Q4_K_M files, one sequence, in tokens per second. llama.cpp is b11372 
 
 | | llama.cpp pp512 | leat pp512 | llama.cpp tg128 | leat tg128 |
 |---|---:|---:|---:|---:|
+| Llama 3.2 3B Instruct | 10970 | 9151 | 275.3 | 284.0 |
 | Llama 3.1 8B Instruct | 5417 | 4658 | 147.6 | 151.8 |
 | Qwen2.5 7B Instruct | 5834 | 4907 | 152.8 | 158.4 |
 | Qwen3 8B | 5244 | 4460 | 141.2 | 147.7 |
@@ -69,6 +70,7 @@ Quality against llama.cpp on the same file: wikitext-2, chunks of 512 tokens wit
 
 | | llama.cpp perplexity, 20 chunks | leat perplexity | mean KL divergence | same top token |
 |---|---:|---:|---:|---:|
+| Llama 3.2 3B Instruct | 11.8783 | 11.8669 | 0.0012 | 98.3% |
 | Llama 3.1 8B Instruct | 8.3870 | 8.3740 | 0.0012 | 98.3% |
 | Qwen2.5 7B Instruct | 7.4307 | 7.3983 | 0.0034 | 96.7% |
 | Qwen3 8B | 11.0321 | 11.0142 | 0.0031 | 97.3% |
