@@ -1,5 +1,6 @@
 """Attention over the KV cache: FlashDecoding for one query token, FlashAttention-2 on f16 tensor
-cores for several."""
+cores for several, and one token's queries, keys and values readied for it: normed, rotated by
+RoPE, and the keys and values stored in the cache."""
 
 import functools
 import math
@@ -160,30 +161,6 @@ def _attention_combine_kernel(o: UOp, partial: UOp, stats: UOp, live: int | UOp)
     stores = [o[0, head, 0, d].store(acc[i].load() / total[0].load()) for i, d in enumerate(dims)]
     info = KernelInfo(name="attention_combine", opts_to_apply=())
     return UOp.group(*stores).end(lane, part, head).sink(arg=info)
-
-
-def supports_wide_attention(q: Tensor) -> bool:
-    return on_nvidia(q) and q.shape[0] == 1
-
-
-def wide_attention(
-    q: Tensor, cache: Tensor, slot: int | UOp, start_pos: int | UOp, scale: float, window: int = 0
-) -> Tensor:
-    """flash_attention for heads too wide for it, Gemma 4's of 512: tinygrad's own matrix kernels
-    in f16 with f32 sums, over every position of the slot with a mask, as fixed shapes let them
-    use tensor cores where a bound number of positions leaves them naive, 50x slower."""
-    _, heads, tokens, dim = q.shape
-    _, _, kv_heads, positions, _ = (int(d) for d in cache.shape)
-    count, group = q.max_shape[2], heads // kv_heads
-    k, v = (cache[i, slot : slot + 1].reshape(kv_heads, positions, dim) for i in (0, 1))
-    q = (q.float() * scale).half().pad_to((1, heads, count, dim))
-    scores = q.reshape(kv_heads, group * count, dim).matmul(k.transpose(1, 2), dtype=dtypes.float32)
-    back = (Tensor.arange(count) + Tensor(start_pos)).reshape(count, 1) - Tensor.arange(positions)
-    seen = (back >= 0) & (back < window) if window else back >= 0
-    scores = scores.reshape(kv_heads, group, count, positions) + seen.where(0.0, -math.inf)
-    probs = scores.softmax(-1).half().reshape(kv_heads, group * count, positions)
-    out = probs.matmul(v, dtype=dtypes.float32).reshape(heads, count, dim)[:, :tokens]
-    return out.transpose(0, 1).reshape(1, tokens, heads * dim)
 
 
 def _since(length: int | UOp, window: int) -> int | UOp:
@@ -412,6 +389,30 @@ def flash_attention(
     return out[:tokens].reshape(1, tokens, heads * dim)
 
 
+def supports_wide_attention(q: Tensor) -> bool:
+    return on_nvidia(q) and q.shape[0] == 1
+
+
+def wide_attention(
+    q: Tensor, cache: Tensor, slot: int | UOp, start_pos: int | UOp, scale: float, window: int = 0
+) -> Tensor:
+    """flash_attention for heads too wide for it, Gemma 4's of 512: tinygrad's own matrix kernels
+    in f16 with f32 sums, over every position of the slot with a mask, as fixed shapes let them
+    use tensor cores where a bound number of positions leaves them naive, 50x slower."""
+    _, heads, tokens, dim = q.shape
+    _, _, kv_heads, positions, _ = (int(d) for d in cache.shape)
+    count, group = q.max_shape[2], heads // kv_heads
+    k, v = (cache[i, slot : slot + 1].reshape(kv_heads, positions, dim) for i in (0, 1))
+    q = (q.float() * scale).half().pad_to((1, heads, count, dim))
+    scores = q.reshape(kv_heads, group * count, dim).matmul(k.transpose(1, 2), dtype=dtypes.float32)
+    back = (Tensor.arange(count) + Tensor(start_pos)).reshape(count, 1) - Tensor.arange(positions)
+    seen = (back >= 0) & (back < window) if window else back >= 0
+    scores = scores.reshape(kv_heads, group, count, positions) + seen.where(0.0, -math.inf)
+    probs = scores.softmax(-1).half().reshape(kv_heads, group * count, positions)
+    out = probs.matmul(v, dtype=dtypes.float32).reshape(heads, count, dim)[:, :tokens]
+    return out.transpose(0, 1).reshape(1, tokens, heads * dim)
+
+
 # ******** one token's queries, keys and values: norms, RoPE, and the cache ********
 
 
@@ -435,12 +436,11 @@ def _rotate_kernel(
     def load(d: UOp) -> UOp:  # dimension d of the warp's head of q or k
         return q[(head * dim + d).valid(is_q)].load() + k[(kv * dim + d).valid(is_kv)].load()
 
-    def normed(values: list[UOp], weight: list[UOp] | None) -> list[UOp]:
+    def normed(values: list[UOp], weights: list[UOp] | None = None) -> list[UOp]:
         inv = (warp_sum(sum((x * x for x in values), zero)) / dim + eps).rsqrt()
-        return [
-            x * inv * (1.0 if weight is None else w)
-            for x, w in zip(values, weight or values, strict=True)
-        ]
+        if weights is None:
+            return [x * inv for x in values]
+        return [x * inv * w for x, w in zip(values, weights, strict=True)]
 
     def stored(kind: int, d: UOp) -> UOp:  # where dimension d of the warp's key or value goes
         at = (((kind * slots + slot) * kv_heads + kv) * positions + pos) * dim + d
@@ -448,9 +448,7 @@ def _rotate_kernel(
 
     x = [load(d) for pair in dims for d in pair]
     if norms:
-        x = normed(
-            x, [is_q.where(norms[0][d].load(), norms[1][d].load()) for pair in dims for d in pair]
-        )
+        x = normed(x, [is_q.where(*(w[d].load() for w in norms)) for pair in dims for d in pair])
     stores = []
     for n, ((d0, d1), i) in enumerate(zip(dims, pairs, strict=True)):
         c, s = cos[pos, i].load(), sin[pos, i].load()
@@ -460,7 +458,7 @@ def _rotate_kernel(
             stores.append(stored(0, d).store(value.cast(dtypes.half)))
     values = [v[(kv * dim + d).valid(is_kv)].load() for pair in dims for d in pair]
     if v_norm:
-        values = normed(values, None)
+        values = normed(values)
     for value, d in zip(values, (d for pair in dims for d in pair), strict=True):
         stores.append(stored(1, d).store(value.cast(dtypes.half)))
     info = KernelInfo(name="rotate", opts_to_apply=())
