@@ -1,7 +1,7 @@
 """GGML storage formats and their reference dequantization in plain tinygrad ops.
 
 Block layouts and arithmetic order follow ggml's `dequantize_row_*` (ggml-quants.c), so the
-reference path matches llama.cpp. Fast kernels are tested against these functions.
+reference path matches llama.cpp; tests check them against gguf-py's.
 """
 
 from dataclasses import dataclass

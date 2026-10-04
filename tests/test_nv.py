@@ -264,8 +264,9 @@ def test_mixture(tokens, favored):
     assert_close(got, x[0, :n] + expected_mixture(normed, scores[0, :n], used, expert), 2e-3)
 
 
-# Gemma 4: gate and up in one stack, GELU, a scale per expert and no residual, on the
-# matrix-vector kernels for any number of tokens; rows of 192 weights quantize in a ragged turn
+# Gemma 4: gate and up in one stack, GELU, a scale per expert and no residual, for one token on
+# the matrix-vector kernels and for more on tensor cores; rows of 192 weights quantize in a ragged
+# turn
 @pytest.mark.parametrize("tokens", [1, 70, UOp.variable("tokens", 1, 128).bind(37)])
 def test_mixture_gemma(tokens):
     rng = np.random.default_rng(16)

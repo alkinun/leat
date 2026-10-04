@@ -1,4 +1,4 @@
-"""Model math in plain tinygrad ops, the reference every fast kernel is tested against.
+"""Model math in plain tinygrad ops, which run on any device.
 
 Ops dispatch to hand-written kernels where one applies; LEAT_KERNELS=ref turns them off.
 """
