@@ -4,7 +4,7 @@ A minimal, fast LLM inference engine built on [tinygrad](https://github.com/tiny
 
 leat runs GGUF models with their weights kept in the quantized storage format. The goal is single-stream decode limited by memory bandwidth, not by the engine. It targets NVIDIA RTX 30-series GPUs first, then AMD Strix Halo.
 
-> Status: on NVIDIA, hand-written kernels decode Llama 3.1, Qwen3, Qwen3 MoE and Gemma 4 faster than llama.cpp, and process prompts at 0.8 to 0.9x its speed. `leat serve` serves the OpenAI chat completions API. Every kernel is tested against the reference ops, plain tinygrad code that runs on any device; `LEAT_KERNELS=ref` runs everything that way.
+> Status: on NVIDIA, hand-written kernels decode Llama 3.1, Qwen3, Qwen3 MoE and Gemma 4 faster than llama.cpp, and process prompts at 0.85 to 1.05x its speed. `leat serve` serves the OpenAI chat completions API. Every kernel is tested against the reference ops, plain tinygrad code that runs on any device; `LEAT_KERNELS=ref` runs everything that way.
 
 ## Quickstart
 
@@ -55,26 +55,26 @@ RTX 3090, Q4_K_M files, one sequence, in tokens per second. llama.cpp is b11372 
 
 | | llama.cpp pp512 | leat pp512 | llama.cpp tg128 | leat tg128 |
 |---|---:|---:|---:|---:|
-| Llama 3.1 8B Instruct | 5417 | 4330 | 147.6 | 151.1 |
-| Qwen3 8B | 5244 | 4171 | 141.2 | 147.4 |
-| Qwen3 30B A3B | 4681 | 4169 | 211.1 | 224.5 |
-| Gemma 4 26B A4B it | 4844 | 4206 | 157.6 | 185.5 |
+| Llama 3.1 8B Instruct | 5417 | 4658 | 147.6 | 151.8 |
+| Qwen3 8B | 5244 | 4460 | 141.2 | 147.7 |
+| Qwen3 30B A3B | 4681 | 4927 | 211.1 | 224.8 |
+| Gemma 4 26B A4B it | 4844 | 4762 | 157.6 | 186.2 |
 
 After 8192 tokens of context, Llama 3.1 8B decodes at 122.3 tok/s against llama.cpp's 125.0.
 
-Through `leat serve`, the first token of a 2141-token prompt to Llama 3.1 8B arrives after 549 ms, or after 55 ms when another conversation has cached its 2130-token system prompt.
+Through `leat serve`, the first token of a 2141-token prompt to Llama 3.1 8B arrives after 463 ms, or after 53 ms when another conversation has cached its 2130-token system prompt.
 
 Quality against llama.cpp on the same file: wikitext-2, chunks of 512 tokens with the second half of each scored, run as one prompt each. Both quantize activations to int8; the mixture's choice of experts amplifies that noise.
 
 | | llama.cpp perplexity, 20 chunks | leat perplexity | mean KL divergence | same top token |
 |---|---:|---:|---:|---:|
-| Llama 3.1 8B Instruct | 8.3870 | 8.3757 | 0.0012 | 98.3% |
-| Qwen3 8B | 11.0321 | 11.0198 | 0.0030 | 97.5% |
-| Qwen3 30B A3B | 9.4920 | 9.4946 | 0.0045 | 97.4% |
+| Llama 3.1 8B Instruct | 8.3870 | 8.3740 | 0.0012 | 98.3% |
+| Qwen3 8B | 11.0321 | 11.0142 | 0.0031 | 97.3% |
+| Qwen3 30B A3B | 9.4920 | 9.5012 | 0.0043 | 97.6% |
 
-leat's decode path, which runs the second half of each chunk one token at a time, scores 0.0013 for Llama 3.1 8B and 0.0034 for Qwen3 30B A3B on 2 chunks. For scale, ignoring Llama 3.1's RoPE frequency factors, a subtle bug, raises the KL from 0.0010 to 0.0026 on the first 5 chunks with the reference ops; Qwen3 8B scores 0.0025 against llama.cpp on the reference ops alone.
+leat's decode path, which runs the second half of each chunk one token at a time, scores 0.0013 for Llama 3.1 8B and 0.0033 for Qwen3 30B A3B on 2 chunks. For scale, ignoring Llama 3.1's RoPE frequency factors, a subtle bug, raises the KL from 0.0010 to 0.0026 on the first 5 chunks with the reference ops; Qwen3 8B scores 0.0025 against llama.cpp on the reference ops alone.
 
-Gemma 4's instruction-tuned model does not model raw text: both engines score wikitext in the tens of thousands. On its chat format, over the 542 positions of six answers to chat prompts, leat's next-token distributions differ from llama.cpp's by a mean KL of 0.0066, with the same top token at 97.8%.
+Gemma 4's instruction-tuned model does not model raw text: both engines score wikitext in the tens of thousands. On its chat format, over the 542 positions of six answers to chat prompts, leat's next-token distributions differ from llama.cpp's by a mean KL of 0.0023, with the same top token at 98.3%.
 
 ## Requirements
 

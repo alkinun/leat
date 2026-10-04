@@ -223,7 +223,7 @@ def test_calls_tools(served):
 @pytest.mark.model
 def test_shared_system_prompt(served):
     # a system prompt that another conversation cached cuts the time to the first token by 5x or
-    # more: from 549 to 55 ms for these 2141 tokens on the 3090
+    # more: from 463 to 53 ms for these 2141 tokens on the 3090
     def system(name: str) -> str:
         rule = "{} {}: answer plainly, cite source {}, and keep replies under {} words."
         return " ".join(rule.format(name, i, i, i + 50) for i in range(100))
