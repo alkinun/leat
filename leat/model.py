@@ -107,6 +107,11 @@ class Transformer:
         self.small = [
             {n: w.dequant() for n, w in layer.items() if len(w.shape) == 1} for layer in self.layers
         ]
+        for (
+            s
+        ) in self.small:  # Gemma 4 routes from x normed with a weight of its own, over sqrt(dim)
+            if "ffn_gate_inp.scale" in s:
+                s["router_norm"] = (s["ffn_gate_inp.scale"] / math.sqrt(config.dim)).realize()
         self.embed = weights["token_embd.weight"]
         self.output = weights.get("output.weight", self.embed)  # tied embeddings when absent
         self.output_norm = weights["output_norm.weight"].dequant()
@@ -186,9 +191,7 @@ class Transformer:
                 return ops.feed_forward(x, *mlp, norm)
             out = ops.feed_forward(x, *mlp, norm, c.gemma, residual=False)
             return ops.add_normed(x, [(out, s["post_ffw_norm"])], None, eps, scale)
-        # Gemma 4 routes from x normed with a weight of its own, over sqrt(dim)
-        router = s["ffn_gate_inp.scale"] / math.sqrt(c.dim) if c.gemma else s["ffn_norm"]
-        scores = ops.router(x, (router, eps), w["ffn_gate_inp"])
+        scores = ops.router(x, (s.get("router_norm", s["ffn_norm"]), eps), w["ffn_gate_inp"])
         # stacked gate and up matrices, or one stack of both, the gate's rows first
         gate, up = (w["ffn_gate_up_exps"], None) if "ffn_gate_up_exps" in w else (
             w["ffn_gate_exps"], w["ffn_up_exps"])  # fmt: skip
