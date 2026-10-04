@@ -428,6 +428,22 @@ def test_attention(n, length, symbolic):
     np.testing.assert_allclose(got, expected, rtol=2e-3, atol=2e-3)
 
 
+# GQA groups that blocks of 4 query heads do not divide: Qwen2.5 7B's of 7, and one of 9
+@pytest.mark.parametrize("heads, kv_heads", [(28, 4), (18, 2)])
+@pytest.mark.parametrize("length", [65, 1000])
+@pytest.mark.parametrize("symbolic", [False, True])
+def test_attention_groups(heads, kv_heads, length, symbolic):
+    rng = np.random.default_rng(length + heads)
+    cache = rng.standard_normal((2, SLOTS, kv_heads, 1024, 128)).astype(np.float16)
+    q = rng.standard_normal((1, heads, 1, 128)).astype(np.float32)
+    valid = UOp.variable("start_pos", 0, 1023).bind(length - 1) + 1 if symbolic else length
+    q_t, cache_t = Tensor(q).realize(), Tensor(cache).realize()
+    assert nv.supports_attention(q_t, cache_t)
+    got = nv.attention(q_t, cache_t, slot(symbolic), valid, 128**-0.5).numpy()[0, :, 0]
+    expected = reference_attention(q[0], cache, length - 1)[0]
+    np.testing.assert_allclose(got, expected, rtol=2e-3, atol=2e-3)
+
+
 # Llama 3.1 8B's groups of 4 query heads, and Qwen2.5 7B's of 7, which do not divide a tile's loads
 @pytest.mark.parametrize("tokens, start", [(37, 0), (64, 0), (100, 300), (512, 3584)])
 @pytest.mark.parametrize("heads, kv_heads", [(32, 8), (28, 4)])

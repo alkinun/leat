@@ -170,12 +170,17 @@ def _since(length: int | UOp, window: int) -> int | UOp:
     return (length - window).maximum(0) if isinstance(length, UOp) else max(length - window, 0)
 
 
+def _per_block(group: int) -> int:
+    # query heads per block, of a GQA group: as many as GROUP_SPLIT, and a divisor of the group
+    return max(n for n in range(1, GROUP_SPLIT + 1) if group % n == 0)
+
+
 def supports_attention(q: Tensor, cache: Tensor) -> bool:
     shape = (*cache.shape[2:], *q.shape[:3])
     if not on_nvidia(q) or not all(isinstance(x, int) for x in shape):
         return False
     kv_heads, n, dim, batch, heads, tokens = (int(x) for x in shape)
-    group = min(heads // kv_heads, GROUP_SPLIT)  # query heads per block
+    group = _per_block(heads // kv_heads)
     fits = (group * dim + PAD) * 2 + group * 8 <= SHARED  # one warp's share of shared memory
     return batch == 1 and tokens == 1 and dim % 64 == 0 and n % KEYS == 0 and fits
 
@@ -187,8 +192,9 @@ def attention(
     the cache (2, slots, KV_H, positions, D), or the last `window` of them, with scores
     q.k * scale."""
     heads, dim = q.shape[1], cache.shape[4]
-    split = max(heads // cache.shape[2] // GROUP_SPLIT, 1)
-    group = heads // cache.shape[2] // split  # query heads per block
+    kv_heads = int(cache.shape[2])
+    group = _per_block(int(heads) // kv_heads)
+    split = int(heads) // kv_heads // group  # blocks per kv head
     q, slot = carry(q.float().contiguous(), slot)
     cache, length = carry(cache, length)
     waves = 16
