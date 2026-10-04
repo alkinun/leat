@@ -69,7 +69,9 @@ def _run(args: argparse.Namespace) -> None:
     chat, tok = ChatTemplate(engine.gguf.metadata, engine.tokenizer), engine.tokenizer
     messages = [{"role": "system", "content": args.system}] if args.system else []
     name = engine.gguf.metadata.get("general.name", args.model.name)
-    print(f"{name} on {Device.DEFAULT}. Ctrl-D quits.")
+    print(f"{name} on {Device.DEFAULT}, compiling...", end="", flush=True)
+    engine.warm_up()
+    print(" ready. Ctrl-D quits.")
     while True:
         try:
             messages.append({"role": "user", "content": input("> ")})
@@ -101,9 +103,11 @@ def _run(args: argparse.Namespace) -> None:
 
 def _serve(args: argparse.Namespace) -> None:
     engine = Engine(args.model, max_context=args.max_context, slots=args.slots)
+    print(f"{engine.gguf.path.stem} on {Device.DEFAULT}, compiling...", end="", flush=True)
+    engine.warm_up()
     with Server(engine, args.host, args.port) as server:
         url = f"http://{args.host}:{server.server_port}/v1"
-        print(f"{server.model} on {Device.DEFAULT} at {url}. Ctrl-C quits.", flush=True)
+        print(f" serving at {url}. Ctrl-C quits.", flush=True)
         with contextlib.suppress(KeyboardInterrupt):
             server.serve_forever()
 

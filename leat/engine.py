@@ -96,6 +96,15 @@ class Engine:
         finally:
             self._generating = False
 
+    def warm_up(self) -> None:
+        """Compiles the graphs generation replays, which takes seconds in a fresh process, so that
+        the first prompt runs at full speed. Leaves no prefix cached."""
+        for _ in self.generate([0, 0], 2, ignore_eog=True):  # a prefill, then a decode step
+            pass
+        if self.slots > 1:  # copying a cached prefix to another slot has a graph too
+            self._copy(self._source.bind(0), self._slot.bind(1))
+        self.reset()
+
     def cached_prefix(self, prompt: list[int]) -> int:
         """How many leading tokens of `prompt` the cache holds: generate() prefills the rest."""
         return max(_shared(prompt, cached) for cached in self._cached)

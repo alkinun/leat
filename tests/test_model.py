@@ -120,6 +120,18 @@ def test_shared_prefix_is_copied(tiny_model, monkeypatch):
     assert starts == [9, len(PROMPT)]
 
 
+def test_warm_up(tiny_model):
+    # compiles every graph, the copy's too, and leaves nothing cached that a generation could see
+    path, _ = tiny_model
+    engine = Engine(path, max_context=CONTEXT, prefill_chunk=8, slots=2)
+    engine.warm_up()
+    graphs = engine._prefill, engine._decode, engine._copy
+    captured = [jit.captured for jit in graphs]
+    assert all(captured) and engine.cached_prefix(PROMPT) == 0
+    assert list(engine.generate(PROMPT, 6)) == generated(path, PROMPT, 6)
+    assert [jit.captured for jit in graphs] == captured
+
+
 def test_one_generation_at_a_time(tiny_model):
     engine = Engine(tiny_model[0], max_context=CONTEXT, prefill_chunk=8, slots=2)
     tokens = engine.generate(PROMPT, 6)
