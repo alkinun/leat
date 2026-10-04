@@ -153,6 +153,8 @@ LIMITS = {"llama": (0.0015, 0.98), "qwen3": (0.0035, 0.97), "qwen3moe": (0.007, 
 @pytest.mark.model
 @pytest.mark.parametrize("decode", [False, True], ids=["prefill", "decode"])
 def test_matches_llama_cpp(model_path, llama_cpp, wikitext, tmp_path, decode):
+    if (arch := GGUF.open(model_path).metadata["general.architecture"]) not in LIMITS:
+        pytest.skip(f"{arch} is instruction-tuned only, and scores raw text badly")
     args = ["-m", model_path, "-f", wikitext, "-c", "512", "--chunks", "4"]
     args += ["--kl-divergence-base", base := tmp_path / "base.kld"]
     subprocess.run([llama_cpp / "llama-perplexity", *args], check=True, capture_output=True)
