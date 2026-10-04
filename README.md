@@ -2,9 +2,9 @@
 
 A minimal, fast LLM inference engine built on [tinygrad](https://github.com/tinygrad/tinygrad).
 
-leat runs GGUF models with their weights kept in the quantized storage format. The goal is single-stream decode limited by memory bandwidth, not by the engine. It targets NVIDIA RTX 30-series GPUs first, then AMD Strix Halo.
+leat runs GGUF models with their weights kept in the quantized storage format. The goal is single-stream decode limited by memory bandwidth, not by the engine. It was developed on an NVIDIA RTX 3090 and is moving to AMD's Strix Halo.
 
-> Status: on NVIDIA, hand-written kernels decode Llama 3, Mistral, Qwen2.5, Qwen3, Qwen3 MoE and Gemma 4 faster than llama.cpp, and process prompts at 0.85 to 1.05x its speed. `leat serve` serves the OpenAI chat completions API. Every kernel is tested against an independent NumPy reference, and so are the plain tinygrad ops they replace, which run on any device; `LEAT_KERNELS=ref` runs everything that way.
+> Status: on NVIDIA, hand-written kernels decode every model below faster than llama.cpp, and process prompts at 0.79 to 1.07x its speed. On AMD's RDNA GPUs the decode kernels run, so far tested on tinygrad's emulated GPU only, and prompts take the reference ops. `leat serve` serves the OpenAI chat completions API. Every kernel is tested against an independent NumPy reference, and so are the plain tinygrad ops they replace, which run on any device; `LEAT_KERNELS=ref` runs everything that way.
 
 ## Quickstart
 
@@ -43,29 +43,59 @@ print(engine.tokenizer.decode(list(engine.generate(prompt, max_tokens=256))))
 
 ## Supported
 
-- Architectures: `llama` (Llama 3.x, Mistral 7B), `qwen2` (Qwen2.5), `qwen3` and `qwen3moe` (Qwen3 and its mixtures of experts) and `gemma4` (Gemma 4, text only), with their tokenizers
-- Storage types: F32, F16, BF16, Q5_0, Q8_0, Q4_K, Q5_K, Q6_K, which covers Q4_K_M, Q5_K_M, Q6_K and Q8_0 files
-- Devices: any tinygrad backend; developed on NVIDIA with `DEV=NV`
-- Server: `/v1/chat/completions`, whole or streamed, with stop strings, seeds, tool calls in Llama 3's, Qwen's and Gemma 4's syntax and `chat_template_kwargs` such as `{"enable_thinking": false}`, and `/v1/models`. Sampling is greedy or by temperature; requests for `top_p`, penalties, `logprobs` or several choices are refused. Completions run one at a time.
-- Prefix caching: the KV cache keeps `--slots` sequences. A conversation continues in its slot, and a prompt that shares a prefix with any slot, such as a system prompt, starts from a copy of it.
+Architectures, text only, with their tokenizers and chat templates:
+
+| `general.architecture` | Models |
+|---|---|
+| `llama` | Llama 3.x, Mistral 7B, Mistral Small 3.x |
+| `qwen2` | Qwen2.5 |
+| `qwen3`, `qwen3moe` | Qwen3 and its mixtures of experts |
+| `gemma3` | Gemma 3 |
+| `gemma4` | Gemma 4 |
+| `gpt-oss` | gpt-oss |
+| `phi3` | Phi-4-mini, Phi-3 mini |
+
+Their parts: grouped-query attention, sliding windows, attention sinks, QK norms, biases, partial RoPE, RoPE scaled as Llama 3, YaRN and LongRoPE, SwiGLU, GELU and gpt-oss's clamped SwiGLU, mixtures of experts, and logit soft-capping.
+
+Tokenizers: SentencePiece, as Mistral 7B's and Gemma 3's; byte-level BPE with llama.cpp's Llama 3, Qwen2, GPT-2, StarCoder, GPT-4o and Tekken pre-tokenizers and the families that share them; and Gemma 4's.
+
+Storage types, and the kernels that take them on the GPU; the reference ops take every type:
+
+| | one token, matrix-vector | several tokens, int8 tensor cores |
+|---|---|---|
+| Q4_K, Q5_K, Q6_K, Q8_0, Q5_0 | NVIDIA, RDNA | NVIDIA |
+| Q4_0, IQ4_NL, IQ4_XS, MXFP4 | NVIDIA, RDNA | NVIDIA |
+| Q4_1, Q5_1 | NVIDIA, RDNA | |
+| Q2_K, Q3_K, F32, F16, BF16 | | |
+
+Devices: any tinygrad backend runs the reference ops. NVIDIA GPUs (`DEV=NV` or `CUDA`) run every kernel; AMD's RDNA 3 and 4 GPUs (`DEV=AMD`), as Strix Halo's, run the warp-level ones: matrix-vector products, norms, quantization, RoPE, decode attention, the mixtures' routing and their one-token path, and sampling. Prompts there take the reference ops for now.
+
+Server: `/v1/chat/completions`, whole or streamed, and `/v1/models`. Replies split into `reasoning_content`, as Qwen3's `<think>` blocks and gpt-oss's analysis channel, text, and tool calls in Llama 3's, Qwen's, Gemma 4's and gpt-oss's syntax. Requests take stop strings, seeds and `chat_template_kwargs` such as `{"enable_thinking": false}`. Sampling is greedy or by temperature; requests for `top_p`, penalties, `logprobs` or several choices are refused. Completions run one at a time.
+
+Prefix caching: the KV cache keeps `--slots` sequences. A conversation continues in its slot, and a prompt that shares a prefix with any slot, such as a system prompt, starts from a copy of it.
 
 ## Measurements
 
-RTX 3090, Q4_K_M files, one sequence, in tokens per second. llama.cpp is b11372 with CUDA. leat's numbers include sampling on the device and reading the token back: after the prompt for pp512, after every token for tg128.
+RTX 3090, one sequence, in tokens per second; Q4_K_M files but for gpt-oss's, MXFP4. llama.cpp is b11372 with CUDA. leat's numbers include sampling on the device and reading the token back: after the prompt for pp512, after every token for tg128.
 
 | | llama.cpp pp512 | leat pp512 | llama.cpp tg128 | leat tg128 |
 |---|---:|---:|---:|---:|
-| Llama 3.2 3B Instruct | 10970 | 9531 | 275.3 | 281.8 |
-| Llama 3.1 8B Instruct | 5417 | 4638 | 147.6 | 152.6 |
-| Mistral 7B Instruct v0.3 | 5433 | 4692 | 155.2 | 161.8 |
-| Qwen2.5 7B Instruct | 5834 | 4947 | 152.8 | 165.7 |
-| Qwen3 8B | 5244 | 4448 | 141.2 | 148.7 |
-| Qwen3 30B A3B | 4681 | 4894 | 211.1 | 228.6 |
-| Gemma 4 26B A4B it | 4844 | 4807 | 157.6 | 186.9 |
+| Llama 3.2 3B Instruct | 10907 | 10185 | 274.4 | 283.1 |
+| Llama 3.1 8B Instruct | 5422 | 4829 | 147.7 | 152.9 |
+| Mistral 7B Instruct v0.3 | 5454 | 4883 | 156.8 | 161.9 |
+| Mistral Small 3.2 24B Instruct | 1996 | 1636 | 54.9 | 58.0 |
+| Qwen2.5 7B Instruct | 5830 | 5263 | 152.6 | 165.7 |
+| Qwen3 8B | 5296 | 4745 | 142.0 | 149.2 |
+| Qwen3 30B A3B | 4697 | 5036 | 213.1 | 233.1 |
+| Gemma 3 4B it | 9795 | 8436 | 203.0 | 226.8 |
+| Gemma 3 12B it | 3463 | 2749 | 89.0 | 97.6 |
+| Gemma 4 26B A4B it | 4823 | 4919 | 158.2 | 190.6 |
+| Phi-4-mini Instruct | 10382 | 8593 | 237.4 | 239.6 |
+| gpt-oss 20B | 6101 | 5846 | 213.2 | 230.0 |
 
-After 8192 tokens of context, Llama 3.1 8B decodes at 122.3 tok/s against llama.cpp's 125.0.
+After 8192 tokens of context, Llama 3.1 8B decodes at 122.5 tok/s against llama.cpp's 125.0.
 
-Through `leat serve`, the first token of a 2141-token prompt to Llama 3.1 8B arrives after 462 ms, or after 20 ms when another conversation has cached its 2130-token system prompt. In the engine, past 2130 cached tokens, the first token after one more arrives in 8.9 ms and after 2 to 16 more in 12.8 ms, against 7.2 ms for a decode step. The server is ready 21 s after it starts, the file in the page cache, most of that spent compiling the graphs it replays, 7 s of it the graph for prompts of up to 16 new tokens.
+Through `leat serve`, the first token of a 2141-token prompt to Llama 3.1 8B arrives after 449 ms, or after 22 ms when another conversation has cached its 2130-token system prompt. In the engine, past 2130 cached tokens, the first token after one more arrives in 8.8 ms and after 2 to 16 more in 12.7 ms, against 7.2 ms for a decode step. The server is ready 28 s after it starts, the file in the page cache, most of that spent compiling the graphs it replays: 14 s the graph for longer prompts, 7 s the graph for prompts of up to 16 new tokens.
 
 Quality against llama.cpp on the same file: wikitext-2, chunks of 512 tokens with the second half of each scored, run as one prompt each. Both quantize activations to int8; the mixture's choice of experts amplifies that noise.
 
@@ -74,11 +104,18 @@ Quality against llama.cpp on the same file: wikitext-2, chunks of 512 tokens wit
 | Llama 3.2 3B Instruct | 11.8783 | 11.8669 | 0.0012 | 98.3% |
 | Llama 3.1 8B Instruct | 8.3870 | 8.3740 | 0.0012 | 98.3% |
 | Mistral 7B Instruct v0.3 | 7.3712 | 7.3699 | 0.0009 | 98.6% |
+| Mistral Small 3.2 24B Instruct | 5.9424 | 5.9364 | 0.0017 | 98.2% |
 | Qwen2.5 7B Instruct | 7.4307 | 7.3983 | 0.0034 | 96.7% |
 | Qwen3 8B | 11.0321 | 11.0142 | 0.0031 | 97.3% |
 | Qwen3 30B A3B | 9.4920 | 9.5012 | 0.0043 | 97.6% |
+| Gemma 3 4B it | 17.9125 | 17.8991 | 0.0093 | 96.2% |
+| Gemma 3 12B it | 10.1972 | 10.1917 | 0.0054 | 97.3% |
+| Phi-4-mini Instruct | 11.4617 | 11.4474 | 0.0032 | 97.2% |
+| gpt-oss 20B | 384.8582 | 390.5311 | 0.0247 | 91.3% |
 
 leat's decode path, which runs the second half of each chunk one token at a time, scores 0.0012 for Llama 3.1 8B and 0.0031 for Qwen3 30B A3B on 2 chunks. For scale, ignoring Llama 3.1's RoPE frequency factors, a subtle bug, raises the KL from 0.0010 to 0.0026 on the first 5 chunks with the reference ops; Qwen3 8B scores 0.0025 against llama.cpp on the reference ops alone.
+
+gpt-oss is trained for its harmony chat format and models raw text poorly: both engines score wikitext near 385, and there its KL, 0.025, is the highest of these models. Comparing it on its chat format, as Gemma 4 is below, is still to do.
 
 Gemma 4's instruction-tuned model does not model raw text: both engines score wikitext in the tens of thousands. On its chat format, over the 542 positions of six answers to chat prompts, leat's next-token distributions differ from llama.cpp's by a mean KL of 0.0023, with the same top token at 98.3%.
 
@@ -87,6 +124,7 @@ Gemma 4's instruction-tuned model does not model raw text: both engines score wi
 - Linux, Python 3.12+, [uv](https://docs.astral.sh/uv/)
 - `clang`: tinygrad compiles its GPU command submission with it
 - NVIDIA: the open kernel module and NVRTC (from the CUDA toolkit)
+- AMD: ROCm's comgr, with which tinygrad compiles the kernels' HIP C
 
 ## Development
 
@@ -99,6 +137,12 @@ The default run is hermetic and needs only a CPU. GPU and real-model tests are o
 
 ```bash
 DEV=NV LEAT_MODEL=model.gguf LLAMA_CPP=llama.cpp/build/bin WIKITEXT=wiki.test.raw uv run pytest
+```
+
+Without an AMD GPU, the warp-level kernels run on tinygrad's emulated RDNA 3 GPU, as [tests/hip.py](tests/hip.py) sets up: its HIP C compiled by the system's clang, and tinygrad's source tree, of the commit pyproject.toml pins, on PYTHONPATH for the emulator. The emulator is slow; the kernel tests take about half an hour.
+
+```bash
+PYTHONPATH=path/to/tinygrad DEV=MOCK+AMD uv run pytest tests/test_kernels.py
 ```
 
 ## License

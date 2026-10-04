@@ -264,7 +264,7 @@ def test_calls_tools(served, model_path):
 @pytest.mark.model
 def test_shared_system_prompt(served, model_path):
     # a system prompt that another conversation cached cuts the time to the first token by 10x or
-    # more: from 462 to 20 ms for these 2141 tokens on the 3090
+    # more: from 449 to 22 ms for these 2141 tokens on the 3090
     if "system" not in chat_template(model_path):
         pytest.skip("the model's chat template takes no system prompt")
 
