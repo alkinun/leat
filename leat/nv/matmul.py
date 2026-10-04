@@ -3,9 +3,10 @@
 The activations are quantized as for one token. A block stages a tile of weights, unpacked to
 int8, and 64 tokens in shared memory, 128 weights of each row per step, while it fetches the next
 step into registers. Each of its warps multiplies 32 rows by the 64 tokens on tensor cores and
-scales every group of 32 in f32. Tiles of 256 rows reach 68 to 79 TOPS on 512 tokens, against 47
-to 61 for 128; matrices with few rows take 128, to occupy more SMs, and 64 where 128 do not divide
-them. A mixture of experts' tokens take the same kernel, a block per tile of an expert's tokens.
+scales every group of 32 in f32. Tiles of 256 rows of Q4_K reach 68 to 79 TOPS on 512 tokens,
+against 54 to 67 for 128; matrices with few rows take 128, to occupy more SMs, and 64 where 128
+do not divide them. A mixture of experts' tokens take the same kernel, a block per tile of an
+expert's tokens.
 """
 
 import functools
@@ -112,8 +113,9 @@ class _Stack:
 
 # A weight type's part of the kernel: its shared buffers, `fetch` of a step's words into
 # registers and `put` of them into the buffers, and `products` of group s. Those take the
-# buffers, s, the lane's rows (r, r + 8) in the tile and t4, its activation words, and its two
-# tokens' d and d * sum(q); they return the 4 f32 results.
+# buffers, s, the lane's rows (r, r + 8) in the tile and t4, its activation words, its two
+# tokens' d and d * sum(q), and its 4 sums so far; they return the sums with the group's
+# products added, written so that the compiler fuses the additions into multiply-adds.
 
 
 class _Q4KTile:
@@ -162,17 +164,13 @@ class _Q4KTile:
         return stores
 
     @staticmethod
-    def products(bufs, s, rows, t4, b, xd, xs) -> list[UOp]:
+    def products(bufs, s, rows, t4, b, xd, xs, acc) -> list[UOp]:
         # groups 2j and 2j + 1 are the low and high nibbles of words 8j .. 8j + 7
         quants, scales = bufs
         shift = (4 * (s % 2)).cast(dtypes.uint32)
         words = [quants[r, s // 2 * 8 + 4 * h + t4].load() for h in range(2) for r in rows]
         c = _mma([((x >> shift) & 0x0F0F0F0F).bitcast(dtypes.int32) for x in words], b)
-        return [
-            c[e].float() * (scales[0, s, rows[e // 2]].load() * xd[e % 2])
-            - scales[1, s, rows[e // 2]].load() * xs[e % 2]
-            for e in range(4)
-        ]
+        return _with_mins(scales, s, rows, xd, xs, acc, c)
 
 
 class _Q5KTile(_Q4KTile):
@@ -211,16 +209,12 @@ class _Q5KTile(_Q4KTile):
         return stores + self.put_scales(scales, step, words[-4:])
 
     @staticmethod
-    def products(bufs, s, rows, t4, b, xd, xs) -> list[UOp]:
+    def products(bufs, s, rows, t4, b, xd, xs, acc) -> list[UOp]:
         quants, scales = bufs
         c = _mma(
             [quants[r, _swizzle(r, 8 * s + 4 * h + t4)].load() for h in range(2) for r in rows], b
         )
-        return [
-            c[e].float() * (scales[0, s, rows[e // 2]].load() * xd[e % 2])
-            - scales[1, s, rows[e // 2]].load() * xs[e % 2]
-            for e in range(4)
-        ]
+        return _with_mins(scales, s, rows, xd, xs, acc, c)
 
 
 class _Q6KTile:
@@ -264,17 +258,18 @@ class _Q6KTile:
         return stores + [d[self.tid].store(f16(words[-1]))]
 
     @staticmethod
-    def products(bufs, s, rows, t4, b, xd, xs) -> list[UOp]:
+    def products(bufs, s, rows, t4, b, xd, xs, acc) -> list[UOp]:
         # a scale per 16 weights: two k = 16 products, combined in int32
         quants, scales, d = bufs
         a = [quants[r, _swizzle(r, 8 * s + 4 * h + t4)].load() for h in range(2) for r in rows]
         c = [_mma(a[2 * h : 2 * h + 2], [b[h]]) for h in range(2)]
-        dots = []
+        sums = []
         for e in range(4):
             packed = scales[s // 2, rows[e // 2]].load()  # the scales of groups 2s and 2s + 1
             sc = [_signed_byte(packed, 16 * (s % 2) + 8 * h) for h in range(2)]
-            dots.append(c[0][e] * sc[0] + c[1][e] * sc[1])
-        return [dots[e].float() * (d[rows[e // 2]].load() * xd[e % 2]) for e in range(4)]
+            dot = (c[0][e] * sc[0] + c[1][e] * sc[1]).float()
+            sums.append(acc[e] + dot * (d[rows[e // 2]].load() * xd[e % 2]))
+        return sums
 
 
 class _Q80Tile:
@@ -322,12 +317,12 @@ class _Q80Tile:
         return stores + [d[j, self.tid].store(f16(word)) for j, word in enumerate(words[-4:])]
 
     @staticmethod
-    def products(bufs, s, rows, t4, b, xd, xs) -> list[UOp]:
+    def products(bufs, s, rows, t4, b, xd, xs, acc) -> list[UOp]:
         quants, d = bufs
         c = _mma(
             [quants[r, _swizzle(r, 8 * s + 4 * h + t4)].load() for h in range(2) for r in rows], b
         )
-        return [c[e].float() * (d[s, rows[e // 2]].load() * xd[e % 2]) for e in range(4)]
+        return [acc[e] + c[e].float() * (d[s, rows[e // 2]].load() * xd[e % 2]) for e in range(4)]
 
 
 class _Q50Tile(_Q80Tile):
@@ -371,6 +366,19 @@ def _swizzle(row: UOp, word: UOp | int) -> UOp:
 def _signed_byte(word: UOp, shift: UOp) -> UOp:
     byte = ((word >> shift.cast(dtypes.uint32)) & 0xFF).cast(dtypes.uint8)
     return byte.bitcast(dtypes.int8).cast(dtypes.int32)
+
+
+def _with_mins(
+    scales: UOp, s: UOp, rows: tuple[UOp, UOp], xd: list[UOp], xs: list[UOp], acc: list[UOp],
+    c: list[UOp],
+) -> list[UOp]:  # fmt: skip
+    # the sums plus group s's products c of a K-quant with mins: c * d * scale - dmin * min * xs
+    return [
+        acc[e]
+        + c[e].float() * (scales[0, s, rows[e // 2]].load() * xd[e % 2])
+        - scales[1, s, rows[e // 2]].load() * xs[e % 2]
+        for e in range(4)
+    ]
 
 
 _TILES: dict[GGMLType, type[_Q4KTile] | type[_Q6KTile] | type[_Q80Tile]] = {
@@ -491,8 +499,8 @@ def _matmul_kernel(
             tok = ni * 8
             b = [act[tok + g, 8 * s + 4 * h + t4].load() for h in range(2)]
             xd_, xs_ = ([act_scales[i, s, tok + 2 * t4 + j].load() for j in (0, 1)] for i in (0, 1))
-            for inc in weights.products(mine, s, (r, r + 8), t4, b, xd_, xs_):
-                vals.append(prev[len(vals)].load() + inc)
+            sums = [prev[len(vals) + e].load() for e in range(4)]
+            vals += weights.products(mine, s, (r, r + 8), t4, b, xd_, xs_, sums)
     computed = acc.store(UOp.stack(*vals)).end(s)
     # every warp is done with this step's tiles before they are overwritten
     done = UOp(Ops.BARRIER, src=(computed,))
