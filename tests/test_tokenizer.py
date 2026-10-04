@@ -1,4 +1,5 @@
 import json
+import os
 import random
 import subprocess
 
@@ -120,6 +121,9 @@ def test_matches_llama_cpp(model_path, llama_cpp, tmp_path):
             args = [llama_cpp / "llama-tokenize", "-m", model_path, "-f", path, "--ids"]
             args += ["--no-bos", "--no-escape", "--log-disable"]
             args += [] if special else ["--no-parse-special"]
-            out = subprocess.run(args, capture_output=True, text=True, check=True).stdout
+            # on the CPU: ggml's CUDA backend, which tokenizing does not need, now and then aborts
+            # starting up beside tinygrad's hold of the GPU
+            env = {**os.environ, "CUDA_VISIBLE_DEVICES": ""}
+            out = subprocess.run(args, capture_output=True, text=True, check=True, env=env).stdout
             assert tok.encode(text, bos=False, special=special) == json.loads(out.splitlines()[-1])
         assert tok.decode(tok.encode(text, bos=False)) == text

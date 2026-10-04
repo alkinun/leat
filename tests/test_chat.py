@@ -127,7 +127,9 @@ def test_llama3(model_path):
     if metadata["general.architecture"] != "llama":
         pytest.skip("checks Llama 3's template")
     c = ChatTemplate(metadata, Tokenizer(metadata))
-    text = c.render([{"role": "system", "content": "Be brief."}, {"role": "user", "content": "Hi"}])
+    messages = [{"role": "system", "content": "Be brief."}, {"role": "user", "content": "Hi"}]
+    # Llama 3.1's template dates the system prompt 26 Jul 2024, 3.2's today, unless told
+    text = c.render(messages, date_string="26 Jul 2024")
     assert text == (
         "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n"
         "Cutting Knowledge Date: December 2023\nToday Date: 26 Jul 2024\n\nBe brief.<|eot_id|>"
