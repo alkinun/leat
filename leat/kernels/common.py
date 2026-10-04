@@ -117,24 +117,19 @@ def popcount(x: UOp) -> UOp:
 def rounded(x: UOp, y: UOp) -> UOp:
     # x / y rounded half away from zero, the division exact: tinygrad would multiply by a
     # reciprocal
-    return UOp(
-        Ops.CUSTOMI,
-        src=(x, y),
-        arg=(either("roundf({0}/{1})", "__builtin_roundf({0}/{1})"), dtypes.float32),
-    )
+    code = either("roundf({0}/{1})", "__builtin_roundf({0}/{1})")
+    return UOp(Ops.CUSTOMI, src=(x, y), arg=(code, dtypes.float32))
 
 
-def warp_sum(value: UOp, lanes: int = WARP) -> UOp:
+def warp_sum(value: UOp, lanes: int = WARP, op: Callable[[UOp, UOp], UOp] = UOp.__add__) -> UOp:
     # over each aligned run of `lanes` lanes
     for mask in (16, 8, 4, 2, 1)[5 - lanes.bit_length() + 1 :]:
-        value = value + shfl_xor(value, mask)
+        value = op(value, shfl_xor(value, mask))
     return value
 
 
 def warp_max(value: UOp, lanes: int = WARP) -> UOp:
-    for mask in (16, 8, 4, 2, 1)[5 - lanes.bit_length() + 1 :]:
-        value = value.maximum(shfl_xor(value, mask))
-    return value
+    return warp_sum(value, lanes, UOp.maximum)
 
 
 def load_vector(ptr: UOp, lanes: int) -> tuple[UOp, ...]:
@@ -150,7 +145,7 @@ def word16(w: UOp, i: UOp) -> UOp:
     return w[i].load().cast(dtypes.uint32) | (w[i + 1].load().cast(dtypes.uint32) << 16)
 
 
-def byte_perm(a: UOp, b: UOp, selector: UOp | int) -> UOp:
+def byte_perm(a: UOp | int, b: UOp | int, selector: UOp | int) -> UOp:
     # the bytes of (b, a) that the low 4 nibbles of the selector pick, as CUDA's __byte_perm; AMD's
     # v_perm takes a byte per pick, from (its first, its second)
     srcs = tuple(x if isinstance(x, UOp) else UOp.const(x, dtypes.uint32) for x in (a, b, selector))
@@ -169,15 +164,9 @@ def table16(q: UOp, table: tuple[int, int, int, int]) -> tuple[UOp, UOp]:
     # a word of 8 nibbles to the int8 values a 16-entry table (as 4 words) gives them: those of
     # its low nibbles, then of its high ones, each a word of 4 bytes; as llama.cpp's
     # get_int_from_table_16, picking from each half of the table and then by the nibble's top bit
-    halves = []
-    pick = (q & 0x88888888) >> 1 | 0x32103210
+    halves, pick = [], (q & 0x88888888) >> 1 | 0x32103210
     for shift in (0, 16):
-        low = byte_perm(
-            UOp.const(table[0], dtypes.uint32), UOp.const(table[1], dtypes.uint32), q >> shift
-        )
-        high = byte_perm(
-            UOp.const(table[2], dtypes.uint32), UOp.const(table[3], dtypes.uint32), q >> shift
-        )
+        low, high = (byte_perm(table[i], table[i + 1], q >> shift) for i in (0, 2))
         halves.append(byte_perm(low, high, pick >> shift))
     return byte_perm(halves[0], halves[1], 0x6420), byte_perm(halves[0], halves[1], 0x7531)
 

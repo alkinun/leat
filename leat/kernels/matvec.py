@@ -267,16 +267,11 @@ def _mxfp4_dot(w: UOp, xq: UOp, xd: UOp, xs: UOp, cols: int) -> Dot:
 DOTS: dict[GGMLType, Callable[[UOp, UOp, UOp, UOp, int], Dot]] = {
     GGMLType.Q4_K: functools.partial(_k_dot, high=False),
     GGMLType.Q5_K: functools.partial(_k_dot, high=True),
-    GGMLType.Q6_K: _q6_k_dot,
-    GGMLType.Q5_0: _q5_0_dot,
-    GGMLType.Q8_0: _q8_0_dot,
-    GGMLType.MXFP4: _mxfp4_dot,
-    GGMLType.IQ4_XS: _iq4_xs_dot,
-    **{
-        t: functools.partial(_q4_dot, kind=t)
-        for t in (GGMLType.Q4_0, GGMLType.Q4_1, GGMLType.Q5_1, GGMLType.IQ4_NL)
-    },
-}
+    GGMLType.Q6_K: _q6_k_dot, GGMLType.Q5_0: _q5_0_dot, GGMLType.Q8_0: _q8_0_dot,
+    GGMLType.MXFP4: _mxfp4_dot, GGMLType.IQ4_XS: _iq4_xs_dot,
+    **{t: functools.partial(_q4_dot, kind=t)
+       for t in (GGMLType.Q4_0, GGMLType.Q4_1, GGMLType.Q5_1, GGMLType.IQ4_NL)},
+}  # fmt: skip
 
 
 @functools.cache

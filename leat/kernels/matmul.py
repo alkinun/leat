@@ -343,13 +343,22 @@ class _Q80Tile:
             for j in range(4)
         ]
 
+    def item(self, i: int) -> tuple[UOp, UOp, UOp]:
+        # the thread's i-th (row, block j, word k) of a step's blocks of 4 words of nibbles
+        item = i * self.rows + self.tid
+        return item // 16, item % 16 // 4, item % 4
+
     def put(self, bufs: list[UOp], step: UOp, words: list[UOp]) -> list[UOp]:
         quants, d = bufs
+        stores = self.put_values(quants, words[:-4])
+        return stores + [d[j, self.tid].store(f16(word)) for j, word in enumerate(words[-4:])]
+
+    def put_values(self, quants: UOp, words: list[UOp]) -> list[UOp]:
         stores = []
-        for i, word in enumerate(words[:-4]):
+        for i, word in enumerate(words):
             row, at = (i * self.rows + self.tid) // 32, (i * self.rows + self.tid) % 32
             stores.append(quants[row, _swizzle(row, at)].store(word.bitcast(dtypes.int32)))
-        return stores + [d[j, self.tid].store(f16(word)) for j, word in enumerate(words[-4:])]
+        return stores
 
     @staticmethod
     def products(bufs, s, rows, t4, b, xd, xs, acc) -> list[UOp]:
@@ -371,27 +380,20 @@ class _Q50Tile(_Q80Tile):
         # nibbles and its high bits; then the d of its row's 4 blocks
         words, base = [], step * 4 * self.words
         for i in range(16):
-            item = i * self.rows + self.tid
-            row, j, k = item // 16, item % 16 // 4, item % 4
+            row, j, k = self.item(i)
             at, inside = base + self.words * j, self.inside(step, j)
-            words += [
-                stack.word16(row, at + 3 + 2 * k, inside),
-                stack.word16(row, at + 1, inside),
-            ]
+            words += [stack.word16(row, at + 3 + 2 * k, inside), stack.word16(row, at + 1, inside)]
         return words + self.scales(stack, step)
 
-    def put(self, bufs: list[UOp], step: UOp, words: list[UOp]) -> list[UOp]:
-        quants, d = bufs
+    def put_values(self, quants: UOp, words: list[UOp]) -> list[UOp]:
         stores = []
         for i in range(16):
-            item = i * self.rows + self.tid
-            row, j, k = item // 16, item % 16 // 4, item % 4
-            nibbles, high = words[2 * i], words[2 * i + 1]
+            (row, j, k), nibbles, high = self.item(i), words[2 * i], words[2 * i + 1]
             for h in range(2):  # values 4k.. of the block, then 16 + 4k..
                 fifth = fifth_bits((high >> (16 * h + 4 * k)) & 15)
                 q = ((nibbles >> (4 * h)) & 0x0F0F0F0F) | fifth
                 stores.append(quants[row, _swizzle(row, 8 * j + 4 * h + k)].store(minus(q, 16)))
-        return stores + [d[j, self.tid].store(f16(word)) for j, word in enumerate(words[-4:])]
+        return stores
 
 
 def _swizzle(row: UOp, word: UOp | int) -> UOp:
@@ -431,27 +433,19 @@ class _Q40Tile(_Q80Tile):
         # nibbles; then the d of its row's 4 blocks
         words, base = [], step * 4 * self.words
         for i in range(16):
-            item = i * self.rows + self.tid
-            row, j, k = item // 16, item % 16 // 4, item % 4
-            at = base + self.words * j + 1 + 2 * k
-            words.append(stack.word16(row, at, self.inside(step, j)))
+            row, j, k = self.item(i)
+            words.append(stack.word16(row, base + self.words * j + 1 + 2 * k, self.inside(step, j)))
         return words + self.scales(stack, step)
 
     def values(self, nibbles: UOp) -> list[UOp]:
         # the word's values of its low nibbles, then of its high ones, as int8
         return [minus((nibbles >> (4 * h)) & 0x0F0F0F0F, 8) for h in range(2)]
 
-    def put(self, bufs: list[UOp], step: UOp, words: list[UOp]) -> list[UOp]:
-        d = bufs[1]
-        stores = self.put_values(bufs[0], words[:16])
-        return stores + [d[j, self.tid].store(f16(word)) for j, word in enumerate(words[16:])]
-
     def put_values(self, quants: UOp, words: list[UOp]) -> list[UOp]:
         # the thread's words of nibbles as their values
         stores = []
         for i, word in enumerate(words):
-            item = i * self.rows + self.tid
-            row, j, k = item // 16, item % 16 // 4, item % 4
+            row, j, k = self.item(i)
             for h, value in enumerate(self.values(word)):  # values 4k.., then 16 + 4k..
                 at = _swizzle(row, 8 * j + 4 * h + k)
                 stores.append(quants[row, at].store(value.bitcast(dtypes.int32)))
@@ -465,7 +459,7 @@ class _IQ4NLTile(_Q40Tile):
         return list(table16(nibbles, IQ4_TABLE))
 
 
-class _IQ4XSTile(_Q40Tile):
+class _IQ4XSTile(_IQ4NLTile):
     """IQ4_XS weights, half a block of 256 per step, unpacked to Q8_0's layout: each sub-block of
     32 is IQ4_NL's nibbles, with a scale d * (s - 32) of 6 bits, from the block's 16 high bits of
     scales and 4 bytes of low ones."""
@@ -477,13 +471,9 @@ class _IQ4XSTile(_Q40Tile):
         # then d and the scales of its row's block
         words, block = [], step // 2 * 34
         for i in range(16):
-            item = i * self.rows + self.tid
-            row, j, k = item // 16, item % 16 // 4, item % 4
+            row, j, k = self.item(i)
             words.append(stack.load(row, block + 2 + 4 * (4 * (step % 2) + j) + k))
         return words + [stack.load(self.tid, block + i) for i in range(2)]
-
-    def values(self, nibbles: UOp) -> list[UOp]:
-        return list(table16(nibbles, IQ4_TABLE))
 
     def put(self, bufs: list[UOp], step: UOp, words: list[UOp]) -> list[UOp]:
         quants, d = bufs
@@ -527,16 +517,10 @@ class _MXFP4Tile(_Q80Tile):
 
 
 _TILES: dict[GGMLType, type[_Q4KTile] | type[_Q6KTile] | type[_Q80Tile]] = {
-    GGMLType.Q4_K: _Q4KTile,
-    GGMLType.Q5_K: _Q5KTile,
-    GGMLType.Q6_K: _Q6KTile,
-    GGMLType.Q5_0: _Q50Tile,
-    GGMLType.Q8_0: _Q80Tile,
-    GGMLType.MXFP4: _MXFP4Tile,
-    GGMLType.Q4_0: _Q40Tile,
-    GGMLType.IQ4_NL: _IQ4NLTile,
-    GGMLType.IQ4_XS: _IQ4XSTile,
-}
+    GGMLType.Q4_K: _Q4KTile, GGMLType.Q5_K: _Q5KTile, GGMLType.Q6_K: _Q6KTile,
+    GGMLType.Q5_0: _Q50Tile, GGMLType.Q8_0: _Q80Tile, GGMLType.MXFP4: _MXFP4Tile,
+    GGMLType.Q4_0: _Q40Tile, GGMLType.IQ4_NL: _IQ4NLTile, GGMLType.IQ4_XS: _IQ4XSTile,
+}  # fmt: skip
 
 
 class _Items:
