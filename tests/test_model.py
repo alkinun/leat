@@ -187,14 +187,16 @@ def test_matches_llama_cpp(model_path, llama_cpp, wikitext, tmp_path, decode):
 @pytest.mark.model
 def test_chunked_prefill(model_path):
     # prefilling in chunks of a bound length, through the kernels' symbolic paths, leaves the first
-    # layer's keys and values and the next token of one pass over the whole prompt, with its fixed
-    # shapes. Deeper layers drift apart: kernels compiled for either differ in the last bit here
-    # and there, which can move an activation to the next int8 step or flip a choice of experts.
+    # layer's keys and values of one pass over the whole prompt, with its fixed shapes, and a next
+    # token it scores as likely. Deeper layers drift apart: kernels compiled for either differ in
+    # the last bit here and there, which can move an activation to the next int8 step or flip a
+    # choice of experts, and so a near tie: Qwen2.5 7B's best two logits here are 0.07 apart.
     prompt = [128000] + [(i * 7919) % 128000 for i in range(299)]
     engine = Engine(model_path, max_context=512, prefill_chunk=128)
     token = next(engine.generate(prompt, 1))
     chunked = engine.model.cache[0][:, :, :, : len(prompt)].numpy()
     hidden = engine.model(Tensor([prompt], dtype=dtypes.int32), 0)  # the same positions again
-    assert token == engine.model.logits(hidden[:, -1]).argmax().item()
+    logits = engine.model.logits(hidden[:, -1]).numpy().reshape(-1)
+    assert logits[token] > logits.max() - 0.1
     whole = engine.model.cache[0][:, :, :, : len(prompt)].numpy()
     np.testing.assert_allclose(chunked.astype(np.float32), whole, rtol=1e-2, atol=1e-2)
