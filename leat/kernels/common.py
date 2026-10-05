@@ -117,6 +117,19 @@ def ballot(predicate: UOp) -> UOp:
     return UOp(Ops.CUSTOM, src=(predicate,), arg=(code, dtypes.uint32))
 
 
+def fast_reciprocal(x: UOp) -> UOp:
+    # 1/x within an ulp or two, in one instruction: tinygrad's IEEE division compiles to a call to
+    # a slow path, around which a kernel holding many values in registers spills them all
+    code = either("__fdividef(1.0f, {0})", "__builtin_amdgcn_rcpf({0})")
+    return UOp(Ops.CUSTOMI, src=(x,), arg=(code, dtypes.float32))
+
+
+def fast_rsqrt(x: UOp) -> UOp:
+    # 1/sqrt(x) as fast_reciprocal: IEEE's sqrt is a call too
+    code = either("rsqrtf({0})", "__builtin_amdgcn_rsqf({0})")
+    return UOp(Ops.CUSTOMI, src=(x,), arg=(code, dtypes.float32))
+
+
 def popcount(x: UOp) -> UOp:
     code = either("__popc({0})", "__builtin_popcount({0})")
     return UOp(Ops.CUSTOMI, src=(x,), arg=(code, dtypes.int32))
@@ -239,6 +252,14 @@ def _gelu(x: UOp) -> UOp:
     # tanh's approximation, as ggml's and tinygrad's: x * sigmoid(2 sqrt(2/pi) (x + 0.044715 x^3))
     z = x * (1 + 0.044715 * x * x) * (2 * math.sqrt(2 / math.pi))
     return x * (1 + (z * -LOG2E).exp2()).reciprocal()
+
+
+def pick(row: UOp, values: tuple[int | UOp, ...]) -> UOp:
+    # values[row] for a range over them: a chain of selects
+    picked = UOp.const(values[-1], dtypes.weakint) if isinstance(values[-1], int) else values[-1]
+    for i in reversed(range(len(values) - 1)):
+        picked = row.eq(i).where(values[i], picked)
+    return picked
 
 
 def register(shape: tuple[int, ...], value: float) -> UOp:

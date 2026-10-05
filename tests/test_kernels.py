@@ -794,3 +794,118 @@ def test_mixture_biases(ggml_type, tokens):
 
     normed = rms_norm(x[0, :n], weight, 1e-5)
     assert_close(got, x[0, :n] + expected_mixture(normed, scores[0, :n], used, expert), 3e-3)
+
+
+# ******** Gated DeltaNet ********
+
+# Qwen3.6 35B A3B's: 16 heads of queries and keys, 32 of values, each of 128, and a convolution
+# over 4 tokens
+DN_K_HEADS, DN_HEADS, DN_DIMS, DN_WIDTH, DN_SLOTS = 16, 32, 128, 4, 3
+DN_CHANNELS = (2 * DN_K_HEADS + DN_HEADS) * DN_DIMS
+
+
+def delta_net_inputs(tokens: int, rng: np.random.Generator) -> dict[str, np.ndarray]:
+    def normal(*shape, scale=1.0):
+        return (rng.standard_normal(shape) * scale).astype(np.float32)
+
+    return {
+        "mixed": normal(tokens, DN_CHANNELS), "z": normal(tokens, DN_HEADS * DN_DIMS),
+        "alpha": normal(tokens, DN_HEADS), "beta": normal(tokens, DN_HEADS),
+        "conv": normal(DN_CHANNELS, DN_WIDTH, scale=0.5), "bias": normal(DN_HEADS),
+        "a": -rng.uniform(0.1, 2.0, DN_HEADS).astype(np.float32),
+        "norm": rng.uniform(0.5, 1.5, DN_DIMS).astype(np.float32),
+    }  # fmt: skip
+
+
+def reference_delta_net(x, conv_state, state, eps):
+    # one sequence's tokens from its states, in f64: the outputs, then the states after
+    T, qk = len(x["mixed"]), DN_K_HEADS * DN_DIMS
+    inputs = np.concatenate([conv_state, x["mixed"]]).astype(np.float64)
+    conved = np.stack([(inputs[t : t + DN_WIDTH] * x["conv"].T).sum(0) for t in range(T)])
+    q, k, v = np.split(conved / (1 + np.exp(-conved)), [qk, 2 * qk], -1)
+
+    def unit(z):
+        z = z.reshape(T, DN_K_HEADS, DN_DIMS)
+        return z / np.maximum(np.linalg.norm(z, axis=-1, keepdims=True), eps)
+
+    q, k, v = unit(q) / np.sqrt(DN_DIMS), unit(k), v.reshape(T, DN_HEADS, DN_DIMS)
+    decay = np.exp(x["a"] * np.logaddexp(0, x["alpha"] + x["bias"]))
+    share = 1 / (1 + np.exp(-x["beta"].astype(np.float64)))
+    s, out = state.astype(np.float64), np.zeros((T, DN_HEADS, DN_DIMS))
+    for t in range(T):
+        for h in range(DN_HEADS):
+            key, query = k[t, h % DN_K_HEADS], q[t, h % DN_K_HEADS]
+            s[h] *= decay[t, h]
+            s[h] += np.outer(key, share[t, h] * (v[t, h] - s[h].T @ key))
+            out[t, h] = s[h].T @ query
+    z = x["z"].reshape(T, DN_HEADS, DN_DIMS)
+    gated = (
+        out / np.sqrt((out * out).mean(-1, keepdims=True) + eps) * x["norm"] * z / (1 + np.exp(-z))
+    )
+    return gated.reshape(T, -1), inputs[T:], s
+
+
+def delta_net_states(rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
+    conv_state = rng.standard_normal((DN_SLOTS, DN_WIDTH - 1, DN_CHANNELS)).astype(np.float32)
+    state = (rng.standard_normal((DN_SLOTS, DN_HEADS, DN_DIMS, DN_DIMS)) * 0.1).astype(np.float32)
+    return conv_state, state
+
+
+def run_delta_net(x, rows, tokens, states):
+    # ops.delta_net() on the kernel, rows (slot, start) of `tokens` tokens each, or of a bound
+    # number for one row
+    count = tokens if len(rows) == 1 else len(rows) * tokens
+
+    def tensor(name):
+        t = Tensor(x[name])
+        return t.unsqueeze(0)[:, :count] if name in ("mixed", "z", "gates") else t
+
+    spans = [ops.Span(slot, start, tokens) for slot, start in rows]
+    x = x | {"gates": np.concatenate([x["alpha"], x["beta"]], -1)}
+    mixed, z, gates, conv = (tensor(n) for n in ("mixed", "z", "gates", "conv"))
+    assert kernels.supports_delta_net(mixed, states[1])
+    decay, norm = (tensor("a"), tensor("bias")), (tensor("norm"), 1e-6)
+    return ops.delta_net(mixed, z, gates, conv, decay, norm, states, spans)
+
+
+@pytest.mark.parametrize("tokens", [1, 37, UOp.variable("tokens", 1, 64).bind(37)])
+@pytest.mark.parametrize("start", [0, 5])
+def test_delta_net(tokens, start):
+    # a sequence's tokens from its slot's states, or from zero ones at position 0; the states
+    # after in its slot, the others' as they were
+    rng = np.random.default_rng(23)
+    n = tokens if isinstance(tokens, int) else tokens.unbind()[1]
+    x, (conv_state, state) = delta_net_inputs(64, rng), delta_net_states(rng)
+    states = (Tensor(conv_state).contiguous().realize(), Tensor(state).contiguous().realize())
+    out = run_delta_net(x, [(1, start)], tokens, states).pad_to((1, 64, DN_HEADS * DN_DIMS))
+    out = out.numpy()[0, :n]
+    first = {k: v[:n] if v.shape[0] == 64 else v for k, v in x.items()}
+    kept = start > 0
+    expected, conv_after, after = reference_delta_net(
+        first, conv_state[1] * kept, state[1] * kept, 1e-6
+    )
+    assert_close(out, expected, 2e-4)
+    got_conv, got = states[0].numpy(), states[1].numpy()
+    np.testing.assert_allclose(got_conv[1], conv_after, rtol=1e-6, atol=1e-6)
+    assert_close(got[1], after, 2e-4)
+    for other in (0, 2):
+        np.testing.assert_array_equal(got_conv[other], conv_state[other])
+        np.testing.assert_array_equal(got[other], state[other])
+
+
+def test_delta_net_rows():
+    # a token of each row from its own slot, one row from position 0
+    rng = np.random.default_rng(29)
+    x, (conv_state, state) = delta_net_inputs(3, rng), delta_net_states(rng)
+    states = (Tensor(conv_state).contiguous().realize(), Tensor(state).contiguous().realize())
+    rows = [(2, 4), (0, 0), (1, 9)]
+    out = run_delta_net(x, rows, 1, states).numpy()[0]
+    for r, (slot, start) in enumerate(rows):
+        one = {k: v[r : r + 1] if v.shape[0] == 3 and k != "conv" else v for k, v in x.items()}
+        kept = start > 0
+        expected, conv_after, after = reference_delta_net(
+            one, conv_state[slot] * kept, state[slot] * kept, 1e-6
+        )
+        assert_close(out[r : r + 1], expected, 2e-4)
+        np.testing.assert_allclose(states[0].numpy()[slot], conv_after, rtol=1e-6, atol=1e-6)
+        assert_close(states[1].numpy()[slot], after, 2e-4)

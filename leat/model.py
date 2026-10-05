@@ -227,6 +227,8 @@ class Transformer:
         ]
         if missing:
             raise ValueError(f"missing {len(missing)} tensors, first: {missing[0]}")
+        for layer in self.layers:
+            _stack(layer)
         # norm weights, biases, sinks and scales, decoded once
         self.small = [
             {n: w.dequant().realize() for n, w in layer.items() if _small(n, w)}
@@ -353,9 +355,9 @@ class Transformer:
         states = self.states[i]
         assert states is not None
         mixed, z = ops.linears(x, w["attn_qkv"], w["attn_gate"], norm=(s["attn_norm"], eps))
-        alpha, beta = ops.linears(x, w["ssm_alpha"], w["ssm_beta"], norm=(s["attn_norm"], eps))
+        gates = ops.router(x, (s["attn_norm"], eps), w["ssm_alpha_beta"])
         decay = (s["ssm_a"], s["ssm_dt.bias"])
-        out = ops.delta_net(mixed, z, alpha, beta, w["ssm_conv1d"].dequant(), decay,
+        out = ops.delta_net(mixed, z, gates, w["ssm_conv1d"].dequant(), decay,
                             (s["ssm_norm"], eps), states, spans)  # fmt: skip
         return ops.linear(out, w["ssm_out"], residual=x)
 
@@ -380,12 +382,11 @@ class Transformer:
         if "ffn_down_exps.bias" in s:  # gpt-oss's
             biases = (s["ffn_gate_exps.bias"], s["ffn_up_exps.bias"], s["ffn_down_exps.bias"])
         experts = (scores, gate, up, w["ffn_down_exps"], c.experts_used)
-        if "ffn_gate_inp_shexp" in s:  # Qwen3.5's shared expert, scaled by its gate's sigmoid
+        if "ffn_gate_inp_shexp" in w:  # Qwen3.5's shared expert, scaled by its gate's sigmoid
             mixed = ops.mixture(x, *experts, norm, c.glu, residual=False, live=live)
             shexp = (w["ffn_gate_shexp"], w["ffn_up_shexp"], w["ffn_down_shexp"])
             out = ops.feed_forward(x, *shexp, norm, c.glu, residual=False)
-            weight = (ops.rms_norm(x, *norm) * s["ffn_gate_inp_shexp"]).sum(-1, keepdim=True)
-            return x + mixed + out * weight.sigmoid()
+            return x + mixed + out * ops.router(x, norm, w["ffn_gate_inp_shexp"]).sigmoid()
         if not mlp:
             return ops.mixture(x, *experts, norm, c.glu, biases=biases, live=live)
         scales = s["ffn_down_exps.scale"]
@@ -415,6 +416,17 @@ def _rows(w: QTensor, start: int, stop: int) -> QTensor:
     elements, _ = BLOCK[w.type]
     per = w.shape[1] if w.type in NATIVE else w.shape[1] // elements  # values or blocks a row
     return QTensor(w.data[start * per : stop * per], w.type, (stop - start, *w.shape[1:]))
+
+
+def _stack(layer: dict[str, QTensor]) -> None:
+    # Qwen3.5's F32 projections of the normed input, as matrices the router's kernel takes:
+    # alpha's and beta's stacked, scored together, and the shared expert's gate a row
+    if "ssm_alpha" in layer:
+        alpha, beta = layer.pop("ssm_alpha"), layer.pop("ssm_beta")
+        data = alpha.data.cat(beta.data).contiguous().realize()
+        layer["ssm_alpha_beta"] = QTensor(data, alpha.type, (2 * alpha.shape[0], alpha.shape[1]))
+    if (gate := layer.get("ffn_gate_inp_shexp")) is not None:
+        layer["ffn_gate_inp_shexp"] = QTensor(gate.data, gate.type, (1, *gate.shape))
 
 
 def _copy_slot(

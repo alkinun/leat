@@ -76,8 +76,8 @@ def add_normed(
 
 
 def router(x: Tensor, norm: tuple[Tensor, float], w: QTensor, bias: Tensor | None = None) -> Tensor:
-    # the scores a mixture of experts' router gives each expert: rms_norm(x, *norm) @ w.T, plus
-    # the bias if given
+    # rms_norm(x, *norm) @ w.T, plus the bias if given: the scores a mixture of experts' router
+    # gives each expert, or other projections of F32 weights as sensitive to rounding
     if _fast() and kernels.supports_scores(x, w):
         scores = kernels.scores(x, norm, w)
     else:
@@ -315,7 +315,7 @@ def _attention(
 
 
 def delta_net(
-    mixed: Tensor, z: Tensor, alpha: Tensor, beta: Tensor, conv: Tensor,
+    mixed: Tensor, z: Tensor, gates: Tensor, conv: Tensor,
     decay: tuple[Tensor, Tensor], norm: tuple[Tensor, float], states: tuple[Tensor, Tensor],
     spans: list[Span],
 ) -> Tensor:  # fmt: skip
@@ -327,22 +327,28 @@ def delta_net(
     # heads than values: value head h takes their head h mod their heads. Each value head's state
     # (slots, heads, key dims, value dims) decays by exp(a * softplus(alpha + bias)) for decay
     # (a, bias), then moves the values it holds for the token's key a sigmoid(beta) share toward
-    # the token's values; the token's output, the values it holds for the token's query, is
+    # the token's values, gates (1, T, 2 * heads) holding its alphas, then betas; the output,
+    # the values the state holds for the token's query, is
     # normed with norm and gated by SiLU of z (1, T, heads * value dims). A span from position 0
     # starts its sequence, from zero states. Returns (1, T, heads * value dims).
+    args = (mixed, z, gates, conv, decay, norm, states)
+    if _fast() and kernels.supports_delta_net(mixed, states[1]) and (rows := _rows(spans)):
+        slots, starts = (r if isinstance(r, list) else [r] for r in rows)
+        tokens = 1 if len(spans) > 1 else mixed.shape[1]
+        return kernels.delta_net(*args, slots, starts, tokens)
     if len(spans) == 1:
-        return _delta_net(mixed, z, alpha, beta, conv, decay, norm, states, spans[0])
+        return _delta_net(mixed, z, gates, conv, decay, norm, states, spans[0])
     outs, at = [], 0
     for span in spans:
         n = int(span.length)
-        m, g, a, b = (t[:, at : at + n] for t in (mixed, z, alpha, beta))
-        outs.append(_delta_net(m, g, a, b, conv, decay, norm, states, span))
+        m, g, a = (t[:, at : at + n] for t in (mixed, z, gates))
+        outs.append(_delta_net(m, g, a, conv, decay, norm, states, span))
         at += n
     return outs[0].cat(*outs[1:], dim=1)
 
 
 def _delta_net(
-    mixed: Tensor, z: Tensor, alpha: Tensor, beta: Tensor, conv: Tensor,
+    mixed: Tensor, z: Tensor, gates: Tensor, conv: Tensor,
     decay: tuple[Tensor, Tensor], norm: tuple[Tensor, float], states: tuple[Tensor, Tensor],
     span: Span,
 ) -> Tensor:  # fmt: skip
@@ -352,7 +358,8 @@ def _delta_net(
     n = T if isinstance(T, int) else int(T.vmax)
     heads, k_dim, v_dim = (int(d) for d in states[1].shape[1:])
     width, eps = int(conv.shape[1]), norm[1]
-    mixed, z, alpha, beta = (t.pad_to(t.max_shape) for t in (mixed, z, alpha, beta))
+    mixed, z, gates = (t.pad_to(t.max_shape) for t in (mixed, z, gates))
+    alpha, beta = gates.chunk(2, dim=-1)
     conv_state, state = (Tensor(span.start > 0).where(t[slot : slot + 1], 0.0).contiguous()
                          for t in states)  # fmt: skip
     # read first: realizing both writes below, tinygrad may write the conv state before the

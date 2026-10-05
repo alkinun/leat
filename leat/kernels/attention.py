@@ -22,6 +22,7 @@ from leat.kernels.common import (
     on_gpu,
     on_nvidia,
     opaque,
+    pick,
     register,
     shfl_xor,
     warp_sum,
@@ -56,7 +57,7 @@ def _attention_partial_kernel(
     partials = int(out.shape[1])
     per_wave, zero = KEYS // waves, UOp.const(0.0, dtypes.float32)
     token = UOp.range(rows, 2, AxisType.GLOBAL)
-    slot, length = _pick(token, slots), _pick(token, lengths)
+    slot, length = pick(token, slots), pick(token, lengths)
     since = _since(length, window)
     chunks = _chunks(length, window)
     head = UOp.range(kv_heads * split, 0, AxisType.GLOBAL)  # query heads from head * group
@@ -176,14 +177,6 @@ def _attention_combine_kernel(
     stores = [o[head, d].store(acc[i].load() / total[0].load()) for i, d in enumerate(dims)]
     info = KernelInfo(name="attention_combine", opts_to_apply=())
     return UOp.group(*stores).end(lane, part, head).sink(arg=info)
-
-
-def _pick(row: UOp, values: tuple[int | UOp, ...]) -> UOp:
-    # values[row] for a range over them: a chain of selects
-    picked = UOp.const(values[-1], dtypes.weakint) if isinstance(values[-1], int) else values[-1]
-    for i in reversed(range(len(values) - 1)):
-        picked = row.eq(i).where(values[i], picked)
-    return picked
 
 
 def _since(length: int | UOp, window: int) -> int | UOp:
@@ -538,8 +531,8 @@ def _rotate_kernel(
     heads, half, turning = int(out.shape[0]) // (tokens * dim), dim // 2, rotated // 2
     head, lane = UOp.range(heads + kv_heads, 0, AxisType.GLOBAL), lane_range()
     token = UOp.range(tokens, 1, AxisType.GLOBAL)
-    slot = _pick(token, slots) if isinstance(slots, tuple) else slots
-    pos = _pick(token, positions) if isinstance(positions, tuple) else positions + token
+    slot = pick(token, slots) if isinstance(slots, tuple) else slots
+    pos = pick(token, positions) if isinstance(positions, tuple) else positions + token
     is_q, is_kv, kv = head < heads, head >= heads, head - heads
     zero = UOp.const(0.0, dtypes.float32)
     pairs = [lane + WARP * m for m in range(half // WARP)]
