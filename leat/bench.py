@@ -15,7 +15,7 @@ from typing import BinaryIO, cast
 
 from tinygrad import Tensor, TinyJit, UOp, dtypes
 
-from leat.engine import BATCH, Engine
+from leat.engine import BATCH, Engine, graph
 
 
 @dataclass(frozen=True)
@@ -146,9 +146,9 @@ def _logprobs(engine: Engine, chunk: list[int], decode: bool) -> Tensor:
     ctx, first, model = len(chunk), len(chunk) // 2, engine.model
     tok = engine.tokenizer
     tokens = [tok.bos_id] + chunk[1:] if tok.add_bos and tok.bos_id is not None else chunk
-    if not decode:
-        hidden = model(Tensor([tokens], dtype=dtypes.int32), 0)[:, first : ctx - 1]
-        return model.logits(hidden)[0].log_softmax(-1)
+    if not decode:  # in a graph, which plans its buffers: a plain call holds every layer's at once
+        score = graph(lambda t: model.logits(model(t, 0)[:, first : ctx - 1])[0].log_softmax(-1))
+        return score(Tensor([tokens], dtype=dtypes.int32))
     model(Tensor([tokens[:first]], dtype=dtypes.int32), 0).realize()
     rows = Tensor.zeros(ctx - 1 - first, engine.config.vocab_size).contiguous().realize()
 

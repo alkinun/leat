@@ -110,11 +110,11 @@ class Engine:
         # the sequences of a padded decode step, whose padding a mixture of experts skips: a
         # padding row would read experts of its own
         self._live = UOp.variable("live", 1, most) if self.config.experts else None
-        self._chunk, self._few_chunk = _graph(self._step), _graph(self._step)
-        self._decode = {n: _graph(self._step) for n in self._batches}
-        self._copy = _graph(self.model.copy)
+        self._chunk, self._few_chunk = graph(self._step), graph(self._step)
+        self._decode = {n: graph(self._step) for n in self._batches}
+        self._copy = graph(self.model.copy)
         self._recurrent = any(self.config.recurrent)
-        self._keep, self._restore = _graph(self.model.keep), _graph(self.model.restore)
+        self._keep, self._restore = graph(self.model.keep), graph(self.model.restore)
         self._kept: list[list[int]] = [[] for _ in range(slots)]  # tokens before each kept state
         self._last: dict[int, _Batch] = {}  # the last decode step's batches, by graph
         self._cached: list[list[int]] = [[] for _ in range(slots)]  # tokens each slot holds
@@ -353,9 +353,9 @@ class Engine:
         return sample(logits, temperature, seed, positions).realize()
 
 
-def _graph[T](fxn: Callable[..., T]) -> Callable[..., T]:
-    # TinyJit runs a function once as is, then captures it on the second call: this captures on
-    # the first, a fresh process's slow call for each graph
+def graph[T](fxn: Callable[..., T]) -> Callable[..., T]:
+    """A TinyJit of fxn that captures its graph on the first call: TinyJit runs a function once
+    as is, then captures it on the second, which a fresh process makes the slow one."""
     jit = TinyJit(fxn)
     jit.cnt = 1
     return jit
