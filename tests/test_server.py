@@ -298,14 +298,29 @@ def test_client_hangs_up(client):
     assert complete(client, "and the next", max_tokens=2)[1] == "length"
 
 
-def test_concurrent_requests(client, engine, expected, monkeypatch):
+def test_concurrent_requests(client, server, engine, expected, monkeypatch):
     # more requests at once than the engine's 2 slots, whole and streamed: each gets the reply it
     # would alone, two in batched steps, the third once a slot is free
-    batches, decode_step = [], engine._decode_step
+    batches, decode_step, step = [], engine._decode_step, engine.step
     monkeypatch.setattr(engine, "_decode_step", lambda s: batches.append(len(s)) or decode_step(s))
-    contents, replies = ["hello", "a b c", "the third one"], {}
+    contents, replies, first = ["hello", "a b c", "the third one"], {}, threading.Event()
+
+    def step_once_queued() -> list:
+        # the first request's first step lets the others in and waits until they are queued, so
+        # that they come before it finishes however fast the engine is: taking them off the
+        # queue waits for them, and they go back in order
+        if not first.is_set():
+            first.set()
+            queued = [server.requests.get() for _ in contents[1:]]
+            for request in queued:
+                server.requests.put(request)
+        return step()
+
+    monkeypatch.setattr(engine, "step", step_once_queued)
 
     def ask(content: str, stream: bool) -> None:
+        if content != contents[0]:
+            first.wait()
         replies[content] = complete(client, content, max_tokens=12, temperature=0, stream=stream)
 
     threads = [threading.Thread(target=ask, args=(c, i > 0)) for i, c in enumerate(contents)]
