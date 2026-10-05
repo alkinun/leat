@@ -17,7 +17,7 @@
       --text: #ece9e1; --muted: #a3a097; --accent: #d97757; --error: #f2847b;
     }
   }
-  * { box-sizing: border-box; }
+  * { box-sizing: border-box; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
   body {
     margin: 0; height: 100dvh; display: flex;
     background: var(--page); color: var(--text); font: 16px/1.65 system-ui, sans-serif;
@@ -64,8 +64,9 @@
   }
   #status { color: var(--muted); font-size: 14px; }
   #status.error { color: var(--error); }
-  #log, #composer, #greeting { width: 100%; max-width: 784px; margin: 0 auto; padding: 0 24px; }
-  #log { flex: 1; overflow-y: auto; padding-top: 16px; }
+  #composer, #greeting { width: 100%; max-width: 784px; margin: 0 auto; padding: 0 24px; }
+  /* the log scrolls at the window's edge, its column centered by its padding */
+  #log { flex: 1; overflow-y: auto; padding: 16px max(24px, calc(50% - 368px)); }
   #greeting { display: none; font: 400 30px/1.3 ui-serif, Georgia, serif; text-align: center; }
   main.empty { justify-content: center; padding-bottom: 12vh; }
   main.empty header { position: absolute; top: 0; }
@@ -96,7 +97,7 @@
     box-shadow: 0 4px 20px rgb(0 0 0 / 0.06);
   }
   #input {
-    flex: 1; max-height: 240px; padding: 6px 0; resize: none;
+    flex: 1; max-height: 240px; padding: 6px 0; resize: none; overflow-y: hidden;
     border: none; outline: none; background: none;
   }
   #send { padding: 8px; border-radius: 50%; background: var(--accent); color: #fff; }
@@ -318,6 +319,7 @@ function controls() {
   const replying = replies.has(chat), input = $("input");
   input.style.height = "auto";
   input.style.height = `${input.scrollHeight}px`;
+  input.style.overflowY = input.scrollHeight > 240 ? "auto" : "hidden"; // its max-height
   $("main").classList.toggle("empty", !chat?.messages.length);
   $("greeting").textContent = loaded ? "How can I help?" : loading ? "Loading…" : "Choose a model";
   $("send").classList.toggle("stop", replying);
