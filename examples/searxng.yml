@@ -1,0 +1,6 @@
+# SearXNG's settings for examples/tools.py: its defaults, with the JSON API on
+use_default_settings: true
+server:
+  limiter: false
+search:
+  formats: [html, json]
