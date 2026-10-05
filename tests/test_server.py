@@ -3,6 +3,7 @@ import json
 import statistics
 import threading
 import time
+import urllib.request
 import weakref
 from collections.abc import Iterator
 from pathlib import Path
@@ -110,6 +111,12 @@ def test_load(tiny_model, tmp_path):
         assert first is None and second is again is server.loaded.engine
         with pytest.raises(openai.NotFoundError, match="there is no model 'tinier'"):
             load(client, "tinier")
+
+
+def test_app(server):
+    with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/") as response:
+        assert response.headers["Content-Type"] == "text/html; charset=utf-8"
+        assert b"<title>leat</title>" in response.read()
 
 
 def test_reply(client, expected):

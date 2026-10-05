@@ -28,7 +28,9 @@ def main(argv: list[str] | None = None) -> None:
     run.add_argument("--temperature", type=float, default=0.7)
     run.add_argument("--system", help="system prompt")
 
-    serve = commands.add_parser("serve", help="serve the OpenAI chat completions API")
+    serve = commands.add_parser(
+        "serve", help="serve a chat app and the OpenAI chat completions API"
+    )
     serve.add_argument(
         "models", type=Path, nargs="+",
         help="GGUF files, or directories of them; the first file loads at start, others on request",
@@ -134,8 +136,8 @@ def _serve(args: argparse.Namespace) -> None:
         if first := next((p for p in args.models if not p.is_dir()), None):
             print(f"{first.stem} on {Device.DEFAULT}, compiling...", end=" ", flush=True)
             server.load(first.stem)
-        url = f"http://{args.host}:{server.server_port}/v1"
-        print(f"serving at {url}. Ctrl-C quits.", flush=True)
+        url = f"http://{args.host}:{server.server_port}"
+        print(f"chat at {url}, the API at {url}/v1. Ctrl-C quits.", flush=True)
         with contextlib.suppress(KeyboardInterrupt):
             server.serve_forever()
 

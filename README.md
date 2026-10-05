@@ -13,7 +13,7 @@ uv sync
 DEV=NV uv run leat run Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf
 ```
 
-As a server, for any OpenAI client:
+As a server, for a chat app in the browser at http://127.0.0.1:8080 and for any OpenAI client:
 
 ```bash
 DEV=NV uv run leat serve Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf
@@ -70,13 +70,15 @@ Storage types, and the kernels that take them on the GPU; the reference ops take
 
 Devices: any tinygrad backend runs the reference ops. NVIDIA GPUs (`DEV=NV` or `CUDA`) run every kernel; AMD's RDNA 3 and 4 GPUs (`DEV=AMD`), as Strix Halo's, run the warp-level ones: matrix-vector products, norms, quantization, RoPE, decode attention, the mixtures' routing and their few-token path, and sampling: every kernel of a decode step, batched or not. Prompts there take the reference ops for now.
 
-Server: `/v1/chat/completions`, whole or streamed, `/v1/models` and `/v1/models/load`. Replies split into `reasoning_content`, as Qwen3's `<think>` blocks and gpt-oss's analysis channel, text, and tool calls in Llama 3's, Qwen's, Gemma 4's and gpt-oss's syntax. Requests take stop strings, seeds and `chat_template_kwargs` such as `{"enable_thinking": false}`. Sampling is greedy or by temperature; requests for `top_p`, penalties, `logprobs` or several choices are refused.
+Server: `/v1/chat/completions`, whole or streamed, `/v1/models` and `/v1/models/load`, and a chat app at `/`. Replies split into `reasoning_content`, as Qwen3's `<think>` blocks and gpt-oss's analysis channel, text, and tool calls in Llama 3's, Qwen's, Gemma 4's and gpt-oss's syntax. Requests take stop strings, seeds and `chat_template_kwargs` such as `{"enable_thinking": false}`. Sampling is greedy or by temperature; requests for `top_p`, penalties, `logprobs` or several choices are refused.
 
 Concurrent requests: completions run together, one in each of `--slots` slots of the KV cache, 4 by default; more wait their turn. Each step prefills a chunk of one prompt, of 256 tokens at most while others decode, then decodes a token of every running completion in one batch, of up to 8, whose matrices read each weight once for all of them. A client that hangs up frees its slot at the next step. A slot past the others holds the padding of batches of 3, 5, 6 or 7, which run in the graphs of 4 and 8.
 
 Prefix caching: a conversation continues in its slot, and a prompt that shares a prefix with any slot, such as a system prompt, starts from a copy of it.
 
 Models: `leat serve` takes GGUF files and directories of them, and holds one model at a time, which answers every request whatever model it names. The first file loads at start. `POST /v1/models/load` with `{"model": id}`, an id that `/v1/models` lists, loads another once the completions before it have finished, the last one freed first.
+
+Chat app: a single page with no dependencies. It loads and switches models, keeps separate chats in the browser's local storage, and streams replies, their reasoning folded away, until done or stopped; one system prompt and temperature apply to every chat.
 
 ## Measurements
 

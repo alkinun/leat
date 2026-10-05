@@ -1,5 +1,5 @@
-"""OpenAI-compatible HTTP server: chat completions, whole or streamed, the model list, and
-loading a model.
+"""OpenAI-compatible HTTP server: chat completions, whole or streamed, the model list, loading a
+model, and a chat app at the root.
 
 Handler threads parse requests, render prompts and write responses. One worker thread owns the
 engine: it runs completions together, one per slot, a token of each per batched step, and loads a
@@ -25,6 +25,8 @@ import jinja2
 from leat.chat import ChatTemplate, Reply, parse_tool_calls, split_reply, tool_call_start
 from leat.engine import Engine, Sequence
 from leat.tokenizer import Tokenizer
+
+_APP = Path(__file__).with_name("app.html")
 
 
 def _integer(v: Any) -> bool:
@@ -110,7 +112,7 @@ class _Completion:
 
 
 class Server(ThreadingHTTPServer):
-    """Serves GGUF models at http://host:port/v1 until shut down.
+    """Serves GGUF models at http://host:port, the API at /v1, until shut down.
 
     One model is loaded at a time, none until load(), as Engine(path, **options); it answers every
     request, whatever model it names. A model's id is its file name without .gguf.
@@ -281,6 +283,8 @@ class _Handler(BaseHTTPRequestHandler):
     server: Server
 
     def do_GET(self) -> None:
+        if self.path == "/":
+            return self._send(200, "text/html; charset=utf-8", _APP.read_bytes())
         if self.path != "/v1/models":
             return self._error(404, f"there is no GET {self.path}")
         self._json(200, {"object": "list", "data": [self._model(m) for m in self.server.models]})
@@ -393,9 +397,11 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(f"data: {text}\n\n".encode())
 
     def _json(self, status: int, body: dict[str, Any]) -> None:
-        data = json.dumps(body).encode()
+        self._send(status, "application/json", json.dumps(body).encode())
+
+    def _send(self, status: int, kind: str, data: bytes) -> None:
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", kind)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)

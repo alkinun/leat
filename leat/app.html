@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>leat</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    color-scheme: light dark;
+    --text: #1f2328; --muted: #656d76; --line: #d0d7de; --panel: #f6f8fa; --page: #fff;
+    --error: #cf222e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --text: #e6edf3; --muted: #8d96a0; --line: #30363d; --panel: #161b22; --page: #0d1117;
+      --error: #f85149;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100dvh; display: flex;
+    background: var(--page); color: var(--text); font: 15px/1.6 system-ui, sans-serif;
+  }
+  button, input, select, textarea {
+    font: inherit; color: var(--text); background: var(--page);
+    border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px;
+  }
+  button { cursor: pointer; }
+  :disabled { opacity: 0.5; cursor: default; }
+  nav {
+    width: 260px; flex: none; display: flex; flex-direction: column; gap: 8px; padding: 12px;
+    background: var(--panel); border-right: 1px solid var(--line);
+  }
+  #chats { flex: 1; overflow-y: auto; }
+  .chat { display: flex; padding: 4px 4px 4px 10px; border-radius: 8px; cursor: pointer; }
+  .chat:hover, .chat.current { background: var(--line); }
+  .chat span { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .chat button { padding: 0 6px; border: none; background: none; color: var(--muted); }
+  .chat:not(:hover) button { visibility: hidden; }
+  nav label { display: block; margin-top: 8px; }
+  nav textarea, nav input { display: block; width: 100%; margin-top: 2px; }
+  main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  header {
+    display: flex; align-items: center; gap: 12px; padding: 12px 16px;
+    border-bottom: 1px solid var(--line);
+  }
+  #log, #composer { padding: 24px max(16px, calc(50% - 380px)); }
+  #log { flex: 1; overflow-y: auto; }
+  .message { margin-bottom: 20px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .user {
+    width: fit-content; max-width: 85%; margin-left: auto; padding: 8px 14px;
+    border-radius: 16px; background: var(--panel);
+  }
+  details, .note, #status { color: var(--muted); font-size: 13px; }
+  summary { cursor: pointer; }
+  #status.error { color: var(--error); }
+  .note:empty { display: none; }
+  pre, code { font: 13px/1.5 ui-monospace, monospace; background: var(--panel); border-radius: 6px; }
+  pre { padding: 10px 12px; overflow-x: auto; border: 1px solid var(--line); }
+  code { padding: 1px 4px; }
+  #composer { display: flex; gap: 8px; padding-top: 0; }
+  #input { flex: 1; resize: none; }
+</style>
+</head>
+<body>
+<nav>
+  <button id="new">New chat</button>
+  <div id="chats"></div>
+  <details>
+    <summary>Settings</summary>
+    <label>System prompt <textarea id="system" rows="5"></textarea></label>
+    <label>Temperature <input id="temperature" type="number" min="0" max="2" step="0.1"></label>
+  </details>
+</nav>
+<main>
+  <header><select id="model"></select><span id="status"></span></header>
+  <div id="log"></div>
+  <div id="composer">
+    <textarea id="input" rows="3" placeholder="Message"></textarea>
+    <button id="send">Send</button>
+  </div>
+</main>
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const chats = JSON.parse(localStorage.getItem("leat.chats") ?? "[]"); // the latest first
+let chat = chats[0]; // the one shown
+let loaded = null, loading = null; // the ids of the loaded model and of one loading
+const replies = new Map(); // each chat replying, to the controller that stops its reply
+
+for (const [id, value] of [["system", ""], ["temperature", "0.7"]]) {
+  $(id).value = localStorage.getItem(`leat.${id}`) ?? value;
+  $(id).oninput = () => localStorage.setItem(`leat.${id}`, $(id).value);
+}
+
+$("new").onclick = () => {
+  if (chat?.messages.length !== 0) chats.unshift((chat = { messages: [] }));
+  save();
+  render();
+  $("input").focus();
+};
+$("model").onchange = () => load($("model").value);
+$("send").onclick = () => (replies.has(chat) ? replies.get(chat).abort() : send());
+$("input").onkeydown = (event) => {
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    if (!replies.has(chat)) send();
+  }
+};
+
+render();
+try {
+  const busy = (await models()).find((m) => m.status === "loading");
+  if (busy) await load(busy.id);
+} catch (error) {
+  status(error.message, true);
+}
+
+async function send() {
+  const content = $("input").value.trim();
+  if (!content || !loaded) return;
+  if (!chat) chats.unshift((chat = { messages: [] }));
+  const c = chat, reply = { role: "assistant", content: "", reasoning: "", note: loaded };
+  const system = $("system").value.trim();
+  const messages = [
+    ...(system ? [{ role: "system", content: system }] : []),
+    ...c.messages.map(({ role, content }) => ({ role, content })),
+    { role: "user", content },
+  ];
+  c.messages.push({ role: "user", content }, reply);
+  chats.splice(chats.indexOf(c), 1);
+  chats.unshift(c);
+  $("input").value = "";
+  const controller = new AbortController();
+  replies.set(c, controller);
+  save();
+  render();
+  status("");
+  const start = performance.now();
+  try {
+    const body = {
+      model: loaded, messages, temperature: Number($("temperature").value),
+      stream: true, stream_options: { include_usage: true },
+    };
+    const response = await post("/v1/chat/completions", body, controller.signal);
+    for await (const data of events(response)) {
+      if (data.error) throw new Error(data.error.message);
+      const delta = data.choices[0]?.delta ?? {};
+      reply.content += delta.content ?? "";
+      reply.reasoning += delta.reasoning_content ?? "";
+      reply.note = data.model;
+      if (data.usage) {
+        const n = data.usage.completion_tokens, seconds = (performance.now() - start) / 1000;
+        reply.note += ` · ${n} tokens, ${(n / seconds).toFixed(1)} tok/s`;
+      }
+      if (c === chat) follow(() => $("log").lastChild.update());
+    }
+  } catch (error) {
+    if (error.name === "AbortError") {
+      reply.note += " · stopped";
+    } else { // the turn is taken back, to send again
+      c.messages.splice(-2);
+      if (c === chat && !$("input").value) $("input").value = content;
+      status(error.message, true);
+    }
+  }
+  replies.delete(c);
+  save();
+  render();
+}
+
+async function load(name) {
+  loaded = null;
+  loading = name;
+  controls();
+  status(`loading ${name}…`);
+  try {
+    await post("/v1/models/load", { model: name });
+    status("");
+  } catch (error) {
+    status(error.message, true);
+  }
+  loading = null;
+  await models();
+}
+
+// the models the server has, after showing them
+async function models() {
+  const { data } = await (await fetch("/v1/models")).json();
+  loaded = data.find((m) => m.status === "loaded")?.id ?? null;
+  const none = new Option(data.length ? "Choose a model" : "No models", "");
+  none.disabled = true;
+  $("model").replaceChildren(none, ...data.map((m) => new Option(m.id)));
+  controls();
+  return data;
+}
+
+async function post(path, body, signal) {
+  const response = await fetch(path, { method: "POST", body: JSON.stringify(body), signal });
+  if (!response.ok) throw new Error((await response.json()).error.message);
+  return response;
+}
+
+// the data of each server-sent event of a response
+async function* events(response) {
+  const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buffer = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) return;
+    const events = (buffer + value).split("\n\n");
+    buffer = events.pop();
+    for (const event of events) if (event !== "data: [DONE]") yield JSON.parse(event.slice(6));
+  }
+}
+
+function save() {
+  localStorage.setItem("leat.chats", JSON.stringify(chats));
+}
+
+function render() {
+  $("chats").replaceChildren(...chats.map((c) => {
+    const item = element("div", c === chat ? "chat current" : "chat");
+    const remove = element("button", "", "×");
+    item.append(element("span", "", c.messages[0]?.content ?? "New chat"), remove);
+    item.onclick = () => {
+      chat = c;
+      render();
+    };
+    remove.title = "Delete";
+    remove.onclick = (event) => {
+      event.stopPropagation();
+      replies.get(c)?.abort();
+      chats.splice(chats.indexOf(c), 1);
+      if (chat === c) chat = chats[0];
+      save();
+      render();
+    };
+    return item;
+  }));
+  $("log").replaceChildren(...(chat?.messages ?? []).map(message));
+  $("log").scrollTop = $("log").scrollHeight;
+  controls();
+}
+
+function controls() {
+  const replying = replies.has(chat);
+  $("send").textContent = replying ? "Stop" : "Send";
+  $("send").disabled = !replying && !loaded;
+  $("model").value = loading ?? loaded ?? "";
+  $("model").disabled = loading !== null || replies.size > 0;
+}
+
+function status(text, error = false) {
+  $("status").textContent = text;
+  $("status").className = error ? "error" : "";
+}
+
+// a message's element, whose update() shows it again as it grows
+function message(m) {
+  const item = element("div", `message ${m.role}`);
+  const thinking = element("details"), reasoning = element("div");
+  const text = element("div"), note = element("div", "note");
+  thinking.append(element("summary", "", "Thinking"), reasoning);
+  item.append(thinking, text, note);
+  item.update = () => {
+    thinking.hidden = !m.reasoning;
+    reasoning.textContent = m.reasoning?.trim() ?? "";
+    text.replaceChildren(...format(m.content));
+    note.textContent = m.note ?? "";
+  };
+  item.update();
+  return item;
+}
+
+// text with its code blocks, inline code and bold set apart: a little of Markdown
+function format(text) {
+  return text.split(/^ *```.*\n?/m).flatMap((part, i) => {
+    if (i % 2) return [element("pre", "", part.replace(/\n$/, ""))];
+    return part.trim().split(/(`[^`\n]+`|\*\*[^*\n]+\*\*)/).map((piece, j) => {
+      if (j % 2 === 0) return piece;
+      return piece[0] === "`" ? element("code", "", piece.slice(1, -1))
+        : element("strong", "", piece.slice(2, -2));
+    });
+  });
+}
+
+// runs a change to the log, keeping it scrolled to the end if it was
+function follow(change) {
+  const log = $("log"), end = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+  change();
+  if (end) log.scrollTop = log.scrollHeight;
+}
+
+function element(tag, className, text) {
+  const e = document.createElement(tag);
+  if (className) e.className = className;
+  if (text) e.textContent = text;
+  return e;
+}
+</script>
+</body>
+</html>
