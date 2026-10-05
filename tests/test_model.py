@@ -185,13 +185,15 @@ def test_copy_takes_recurrent_state(tiny):
     np.testing.assert_array_equal(first, copied)
 
 
-def test_warm_up(tiny_model):
-    # compiles every graph, the copy's and every batch's too, and leaves nothing cached that a
-    # generation could see
-    path, _ = tiny_model
+@pytest.mark.parametrize("arch", ["llama", "qwen35moe"])
+def test_warm_up(tiny, arch):
+    # compiles every graph, the copy's and every batch's too, and keeping and restoring recurrent
+    # state's, and leaves nothing cached that a generation could see
+    path, _ = tiny(arch)
     engine = Engine(path, max_context=CONTEXT, prefill_chunk=FEW_TOKENS + 4, slots=5)
     engine.warm_up()
-    graphs = engine._chunk, engine._few_chunk, *engine._decode.values(), engine._copy
+    graphs = [engine._chunk, engine._few_chunk, *engine._decode.values(), engine._copy]
+    graphs += [engine._keep, engine._restore] if arch == "qwen35moe" else []
     assert list(engine._decode) == [1, 2, 4, 5]
     captured = [jit.captured for jit in graphs]
     assert all(captured) and engine.cached_prefix(PROMPT) == 0

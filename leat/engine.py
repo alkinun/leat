@@ -195,8 +195,10 @@ class Engine:
     def warm_up(self) -> None:
         """Compiles the graphs generation replays, which takes seconds in a fresh process, so that
         the first prompt runs at full speed. Leaves no prefix cached."""
-        # a prefill of more than FEW_TOKENS tokens and a decode step, then a prefill of few
-        for prompt, n in (([0] * min(FEW_TOKENS + 1, self.max_context - 1), 2), ([0, 0], 1)):
+        # a prefill of more than FEW_TOKENS tokens and a decode step, then a prefill of few; the
+        # first longer by the KEEP_BACK tokens after the state a recurrent model keeps
+        longer = FEW_TOKENS + 1 + (KEEP_BACK if self._recurrent else 0)
+        for prompt, n in (([0] * min(longer, self.max_context - 1), 2), ([0, 0], 1)):
             self.reset()
             for _ in self.generate(prompt, n, ignore_eog=True):
                 pass
