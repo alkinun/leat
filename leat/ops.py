@@ -314,6 +314,86 @@ def _attention(
     return out.transpose(1, 2).reshape(B, T, H * D)
 
 
+def delta_net(
+    mixed: Tensor, z: Tensor, alpha: Tensor, beta: Tensor, conv: Tensor,
+    decay: tuple[Tensor, Tensor], norm: tuple[Tensor, float], states: tuple[Tensor, Tensor],
+    spans: list[Span],
+) -> Tensor:  # fmt: skip
+    # Gated DeltaNet, Qwen3.5's linear attention, over the spans' tokens in turn, each from and
+    # into its slot's states, as llama.cpp's. mixed (1, T, channels) holds each token's queries,
+    # keys and values, which pass a causal convolution of conv's weights (channels, width) over
+    # the token and the width - 1 inputs before it, which the conv state (slots, width - 1,
+    # channels) holds, and then SiLU. Queries and keys, L2-normed and queries scaled, have fewer
+    # heads than values: value head h takes their head h mod their heads. Each value head's state
+    # (slots, heads, key dims, value dims) decays by exp(a * softplus(alpha + bias)) for decay
+    # (a, bias), then moves the values it holds for the token's key a sigmoid(beta) share toward
+    # the token's values; the token's output, the values it holds for the token's query, is
+    # normed with norm and gated by SiLU of z (1, T, heads * value dims). A span from position 0
+    # starts its sequence, from zero states. Returns (1, T, heads * value dims).
+    if len(spans) == 1:
+        return _delta_net(mixed, z, alpha, beta, conv, decay, norm, states, spans[0])
+    outs, at = [], 0
+    for span in spans:
+        n = int(span.length)
+        m, g, a, b = (t[:, at : at + n] for t in (mixed, z, alpha, beta))
+        outs.append(_delta_net(m, g, a, b, conv, decay, norm, states, span))
+        at += n
+    return outs[0].cat(*outs[1:], dim=1)
+
+
+def _delta_net(
+    mixed: Tensor, z: Tensor, alpha: Tensor, beta: Tensor, conv: Tensor,
+    decay: tuple[Tensor, Tensor], norm: tuple[Tensor, float], states: tuple[Tensor, Tensor],
+    span: Span,
+) -> Tensor:  # fmt: skip
+    # delta_net() for one span, a token at a time. A bound number of tokens runs as many as there
+    # may be, those past the span's with no decay or update, which leave the states as they are.
+    T, slot = mixed.shape[1], span.slot
+    n = T if isinstance(T, int) else int(T.vmax)
+    heads, k_dim, v_dim = (int(d) for d in states[1].shape[1:])
+    width, eps = int(conv.shape[1]), norm[1]
+    mixed, z, alpha, beta = (t.pad_to(t.max_shape) for t in (mixed, z, alpha, beta))
+    conv_state, state = (Tensor(span.start > 0).where(t[slot : slot + 1], 0.0).contiguous()
+                         for t in states)  # fmt: skip
+    # read first: realizing both writes below, tinygrad may write the conv state before the
+    # recurrence reads its inputs from it
+    Tensor.realize(conv_state, state)
+    inputs = conv_state.cat(mixed, dim=1)  # the convolution's: those before the span's, then its
+    mixed = inputs[:, :n] * conv[:, 0]
+    for j in range(1, width):
+        mixed = mixed + inputs[:, j : j + n] * conv[:, j]
+    mixed = mixed.silu()
+    k_heads = (int(mixed.shape[-1]) - heads * v_dim) // (2 * k_dim)
+    q, k, v = mixed.split([k_heads * k_dim, k_heads * k_dim, heads * v_dim], dim=-1)
+    q, k = (_l2_norm(t.reshape(1, n, k_heads, k_dim), eps).repeat(1, 1, heads // k_heads, 1)
+            for t in (q, k))  # fmt: skip
+    q, v = q / math.sqrt(k_dim), v.reshape(1, n, heads, v_dim)
+    real = (Tensor.arange(n) < Tensor(T)).reshape(1, n, 1)  # tokens, not padding
+    decays = real.where(decay[0] * _softplus(alpha + decay[1]), 0.0).exp()
+    shares = real.where(beta.sigmoid(), 0.0)
+    out = []
+    for t in range(n):
+        state = state * decays[:, t].reshape(1, heads, 1, 1)
+        key = k[:, t].unsqueeze(-1)
+        delta = (v[:, t] - (state * key).sum(2)) * shares[:, t].unsqueeze(-1)
+        state = state + key * delta.unsqueeze(2)
+        out.append((state * q[:, t].unsqueeze(-1)).sum(2))
+    # realized now: no later op reads them, so the step's outputs would not
+    Tensor.realize(states[0][slot : slot + 1].assign(inputs[:, T : T + width - 1]),
+                   states[1][slot : slot + 1].assign(state))  # fmt: skip
+    gated = rms_norm(Tensor.stack(*out, dim=1), *norm) * z.reshape(1, n, heads, v_dim).silu()
+    return gated.reshape(1, n, heads * v_dim).shrink_to((1, T, heads * v_dim))
+
+
+def _l2_norm(x: Tensor, eps: float) -> Tensor:
+    return x / x.square().sum(-1, keepdim=True).sqrt().maximum(eps)
+
+
+def _softplus(x: Tensor) -> Tensor:
+    # log(1 + exp(x)), without overflow
+    return x.relu() + (1 + (-x.abs()).exp()).log()
+
+
 def argmax(x: Tensor) -> Tensor:
     # index of each row's largest value, the first on ties: (B, V) -> (B, 1) int32
     if _fast() and kernels.supports_argmax(x):

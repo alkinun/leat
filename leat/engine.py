@@ -69,7 +69,9 @@ class Engine:
     A prompt is prefilled only past the longest prefix any slot shares with it. A prompt that
     extends a slot's tokens continues in that slot, so multi-turn chat costs only the latest turn.
     Any other prompt takes a free slot, empty or else the least recently used, and first copies
-    that prefix in: a system prompt that several conversations share, say.
+    that prefix in: a system prompt that several conversations share, say. A model with recurrent
+    state, as Qwen3.5's Gated DeltaNet, holds it for all the tokens a slot ran, and so shares a
+    slot's tokens only when it shares all of them.
     """
 
     def __init__(
@@ -90,7 +92,8 @@ class Engine:
         self.tokenizer = Tokenizer(gguf.metadata)
         self.config = Config.from_gguf(gguf.metadata)
         cache_slots = slots + bool(self._padded)
-        self.model = Transformer(self.config, gguf.load(), max_context, cache_slots)
+        weights = gguf.load(names=filter(self.config.uses, gguf.tensors))
+        self.model = Transformer(self.config, weights, max_context, cache_slots)
         self.max_context, self.prefill_chunk, self.slots = max_context, prefill_chunk, slots
         self._len = UOp.variable("chunk_len", 1, prefill_chunk)
         self._few = UOp.variable("few_len", 1, min(FEW_TOKENS, prefill_chunk))
@@ -203,7 +206,7 @@ class Engine:
 
     def cached_prefix(self, prompt: list[int]) -> int:
         """How many leading tokens of `prompt` the cache holds: generation prefills the rest."""
-        return max(_shared(prompt, cached) for cached in self._cached)
+        return max(self._shared(prompt))
 
     def reset(self) -> None:
         """Forgets every cached prefix, so the next prompt is prefilled from scratch, and ends
@@ -216,7 +219,7 @@ class Engine:
         # a free slot for the prompt, made to hold the longest prefix of it that any slot holds
         busy = {s.slot for s in self.active}
         free = [s for s in range(self.slots) if s not in busy]
-        shared = [_shared(prompt, cached) for cached in self._cached]
+        shared = self._shared(prompt)
         extended = [s for s in free if shared[s] == len(self._cached[s])]  # empty slots too
         if extended:
             slot = max(extended, key=lambda s: shared[s])
@@ -229,6 +232,14 @@ class Engine:
         self._cached[slot] = prompt[:prefix]
         self._used[slot] = next(self._clock)
         return slot
+
+    def _shared(self, prompt: list[int]) -> list[int]:
+        # how many leading tokens of the prompt each slot holds that generation may start from: of
+        # a slot with recurrent state, all its tokens or none
+        shared = [_shared(prompt, cached) for cached in self._cached]
+        if any(self.config.recurrent):
+            shared = [n if n == len(c) else 0 for n, c in zip(shared, self._cached, strict=True)]
+        return shared
 
     def _prefill(self, sequence: Sequence, size: int) -> int | None:
         # runs the next chunk of the sequence's prompt, of up to `size` tokens: a single token as

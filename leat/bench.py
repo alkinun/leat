@@ -66,7 +66,8 @@ def speed(
     engine.reset()
     # the bytes a token reads: the embedding only where it is also the output layer, and of a
     # mixture of experts, only the share each token uses
-    tensors, c = engine.gguf.tensors, engine.config
+    c = engine.config
+    tensors = {n: t for n, t in engine.gguf.tensors.items() if c.uses(n)}
     tied = "output.weight" not in tensors
     share = {n: c.experts_used / c.experts if "_exps." in n else 1.0 for n in tensors}
     streamed = sum(

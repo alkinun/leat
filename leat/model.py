@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from tinygrad import Tensor, UOp, dtypes
+from tinygrad.dtype import DType
 
 from leat import ops
 from leat.ops import Span
@@ -12,13 +13,18 @@ from leat.quant import BLOCK, NATIVE, QTensor
 
 CACHE_TILE = 256  # positions
 _LAYER = ("attn_norm", "attn_q", "attn_k", "attn_output", "ffn_norm")
+# the tensors of a Gated DeltaNet layer, Qwen3.5's in place of attention: its input norm, the
+# projections of queries, keys and values and of the output's gate z, those of the decay's alpha
+# and of beta, the decay's rate and bias, the causal convolution, the output's norm and projection
+_DELTA_NET = ("attn_norm", "attn_qkv", "attn_gate", "ssm_alpha", "ssm_beta", "ssm_a", "ssm_dt.bias",
+              "ssm_conv1d", "ssm_norm", "ssm_out", "ffn_norm")  # fmt: skip
 _MLP = ("ffn_gate", "ffn_up", "ffn_down")
 _EXPERTS = ("ffn_gate_inp", "ffn_down_exps")  # the router, and the experts' down projections
 # the supported architectures, and whether their RoPE rotates dimension i with i + D/2, ggml's
 # "neox" mode, rather than adjacent pairs, its "normal" mode, as GGUF lays out llama's q and k
 _ROPE_HALVES = {
     "llama": False, "qwen2": True, "qwen3": True, "qwen3moe": True, "gemma3": True,
-    "gemma4": True, "gpt-oss": True, "phi3": True,
+    "gemma4": True, "gpt-oss": True, "phi3": True, "qwen35moe": True,
 }  # fmt: skip
 # where a GGUF has no attention.sliding_window_pattern, as llama.cpp: every n-th layer sees all
 # positions, the others the window
@@ -44,6 +50,18 @@ class Rope:
 
 
 @dataclass(frozen=True)
+class DeltaNet:
+    """The sizes of Gated DeltaNet, Qwen3.5's linear attention: heads of queries and keys and of
+    values, the dimensions of each, and the tokens its causal convolution spans."""
+
+    k_heads: int
+    v_heads: int
+    k_dim: int
+    v_dim: int
+    conv: int
+
+
+@dataclass(frozen=True)
 class Config:
     arch: str
     n_layers: int
@@ -61,6 +79,10 @@ class Config:
     windows: tuple[int, ...]
     ropes: tuple[Rope, ...]
     scales: tuple[float, ...]
+    # the layers that are Gated DeltaNet's rather than attention, and its sizes
+    recurrent: tuple[bool, ...]
+    delta_net: DeltaNet | None = None
+    q_gate: bool = False  # q's projection also gives each head a gate for its output, as Qwen3.5's
     experts: int = 0  # MLPs per layer of a mixture of experts, 0 for one MLP
     experts_used: int = 0  # experts each token takes
     glu: str = "silu"  # how an MLP's gate and up combine, as ops.glu has it
@@ -73,10 +95,12 @@ class Config:
         if (arch := metadata["general.architecture"]) not in _ROPE_HALVES:
             raise NotImplementedError(f"architecture {arch!r} is not supported")
         m = {k.removeprefix(f"{arch}."): v for k, v in metadata.items()}
-        n_layers, n_heads, dim = m["block_count"], m["attention.head_count"], m["embedding_length"]
+        n_heads, dim = m["attention.head_count"], m["embedding_length"]
+        # without the layers past the others that predict further tokens, as Qwen3.5's
+        n_layers = m["block_count"] - m.get("nextn_predict_layers", 0)
 
         def per_layer(value: Any) -> tuple:
-            return tuple(value) if isinstance(value, list) else (value,) * n_layers
+            return tuple(value[:n_layers]) if isinstance(value, list) else (value,) * n_layers
 
         pattern = m.get("attention.sliding_window_pattern")
         if pattern is None and m.get("attention.sliding_window") and arch in _SLIDING_EVERY:
@@ -99,11 +123,18 @@ class Config:
             scales = (1 / math.sqrt(dim / n_heads),) * n_layers
         else:
             scales = tuple(1 / math.sqrt(d) for d in head_dims)
+        delta_net, recurrent = None, (False,) * n_layers
+        # Qwen3.5's: every n-th layer attention, the others Gated DeltaNet
+        if "ssm.inner_size" in m:
+            v_heads, every = m["ssm.time_step_rank"], m.get("full_attention_interval", 4)
+            delta_net = DeltaNet(m["ssm.group_count"], v_heads, m["ssm.state_size"],
+                                 m["ssm.inner_size"] // v_heads, m["ssm.conv_kernel"])  # fmt: skip
+            recurrent = tuple((i + 1) % every != 0 for i in range(n_layers))
         return Config(
             arch=arch,
             n_layers=n_layers,
             dim=dim,
-            hidden_dim=m["feed_forward_length"],
+            hidden_dim=m.get("feed_forward_length", 0),
             n_heads=n_heads,
             vocab_size=len(metadata["tokenizer.ggml.tokens"]),
             norm_eps=m["attention.layer_norm_rms_epsilon"],
@@ -114,6 +145,9 @@ class Config:
             windows=tuple(m["attention.sliding_window"] if s else 0 for s in sliding),
             ropes=tuple(ropes),
             scales=scales,
+            recurrent=recurrent,
+            delta_net=delta_net,
+            q_gate=arch == "qwen35moe",
             experts=m.get("expert_count", 0),
             experts_used=m.get("expert_used_count", 0),
             glu={"gemma3": "gelu", "gemma4": "gelu", "gpt-oss": "oai"}.get(arch, "silu"),
@@ -121,6 +155,11 @@ class Config:
             v_norm=arch == "gemma4",
             logit_cap=m.get("final_logit_softcapping", 0.0),
         )
+
+    def uses(self, name: str) -> bool:
+        """Whether the model reads a tensor: all but those of layers past its own, as Qwen3.5's
+        layer for predicting further tokens."""
+        return not name.startswith("blk.") or int(name.split(".")[1]) < self.n_layers
 
 
 def _rope(m: dict[str, Any], arch: str, sliding: bool, dims: int) -> Rope:
@@ -154,12 +193,13 @@ def _yarn_mscale(scale: float, multiplier: float) -> float:
 
 
 class Transformer:
-    """Weights, RoPE tables and a KV cache of `slots` sequences of up to `max_context` tokens.
+    """Weights, RoPE tables and a KV cache of `slots` sequences of up to `max_context` tokens, and
+    for Gated DeltaNet's layers in place of attention, the recurrent state of each sequence.
 
     Optional parts are used where the GGUF has their tensors: biases of q, k, v and the attention
     output, RMSNorms of q and k, of the attention and MLP outputs, attention sinks, a shared MLP
-    beside the experts, the router's and experts' biases, and a scale per layer output. Fused
-    tensors, q, k and v in one or gate and up in one, are split.
+    beside the experts, gated or not, the router's and experts' biases, and a scale per layer
+    output. Fused tensors, q, k and v in one or gate and up in one, are split.
     """
 
     def __init__(
@@ -173,14 +213,17 @@ class Transformer:
         # each layer's tensors by name, without "blk.{i}." and ".weight"
         self.layers: list[dict[str, QTensor]] = [{} for _ in range(config.n_layers)]
         for name, w in weights.items():
-            if name.startswith("blk."):
+            if name.startswith("blk.") and config.uses(name):
                 i, part = name.removeprefix("blk.").split(".", 1)
                 self.layers[int(i)][part.removesuffix(".weight")] = w
         for n, layer in enumerate(self.layers):
             _unfuse(layer, config, n)
-        needed = _LAYER + (_EXPERTS if config.experts else _MLP)
+        mlp = _EXPERTS if config.experts else _MLP
         missing = [
-            f"blk.{i}.{n}" for i, layer in enumerate(self.layers) for n in needed if n not in layer
+            f"blk.{i}.{n}"
+            for i, (layer, recurrent) in enumerate(zip(self.layers, config.recurrent, strict=True))
+            for n in (_DELTA_NET if recurrent else _LAYER) + mlp
+            if n not in layer
         ]
         if missing:
             raise ValueError(f"missing {len(missing)} tensors, first: {missing[0]}")
@@ -205,11 +248,19 @@ class Transformer:
         # whole tiles of positions, which the attention kernels need; the rest stay unused
         positions = -(-max_context // CACHE_TILE) * CACHE_TILE
         self.cache = [
-            Tensor.zeros(2, slots, kv_heads, positions, dim, dtype=dtypes.half)
-            .contiguous()
-            .realize()
-            for kv_heads, dim in zip(config.kv_heads, config.head_dims, strict=True)
+            None if recurrent else _zeros(2, slots, kv_heads, positions, dim, dtype=dtypes.half)
+            for kv_heads, dim, recurrent in zip(
+                config.kv_heads, config.head_dims, config.recurrent, strict=True
+            )
         ]
+        # a Gated DeltaNet layer's state of each slot: the last inputs of its convolution, and
+        # the recurrence's state of each value head, keys by values
+        d = config.delta_net
+        self.states = [
+            (_zeros(slots, d.conv - 1, 2 * d.k_heads * d.k_dim + d.v_heads * d.v_dim),
+             _zeros(slots, d.v_heads, d.k_dim, d.v_dim)) if d and recurrent else None
+            for recurrent in config.recurrent
+        ]  # fmt: skip
 
     def __call__(self, tokens: Tensor, start_pos: int | UOp, slot: int | UOp = 0) -> Tensor:
         """Runs `tokens` (1, T) at positions `start_pos...` of cache slot `slot` and returns normed
@@ -227,7 +278,8 @@ class Transformer:
         if (scale := self.config.embed_scale) != 1:
             x = x * scale
         for i in range(self.config.n_layers):
-            x = self._feed_forward(i, self._attention(i, x, spans), live)
+            mix = self._delta_net if self.config.recurrent[i] else self._attention
+            x = self._feed_forward(i, mix(i, x, spans), live)
         return ops.rms_norm(x, self.output_norm, self.config.norm_eps)
 
     def logits(self, hidden: Tensor) -> Tensor:
@@ -237,12 +289,16 @@ class Transformer:
         return logits
 
     def copy(self, source: int | UOp, slot: int | UOp) -> None:
-        """Copies the cache of slot `source` to slot `slot`."""
+        """Copies the cache and recurrent states of slot `source` to slot `slot`."""
         # Whole slots, as tinygrad runs a copy of a bound number of positions on few threads: for
         # Llama 3.1 8B on the 3090, 2130 positions took 12.3 ms, whole slots of 4096 3.1 ms.
+        copied = []
         for cache in self.cache:
-            cache[:, slot : slot + 1].assign(cache[:, source : source + 1])
-        Tensor.realize(*self.cache)
+            if cache is not None:
+                copied.append(cache[:, slot : slot + 1].assign(cache[:, source : source + 1]))
+        for state in (state for states in self.states if states for state in states):
+            copied.append(state[slot : slot + 1].assign(state[source : source + 1]))
+        Tensor.realize(*copied)
 
     def _attention(self, i: int, x: Tensor, spans: list[Span]) -> Tensor:
         # x + the attention block's output
@@ -252,6 +308,8 @@ class Transformer:
         # Gemma 4's full-attention layers have no values of their own: the keys are, before norm
         proj = [w["attn_q"], w["attn_k"]] + ([w["attn_v"]] if "attn_v" in w else [])
         q, k, *values = ops.linears(x, *proj, norm=(s["attn_norm"], eps))
+        if c.q_gate:  # each head's q, then the gate of its output
+            q, gate = q.reshape(B, T, c.n_heads, 2 * dim).chunk(2, dim=-1)
         q, k = q.reshape(B, T, c.n_heads, dim), k.reshape(B, T, kv_heads, dim)
         v = (values[0] if values else k).reshape(B, T, kv_heads, dim)
         biases = None
@@ -260,9 +318,13 @@ class Transformer:
         norms = (s["attn_q_norm"], s["attn_k_norm"]) if "attn_q_norm" in s else None
         table = self.rope[i]
         rope = None if table is None else (table, c.ropes[i].dims)
-        q, cache = ops.rotate(q, k, v, self.cache[i], spans, rope, c.rope_halves, biases, norms,
-                              c.v_norm, eps)  # fmt: skip
+        cache = self.cache[i]
+        assert cache is not None
+        q, cache = ops.rotate(q, k, v, cache, spans, rope, c.rope_halves, biases, norms, c.v_norm,
+                              eps)  # fmt: skip
         out = ops.attention(q, cache, spans, c.scales[i], c.windows[i], s.get("attn_sinks"))
+        if c.q_gate:
+            out = out * gate.reshape(out.shape).sigmoid()
         # gpt-oss's output bias joins the residual
         residual = x + s["attn_output.bias"] if "attn_output.bias" in s else x
         if "post_attention_norm" not in s:
@@ -271,9 +333,23 @@ class Transformer:
             residual, [(ops.linear(out, w["attn_output"]), s["post_attention_norm"])], None, eps
         )
 
+    def _delta_net(self, i: int, x: Tensor, spans: list[Span]) -> Tensor:
+        # x + a Gated DeltaNet block's output, in place of attention: queries, keys and values
+        # and the output's gate z projected together, the decay's alpha and beta together
+        w, s, eps = self.layers[i], self.small[i], self.config.norm_eps
+        states = self.states[i]
+        assert states is not None
+        mixed, z = ops.linears(x, w["attn_qkv"], w["attn_gate"], norm=(s["attn_norm"], eps))
+        alpha, beta = ops.linears(x, w["ssm_alpha"], w["ssm_beta"], norm=(s["attn_norm"], eps))
+        decay = (s["ssm_a"], s["ssm_dt.bias"])
+        out = ops.delta_net(mixed, z, alpha, beta, w["ssm_conv1d"].dequant(), decay,
+                            (s["ssm_norm"], eps), states, spans)  # fmt: skip
+        return ops.linear(out, w["ssm_out"], residual=x)
+
     def _feed_forward(self, i: int, x: Tensor, live: int | UOp | None = None) -> Tensor:
-        # x + the MLP block's output: an MLP, a mixture of experts, or as in Gemma 4 both, each
-        # output normed and then their sum, and the layer's output scaled
+        # x + the MLP block's output: an MLP, a mixture of experts, as in Gemma 4 both, each output
+        # normed and then their sum, and the layer's output scaled, or as in Qwen3.5 experts beside
+        # a shared one
         c, w, s = self.config, self.layers[i], self.small[i]
         norm, eps, scale = (s["ffn_norm"], c.norm_eps), c.norm_eps, s.get("layer_output_scale")
         mlp = (w["ffn_gate"], w["ffn_up"], w["ffn_down"]) if "ffn_gate" in w else None
@@ -291,6 +367,12 @@ class Transformer:
         if "ffn_down_exps.bias" in s:  # gpt-oss's
             biases = (s["ffn_gate_exps.bias"], s["ffn_up_exps.bias"], s["ffn_down_exps.bias"])
         experts = (scores, gate, up, w["ffn_down_exps"], c.experts_used)
+        if "ffn_gate_inp_shexp" in s:  # Qwen3.5's shared expert, scaled by its gate's sigmoid
+            mixed = ops.mixture(x, *experts, norm, c.glu, residual=False, live=live)
+            shexp = (w["ffn_gate_shexp"], w["ffn_up_shexp"], w["ffn_down_shexp"])
+            out = ops.feed_forward(x, *shexp, norm, c.glu, residual=False)
+            weight = (ops.rms_norm(x, *norm) * s["ffn_gate_inp_shexp"]).sum(-1, keepdim=True)
+            return x + mixed + out * weight.sigmoid()
         if not mlp:
             return ops.mixture(x, *experts, norm, c.glu, biases=biases, live=live)
         scales = s["ffn_down_exps.scale"]
@@ -322,10 +404,14 @@ def _rows(w: QTensor, start: int, stop: int) -> QTensor:
     return QTensor(w.data[start * per : stop * per], w.type, (stop - start, *w.shape[1:]))
 
 
+def _zeros(*shape: int, dtype: DType = dtypes.float32) -> Tensor:
+    return Tensor.zeros(*shape, dtype=dtype).contiguous().realize()
+
+
 def _unfuse(layer: dict[str, QTensor], c: Config, i: int) -> None:
-    # Phi-3's q, k and v in one matrix, and its gate and up in one, gate first; gpt-oss's norm
-    # before its experts, named for after attention
-    if "attn_qkv" in layer:
+    # Phi-3's q, k and v in one matrix, and its gate and up in one, gate first; the norm before
+    # the experts of gpt-oss and Qwen3.5, named for after attention
+    if "attn_qkv" in layer and not c.recurrent[i]:
         qkv, q, kv = (
             layer.pop("attn_qkv"),
             c.n_heads * c.head_dims[i],
@@ -336,7 +422,7 @@ def _unfuse(layer: dict[str, QTensor], c: Config, i: int) -> None:
     if "ffn_up" in layer and "ffn_gate" not in layer and not c.experts:
         up, hidden = layer["ffn_up"], layer["ffn_up"].shape[0] // 2
         layer["ffn_gate"], layer["ffn_up"] = _rows(up, 0, hidden), _rows(up, hidden, 2 * hidden)
-    if c.arch == "gpt-oss" and "post_attention_norm" in layer:
+    if c.arch in ("gpt-oss", "qwen35moe") and "post_attention_norm" in layer:
         layer["ffn_norm"] = layer.pop("post_attention_norm")
 
 

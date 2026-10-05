@@ -568,6 +568,139 @@ def _reference_phi3(w: dict[str, np.ndarray], tokens: list[int]) -> np.ndarray:
     return norm(x, w["output_norm.weight"]) @ w["token_embd.weight"].T
 
 
+# Qwen3.5's mixture of experts: two Gated DeltaNet layers, then an attention layer whose q also
+# gives each head's output a gate, with q and k norms and RoPE over 16 of 64 dimensions; experts
+# beside a shared one with a gate of its own; and a layer past the others, for predicting
+# further tokens, which leat leaves unread
+Q35_EVERY, Q35_ROTATED, Q35_HEAD = 3, 16, 64  # every 3rd layer attention; heads of 64
+Q35_K_HEADS, Q35_V_HEADS, Q35_DIM, Q35_CONV, Q35_SHARED = 2, 4, 32, 4, 128
+Q35_CHANNELS = (2 * Q35_K_HEADS + Q35_V_HEADS) * Q35_DIM
+
+
+def _write_qwen35moe(path: Path) -> dict[str, np.ndarray]:
+    w, weights, add = _writer(path, "qwen35moe")
+    a = "qwen35moe."
+    for key, value in [("block_count", Q35_EVERY + 1), ("nextn_predict_layers", 1),
+                       ("embedding_length", D), ("attention.head_count", HEADS),
+                       ("attention.head_count_kv", KV_HEADS), ("attention.key_length", Q35_HEAD),
+                       ("attention.value_length", Q35_HEAD),
+                       ("rope.dimension_count", Q35_ROTATED), ("expert_count", EXPERTS),
+                       ("expert_used_count", USED), ("expert_feed_forward_length", EXPERT_HIDDEN),
+                       ("expert_shared_feed_forward_length", Q35_SHARED),
+                       ("ssm.conv_kernel", Q35_CONV), ("ssm.state_size", Q35_DIM),
+                       ("ssm.group_count", Q35_K_HEADS), ("ssm.time_step_rank", Q35_V_HEADS),
+                       ("ssm.inner_size", Q35_V_HEADS * Q35_DIM),
+                       ("full_attention_interval", Q35_EVERY)]:  # fmt: skip
+        w.add_uint32(a + key, value)
+    w.add_float32(a + "rope.freq_base", 1e7)
+    add("token_embd.weight", *TENSORS["token_embd.weight"])
+    add("output.weight", *TENSORS["output.weight"])
+    add("output_norm.weight", (D,))
+    rng = np.random.default_rng(1)
+    for i in range(Q35_EVERY):
+        b = f"blk.{i}."
+        for name in ("attn_norm", "post_attention_norm"):
+            add(b + name + ".weight", (D,))
+        if i < Q35_EVERY - 1:  # Gated DeltaNet
+            inner = Q35_V_HEADS * Q35_DIM
+            add(b + "attn_qkv.weight", (Q35_CHANNELS, D), GGMLType.Q4_K, 2e-4)
+            add(b + "attn_gate.weight", (inner, D), GGMLType.Q5_K, 2e-4)
+            for name in ("ssm_alpha", "ssm_beta"):
+                add(b + name + ".weight", (Q35_V_HEADS, D), GGMLType.F32, 0.1)
+            add(b + "ssm_conv1d.weight", (Q35_CHANNELS, Q35_CONV), GGMLType.F32, 0.5)
+            add(b + "ssm_dt.bias", (Q35_V_HEADS,), GGMLType.F32, 2.0)
+            add(b + "ssm_norm.weight", (Q35_DIM,))
+            add(b + "ssm_out.weight", (D, inner), GGMLType.Q8_0, 1e-3)
+            # -exp(A_log), as GGUF holds it
+            weights[b + "ssm_a"] = -rng.uniform(0.2, 2.0, Q35_V_HEADS).astype(np.float32)
+            w.add_tensor(b + "ssm_a", weights[b + "ssm_a"])
+        else:
+            add(b + "attn_q.weight", (2 * HEADS * Q35_HEAD, D), GGMLType.Q4_K, 2e-4)
+            for name in ("attn_k", "attn_v"):
+                add(b + name + ".weight", (KV_HEADS * Q35_HEAD, D), GGMLType.Q8_0, 1e-3)
+            add(b + "attn_output.weight", (D, HEADS * Q35_HEAD), GGMLType.Q4_K, 2e-4)
+            for name in ("attn_q_norm", "attn_k_norm"):
+                add(b + name + ".weight", (Q35_HEAD,))
+        for name in MOE:
+            add(b + name + ".weight", *TENSORS[name])
+        add(b + "ffn_gate_inp_shexp.weight", (D,), GGMLType.F32, 1.2)
+        add(b + "ffn_gate_shexp.weight", (Q35_SHARED, D), GGMLType.Q4_K, 2e-4)
+        add(b + "ffn_up_shexp.weight", (Q35_SHARED, D), GGMLType.Q6_K, 5e-5)
+        add(b + "ffn_down_shexp.weight", (D, Q35_SHARED), GGMLType.Q8_0, 1e-3)
+    add(f"blk.{Q35_EVERY}.nextn.enorm.weight", (D,))
+    _finish(w)
+    return weights
+
+
+def _reference_qwen35moe(w: dict[str, np.ndarray], tokens: list[int]) -> np.ndarray:
+    T, positions = len(tokens), np.arange(len(tokens))
+    freqs = 1e7 ** (-np.arange(0, Q35_ROTATED, 2) / Q35_ROTATED)
+    angles = positions[:, None, None] * freqs
+    cos, sin = np.cos(angles), np.sin(angles)
+
+    def rope(z):  # the first Q35_ROTATED dimensions, i with i + Q35_ROTATED / 2
+        return np.concatenate(
+            [rotate_halves(z[..., :Q35_ROTATED], cos, sin), z[..., Q35_ROTATED:]], -1
+        )
+
+    x = w["token_embd.weight"][tokens].astype(np.float64)
+    for i in range(Q35_EVERY):
+        lw = _layer(w, i)
+        h = norm(x, lw["attn_norm"])
+        if i < Q35_EVERY - 1:
+            out = _gated_delta_net(lw, h)
+        else:
+            q, gate = np.split((h @ lw["attn_q"].T).reshape(T, HEADS, 2 * Q35_HEAD), 2, -1)
+            k, v = ((h @ lw[n].T).reshape(T, KV_HEADS, Q35_HEAD) for n in ("attn_k", "attn_v"))
+            q, k = rope(norm(q, lw["attn_q_norm"])), rope(norm(k, lw["attn_k_norm"]))
+            out = attention(q, k, v, _mask(T, 0), 1 / np.sqrt(Q35_HEAD))
+            out = out * sigmoid(gate.reshape(T, -1)) @ lw["attn_output"].T
+        x = x + out
+        h = norm(x, lw["post_attention_norm"])
+        x = x + experts(
+            h,
+            h @ lw["ffn_gate_inp"].T,
+            lambda e, row, lw=lw: mlp(
+                row, lw["ffn_gate_exps"][e], lw["ffn_up_exps"][e], lw["ffn_down_exps"][e]
+            ),
+        )
+        shared = mlp(h, lw["ffn_gate_shexp"], lw["ffn_up_shexp"], lw["ffn_down_shexp"])
+        x = x + shared * sigmoid(h @ lw["ffn_gate_inp_shexp"])[:, None]
+    return norm(x, w["output_norm.weight"]) @ w["output.weight"].T
+
+
+def _gated_delta_net(lw: dict[str, np.ndarray], h: np.ndarray) -> np.ndarray:
+    # each value head's state, keys by values, from zero: for each token, decayed, then moved a
+    # share toward the token's values for its key; its output, the state's values for the query
+    T, qk = len(h), Q35_K_HEADS * Q35_DIM
+    inputs = np.concatenate([np.zeros((Q35_CONV - 1, Q35_CHANNELS)), h @ lw["attn_qkv"].T])
+    conved = np.stack([(inputs[t : t + Q35_CONV] * lw["ssm_conv1d"].T).sum(0) for t in range(T)])
+    q, k, v = np.split(conved / (1 + np.exp(-conved)), [qk, 2 * qk], -1)
+
+    def unit(z):
+        z = z.reshape(T, Q35_K_HEADS, Q35_DIM)
+        return z / np.maximum(np.sqrt((z * z).sum(-1, keepdims=True)), 1e-5)
+
+    q, k, v = unit(q) / np.sqrt(Q35_DIM), unit(k), v.reshape(T, Q35_V_HEADS, Q35_DIM)
+    rate = h @ lw["ssm_alpha"].T + lw["ssm_dt.bias"]
+    decay = np.exp(lw["ssm_a"] * np.logaddexp(0, rate))
+    share = sigmoid(h @ lw["ssm_beta"].T)
+    state, out = np.zeros((Q35_V_HEADS, Q35_DIM, Q35_DIM)), np.zeros((T, Q35_V_HEADS, Q35_DIM))
+    for t in range(T):
+        for hd in range(Q35_V_HEADS):
+            key, query = k[t, hd % Q35_K_HEADS], q[t, hd % Q35_K_HEADS]
+            state[hd] *= decay[t, hd]
+            state[hd] += np.outer(key, share[t, hd] * (v[t, hd] - state[hd].T @ key))
+            out[t, hd] = state[hd].T @ query
+    z = (h @ lw["attn_gate"].T).reshape(T, Q35_V_HEADS, Q35_DIM)
+    gated = norm(out, lw["ssm_norm"]) * z / (1 + np.exp(-z))
+    return gated.reshape(T, -1) @ lw["ssm_out"].T
+
+
+def sigmoid(x):
+    return 1 / (1 + np.exp(-x))
+
+
 def _layer(w: dict[str, np.ndarray], i: int) -> dict[str, np.ndarray]:
     # a layer's tensors by name, without "blk.{i}." and ".weight"
     return {
@@ -583,5 +716,11 @@ def _mask(T: int, window: int) -> np.ndarray:
     return np.where((back < 0) | (window > 0) & (back >= window), -np.inf, 0)
 
 
-_WRITERS = {"gemma3": _write_gemma3, "gpt-oss": _write_gpt_oss, "phi3": _write_phi3}
-_REFERENCES = {"gemma3": _reference_gemma3, "gpt-oss": _reference_gpt_oss, "phi3": _reference_phi3}
+_WRITERS = {
+    "gemma3": _write_gemma3, "gpt-oss": _write_gpt_oss, "phi3": _write_phi3,
+    "qwen35moe": _write_qwen35moe,
+}  # fmt: skip
+_REFERENCES = {
+    "gemma3": _reference_gemma3, "gpt-oss": _reference_gpt_oss, "phi3": _reference_phi3,
+    "qwen35moe": _reference_qwen35moe,
+}  # fmt: skip

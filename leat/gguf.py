@@ -6,6 +6,7 @@ Spec: https://github.com/ggml-org/ggml/blob/master/docs/gguf.md
 import math
 import mmap
 import struct
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -78,15 +79,19 @@ class GGUF:
                 raise ValueError(f"{path}: truncated, tensor {t.name!r} ends past the end of file")
         return GGUF(path, metadata, tensors)
 
-    def load(self, device: str | None = None) -> dict[str, QTensor]:
-        """Copies all tensor data to `device` in one transfer and returns a view per tensor."""
-        if not self.tensors:
+    def load(
+        self, device: str | None = None, names: Iterable[str] | None = None
+    ) -> dict[str, QTensor]:
+        """Copies the data of the tensors named, or of all, to `device` in one transfer and returns
+        a view per tensor."""
+        tensors = list(self.tensors.values()) if names is None else [self.tensors[n] for n in names]
+        if not tensors:
             return {}
-        start = min(t.offset for t in self.tensors.values())
-        end = max(t.offset + t.nbytes for t in self.tensors.values())
+        start = min(t.offset for t in tensors)
+        end = max(t.offset + t.nbytes for t in tensors)
         data = Tensor(self.path)[start:end].to(device).realize()
         out = {}
-        for t in self.tensors.values():
+        for t in tensors:
             raw = data[t.offset - start : t.offset - start + t.nbytes]
             if t.type in NATIVE:
                 out[t.name] = QTensor(raw.bitcast(NATIVE[t.type]), t.type, t.shape)

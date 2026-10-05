@@ -21,6 +21,7 @@ ARCHS = [
     "gemma3",
     "gpt-oss",
     "phi3",
+    "qwen35moe",
 ]
 
 
@@ -144,6 +145,32 @@ def test_shared_prefix_is_copied(tiny_model, monkeypatch):
     assert starts == [9, len(PROMPT)]
 
 
+@pytest.mark.usefixtures("reference_ops")
+def test_recurrent_state_shares_whole_slots(tiny, monkeypatch):
+    # recurrent state holds all a slot ran: a prompt that shares part of a slot's tokens starts
+    # over in another, and one that shares all of them goes on from there
+    path, _ = tiny("qwen35moe")
+    engine = Engine(path, max_context=CONTEXT, prefill_chunk=8, slots=2)
+    out = list(engine.generate(PROMPT, 4))
+    starts, branch = prefill_starts(engine, monkeypatch), PROMPT[:9] + [1, 2, 3]
+    assert list(engine.generate(branch, 6)) == generated(path, branch, 6)
+    longer = PROMPT + out + [7]
+    assert list(engine.generate(longer, 4)) == generated(path, longer, 4)
+    assert starts == [0, 8, len(PROMPT) + 3]
+
+
+@pytest.mark.usefixtures("reference_ops")
+def test_copy_takes_recurrent_state(tiny):
+    path, _ = tiny("qwen35moe")
+    f = GGUF.open(path)
+    model = Transformer(Config.from_gguf(f.metadata), f.load(), CONTEXT, slots=2)
+    model(Tensor([PROMPT], dtype=dtypes.int32), 0, 0)
+    model.copy(0, 1)
+    after = Tensor([[7]], dtype=dtypes.int32)
+    first, copied = (model.logits(model(after, len(PROMPT), slot)).numpy() for slot in (0, 1))
+    np.testing.assert_array_equal(first, copied)
+
+
 def test_warm_up(tiny_model):
     # compiles every graph, the copy's and every batch's too, and leaves nothing cached that a
     # generation could see
@@ -198,7 +225,7 @@ def run_all(engine: Engine, starts: dict[int, tuple]) -> dict[int, list[int]]:
 
 
 @pytest.mark.usefixtures("reference_ops")
-@pytest.mark.parametrize("arch", ["llama", "qwen3moe", "gemma4", "gpt-oss"])
+@pytest.mark.parametrize("arch", ["llama", "qwen3moe", "gemma4", "gpt-oss", "qwen35moe"])
 def test_batched_matches_alone(tiny, arch):
     # sequences that join and leave a batch, 3 padded to 4 too, whose padding the mixtures of
     # experts skip, generate what each would alone: greedy or seeded, and with prompts as long
