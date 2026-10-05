@@ -29,7 +29,10 @@ def main(argv: list[str] | None = None) -> None:
     run.add_argument("--system", help="system prompt")
 
     serve = commands.add_parser("serve", help="serve the OpenAI chat completions API")
-    serve.add_argument("model", type=Path, help="GGUF file")
+    serve.add_argument(
+        "models", type=Path, nargs="+",
+        help="GGUF files, or directories of them; the first file loads at start, others on request",
+    )  # fmt: skip
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8080)
     serve.add_argument("--max-context", type=int, default=4096)
@@ -125,12 +128,14 @@ def _show(parts, shown: tuple[str, str]) -> tuple[str, str]:
 
 
 def _serve(args: argparse.Namespace) -> None:
-    engine = Engine(args.model, max_context=args.max_context, slots=args.slots)
-    print(f"{engine.gguf.path.stem} on {Device.DEFAULT}, compiling...", end="", flush=True)
-    engine.warm_up()
-    with Server(engine, args.host, args.port) as server:
+    files = [f for p in args.models for f in (sorted(p.glob("*.gguf")) if p.is_dir() else [p])]
+    options = {"max_context": args.max_context, "slots": args.slots}
+    with Server(files, args.host, args.port, **options) as server:
+        if first := next((p for p in args.models if not p.is_dir()), None):
+            print(f"{first.stem} on {Device.DEFAULT}, compiling...", end=" ", flush=True)
+            server.load(first.stem)
         url = f"http://{args.host}:{server.server_port}/v1"
-        print(f" serving at {url}. Ctrl-C quits.", flush=True)
+        print(f"serving at {url}. Ctrl-C quits.", flush=True)
         with contextlib.suppress(KeyboardInterrupt):
             server.serve_forever()
 

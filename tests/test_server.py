@@ -3,7 +3,9 @@ import json
 import statistics
 import threading
 import time
+import weakref
 from collections.abc import Iterator
+from pathlib import Path
 
 import openai
 import pytest
@@ -24,24 +26,38 @@ WEATHER = {
 
 
 @contextlib.contextmanager
-def serving(engine: Engine) -> Iterator[openai.OpenAI]:
-    # a client of a server of the engine, on a free port
-    with Server(engine, port=0) as server:
+def serving(*models: Path, **options) -> Iterator[Server]:
+    # a server of the models on a free port, none loaded
+    with Server(models, port=0, **options) as server:
         threading.Thread(target=server.serve_forever, daemon=True).start()
-        url = f"http://127.0.0.1:{server.server_port}/v1"
-        yield openai.OpenAI(base_url=url, api_key="unused", max_retries=0)
+        yield server
         server.shutdown()
 
 
-@pytest.fixture(scope="module")
-def engine(tiny_model) -> Engine:
-    return Engine(tiny_model[0], max_context=CONTEXT, prefill_chunk=8, slots=2)
+def connect(server: Server) -> openai.OpenAI:
+    url = f"http://127.0.0.1:{server.server_port}/v1"
+    return openai.OpenAI(base_url=url, api_key="unused", max_retries=0)
+
+
+def load(client: openai.OpenAI, model: str) -> dict:
+    return client.post("/models/load", cast_to=object, body={"model": model})
 
 
 @pytest.fixture(scope="module")
-def client(engine) -> Iterator[openai.OpenAI]:
-    with serving(engine) as client:
-        yield client
+def server(tiny_model) -> Iterator[Server]:
+    with serving(tiny_model[0], max_context=CONTEXT, prefill_chunk=8, slots=2) as server:
+        server.load("tiny")
+        yield server
+
+
+@pytest.fixture(scope="module")
+def engine(server) -> Engine:
+    return server.loaded.engine
+
+
+@pytest.fixture(scope="module")
+def client(server) -> openai.OpenAI:
+    return connect(server)
 
 
 @pytest.fixture(scope="module")
@@ -71,7 +87,29 @@ def complete(client: openai.OpenAI, content: str, **kwargs) -> tuple[str, str]:
 
 
 def test_models(client):
-    assert [model.id for model in client.models.list()] == ["tiny"]
+    assert [(model.id, model.status) for model in client.models.list()] == [("tiny", "loaded")]
+
+
+def test_load(tiny_model, tmp_path):
+    # models load on request, each in place of the last, and answer whatever model a request names
+    (other := tmp_path / "other.gguf").symlink_to(tiny_model[0])
+    with serving(tiny_model[0], other, max_context=CONTEXT) as server:
+        client = connect(server)
+        with pytest.raises(openai.BadRequestError, match="no model is loaded"):
+            chat(client, "hello")
+        engines = []
+        for name, unloaded in (("tiny", "other"), ("other", "tiny"), ("other", "tiny")):
+            assert load(client, name)["status"] == "loaded"
+            statuses = {model.id: model.status for model in client.models.list()}
+            assert statuses == {name: "loaded", unloaded: "unloaded"}
+            assert chat(client, "hello", max_tokens=2).model == name
+            engines.append(weakref.ref(server.loaded.engine))
+        # the first is freed before the second loads, as a GPU holds one model at most; loading
+        # the second again keeps it
+        first, second, again = (engine() for engine in engines)
+        assert first is None and second is again is server.loaded.engine
+        with pytest.raises(openai.NotFoundError, match="there is no model 'tinier'"):
+            load(client, "tinier")
 
 
 def test_reply(client, expected):
@@ -295,8 +333,9 @@ def test_engine_error(client, engine, monkeypatch):
 
 @pytest.fixture(scope="module")
 def served(model_path) -> Iterator[openai.OpenAI]:
-    with serving(Engine(model_path, max_context=4096, slots=4)) as client:
-        yield client
+    with serving(model_path, max_context=4096, slots=4) as server:
+        server.load(model_path.stem)
+        yield connect(server)
 
 
 @pytest.mark.gpu

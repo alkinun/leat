@@ -1,20 +1,23 @@
-"""OpenAI-compatible HTTP server: chat completions, whole or streamed, and the model list.
+"""OpenAI-compatible HTTP server: chat completions, whole or streamed, the model list, and
+loading a model.
 
 Handler threads parse requests, render prompts and write responses. One worker thread owns the
-engine and runs completions together, one per slot, a token of each per batched step; the rest
-wait their turn in the order they arrive.
+engine: it runs completions together, one per slot, a token of each per batched step, and loads a
+model once the completions before have finished; the rest wait their turn in the order they arrive.
 """
 
 import collections
 import contextlib
+import gc
 import json
 import queue
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 
 import jinja2
@@ -60,11 +63,27 @@ class _Finish:
     tokens: int  # tokens generated
 
 
+@dataclass(frozen=True)
+class _Loaded:
+    # the loaded model: its id, its engine, and its chat template
+    name: str
+    engine: Engine
+    chat: ChatTemplate
+
+
+@dataclass
+class _Load:
+    # a model to load: the worker answers None once it is ready, or the exception it raised
+    name: str
+    done: queue.SimpleQueue[Exception | None] = field(default_factory=queue.SimpleQueue)
+
+
 @dataclass
 class _Completion:
     """A chat completion: what the worker generates, and what the handler answers with."""
 
     prompt: list[int]
+    model: str  # whose chat template rendered the prompt
     max_tokens: int
     temperature: float
     seed: int | None
@@ -91,79 +110,138 @@ class _Completion:
 
 
 class Server(ThreadingHTTPServer):
-    """Serves an engine's model at http://host:port/v1 until shut down.
+    """Serves GGUF models at http://host:port/v1 until shut down.
 
-    The model's id is its file name without .gguf; requests may name any model.
+    One model is loaded at a time, none until load(), as Engine(path, **options); it answers every
+    request, whatever model it names. A model's id is its file name without .gguf.
     """
 
-    def __init__(self, engine: Engine, host: str = "127.0.0.1", port: int = 8080):
-        self.engine, self.model, self.created = engine, engine.gguf.path.stem, int(time.time())
-        self.chat = ChatTemplate(engine.gguf.metadata, engine.tokenizer)
-        self.completions: queue.SimpleQueue[_Completion | None] = queue.SimpleQueue()
+    def __init__(
+        self, models: Iterable[str | Path], host: str = "127.0.0.1", port: int = 8080,
+        **options: Any,
+    ):  # fmt: skip
+        self.models = {Path(path).stem: Path(path) for path in models}
+        self.options, self.created = options, int(time.time())
+        self.loaded: _Loaded | None = None
+        self.loading: str | None = None  # the id of the model the worker is loading
+        self.requests: queue.SimpleQueue[_Completion | _Load | None] = queue.SimpleQueue()
         super().__init__((host, port), _Handler)
         threading.Thread(target=self._work, name="leat engine", daemon=True).start()
 
+    def load(self, name: str) -> None:
+        """Loads a model in place of the loaded one, once the completions before have finished,
+        and compiles its graphs; returns when it is ready. Loading the loaded model does nothing."""
+        if name not in self.models:
+            raise ValueError(f"there is no model {name!r}")
+        self.requests.put(load := _Load(name))
+        if (error := load.done.get()) is not None:
+            raise RuntimeError(f"loading {name} failed: {error!r}") from error
+
     def server_close(self) -> None:
         super().server_close()
-        self.completions.put(None)  # the worker stops after the completions before it
+        self.requests.put(None)  # the worker stops after the requests before it
 
     def _work(self) -> None:
-        # starts waiting completions while slots are free, then steps every running one; waits
-        # for a completion only when none is running or waiting, and stops after the completions
-        # that came before shutdown
-        engine = self.engine
-        waiting: collections.deque[_Completion] = collections.deque()
+        # starts waiting requests in turn, then steps every running completion; waits for a
+        # request only when none is running or waiting, and stops after the requests that came
+        # before shutdown
+        waiting: collections.deque[_Completion | _Load] = collections.deque()
         running: dict[Sequence, _Writer] = {}
         stopping = False
         while not stopping or waiting or running:
-            for c in self._arrivals(wait=not (waiting or running)):
-                if c is None:
+            for request in self._arrivals(wait=not (waiting or running)):
+                if request is None:
                     stopping = True
                 else:
-                    waiting.append(c)
-            while waiting and len(engine.active) < engine.slots:
-                c = waiting.popleft()
-                if c.cancelled.is_set():
-                    continue
-                try:
-                    cached = engine.cached_prefix(c.prompt)
-                    sequence = engine.start(c.prompt, c.max_tokens, c.temperature, c.seed)
-                except Exception as e:  # for the client; the server carries on
-                    c.out.put(e)
-                    continue
-                running[sequence] = _Writer(c, engine.tokenizer, cached)
-            for sequence, writer in list(running.items()):
-                if writer.c.cancelled.is_set():  # the client hung up
-                    engine.cancel(sequence)
-                    writer.finish("stop")
-                    del running[sequence]
-            if not running:
-                continue
-            try:
-                stepped = engine.step()
-            except Exception as e:  # for every running completion's client
-                for sequence, writer in running.items():
-                    engine.cancel(sequence)
-                    writer.c.out.put(e)
-                running.clear()
-                continue
-            for sequence, token in stepped:
-                writer = running[sequence]
-                if writer.take(token):  # end of generation or a stop string
-                    engine.cancel(sequence)
-                    writer.finish("stop")
-                elif sequence.done:  # max_tokens, or the context full
-                    writer.finish("length")
-                else:
-                    continue
-                del running[sequence]
+                    waiting.append(request)
+            while waiting and self._start(waiting[0], running):
+                waiting.popleft()
+            if running:
+                self._step(running)
 
-    def _arrivals(self, wait: bool) -> Iterator[_Completion | None]:
-        # the completions queued so far, after waiting for one if `wait`
+    def _step(self, running: dict[Sequence, "_Writer"]) -> None:
+        # steps every running completion, after ending those whose clients hung up. The engine
+        # is local to this call, which a load waits out, so that the load can free it.
+        assert self.loaded is not None  # a load waits for running completions to finish
+        engine = self.loaded.engine
+        for sequence, writer in list(running.items()):
+            if writer.c.cancelled.is_set():  # the client hung up
+                engine.cancel(sequence)
+                writer.finish("stop")
+                del running[sequence]
+        if not running:
+            return
+        try:
+            stepped = engine.step()
+        except Exception as e:  # for every running completion's client
+            for sequence, writer in running.items():
+                engine.cancel(sequence)
+                writer.c.out.put(e)
+            running.clear()
+            return
+        for sequence, token in stepped:
+            writer = running[sequence]
+            if writer.take(token):  # end of generation or a stop string
+                engine.cancel(sequence)
+                writer.finish("stop")
+            elif sequence.done:  # max_tokens, or the context full
+                writer.finish("length")
+            else:
+                continue
+            del running[sequence]
+
+    def _start(self, request: _Completion | _Load, running: dict[Sequence, "_Writer"]) -> bool:
+        # starts a request, or ends it if it never can: a completion while a slot is free, a load
+        # once no completion runs. False if it must wait.
+        if isinstance(request, _Load):
+            if running:
+                return False
+            self._load(request)
+            return True
+        if request.cancelled.is_set():
+            return True
+        if (loaded := self.loaded) is None or loaded.name != request.model:
+            request.out.put(
+                RuntimeError(f"{request.model} was unloaded before the completion started")
+            )
+            return True
+        engine = loaded.engine
+        if len(engine.active) == engine.slots:
+            return False
+        try:
+            cached = engine.cached_prefix(request.prompt)
+            sequence = engine.start(
+                request.prompt, request.max_tokens, request.temperature, request.seed
+            )
+        except Exception as e:  # for the client; the server carries on
+            request.out.put(e)
+            return True
+        running[sequence] = _Writer(request, engine.tokenizer, cached)
+        return True
+
+    def _load(self, load: _Load) -> None:
+        # replaces the loaded model, whose memory is freed first: a GPU holds one model at most
+        if self.loaded is not None and self.loaded.name == load.name:
+            return load.done.put(None)
+        self.loaded, self.loading = None, load.name
+        gc.collect()  # an engine's graphs refer back to it
+        error: Exception | None = None
+        try:
+            engine = Engine(self.models[load.name], **self.options)
+            chat = ChatTemplate(engine.gguf.metadata, engine.tokenizer)
+            engine.warm_up()
+            self.loaded = _Loaded(load.name, engine, chat)
+        except Exception as e:  # for the client; the server carries on with no model
+            error = e
+        self.loading = None
+        load.done.put(error)
+
+    def _arrivals(self, wait: bool) -> Iterator[_Completion | _Load | None]:
+        # the requests queued so far, after waiting for one if `wait`
         with contextlib.suppress(queue.Empty):
-            yield self.completions.get(block=wait)
+            yield self.requests.get(block=wait)
             while True:
-                yield self.completions.get_nowait()
+                yield self.requests.get_nowait()
 
 
 class _Writer:
@@ -205,19 +283,35 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path != "/v1/models":
             return self._error(404, f"there is no GET {self.path}")
-        s = self.server
-        model = {"id": s.model, "object": "model", "created": s.created, "owned_by": "leat"}
-        self._json(200, {"object": "list", "data": [model]})
+        self._json(200, {"object": "list", "data": [self._model(m) for m in self.server.models]})
 
     def do_POST(self) -> None:
-        if self.path != "/v1/chat/completions":
+        routes = {"/v1/chat/completions": self._complete, "/v1/models/load": self._load}
+        if (route := routes.get(self.path)) is None:
             return self._error(404, f"there is no POST {self.path}")
         try:
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+        except ValueError as e:
+            return self._error(400, str(e))
+        with contextlib.suppress(OSError):  # the client hung up, while a model loaded say
+            route(body)
+
+    def _load(self, body: Any) -> None:
+        name = body.get("model") if isinstance(body, dict) else None
+        if not isinstance(name, str) or name not in self.server.models:
+            return self._error(404, f"there is no model {name!r}")
+        try:
+            self.server.load(name)
+        except RuntimeError as e:
+            return self._error(500, str(e))
+        self._json(200, self._model(name))
+
+    def _complete(self, body: Any) -> None:
+        try:
             completion = _completion(body, self.server)
         except (ValueError, TypeError, jinja2.TemplateError) as e:
             return self._error(400, str(e))
-        self.server.completions.put(completion)
+        self.server.requests.put(completion)
         try:
             if completion.stream:
                 self._stream(completion)
@@ -280,8 +374,15 @@ class _Handler(BaseHTTPRequestHandler):
             self._event(self._head(c, "chat.completion.chunk") | usage)
         self._event("[DONE]")
 
+    def _model(self, name: str) -> dict[str, Any]:
+        s = self.server
+        loaded = s.loaded is not None and s.loaded.name == name
+        status = "loaded" if loaded else "loading" if s.loading == name else "unloaded"
+        model = {"id": name, "object": "model", "created": s.created, "owned_by": "leat"}
+        return model | {"status": status}
+
     def _head(self, c: _Completion, kind: str) -> dict[str, Any]:
-        return {"id": c.id, "object": kind, "created": c.created, "model": self.server.model}
+        return {"id": c.id, "object": kind, "created": c.created, "model": c.model}
 
     def _chunk(self, c: _Completion, delta: dict[str, Any], reason: str | None = None) -> None:
         choice = {"index": 0, "delta": delta, "logprobs": None, "finish_reason": reason}
@@ -317,16 +418,19 @@ def _completion(body: Any, server: Server) -> _Completion:
             raise ValueError(f"{key}={body[key]!r} is not supported")
     if (choice := body.get("tool_choice") or "auto") not in ("auto", "none"):
         raise ValueError(f"tool_choice={choice!r} is not supported, only 'auto' and 'none'")
+    if (loaded := server.loaded) is None:
+        raise ValueError("no model is loaded")
     tools = (body.get("tools") or None) if choice == "auto" else None
     # options for the template too, such as Qwen3's enable_thinking, as llama.cpp and vLLM take
     options = (body.get("chat_template_kwargs") or {}) | ({"tools": tools} if tools else {})
-    text = server.chat.render(body["messages"], **options)
-    prompt = server.chat.tokens(text)
-    if len(prompt) >= (context := server.engine.max_context):
+    text = loaded.chat.render(body["messages"], **options)
+    prompt = loaded.chat.tokens(text)
+    if len(prompt) >= (context := loaded.engine.max_context):
         raise ValueError(f"the prompt has {len(prompt)} tokens, too many for {context} of context")
     stop, temperature = body.get("stop") or [], body.get("temperature")
     return _Completion(
         prompt,
+        loaded.name,
         max_tokens=body.get("max_completion_tokens") or body.get("max_tokens") or context,
         temperature=1.0 if temperature is None else temperature,  # OpenAI's default
         seed=body.get("seed"),
@@ -334,8 +438,8 @@ def _completion(body: Any, server: Server) -> _Completion:
         tools=tools,
         stream=bool(body.get("stream")),
         stream_usage=bool((body.get("stream_options") or {}).get("include_usage")),
-        form=server.chat.form,
-        thinking=server.chat.opens_thinking(text),
+        form=loaded.chat.form,
+        thinking=loaded.chat.opens_thinking(text),
     )
 
 
