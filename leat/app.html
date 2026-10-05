@@ -8,64 +8,116 @@
 <style>
   :root {
     color-scheme: light dark;
-    --text: #1f2328; --muted: #656d76; --line: #d0d7de; --panel: #f6f8fa; --page: #fff;
-    --error: #cf222e;
+    --page: #faf9f5; --side: #f3f1ea; --card: #fff; --bubble: #ece9e0; --line: #e3dfd4;
+    --text: #1f1e1d; --muted: #75736c; --accent: #c96442; --error: #b3261e;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --text: #e6edf3; --muted: #8d96a0; --line: #30363d; --panel: #161b22; --page: #0d1117;
-      --error: #f85149;
+      --page: #262624; --side: #1f1e1d; --card: #30302e; --bubble: #3a3936; --line: #3e3d39;
+      --text: #ece9e1; --muted: #a3a097; --accent: #d97757; --error: #f2847b;
     }
   }
   * { box-sizing: border-box; }
   body {
     margin: 0; height: 100dvh; display: flex;
-    background: var(--page); color: var(--text); font: 15px/1.6 system-ui, sans-serif;
+    background: var(--page); color: var(--text); font: 16px/1.65 system-ui, sans-serif;
   }
-  button, input, select, textarea {
-    font: inherit; color: var(--text); background: var(--page);
-    border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px;
+  button, select, textarea, input { font: inherit; color: inherit; }
+  button { cursor: pointer; border: none; background: none; }
+  :disabled { opacity: 0.4; cursor: default; }
+  svg {
+    display: block; width: 18px; height: 18px; fill: none; stroke: currentColor;
+    stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
   }
-  button { cursor: pointer; }
-  :disabled { opacity: 0.5; cursor: default; }
+  .icon { display: grid; place-items: center; padding: 8px; border-radius: 8px; }
+  .icon:hover:enabled, select:hover:enabled, .chat:hover, .chat.current {
+    background: var(--bubble);
+  }
+
   nav {
-    width: 260px; flex: none; display: flex; flex-direction: column; gap: 8px; padding: 12px;
-    background: var(--panel); border-right: 1px solid var(--line);
+    width: 272px; flex: none; display: flex; flex-direction: column; gap: 2px; padding: 12px;
+    background: var(--side); border-right: 1px solid var(--line); font-size: 14px;
   }
-  #chats { flex: 1; overflow-y: auto; }
-  .chat { display: flex; padding: 4px 4px 4px 10px; border-radius: 8px; cursor: pointer; }
-  .chat:hover, .chat.current { background: var(--line); }
+  body.menu nav { display: none; } /* on a narrow screen, the menu shows it instead */
+  #new { display: flex; gap: 10px; align-items: center; padding: 8px 10px; border-radius: 8px; }
+  #new:hover { background: var(--bubble); }
+  #chats { flex: 1; overflow-y: auto; margin-top: 12px; }
+  .chat {
+    display: flex; align-items: center; padding: 6px 4px 6px 10px;
+    border-radius: 8px; cursor: pointer;
+  }
   .chat span { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-  .chat button { padding: 0 6px; border: none; background: none; color: var(--muted); }
+  .chat button { padding: 0 6px; color: var(--muted); font-size: 16px; }
   .chat:not(:hover) button { visibility: hidden; }
-  nav label { display: block; margin-top: 8px; }
-  nav textarea, nav input { display: block; width: 100%; margin-top: 2px; }
-  main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-  header {
-    display: flex; align-items: center; gap: 12px; padding: 12px 16px;
-    border-bottom: 1px solid var(--line);
+  nav details { padding: 8px 10px; color: var(--muted); }
+  nav label { display: block; margin-top: 10px; }
+  nav textarea, nav input {
+    display: block; width: 100%; margin-top: 4px; padding: 6px 8px; resize: vertical;
+    background: var(--card); border: 1px solid var(--line); border-radius: 8px;
   }
-  #log, #composer { padding: 24px max(16px, calc(50% - 380px)); }
-  #log { flex: 1; overflow-y: auto; }
-  .message { margin-bottom: 20px; white-space: pre-wrap; overflow-wrap: anywhere; }
-  .user {
-    width: fit-content; max-width: 85%; margin-left: auto; padding: 8px 14px;
-    border-radius: 16px; background: var(--panel);
+
+  main { position: relative; flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; }
+  select {
+    field-sizing: content; max-width: 60vw; padding: 6px 8px; border: none; border-radius: 8px;
+    background: none; font-weight: 600; cursor: pointer;
   }
-  details, .note, #status { color: var(--muted); font-size: 13px; }
-  summary { cursor: pointer; }
+  #status { color: var(--muted); font-size: 14px; }
   #status.error { color: var(--error); }
+  #log, #composer, #greeting { width: 100%; max-width: 784px; margin: 0 auto; padding: 0 24px; }
+  #log { flex: 1; overflow-y: auto; padding-top: 16px; }
+  #greeting { display: none; font: 400 30px/1.3 ui-serif, Georgia, serif; text-align: center; }
+  main.empty { justify-content: center; padding-bottom: 12vh; }
+  main.empty header { position: absolute; top: 0; }
+  main.empty #log { display: none; }
+  main.empty #greeting { display: block; margin-bottom: 28px; }
+
+  .message { margin-bottom: 28px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .user {
+    width: fit-content; max-width: 80%; margin-left: auto; padding: 10px 16px;
+    border-radius: 20px; background: var(--bubble);
+  }
+  details summary { cursor: pointer; color: var(--muted); font-size: 14px; }
+  .message details { margin-bottom: 12px; }
+  .message details div {
+    margin-top: 8px; padding-left: 14px; border-left: 2px solid var(--line);
+    color: var(--muted); font-size: 14px;
+  }
+  .note { margin-top: 8px; color: var(--muted); font-size: 12px; }
   .note:empty { display: none; }
-  pre, code { font: 13px/1.5 ui-monospace, monospace; background: var(--panel); border-radius: 6px; }
-  pre { padding: 10px 12px; overflow-x: auto; border: 1px solid var(--line); }
-  code { padding: 1px 4px; }
-  #composer { display: flex; gap: 8px; padding-top: 0; }
-  #input { flex: 1; resize: none; }
+  pre, code { font: 14px/1.5 ui-monospace, monospace; background: var(--side); border-radius: 6px; }
+  pre { margin: 12px 0; padding: 12px 16px; overflow-x: auto; border: 1px solid var(--line); }
+  code { padding: 2px 5px; }
+
+  #composer { padding-bottom: 20px; }
+  #composer div {
+    display: flex; align-items: flex-end; gap: 8px; padding: 10px 10px 10px 18px;
+    background: var(--card); border: 1px solid var(--line); border-radius: 24px;
+    box-shadow: 0 4px 20px rgb(0 0 0 / 0.06);
+  }
+  #input {
+    flex: 1; max-height: 240px; padding: 6px 0; resize: none;
+    border: none; outline: none; background: none;
+  }
+  #send { padding: 8px; border-radius: 50%; background: var(--accent); color: #fff; }
+  #send:not(.stop) .square, #send.stop .arrow { display: none; }
+  .square { fill: currentColor; }
+
+  @media (max-width: 720px) {
+    nav {
+      display: none; position: fixed; inset: 0 auto 0 0; z-index: 1;
+      box-shadow: 0 0 40px rgb(0 0 0 / 0.2);
+    }
+    body.menu nav { display: flex; }
+    #log, #composer, #greeting { padding-left: 12px; padding-right: 12px; }
+  }
 </style>
 </head>
 <body>
 <nav>
-  <button id="new">New chat</button>
+  <button id="new">
+    <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>New chat
+  </button>
   <div id="chats"></div>
   <details>
     <summary>Settings</summary>
@@ -73,12 +125,26 @@
     <label>Temperature <input id="temperature" type="number" min="0" max="2" step="0.1"></label>
   </details>
 </nav>
-<main>
-  <header><select id="model"></select><span id="status"></span></header>
+<main id="main">
+  <header>
+    <button id="menu" class="icon" title="Chats">
+      <svg viewBox="0 0 24 24">
+        <rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/>
+      </svg>
+    </button>
+    <select id="model"></select>
+    <span id="status"></span>
+  </header>
+  <h1 id="greeting"></h1>
   <div id="log"></div>
   <div id="composer">
-    <textarea id="input" rows="3" placeholder="Message"></textarea>
-    <button id="send">Send</button>
+    <div>
+      <textarea id="input" rows="1" placeholder="Message"></textarea>
+      <button id="send">
+        <svg class="arrow" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+        <svg class="square" viewBox="0 0 24 24"><path d="M8 8h8v8H8z"/></svg>
+      </button>
+    </div>
   </div>
 </main>
 <script type="module">
@@ -95,12 +161,15 @@ for (const [id, value] of [["system", ""], ["temperature", "0.7"]]) {
 
 $("new").onclick = () => {
   if (chat?.messages.length !== 0) chats.unshift((chat = { messages: [] }));
+  document.body.classList.remove("menu");
   save();
   render();
   $("input").focus();
 };
+$("menu").onclick = () => document.body.classList.toggle("menu");
 $("model").onchange = () => load($("model").value);
 $("send").onclick = () => (replies.has(chat) ? replies.get(chat).abort() : send());
+$("input").oninput = controls;
 $("input").onkeydown = (event) => {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
@@ -225,6 +294,7 @@ function render() {
     item.append(element("span", "", c.messages[0]?.content ?? "New chat"), remove);
     item.onclick = () => {
       chat = c;
+      document.body.classList.remove("menu");
       render();
     };
     remove.title = "Delete";
@@ -243,10 +313,16 @@ function render() {
   controls();
 }
 
+// shows the controls as the state has them, the input as tall as its text
 function controls() {
-  const replying = replies.has(chat);
-  $("send").textContent = replying ? "Stop" : "Send";
-  $("send").disabled = !replying && !loaded;
+  const replying = replies.has(chat), input = $("input");
+  input.style.height = "auto";
+  input.style.height = `${input.scrollHeight}px`;
+  $("main").classList.toggle("empty", !chat?.messages.length);
+  $("greeting").textContent = loaded ? "How can I help?" : loading ? "Loading…" : "Choose a model";
+  $("send").classList.toggle("stop", replying);
+  $("send").title = replying ? "Stop" : "Send";
+  $("send").disabled = !replying && !(loaded && input.value.trim());
   $("model").value = loading ?? loaded ?? "";
   $("model").disabled = loading !== null || replies.size > 0;
 }
