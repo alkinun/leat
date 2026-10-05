@@ -78,6 +78,7 @@
   main.empty #greeting { display: block; margin-bottom: 28px; }
 
   .message { margin-bottom: 28px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .tool { margin-bottom: 16px; }
   .user {
     width: fit-content; max-width: 80%; margin-left: auto; padding: 10px 16px;
     border-radius: var(--round-large); background: var(--bubble);
@@ -133,6 +134,7 @@
     <summary>Settings</summary>
     <label>System prompt <textarea id="system" rows="5"></textarea></label>
     <label>Temperature <input id="temperature" type="number" min="0" max="2" step="0.1"></label>
+    <label>Tools server <input id="tools" placeholder="http://host:8081"></label>
   </details>
 </nav>
 <main id="main">
@@ -163,8 +165,9 @@ const chats = JSON.parse(localStorage.getItem("leat.chats") ?? "[]"); // the lat
 let chat = chats[0]; // the one shown
 let loaded = null, loading = null; // the ids of the loaded model and of one loading
 const replies = new Map(); // each chat replying, to the controller that stops its reply
+const ROUNDS = 8; // replies a turn takes at most, each after the tools the last one called
 
-for (const [id, value] of [["system", ""], ["temperature", "0.7"]]) {
+for (const [id, value] of [["system", ""], ["temperature", "0.7"], ["tools", ""]]) {
   $(id).value = localStorage.getItem(`leat.${id}`) ?? value;
   $(id).oninput = () => localStorage.setItem(`leat.${id}`, $(id).value);
 }
@@ -195,50 +198,41 @@ try {
   status(error.message, true);
 }
 
+// a turn: the user's message, then replies, and the tools they call, until one calls none
 async function send() {
   const content = $("input").value.trim();
   if (!content || !loaded) return;
   if (!chat) chats.unshift((chat = { messages: [] }));
-  const c = chat, reply = { role: "assistant", content: "", reasoning: "", note: loaded };
-  const system = $("system").value.trim();
-  const messages = [
-    ...(system ? [{ role: "system", content: system }] : []),
-    ...c.messages.map(({ role, content }) => ({ role, content })),
-    { role: "user", content },
-  ];
-  c.messages.push({ role: "user", content }, reply);
+  const c = chat, turn = c.messages.length, controller = new AbortController();
+  c.messages.push({ role: "user", content });
   chats.splice(chats.indexOf(c), 1);
   chats.unshift(c);
   $("input").value = "";
-  const controller = new AbortController();
   replies.set(c, controller);
-  save();
-  render();
   status("");
-  const start = performance.now();
   try {
-    const body = {
-      model: loaded, messages, temperature: Number($("temperature").value),
-      stream: true, stream_options: { include_usage: true },
-    };
-    const response = await post("/v1/chat/completions", body, controller.signal);
-    for await (const data of events(response)) {
-      if (data.error) throw new Error(data.error.message);
-      const delta = data.choices[0]?.delta ?? {};
-      reply.content += delta.content ?? "";
-      reply.reasoning += delta.reasoning_content ?? "";
-      reply.note = data.model;
-      if (data.usage) {
-        const n = data.usage.completion_tokens, seconds = (performance.now() - start) / 1000;
-        reply.note += ` · ${n} tokens, ${(n / seconds).toFixed(1)} tok/s`;
+    const server = $("tools").value.trim().replace(/\/$/, "");
+    const tools = server ? await (await fetch(`${server}/tools`)).json() : undefined;
+    for (let round = 0; round < ROUNDS; round++) {
+      const calls = await reply(c, tools, controller.signal);
+      if (!calls.length) break;
+      // a message for each call, before any runs, so that each call has its answer
+      const results = calls.map(({ id, function: f }) => ({
+        role: "tool", tool_call_id: id, name: f.name, arguments: JSON.parse(f.arguments),
+        content: "", note: "",
+      }));
+      c.messages.push(...results);
+      for (const result of results) {
+        render();
+        result.content = await run(server, result, controller.signal);
       }
-      if (c === chat) follow(() => $("log").lastChild.update());
     }
   } catch (error) {
+    const last = c.messages.at(-1);
     if (error.name === "AbortError") {
-      reply.note += " · stopped";
+      last.note = last.note ? `${last.note} · stopped` : "stopped";
     } else { // the turn is taken back, to send again
-      c.messages.splice(-2);
+      c.messages.splice(turn);
       if (c === chat && !$("input").value) $("input").value = content;
       status(error.message, true);
     }
@@ -246,6 +240,46 @@ async function send() {
   replies.delete(c);
   save();
   render();
+}
+
+// streams the model's reply to the chat so far into a message of its own: the tools it calls
+async function reply(c, tools, signal) {
+  const system = $("system").value.trim();
+  const messages = [...(system ? [{ role: "system", content: system }] : []), ...c.messages];
+  const m = { role: "assistant", content: "", reasoning: "", note: loaded };
+  c.messages.push(m);
+  save();
+  render();
+  const body = {
+    model: loaded, messages: messages.map(api), tools, temperature: Number($("temperature").value),
+    stream: true, stream_options: { include_usage: true },
+  };
+  const start = performance.now();
+  const response = await post("/v1/chat/completions", body, signal);
+  for await (const data of events(response)) {
+    if (data.error) throw new Error(data.error.message);
+    const delta = data.choices[0]?.delta ?? {};
+    m.content += delta.content ?? "";
+    m.reasoning += delta.reasoning_content ?? "";
+    if (delta.tool_calls) m.tool_calls = delta.tool_calls; // leat sends them whole, at the end
+    m.note = data.model;
+    if (data.usage) {
+      const n = data.usage.completion_tokens, seconds = (performance.now() - start) / 1000;
+      m.note += ` · ${n} tokens, ${(n / seconds).toFixed(1)} tok/s`;
+    }
+    if (c === chat) follow(() => $("log").lastChild.update());
+  }
+  return m.tool_calls ?? [];
+}
+
+// what a tool the tools server runs answers
+async function run(server, { name, arguments: args }, signal) {
+  return (await (await post(`${server}/call`, { name, arguments: args }, signal)).json()).content;
+}
+
+// a message as the API takes it, without what only the app shows
+function api({ role, content, tool_calls, tool_call_id, name }) {
+  return { role, content, tool_calls, tool_call_id, name };
 }
 
 async function load(name) {
@@ -348,12 +382,16 @@ function message(m) {
   const item = element("div", `message ${m.role}`);
   const thinking = element("details"), reasoning = element("div");
   const text = element("div"), note = element("div", "note");
-  thinking.append(element("summary", "", "Thinking"), reasoning);
+  const summary = element("summary", "", "Thinking"), tool = m.role === "tool";
+  thinking.append(summary, reasoning);
   item.append(thinking, text, note);
-  item.update = () => {
-    thinking.hidden = !m.reasoning;
-    reasoning.textContent = m.reasoning?.trim() ?? "";
-    text.replaceChildren(...format(m.content));
+  item.update = () => { // a tool's message shows its call, and folds its answer away
+    if (tool) summary.textContent = `${m.name}: ${Object.values(m.arguments).join(", ")}`;
+    if (tool && !m.content) summary.textContent += " …";
+    thinking.hidden = !(tool || m.reasoning);
+    item.hidden = Boolean(m.tool_calls) && !m.content && !m.reasoning; // its calls show it
+    reasoning.textContent = (tool ? m.content : m.reasoning)?.trim() ?? "";
+    text.replaceChildren(...format(tool ? "" : m.content));
     note.textContent = m.note ?? "";
   };
   item.update();
