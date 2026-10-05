@@ -5,7 +5,7 @@ import pytest
 from tinygrad import Tensor, dtypes
 
 from leat import bench
-from leat.engine import FEW_TOKENS, Engine
+from leat.engine import FEW_TOKENS, KEEP_BACK, Engine
 from leat.gguf import GGUF
 from leat.model import CACHE_TILE, Config, Transformer
 from tests.helpers import CONTEXT, reference_logits
@@ -157,6 +157,20 @@ def test_recurrent_state_shares_whole_slots(tiny, monkeypatch):
     longer = PROMPT + out + [7]
     assert list(engine.generate(longer, 4)) == generated(path, longer, 4)
     assert starts == [0, 8, len(PROMPT) + 3]
+
+
+@pytest.mark.usefixtures("reference_ops")
+def test_recurrent_state_resumes_where_kept(tiny, monkeypatch):
+    # a prompt that shares another but for its last tokens, as a chat's next turn, goes on from
+    # the state kept KEEP_BACK tokens before that one's end: here from 4 of 20, a chunk of 1
+    # ending where the new prompt's state is kept, at 5 of 21, then chunks of 8
+    path, _ = tiny("qwen35moe")
+    engine = Engine(path, max_context=CONTEXT, prefill_chunk=8)
+    prompt = (PROMPT * 2)[:20]
+    list(engine.generate(prompt, 3))
+    starts, turn = prefill_starts(engine, monkeypatch), prompt[:18] + [7, 1, 2]
+    assert list(engine.generate(turn, 4)) == generated(path, turn, 4)
+    assert starts == [len(prompt) - KEEP_BACK, len(turn) - KEEP_BACK, 13]
 
 
 @pytest.mark.usefixtures("reference_ops")

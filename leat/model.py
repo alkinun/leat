@@ -261,6 +261,11 @@ class Transformer:
              _zeros(slots, d.v_heads, d.k_dim, d.v_dim)) if d and recurrent else None
             for recurrent in config.recurrent
         ]  # fmt: skip
+        # and a copy of them kept partway through a prompt, from which a later one may go on
+        self.kept = [
+            None if s is None else (_zeros(*map(int, s[0].shape)), _zeros(*map(int, s[1].shape)))
+            for s in self.states
+        ]
 
     def __call__(self, tokens: Tensor, start_pos: int | UOp, slot: int | UOp = 0) -> Tensor:
         """Runs `tokens` (1, T) at positions `start_pos...` of cache slot `slot` and returns normed
@@ -299,6 +304,14 @@ class Transformer:
         for state in (state for states in self.states if states for state in states):
             copied.append(state[slot : slot + 1].assign(state[source : source + 1]))
         Tensor.realize(*copied)
+
+    def keep(self, slot: int | UOp) -> None:
+        """Copies the recurrent states of slot `slot` to its kept copy."""
+        _copy_slot(self.states, self.kept, slot)
+
+    def restore(self, slot: int | UOp) -> None:
+        """Copies the kept recurrent states of slot `slot` back."""
+        _copy_slot(self.kept, self.states, slot)
 
     def _attention(self, i: int, x: Tensor, spans: list[Span]) -> Tensor:
         # x + the attention block's output
@@ -402,6 +415,15 @@ def _rows(w: QTensor, start: int, stop: int) -> QTensor:
     elements, _ = BLOCK[w.type]
     per = w.shape[1] if w.type in NATIVE else w.shape[1] // elements  # values or blocks a row
     return QTensor(w.data[start * per : stop * per], w.type, (stop - start, *w.shape[1:]))
+
+
+def _copy_slot(
+    sources: list[tuple[Tensor, Tensor] | None], targets: list[tuple[Tensor, Tensor] | None],
+    slot: int | UOp,
+) -> None:  # fmt: skip
+    pairs = [(s, t) for ss, ts in zip(sources, targets, strict=True) if ss and ts
+             for s, t in zip(ss, ts, strict=True)]  # fmt: skip
+    Tensor.realize(*(t[slot : slot + 1].assign(s[slot : slot + 1]) for s, t in pairs))
 
 
 def _zeros(*shape: int, dtype: DType = dtypes.float32) -> Tensor:

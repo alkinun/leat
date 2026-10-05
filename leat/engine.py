@@ -22,6 +22,10 @@ FEW_TOKENS = 16
 # prompt tokens a step prefills at most while other sequences decode, which wait for it: for Llama
 # 3.1 8B on the 3090, a chunk of 256 takes 57 ms against 111 for 512, and prefills 2.3% slower
 SHARED_CHUNK = 256
+# tokens before a prompt's end where a model with recurrent state keeps it: a later prompt that
+# shares the prompt up to there goes on from it, as a chat's next turn, which renders the last
+# turn's opening anew, or an agent's next step. The rest takes the graph for few tokens.
+KEEP_BACK = FEW_TOKENS
 # sequences a decode step runs at most in one graph, more in turn: as many tokens as the
 # matrix-vector kernels take, which on AMD are the only kernels for several
 BATCH = MATVEC_TOKENS
@@ -71,7 +75,8 @@ class Engine:
     Any other prompt takes a free slot, empty or else the least recently used, and first copies
     that prefix in: a system prompt that several conversations share, say. A model with recurrent
     state, as Qwen3.5's Gated DeltaNet, holds it for all the tokens a slot ran, and so shares a
-    slot's tokens only when it shares all of them.
+    slot's tokens only when it shares all of them, or else all those before the state it kept
+    KEEP_BACK tokens before its last prompt's end.
     """
 
     def __init__(
@@ -108,6 +113,9 @@ class Engine:
         self._chunk, self._few_chunk = _graph(self._step), _graph(self._step)
         self._decode = {n: _graph(self._step) for n in self._batches}
         self._copy = _graph(self.model.copy)
+        self._recurrent = any(self.config.recurrent)
+        self._keep, self._restore = _graph(self.model.keep), _graph(self.model.restore)
+        self._kept: list[list[int]] = [[] for _ in range(slots)]  # tokens before each kept state
         self._last: dict[int, _Batch] = {}  # the last decode step's batches, by graph
         self._cached: list[list[int]] = [[] for _ in range(slots)]  # tokens each slot holds
         self._used = [0] * slots  # when each slot last started a generation
@@ -202,6 +210,9 @@ class Engine:
         self._last = {}
         if self.slots > 1:  # copying a cached prefix to another slot has a graph too
             self._copy(self._source.bind(0), self._slot_vars[0].bind(1))
+        if self._recurrent:  # and keeping recurrent state, and going back to it
+            self._keep(self._slot_vars[0].bind(0))
+            self._restore(self._slot_vars[0].bind(0))
         self.reset()
 
     def cached_prefix(self, prompt: list[int]) -> int:
@@ -214,11 +225,14 @@ class Engine:
         for sequence in list(self.active):
             self.cancel(sequence)
         self._cached = [[] for _ in range(self.slots)]
+        self._kept = [[] for _ in range(self.slots)]
 
     def _claim(self, prompt: list[int]) -> int:
         # a free slot for the prompt, made to hold the longest prefix of it that any slot holds
         busy = {s.slot for s in self.active}
         free = [s for s in range(self.slots) if s not in busy]
+        if self._recurrent:
+            self._resume(prompt, free)
         shared = self._shared(prompt)
         extended = [s for s in free if shared[s] == len(self._cached[s])]  # empty slots too
         if extended:
@@ -227,11 +241,23 @@ class Engine:
             slot = min(free, key=lambda s: self._used[s])
         source = max(range(self.slots), key=lambda s: shared[s])
         if (prefix := shared[source]) > shared[slot]:
-            self._cached[slot] = []  # while the copy overwrites it
+            self._cached[slot], self._kept[slot] = [], []  # while the copy overwrites it
             self._copy(self._source.bind(source), self._slot_vars[0].bind(slot))
         self._cached[slot] = prompt[:prefix]
+        if prefix < len(self._kept[slot]):  # the slot no longer holds the tokens before it
+            self._kept[slot] = []
         self._used[slot] = next(self._clock)
         return slot
+
+    def _resume(self, prompt: list[int], free: list[int]) -> None:
+        # takes a free slot back to its kept recurrent state, where the prompt shares all the
+        # tokens before it, and more than all of any slot's
+        best = max(self._shared(prompt))
+        kept = [s for s in free if best < len(self._kept[s]) == _shared(prompt, self._kept[s])]
+        if kept:
+            slot = max(kept, key=lambda s: len(self._kept[s]))
+            self._restore(self._slot_vars[0].bind(slot))
+            self._cached[slot] = list(self._kept[slot])
 
     def _shared(self, prompt: list[int]) -> list[int]:
         # how many leading tokens of the prompt each slot holds that generation may start from: of
@@ -245,7 +271,9 @@ class Engine:
         # runs the next chunk of the sequence's prompt, of up to `size` tokens: a single token as
         # a decode step, up to FEW_TOKENS in the graph bound to that many, more in the one bound
         # to prefill_chunk. Returns the token sampled after the prompt's last chunk.
-        cached = self._cached[sequence.slot]
+        cached, mark = self._cached[sequence.slot], len(sequence.prompt) - KEEP_BACK
+        if self._recurrent and len(cached) < mark:  # a chunk ends where the state is kept
+            size = min(size, mark - len(cached))
         pos, chunk = len(cached), sequence.prompt[len(cached) : len(cached) + size]
         row = self._slot_vars[0].bind(sequence.slot), self._pos_vars[0].bind(pos)
         if (n := len(chunk)) == 1:
@@ -257,6 +285,9 @@ class Engine:
             tokens = _ids(chunk, int(length.vmax)).shrink(((0, 1), (0, length.bind(n))))
         token = graph(tokens, *sequence.sampling, *row)
         cached += chunk
+        if self._recurrent and len(cached) == mark:
+            self._keep(self._slot_vars[0].bind(sequence.slot))
+            self._kept[sequence.slot] = list(cached)
         return int(token.item()) if len(cached) == len(sequence.prompt) else None
 
     def _decode_step(self, sequences: list[Sequence]) -> list[int]:
