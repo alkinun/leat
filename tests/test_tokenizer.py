@@ -138,8 +138,8 @@ def test_matches_llama_cpp(model_path, llama_cpp, tmp_path):
 
 
 # the vocab-only GGUFs llama.cpp tests its tokenizers with, of each pre-tokenizer leat supports
-VOCABS = ["gpt-2", "mpt", "starcoder", "refact", "command-r", "qwen2", "llama-bpe", "llama-spm",
-          "phi-3", "gemma-4"]  # fmt: skip
+VOCABS = ["gpt-2", "mpt", "starcoder", "refact", "command-r", "qwen2", "qwen35", "llama-bpe",
+          "llama-spm", "phi-3", "gemma-4"]  # fmt: skip
 
 
 @pytest.mark.parametrize("name", VOCABS)

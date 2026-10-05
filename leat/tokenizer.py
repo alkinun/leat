@@ -30,12 +30,12 @@ SPACE = "\u2581"  # how SentencePiece spells a space
 
 
 def _category_classes() -> dict[str, str]:
-    # regex class bodies for the Unicode letter, number and separator categories, as ranges so `re`
-    # stays fast on long inputs. Python's own \s, \d and \w differ from llama.cpp's definitions.
-    # U and W are the letters but a-z and A-Z: those GPT-4o's pre-tokenizer takes for upper and
-    # lower case, as llama.cpp rewrites its classes
-    cps: dict[str, list[int]] = {"L": [], "N": [], "Z": []}
-    for cp in range(0x323B0):  # one past the last letter; numbers and separators end earlier
+    # regex class bodies for the Unicode letter, mark, number and separator categories, as ranges
+    # so `re` stays fast on long inputs. Python's own \s, \d and \w differ from llama.cpp's
+    # definitions. U and W are the letters but a-z and A-Z: those GPT-4o's pre-tokenizer takes for
+    # upper and lower case, as llama.cpp rewrites its classes
+    cps: dict[str, list[int]] = {"L": [], "M": [], "N": [], "Z": []}
+    for cp in range(0xE01F0):  # one past the last mark; the others end earlier
         if (cat := unicodedata.category(chr(cp))[0]) in cps:
             cps[cat].append(cp)
     cps["U"] = [cp for cp in cps["L"] if not 0x61 <= cp <= 0x7A]
@@ -64,12 +64,13 @@ def _patterns(kind: str) -> tuple[re.Pattern[str], ...]:
     contractions = "'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD]"
     # GPT-2's: 's|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)
     gpt2 = rf"'s|'t|'re|'ve|'m|'ll|'d| ?[{L}]+| ?[{N}]+| ?[^{S}{L}{N}]+|[{S}]+(?![^{S}])"
-    if kind in ("llama3", "qwen2"):  # QWEN2's splits numbers into digits, not runs of up to 3
+    if kind in ("llama3", "qwen2", "qwen35"):  # QWEN2's splits numbers into digits, not runs of
+        # up to 3; QWEN35's words also take marks, and its runs of other characters not:
         # (?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}|
         # ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
-        digits = "{1,3}" if kind == "llama3" else ""
+        digits, M = "{1,3}" if kind == "llama3" else "", c["M"] if kind == "qwen35" else ""
         regexes = [
-            rf"{contractions}|[^\r\n{L}{N}]?[{L}]+|[{N}]{digits}| ?[^{S}{L}{N}]+[\r\n]*"
+            rf"{contractions}|[^\r\n{L}{N}]?[{L}{M}]+|[{N}]{digits}| ?[^{S}{L}{M}{N}]+[\r\n]*"
             rf"|[{S}]*[\r\n]+|[{S}]+(?![^{S}])|[{S}]+"
         ]
     elif kind == "gpt2":
@@ -106,6 +107,7 @@ _PRE_TOKENIZERS = {
                      "minerva-7b", "mellum2"), ("digits-gpt2", False, False)),
     **dict.fromkeys(("gpt-4o", "llama4", "kanana2", "talkie", "minimax-m2"),
                     ("gpt-4o", False, False)),
+    "qwen35": ("qwen35", False, False),
     "tekken": ("tekken", True, True),
 }  # fmt: skip
 
