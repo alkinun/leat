@@ -277,9 +277,11 @@ async function run(server, { name, arguments: args }, signal) {
   return (await (await post(`${server}/call`, { name, arguments: args }, signal)).json()).content;
 }
 
-// a message as the API takes it, without what only the app shows
-function api({ role, content, tool_calls, tool_call_id, name }) {
-  return { role, content, tool_calls, tool_call_id, name };
+// a message as the API takes it, without what only the app shows: with its reasoning, which
+// templates such as Qwen3.5's show again to the steps of an agent's turn
+function api({ role, content, reasoning, tool_calls, tool_call_id, name }) {
+  const reasoning_content = reasoning || undefined;
+  return { role, content, reasoning_content, tool_calls, tool_call_id, name };
 }
 
 async function load(name) {
