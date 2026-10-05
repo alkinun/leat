@@ -389,12 +389,10 @@ def test_shared_system_prompt(served, model_path):
         return " ".join(rule.format(name, i, i, i + 50) for i in range(100))
 
     def first_token(system: str, question: str) -> float:
+        # the time to a reply of one token: text, or for a model that thinks first, reasoning
         messages = [{"role": "system", "content": system}, {"role": "user", "content": question}]
         start = time.perf_counter()
-        with served.chat.completions.create(
-            model="real", messages=messages, max_tokens=1, temperature=0, stream=True
-        ) as stream:
-            next(chunk for chunk in stream if chunk.choices and chunk.choices[0].delta.content)
+        served.chat.completions.create(model="real", messages=messages, max_tokens=1, temperature=0)
         return time.perf_counter() - start
 
     for question in ("Hi", "Hello"):  # captures the graphs, the copy's too

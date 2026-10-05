@@ -349,10 +349,11 @@ def test_start_needs_a_free_slot(tiny_model):
 # Qwen2.5 7B 0.0031 and both paths 0.0036, and Qwen3 30B A3B 0.003 to 0.0053, where noise also
 # flips a token's choice of experts. The top token is the noisier measure: on the 1020 positions
 # here, a change of rounding in the matrix kernels took Llama's decode path's KL from 0.00128 to
-# 0.00126 and its agreement from 98.2 to 97.9%.
+# 0.00126 and its agreement from 98.2 to 97.9%. Qwen3.6 35B A3B, of 256 experts and recurrent
+# state, scores 0.0082 and 97.4% on both paths.
 LIMITS = {
     "llama": (0.0015, 0.975), "qwen2": (0.0045, 0.97), "qwen3": (0.0035, 0.97),
-    "qwen3moe": (0.007, 0.97),
+    "qwen3moe": (0.007, 0.97), "qwen35moe": (0.01, 0.965),
 }  # fmt: skip
 
 
@@ -376,18 +377,24 @@ def test_matches_llama_cpp(model_path, llama_cpp, wikitext, tmp_path, decode):
 @pytest.mark.model
 def test_chunked_prefill(model_path):
     # prefilling in chunks of a bound length, through the kernels' symbolic paths, leaves the first
-    # layer's keys and values of one pass over the whole prompt, with its fixed shapes, and a next
-    # token it scores as likely. Deeper layers drift apart: kernels compiled for either differ in
-    # the last bit here and there, which can move an activation to the next int8 step or flip a
-    # choice of experts, and so a near tie: on tinygrad's own attention, Qwen2.5 7B's chunked pass
-    # once picked a token 0.07 below the best.
+    # layer's keys and values, or its recurrent states, of one pass over the whole prompt, with its
+    # fixed shapes, and a next token it scores as likely. Deeper layers drift apart: kernels
+    # compiled for either differ in the last bit here and there, which can move an activation to
+    # the next int8 step or flip a choice of experts, and so a near tie: on tinygrad's own
+    # attention, Qwen2.5 7B's chunked pass once picked a token 0.07 below the best.
     engine = Engine(model_path, max_context=512, prefill_chunk=128)
     vocab, bos = engine.config.vocab_size, engine.tokenizer.bos_id
     prompt = [0 if bos is None else bos] + [(i * 7919) % vocab for i in range(299)]
+
+    def held() -> list[np.ndarray]:  # what the first layer holds of the prompt
+        if (cache := engine.model.cache[0]) is not None:
+            return [cache[:, :, :, : len(prompt)].numpy().astype(np.float32)]
+        return [state[0].numpy() for state in engine.model.states[0]]
+
     token = next(engine.generate(prompt, 1))
-    chunked = engine.model.cache[0][:, :, :, : len(prompt)].numpy()
+    chunked = held()
     hidden = engine.model(Tensor([prompt], dtype=dtypes.int32), 0)  # the same positions again
     logits = engine.model.logits(hidden[:, -1]).numpy().reshape(-1)
     assert logits[token] > logits.max() - 0.1
-    whole = engine.model.cache[0][:, :, :, : len(prompt)].numpy()
-    np.testing.assert_allclose(chunked.astype(np.float32), whole, rtol=1e-2, atol=1e-2)
+    for got, whole in zip(chunked, held(), strict=True):
+        np.testing.assert_allclose(got, whole, rtol=1e-2, atol=1e-2)

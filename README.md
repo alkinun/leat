@@ -50,14 +50,15 @@ Architectures, text only, with their tokenizers and chat templates:
 | `llama` | Llama 3.x, Mistral 7B, Mistral Small 3.x |
 | `qwen2` | Qwen2.5 |
 | `qwen3`, `qwen3moe` | Qwen3 and its mixtures of experts |
+| `qwen35moe` | Qwen3.5 and Qwen3.6's mixtures of experts |
 | `gemma3` | Gemma 3 |
 | `gemma4` | Gemma 4 |
 | `gpt-oss` | gpt-oss |
 | `phi3` | Phi-4-mini, Phi-3 mini |
 
-Their parts: grouped-query attention, sliding windows, attention sinks, QK norms, biases, partial RoPE, RoPE scaled as Llama 3, YaRN and LongRoPE, SwiGLU, GELU and gpt-oss's clamped SwiGLU, mixtures of experts, and logit soft-capping.
+Their parts: grouped-query attention, sliding windows, attention sinks, QK norms, biases, partial RoPE, RoPE scaled as Llama 3, YaRN and LongRoPE, SwiGLU, GELU and gpt-oss's clamped SwiGLU, mixtures of experts, beside a shared expert or one with a gate, logit soft-capping, and Qwen3.5's Gated DeltaNet linear attention, its recurrent state kept for each sequence, beside attention gated per head.
 
-Tokenizers: SentencePiece, as Mistral 7B's and Gemma 3's; byte-level BPE with llama.cpp's Llama 3, Qwen2, GPT-2, StarCoder, GPT-4o and Tekken pre-tokenizers and the families that share them; and Gemma 4's.
+Tokenizers: SentencePiece, as Mistral 7B's and Gemma 3's; byte-level BPE with llama.cpp's Llama 3, Qwen2, Qwen3.5, GPT-2, StarCoder, GPT-4o and Tekken pre-tokenizers and the families that share them; and Gemma 4's.
 
 Storage types, and the kernels that take them on the GPU; the reference ops take every type:
 
@@ -68,13 +69,13 @@ Storage types, and the kernels that take them on the GPU; the reference ops take
 | Q4_1, Q5_1 | NVIDIA, RDNA | |
 | Q2_K, Q3_K, F32, F16, BF16 | | |
 
-Devices: any tinygrad backend runs the reference ops. NVIDIA GPUs (`DEV=NV` or `CUDA`) run every kernel; AMD's RDNA 3 and 4 GPUs (`DEV=AMD`), as Strix Halo's, run the warp-level ones: matrix-vector products, norms, quantization, RoPE, decode attention, the mixtures' routing and their few-token path, and sampling: every kernel of a decode step, batched or not. Prompts there take the reference ops for now.
+Devices: any tinygrad backend runs the reference ops. NVIDIA GPUs (`DEV=NV` or `CUDA`) run every kernel; AMD's RDNA 3 and 4 GPUs (`DEV=AMD`), as Strix Halo's, run the warp-level ones: matrix-vector products, norms, quantization, RoPE, decode attention, the mixtures' routing and their few-token path, Gated DeltaNet's convolution and recurrence, and sampling: every kernel of a decode step, batched or not. Prompts there take the reference ops for now, but for Gated DeltaNet's.
 
-Server: `/v1/chat/completions`, whole or streamed, `/v1/models` and `/v1/models/load`, and a chat app at `/`. Replies split into `reasoning_content`, as Qwen3's `<think>` blocks and gpt-oss's analysis channel, text, and tool calls in Llama 3's, Qwen's, Gemma 4's and gpt-oss's syntax. Requests take stop strings, seeds and `chat_template_kwargs` such as `{"enable_thinking": false}`. Sampling is greedy or by temperature; requests for `top_p`, penalties, `logprobs` or several choices are refused.
+Server: `/v1/chat/completions`, whole or streamed, `/v1/models` and `/v1/models/load`, and a chat app at `/`. Replies split into `reasoning_content`, as Qwen3's `<think>` blocks and gpt-oss's analysis channel, text, and tool calls in Llama 3's, Qwen's, Qwen3.5's, Gemma 4's and gpt-oss's syntax. Requests take stop strings, seeds and `chat_template_kwargs` such as `{"enable_thinking": false}`. Sampling is greedy or by temperature; requests for `top_p`, penalties, `logprobs` or several choices are refused.
 
 Concurrent requests: completions run together, one in each of `--slots` slots of the KV cache, 4 by default; more wait their turn. Each step prefills a chunk of one prompt, of 256 tokens at most while others decode, then decodes a token of every running completion in one batch, of up to 8, whose matrices read each weight once for all of them. A client that hangs up frees its slot at the next step. A slot past the others holds the padding of batches of 3, 5, 6 or 7, which run in the graphs of 4 and 8.
 
-Prefix caching: a conversation continues in its slot, and a prompt that shares a prefix with any slot, such as a system prompt, starts from a copy of it.
+Prefix caching: a conversation continues in its slot, and a prompt that shares a prefix with any slot, such as a system prompt, starts from a copy of it. Qwen3.5's recurrent state holds all a slot ran, so there a prompt shares a slot's tokens only when it shares all of them, or all those before the state the slot kept 16 tokens before its last prompt's end: where a chat's next turn, which renders the last turn anew, and an agent's next step go on.
 
 Models: `leat serve` takes GGUF files and directories of them, and holds one model at a time, which answers every request whatever model it names. The first file loads at start. `POST /v1/models/load` with `{"model": id}`, an id that `/v1/models` lists, loads another once the completions before it have finished, the last one freed first.
 
@@ -84,7 +85,7 @@ Tools: given a tools server in its settings, the chat app offers the model its t
 
 ## Measurements
 
-RTX 3090, one sequence, in tokens per second; Q4_K_M files but for gpt-oss's, MXFP4. llama.cpp is b11372 with CUDA. leat's numbers include sampling on the device and reading the token back: after the prompt for pp512, after every token for tg128.
+RTX 3090, one sequence, in tokens per second; Q4_K_M files but for gpt-oss's, MXFP4. llama.cpp is b11372 with CUDA, and b9691 for Qwen3.6. leat's numbers include sampling on the device and reading the token back: after the prompt for pp512, after every token for tg128.
 
 | | llama.cpp pp512 | leat pp512 | llama.cpp tg128 | leat tg128 |
 |---|---:|---:|---:|---:|
@@ -95,6 +96,7 @@ RTX 3090, one sequence, in tokens per second; Q4_K_M files but for gpt-oss's, MX
 | Qwen2.5 7B Instruct | 5830 | 5263 | 152.6 | 165.7 |
 | Qwen3 8B | 5296 | 4745 | 142.0 | 149.2 |
 | Qwen3 30B A3B | 4697 | 5036 | 213.1 | 233.1 |
+| Qwen3.6 35B A3B | 3516 | 3686 | 168.0 | 194.2 |
 | Gemma 3 4B it | 9795 | 8436 | 203.0 | 226.8 |
 | Gemma 3 12B it | 3463 | 2749 | 89.0 | 97.6 |
 | Gemma 4 26B A4B it | 4823 | 4919 | 158.2 | 190.6 |
@@ -131,12 +133,13 @@ Quality against llama.cpp on the same file: wikitext-2, chunks of 512 tokens wit
 | Qwen2.5 7B Instruct | 7.4307 | 7.3983 | 0.0034 | 96.7% |
 | Qwen3 8B | 11.0321 | 11.0142 | 0.0031 | 97.3% |
 | Qwen3 30B A3B | 9.4920 | 9.5012 | 0.0043 | 97.6% |
+| Qwen3.6 35B A3B | 6.6609 | 6.6521 | 0.0069 | 96.7% |
 | Gemma 3 4B it | 17.9125 | 17.8991 | 0.0093 | 96.2% |
 | Gemma 3 12B it | 10.1972 | 10.1917 | 0.0054 | 97.3% |
 | Phi-4-mini Instruct | 11.4617 | 11.4474 | 0.0032 | 97.2% |
 | gpt-oss 20B | 384.8582 | 390.5311 | 0.0247 | 91.3% |
 
-leat's decode path, which runs the second half of each chunk one token at a time, scores 0.0012 for Llama 3.1 8B and 0.0031 for Qwen3 30B A3B on 2 chunks. For scale, ignoring Llama 3.1's RoPE frequency factors, a subtle bug, raises the KL from 0.0010 to 0.0026 on the first 5 chunks with the reference ops; Qwen3 8B scores 0.0025 against llama.cpp on the reference ops alone.
+leat's decode path, which runs the second half of each chunk one token at a time, scores 0.0012 for Llama 3.1 8B, 0.0031 for Qwen3 30B A3B and 0.0038 for Qwen3.6 35B A3B on 2 chunks. For scale, ignoring Llama 3.1's RoPE frequency factors, a subtle bug, raises the KL from 0.0010 to 0.0026 on the first 5 chunks with the reference ops; Qwen3 8B scores 0.0025 against llama.cpp on the reference ops alone.
 
 gpt-oss is trained for its harmony chat format and models raw text poorly: both engines score wikitext near 385, and there its KL, 0.025, is the highest of these models. Comparing it on its chat format, as Gemma 4 is below, is still to do.
 
