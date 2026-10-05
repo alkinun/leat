@@ -185,12 +185,14 @@ def replies_with(engine, monkeypatch):
     return reply_with
 
 
-# as Llama 3, Qwen3 and Gemma 4 call tools; Qwen3's text before its call is the content
+# as Llama 3, Qwen3, Gemma 4 and Qwen3.5 call tools; the text before a call is the content
 CALLS = [
     (' {"name": "weather", "parameters": {"city": "Paris"}}', None),
     ('Checking.\n<tool_call>\n{"name": "weather", "arguments": {"city": "Paris"}}\n</tool_call>',
      "Checking."),
     ('<|tool_call>call:weather{city:<|"|>Paris<|"|>}<tool_call|>', None),
+    ("Checking.\n\n<tool_call>\n<function=weather>\n<parameter=city>\nParis\n</parameter>\n"
+     "</function>\n</tool_call>", "Checking."),
 ]  # fmt: skip
 
 

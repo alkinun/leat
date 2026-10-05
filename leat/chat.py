@@ -4,6 +4,7 @@ split into their reasoning, text and tool calls, in each supported model's synta
 import contextlib
 import json
 import re
+from collections.abc import Container
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -137,6 +138,9 @@ _CALLS = re.compile(
     r"<tool_call>(.*?)</tool_call>|<\|tool_call>call:([^{]+)(\{.*?\})<tool_call\|>", re.S
 )
 _QUOTE = '<|"|>'  # Gemma 4's string quotes
+# Qwen3.5's calls inside <tool_call>: a function, and a parameter on each value's lines
+_FUNCTION = re.compile(r"\s*<function=([^>\s]+)>\n?(.*?)</function>\s*", re.S)
+_PARAMETER = re.compile(r"<parameter=([^>\s]+)>\n?(.*?)\n?</parameter>\s*", re.S)
 
 
 def parse_tool_calls(reply: str, tools: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
@@ -144,15 +148,19 @@ def parse_tool_calls(reply: str, tools: list[dict[str, Any]]) -> tuple[str, list
     "arguments": {...}}; or the whole reply and no calls, if one is malformed or names no tool.
 
     Llama 3 calls a tool by replying with nothing but {"name": ..., "parameters": {...}}, Qwen
-    with <tool_call>{"name": ..., "arguments": {...}}</tool_call> after any text, and Gemma 4
-    with <|tool_call>call:name{key:value,...}<tool_call|>.
+    with <tool_call>{"name": ..., "arguments": {...}}</tool_call> after any text, Qwen3.5 with
+    <tool_call><function=name><parameter=key>value</parameter>...</function></tool_call>, values
+    as text where the tool takes a string and else as JSON, and Gemma 4 with
+    <|tool_call>call:name{key:value,...}<tool_call|>.
     """
-    names = {tool.get("function", {}).get("name") for tool in tools}
+    functions = {f.get("name"): f for tool in tools if (f := tool.get("function"))}
     if not (blocks := list(_CALLS.finditer(reply))):
-        call = _json_call(reply, names)
+        call = _json_call(reply, functions)
         return ("", [call]) if call else (reply, [])
     calls = [
-        _json_call(b[1], names) if b[1] is not None else _gemma_call(b[2], b[3], names)
+        (_json_call(b[1], functions) or _xml_call(b[1], functions))
+        if b[1] is not None
+        else _gemma_call(b[2], b[3], functions)
         for b in blocks
     ]
     if any(call is None for call in calls):
@@ -171,7 +179,7 @@ def tool_call_start(text: str) -> int:
     return len(text[: len(text) - max(partial, default=0)].rstrip())
 
 
-def _json_call(text: str, names: set[str]) -> dict[str, Any] | None:
+def _json_call(text: str, names: Container[str]) -> dict[str, Any] | None:
     try:
         call = json.loads(text)
     except json.JSONDecodeError:
@@ -182,7 +190,22 @@ def _json_call(text: str, names: set[str]) -> dict[str, Any] | None:
     return {"name": call["name"], "arguments": arguments} if isinstance(arguments, dict) else None
 
 
-def _gemma_call(name: str, text: str, names: set[str]) -> dict[str, Any] | None:
+def _xml_call(text: str, functions: dict[str, Any]) -> dict[str, Any] | None:
+    if not (match := _FUNCTION.fullmatch(text)) or match[1] not in functions:
+        return None
+    if _PARAMETER.sub("", match[2]).strip():  # anything but parameters
+        return None
+    properties = functions[match[1]].get("parameters", {}).get("properties", {})
+    arguments: dict[str, Any] = {}
+    for key, value in _PARAMETER.findall(match[2]):
+        arguments[key] = value
+        if properties.get(key, {}).get("type") != "string":
+            with contextlib.suppress(ValueError):
+                arguments[key] = json.loads(value)
+    return {"name": match[1], "arguments": arguments}
+
+
+def _gemma_call(name: str, text: str, names: Container[str]) -> dict[str, Any] | None:
     try:
         arguments, end = _gemma_value(text, 0)
     except (ValueError, IndexError):

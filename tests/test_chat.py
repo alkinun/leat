@@ -74,6 +74,8 @@ PARIS = {"name": "weather", "arguments": {"city": "Paris"}}
         ('\n{"name": "weather", "arguments": {"city": "Paris"}}\n', ""),
         ('Let me see.\n<tool_call>\n{"name": "weather", "arguments": {"city": "Paris"}}\n'
          "</tool_call>", "Let me see."),  # Qwen3
+        ("<tool_call>\n<function=weather>\n<parameter=city>\nParis\n</parameter>\n</function>\n"
+         "</tool_call>", ""),  # Qwen3.5
         ('<|tool_call>call:weather{city:<|"|>Paris<|"|>}<tool_call|>', ""),  # Gemma 4
     ],
 )  # fmt: skip
@@ -94,6 +96,24 @@ def test_tool_call_arguments():
     )
 
 
+def test_tool_call_parameters():
+    # Qwen3.5's syntax: values of several lines, as text where the tool takes a string and else
+    # as JSON, or as text where that fails; several calls in a row
+    properties = {"q": {"type": "string"}, "n": {"type": "integer"}, "tags": {"type": "array"}}
+    tools = [{"type": "function", "function": {"name": "search", "parameters": {
+        "type": "object", "properties": properties}}}]  # fmt: skip
+    call = (
+        "<tool_call>\n<function=search>\n<parameter=q>\n12\nmore lines\n</parameter>\n"
+        '<parameter=n>\n5\n</parameter>\n<parameter=tags>\n["a"]\n</parameter>\n'
+        "<parameter=other>\nnot json\n</parameter>\n</function>\n</tool_call>"
+    )
+    arguments = {"q": "12\nmore lines", "n": 5, "tags": ["a"], "other": "not json"}
+    assert parse_tool_calls("Searching.\n\n" + call + "\n" + call, tools) == (
+        "Searching.",
+        [{"name": "search", "arguments": arguments}] * 2,
+    )
+
+
 @pytest.mark.parametrize(
     "reply",
     [
@@ -102,6 +122,7 @@ def test_tool_call_arguments():
         '{"name": "weather"}',
         '<tool_call>{"name": "weather", "arguments": {}</tool_call>',
         "<|tool_call>call:news{}<tool_call|>",
+        "<tool_call>\n<function=weather>\nParis\n</function>\n</tool_call>",
         "<|tool_call>call:weather{city:Paris}<tool_call|>",
     ],
 )
