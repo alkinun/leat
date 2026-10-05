@@ -80,6 +80,8 @@ Models: `leat serve` takes GGUF files and directories of them, and holds one mod
 
 Chat app: a single page with no dependencies. It loads and switches models, keeps separate chats in the browser's local storage, and streams replies, their reasoning folded away, until done or stopped; one system prompt and temperature apply to every chat.
 
+Tools: given a tools server in its settings, the chat app offers the model its tools and runs the calls it makes there, up to 8 replies a turn. [examples/tools.py](examples/tools.py) is one, of web search through a SearXNG on the machine and page reading; search results and pages take context, so serve with `--max-context 16384` or more.
+
 ## Measurements
 
 RTX 3090, one sequence, in tokens per second; Q4_K_M files but for gpt-oss's, MXFP4. llama.cpp is b11372 with CUDA. leat's numbers include sampling on the device and reading the token back: after the prompt for pp512, after every token for tg128.
