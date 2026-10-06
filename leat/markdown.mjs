@@ -25,6 +25,7 @@ export function markdown(element, text) {
 
 export function parse(text) {
   closers.clear();
+  brackets.clear();
   return blocks(text.split("\n"));
 }
 
@@ -277,31 +278,45 @@ function emphasis(text, i) {
   return null;
 }
 
-// where the run of n c's that closes the span from j starts, past the spans within it: searched
-// once for each text, j, c and n, as the spans that never close would each search the rest of
-// the text again for each before them
+// where the run of n c's that closes the span from j starts, past the spans within it, or -1:
+// searched once for each text, j, c and n, as the spans that never close would each search the
+// rest of the text again for each before them, and on a stack of searches rather than by
+// recursion, as such spans may nest thousands deep
 function closer(text, j, c, n) {
   const memo = closers.get(text) ?? closers.set(text, new Map()).get(text);
-  const key = `${c}${n}:${j}`;
-  if (!memo.has(key)) memo.set(key, searchCloser(text, j, c, n));
-  return memo.get(key);
+  if (memo.has(`${c}${n}:${j}`)) return memo.get(`${c}${n}:${j}`);
+  const searches = [{ from: j, j, n, run: 0 }];
+  for (;;) {
+    const s = searches.at(-1), found = search(text, s, c, memo);
+    if (found === undefined) { // it waits on the span that opens at s.j, searched first
+      searches.push({ from: s.j + s.run, j: s.j + s.run, n: Math.min(s.run, 3), run: 0 });
+      continue;
+    }
+    memo.set(`${c}${s.n}:${s.from}`, found);
+    searches.pop();
+    if (!searches.length) return found;
+    const outer = searches.at(-1); // past the span within it, or its opening run if none closes
+    outer.j = found < 0 ? outer.j + outer.run : found + Math.min(outer.run, 3);
+  }
 }
 
 const closers = new Map(); // closer()'s answers by text, of the text parse() last took
 
-function searchCloser(text, j, c, n) {
-  const from = j;
-  while (j < text.length) {
-    const end = atom(text, j);
+// advances a search of closer()'s to the close of its span, or -1 where none closes it, past the
+// spans within whose closes are known; undefined where it must wait on one that opens at s.j
+function search(text, s, c, memo) {
+  while (s.j < text.length) {
+    const end = atom(text, s.j);
     if (end >= 0) {
-      j = end;
-    } else if (text[j] !== c) {
-      j++;
+      s.j = end;
+    } else if (text[s.j] !== c) {
+      s.j++;
     } else {
-      const run = runAt(text, j), inner = Math.min(run, 3);
-      if (j > from && run >= n && closes(text, j, run)) return j;
-      const end = opens(text, j, run) ? closer(text, j + run, c, inner) : -1;
-      j = end < 0 ? j + run : end + inner;
+      const run = (s.run = runAt(text, s.j)), inner = Math.min(run, 3);
+      if (s.j > s.from && run >= s.n && closes(text, s.j, run)) return s.j;
+      if (opens(text, s.j, run) && !memo.has(`${c}${inner}:${s.j + run}`)) return undefined;
+      const end = opens(text, s.j, run) ? memo.get(`${c}${inner}:${s.j + run}`) : -1;
+      s.j = end < 0 ? s.j + run : end + inner;
     }
   }
   return -1;
@@ -310,8 +325,10 @@ function searchCloser(text, j, c, n) {
 // [text](url "title"), and ![alt](url) as a link to the image: a link to anything but the web or
 // mail stays text, so that none runs script
 function link(text, i) {
-  const open = text[i] === "!" ? i + 1 : i, close = bracket(text, open);
-  if (text[open] !== "[" || close < 0) return null;
+  const open = text[i] === "!" ? i + 1 : i;
+  if (text[open] !== "[") return null;
+  const close = bracket(text, open);
+  if (close < 0) return null;
   const destination = DESTINATION.exec(text.slice(close + 1));
   const href = destination?.[1] ?? destination?.[2];
   if (!SAFE.test(href ?? "")) return null;
@@ -319,20 +336,31 @@ function link(text, i) {
   return [["a", { href }, ...inline(text.slice(open + 1, close))], end];
 }
 
-// where the ] that closes the [ at i is, past the escapes, code spans and math within
+// where the ] that closes the [ at i is, past the escapes, code spans and math within, or -1:
+// each [ a search passes is matched too, and kept, so that no text is searched twice
 function bracket(text, i) {
-  for (let j = i, depth = 0; j < text.length; ) {
+  const memo = brackets.get(text) ?? brackets.set(text, new Map()).get(text);
+  if (memo.has(i)) return memo.get(i);
+  const open = [];
+  for (let j = i; j < text.length; ) {
     const end = atom(text, j);
     if (end >= 0) {
       j = end;
-    } else {
-      depth += { "[": 1, "]": -1 }[text[j]] ?? 0;
-      if (depth === 0) return j;
-      j++;
+      continue;
     }
+    if (text[j] === "[") {
+      open.push(j);
+    } else if (text[j] === "]" && open.length) {
+      memo.set(open.pop(), j);
+      if (!open.length) return j;
+    }
+    j++;
   }
+  for (const k of open) memo.set(k, -1);
   return -1;
 }
+
+const brackets = new Map(); // bracket()'s answers by text, of the text parse() last took
 
 // <https://example.com>
 function autolink(text, i) {
