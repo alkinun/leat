@@ -41,7 +41,8 @@ class _Reader:
     def string(self) -> str:
         n = self.scalar("Q")
         self.pos += n
-        return str(self.buf[self.pos - n : self.pos], "utf-8")
+        # as bytes in llama.cpp: a token may not be UTF-8 of its own
+        return str(self.buf[self.pos - n : self.pos], "utf-8", errors="replace")
 
     def value(self, vtype: int) -> Any:
         if vtype == _STRING:
@@ -121,6 +122,8 @@ def _parse(buf: memoryview) -> tuple[dict[str, Any], dict[str, TensorInfo]]:
         infos.append((name, dims, type_id, offset))
 
     alignment = metadata.get("general.alignment", 32)
+    if alignment <= 0 or alignment & (alignment - 1):
+        raise ValueError(f"alignment {alignment} is not a power of 2")
     data_start = -(-r.pos // alignment) * alignment
     tensors = {}
     for name, dims, type_id, offset in infos:
@@ -129,9 +132,9 @@ def _parse(buf: memoryview) -> tuple[dict[str, Any], dict[str, TensorInfo]]:
         except ValueError:
             raise ValueError(f"tensor {name!r} has unknown ggml type {type_id}") from None
         elements, block_bytes = BLOCK[ggml_type]
-        if (numel := math.prod(dims)) % elements:
-            raise ValueError(f"tensor {name!r} has {numel} elements, not a multiple of {elements}")
-        nbytes = numel // elements * block_bytes
+        if dims and dims[0] % elements:  # blocks lie along rows
+            raise ValueError(f"tensor {name!r} has rows of {dims[0]}, not a multiple of {elements}")
+        nbytes = math.prod(dims) // elements * block_bytes
         shape = tuple(reversed(dims))
         tensors[name] = TensorInfo(name, ggml_type, shape, data_start + offset, nbytes)
     return metadata, tensors

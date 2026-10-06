@@ -22,6 +22,7 @@ def tiny_gguf(tmp_path):
         "q6_k": random_blocks(GGMLType.Q6_K, 4, rng).reshape(2, 2 * 210),
     }
     w = gguf.GGUFWriter(path, arch="llama")
+    w.add_custom_alignment(32)
     w.add_string("general.name", "tiny")
     w.add_uint32("llama.block_count", 2)
     w.add_float32("llama.rope.freq_base", 500000.0)
@@ -101,7 +102,16 @@ def string(s: str) -> bytes:
     return struct.pack("<Q", len(s)) + s.encode()
 
 
-# a field to overwrite, found `skip` bytes past the first `after`
+def patched(tiny_gguf, tmp_path, after: bytes, skip: int, value: bytes) -> GGUF:
+    # the tiny GGUF with a field overwritten, `skip` bytes past the first `after`
+    data = bytearray(tiny_gguf[0].read_bytes())
+    at = data.index(after) + len(after) + skip
+    data[at : at + len(value)] = value
+    (path := tmp_path / "patched.gguf").write_bytes(data)
+    return GGUF.open(path)
+
+
+# fields patched to what no GGUF reader takes
 @pytest.mark.parametrize(
     "after, skip, value, error",
     [
@@ -109,13 +119,24 @@ def string(s: str) -> bytes:
         (string("general.name"), 0, struct.pack("<I", 13), "unknown GGUF metadata value type 13"),
         # a tensor's name, then its dimensions' count and each one, then its type
         (string("f32"), 4 + 2 * 8, struct.pack("<I", 99), "tensor 'f32' has unknown ggml type 99"),
-        (string("q8_0"), 4, struct.pack("<Q", 63), "'q8_0' has 252 elements, not a multiple of 32"),
+        (string("q8_0"), 4, struct.pack("<Q", 63), "'q8_0' has rows of 63, not a multiple of 32"),
+        # blocks lie along rows, though a tensor's elements would fill them
+        (string("q8_0"), 4, struct.pack("<QQ", 16, 16), "'q8_0' has rows of 16, not a multiple"),
+        (string("general.alignment"), 4, struct.pack("<I", 0), "alignment 0 is not a power of 2"),
+        (string("general.alignment"), 4, struct.pack("<I", 48), "alignment 48 is not a power"),
     ],
 )
 def test_malformed(tiny_gguf, tmp_path, after, skip, value, error):
-    data = bytearray(tiny_gguf[0].read_bytes())
-    at = data.index(after) + len(after) + skip
-    data[at : at + len(value)] = value
-    (path := tmp_path / "bad.gguf").write_bytes(data)
     with pytest.raises(ValueError, match=error):
-        GGUF.open(path)
+        patched(tiny_gguf, tmp_path, after, skip, value)
+
+
+def test_opens_what_it_cannot_decode(tiny_gguf, tmp_path):
+    # a type leat does not decode, as Q8_1, opens, failing only where decoded; a string that is
+    # not UTF-8, as a token may be, reads with replacement characters
+    f = patched(tiny_gguf, tmp_path, string("q8_0"), 4 + 2 * 8, struct.pack("<I", 9))
+    assert f.tensors["q8_0"].type == GGMLType.Q8_1
+    with pytest.raises(NotImplementedError, match="Q8_1"):
+        f.load(names=["q8_0"])["q8_0"].dequant()
+    f = patched(tiny_gguf, tmp_path, string("general.name"), 4 + 8, b"ti\xffy")
+    assert f.metadata["general.name"] == "ti\ufffdy"

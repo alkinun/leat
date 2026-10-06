@@ -19,11 +19,13 @@ class GGMLType(IntEnum):
     Q5_0 = 6
     Q5_1 = 7
     Q8_0 = 8
+    Q8_1 = 9
     Q2_K = 10
     Q3_K = 11
     Q4_K = 12
     Q5_K = 13
     Q6_K = 14
+    Q8_K = 15
     IQ2_XXS = 16
     IQ2_XS = 17
     IQ3_XXS = 18
@@ -39,6 +41,8 @@ class GGMLType(IntEnum):
     F64 = 28
     IQ1_M = 29
     BF16 = 30
+    TQ1_0 = 34
+    TQ2_0 = 35
     MXFP4 = 39
 
 
@@ -53,6 +57,8 @@ BLOCK = {
     GGMLType.IQ2_XXS: (256, 66), GGMLType.IQ2_XS: (256, 74), GGMLType.IQ3_XXS: (256, 98),
     GGMLType.IQ1_S: (256, 50), GGMLType.IQ3_S: (256, 110), GGMLType.IQ2_S: (256, 82),
     GGMLType.IQ4_XS: (256, 136), GGMLType.IQ1_M: (256, 56),
+    GGMLType.Q8_1: (32, 36), GGMLType.Q8_K: (256, 292), GGMLType.TQ1_0: (256, 54),
+    GGMLType.TQ2_0: (256, 66),
 }  # fmt: skip
 
 NATIVE: dict[GGMLType, DType] = {
