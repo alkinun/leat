@@ -38,7 +38,18 @@ def on_nvidia(t: Tensor) -> bool:
 def on_gpu(t: Tensor) -> bool:
     # an NVIDIA GPU, or an AMD one of waves of 32 that tinygrad renders C for: RDNA 3 and 4, as
     # Strix Halo's
-    return isinstance(t.device, str) and (on_nvidia(t) or _rdna(t.device.split(":")[0]))
+    return isinstance(t.device, str) and (on_nvidia(t) or _rdna(t.device.split(":")[0]) > 0)
+
+
+def on_rdna3(t: Tensor) -> bool:
+    # RDNA 3 or 3.5, as Strix Halo's: the GPUs whose WMMA takes the layout matmul's and
+    # FlashAttention's kernels give it, which RDNA 4 changed
+    return isinstance(t.device, str) and _rdna(t.device.split(":")[0]) == 11
+
+
+def on_matrix_cores(t: Tensor) -> bool:
+    # a GPU whose matrix cores the tensor-core kernels take: NVIDIA's, or RDNA 3's
+    return on_nvidia(t) or on_rdna3(t)
 
 
 def one_sequence(x: Tensor) -> bool:
@@ -47,13 +58,16 @@ def one_sequence(x: Tensor) -> bool:
 
 
 @functools.cache
-def _rdna(device: str) -> bool:
+def _rdna(device: str) -> int:
+    # the RDNA generation's major gfx version, 11 or 12, of an AMD GPU tinygrad renders C for;
+    # else 0
     if not device.endswith("AMD"):
-        return False
+        return 0
     from tinygrad.renderer.cstyle import HIPRenderer
 
     dev: Any = Device[device]
-    return isinstance(dev.renderer, HIPRenderer) and getattr(dev, "target", (0,))[0] in (11, 12)
+    major = getattr(dev, "target", (0,))[0]
+    return major if isinstance(dev.renderer, HIPRenderer) and major in (11, 12) else 0
 
 
 def either(cuda: str, amd: str) -> str:
@@ -71,9 +85,11 @@ def either(cuda: str, amd: str) -> str:
 
 @functools.cache
 def compute_units(device: str) -> int:
-    # the GPU's SMs: as CUDA counts them, or those of the TPCs each GPC has enabled; the 3090's
-    # 82 where the backend does not say
+    # the GPU's SMs: as CUDA counts them, or those of the TPCs each GPC has enabled; an AMD GPU's
+    # CUs; the 3090's 82 where the backend does not say
     dev: Any = Device[device]
+    if hasattr(dev, "cu_cnt"):
+        return dev.cu_cnt
     if hasattr(dev, "cu_device"):
         import ctypes
 

@@ -21,7 +21,7 @@ from leat.kernels.common import (
     lane_range,
     load_vector,
     on_gpu,
-    on_nvidia,
+    on_matrix_cores,
     one_sequence,
     popcount,
     register,
@@ -292,7 +292,8 @@ def mixture(
     # kernels do not fit, take the matrix-vector kernels
     few = int(x.max_shape[1]) <= MATVEC_TOKENS
     _, cols, rows = down.shape  # (experts, dim, hidden)
-    fit = on_nvidia(x) and matmul_fits(gate.type, rows, cols) and matmul_fits(down.type, cols, rows)
+    fits = matmul_fits(gate.type, rows, cols) and matmul_fits(down.type, cols, rows)
+    fit = on_matrix_cores(x) and fits
     flat = None if biases is None else tuple(b.float().flatten().contiguous() for b in biases)
     if few or not fit:
         args = (used, norm, kind, scales, residual, flat, live)

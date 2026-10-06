@@ -4,7 +4,7 @@ A minimal, fast LLM inference engine built on [tinygrad](https://github.com/tiny
 
 leat runs GGUF models with their weights kept in the quantized storage format. The goal is single-stream decode limited by memory bandwidth, not by the engine. It was developed on an NVIDIA RTX 3090 and is moving to AMD's Strix Halo.
 
-> Status: on NVIDIA, hand-written kernels decode every model below faster than llama.cpp, and process prompts at 0.79 to 1.07x its speed. On AMD's RDNA GPUs the decode kernels run, so far tested on tinygrad's emulated GPU only, and prompts take the reference ops. `leat serve` serves the OpenAI chat completions API to several clients at once, decoding their replies in batched steps that read each weight once for all of them. Every kernel is tested against an independent NumPy reference, and so are the plain tinygrad ops they replace, which run on any device; `LEAT_KERNELS=ref` runs everything that way.
+> Status: on NVIDIA, hand-written kernels decode every model below faster than llama.cpp, and process prompts at 0.79 to 1.07x its speed. On AMD's RDNA GPUs the decode kernels run, and on RDNA 3, as Strix Halo's, the int8 matrix kernels for prompts too, on its WMMA matrix cores, while attention over a prompt takes the reference ops: so far tested on tinygrad's emulated GPU only. `leat serve` serves the OpenAI chat completions API to several clients at once, decoding their replies in batched steps that read each weight once for all of them. Every kernel is tested against an independent NumPy reference, and so are the plain tinygrad ops they replace, which run on any device; `LEAT_KERNELS=ref` runs everything that way.
 
 ## Quickstart
 
@@ -64,12 +64,12 @@ Storage types, and the kernels that take them on the GPU; the reference ops take
 
 | | up to 8 tokens, matrix-vector | more tokens, int8 tensor cores |
 |---|---|---|
-| Q4_K, Q5_K, Q6_K, Q8_0, Q5_0 | NVIDIA, RDNA | NVIDIA |
-| Q4_0, IQ4_NL, IQ4_XS, MXFP4 | NVIDIA, RDNA | NVIDIA |
+| Q4_K, Q5_K, Q6_K, Q8_0, Q5_0 | NVIDIA, RDNA | NVIDIA, RDNA 3 |
+| Q4_0, IQ4_NL, IQ4_XS, MXFP4 | NVIDIA, RDNA | NVIDIA, RDNA 3 |
 | Q4_1, Q5_1 | NVIDIA, RDNA | |
 | Q2_K, Q3_K, F32, F16, BF16 | | |
 
-Devices: any tinygrad backend runs the reference ops. NVIDIA GPUs (`DEV=NV` or `CUDA`) run every kernel; AMD's RDNA 3 and 4 GPUs (`DEV=AMD`), as Strix Halo's, run the warp-level ones: matrix-vector products, norms, quantization, RoPE, decode attention, the mixtures' routing and their few-token path, Gated DeltaNet's convolution and recurrence, and sampling: every kernel of a decode step, batched or not. Prompts there take the reference ops for now, but for Gated DeltaNet's.
+Devices: any tinygrad backend runs the reference ops. NVIDIA GPUs (`DEV=NV` or `CUDA`) run every kernel; AMD's RDNA 3 and 4 GPUs (`DEV=AMD`), as Strix Halo's, run the warp-level ones: matrix-vector products, norms, quantization, RoPE, decode attention, the mixtures' routing and their few-token path, Gated DeltaNet's convolution and recurrence, and sampling: every kernel of a decode step, batched or not. RDNA 3's also run the int8 matrix products on WMMA, but FlashAttention not yet; prompts on RDNA 4 take the reference ops for now, but for Gated DeltaNet's.
 
 Server: `/v1/chat/completions`, whole or streamed, `/v1/models` and `/v1/models/load`, and a chat app at `/`; a POST from another site's page in a browser is refused. Replies split into `reasoning_content`, as Qwen3's `<think>` blocks, Gemma 4's thought channel and gpt-oss's analysis channel, text, and tool calls in Llama 3's, Qwen's, Qwen3.5's, Gemma 4's and gpt-oss's syntax. Requests take stop strings, seeds and `chat_template_kwargs` such as `{"enable_thinking": false}`. Sampling, on the device, is greedy or by temperature, with `top_k`, `top_p` and `min_p`, which the kernels cut within a hundredth of a nat, and `presence_penalty` on the tokens a reply has generated; requests for other penalties, `logprobs` or several choices are refused. Each reply ends with `timings`, as llama.cpp's server sends them: the prompt's tokens past those cached and the reply's, each timed, from when the completion gets a slot, and their rates.
 
@@ -165,13 +165,13 @@ The default run is hermetic and needs only a CPU: every architecture's tiny rand
 DEV=NV LEAT_MODEL=model.gguf LLAMA_CPP=llama.cpp/build/bin WIKITEXT=wiki.test.raw uv run pytest
 ```
 
-Without an AMD GPU, the warp-level kernels run on tinygrad's emulated RDNA 3 GPU, as [tests/hip.py](tests/hip.py) sets up: its HIP C compiled by the system's clang, and tinygrad's source tree, of the commit pyproject.toml pins, on PYTHONPATH for the emulator. The emulator is slow: the GPU tests, the kernels' and every tiny model through them, take about 10 minutes on 8 cores.
+Without an AMD GPU, the kernels run on tinygrad's emulated RDNA 3 GPU, as [tests/hip.py](tests/hip.py) sets up: its HIP C compiled by the system's clang, and tinygrad's source tree, of the commit pyproject.toml pins, on PYTHONPATH for the emulator. The emulator is slow: the GPU tests, the kernels' and every tiny model through them, take about 10 minutes on 8 cores.
 
 ```bash
 PYTHONPATH=path/to/tinygrad DEV=MOCK+AMD uv run pytest -m gpu -n auto
 ```
 
-CI runs all but the real-model tests on every push: lint and types, the CPU suite on Python 3.12 and 3.14, and the GPU tests on the emulator. It fails if together they run less than 80% of leat; most of what they leave is NVIDIA's alone, the tensor cores' kernels, which the GPU run above covers.
+CI runs all but the real-model tests on every push: lint and types, the CPU suite on Python 3.12 and 3.14, and the GPU tests on the emulator. It fails if together they run less than 80% of leat; most of what they leave is NVIDIA's alone, the tensor cores' mma.sync, which the GPU run above covers.
 
 ## License
 

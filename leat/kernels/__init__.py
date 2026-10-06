@@ -1,9 +1,9 @@
 """Hand-written kernels, in tinygrad's UOp DSL, rendered as CUDA C or HIP C.
 
 The warp-level kernels, which carry decoding, run on NVIDIA GPUs (DEV=NV or CUDA) and on AMD's RDNA
-GPUs (DEV=AMD), as Strix Halo's; those on tensor cores, matmul's and FlashAttention's, on NVIDIA's
-alone. Each family the model's ops dispatch to has a `supports_*` check beside the op itself:
-leat.ops chooses between them and the reference ops.
+GPUs (DEV=AMD), as Strix Halo's; matmul's on tensor cores, on NVIDIA's mma.sync and RDNA 3's WMMA,
+and FlashAttention on NVIDIA's alone. Each family the model's ops dispatch to has a `supports_*`
+check beside the op itself: leat.ops chooses between them and the reference ops.
 """
 
 from leat.kernels.argmax import argmax, supports_argmax

@@ -12,11 +12,13 @@ from leat.kernels.cutoff import BINS, RANGE
 from leat.quant import BLOCK, GGMLType, QTensor
 from tests.helpers import cuts, glu, random_blocks
 
-# the warp-level kernels run on NVIDIA's GPUs and AMD's RDNA, tinygrad's emulated one too; those on
-# tensor cores on NVIDIA's alone
+# the warp-level kernels run on NVIDIA's GPUs and AMD's RDNA, tinygrad's emulated one too; matmul's
+# on tensor cores on NVIDIA's and RDNA 3's, FlashAttention on NVIDIA's alone
 pytestmark = [pytest.mark.gpu]
 NVIDIA = os.environ.get("DEV", "").split(":")[0] in ("NV", "CUDA")
-nvidia = pytest.mark.skipif(not NVIDIA, reason="tensor-core kernels need DEV=NV or CUDA")
+MATRIX_CORES = NVIDIA or os.environ.get("DEV", "").split(":")[0] in ("AMD", "MOCK+AMD")
+nvidia = pytest.mark.skipif(not NVIDIA, reason="FlashAttention needs DEV=NV or CUDA")
+matrix_cores = pytest.mark.skipif(not MATRIX_CORES, reason="tensor-core kernels need a GPU of them")
 Q4_K, Q5_K, Q6_K, Q5_0, Q8_0, MXFP4 = (
     GGMLType[t] for t in ("Q4_K", "Q5_K", "Q6_K", "Q5_0", "Q8_0", "MXFP4")
 )
@@ -162,7 +164,7 @@ SHORT = [5, UOp.variable("tokens", 1, 16).bind(11)]
 @pytest.mark.parametrize("tokens", [64, 100, UOp.variable("tokens", 1, 128).bind(70), *SHORT])
 # tiles of 128 and 256 rows, and of 96, gpt-oss's 2880 rows, which 128 do not divide
 @pytest.mark.parametrize("shape", [(256, 2048), (4096, 512), (2880, 512)])
-@nvidia
+@matrix_cores
 def test_matmul(ggml_type, tokens, shape):
     rng = np.random.default_rng(8)
     w, blocks = random_matrix(ggml_type, *shape, rng)
@@ -181,14 +183,14 @@ def test_matmul(ggml_type, tokens, shape):
 @pytest.mark.parametrize("ggml_type", [Q5_0, Q8_0, MXFP4, *TILED[:2]])
 @pytest.mark.parametrize("tokens", [64, UOp.variable("tokens", 1, 128).bind(70), SHORT[1]])
 @pytest.mark.parametrize("shape", [(256, 704), (128, 2112), (4096, 512)])
-@nvidia
+@matrix_cores
 def test_matmul_blocks_of_32(ggml_type, tokens, shape):
     test_matmul(ggml_type, tokens, shape)
 
 
 @pytest.mark.parametrize("heights", [(256, 128, 128), (4096, 1024, 1024)])  # tiles of 128, 256
 @pytest.mark.parametrize("tokens", [70, 5])
-@nvidia
+@matrix_cores
 def test_matmul_stacked(heights, tokens):
     # consecutive matrices of one type share a kernel: here the first two, as q and k
     rng = np.random.default_rng(10)
@@ -387,8 +389,8 @@ def test_add_normed(monkeypatch, parts, normed, tokens):
 
 @pytest.mark.parametrize("tokens", [1, 80, 5])
 def test_norm_and_residual(tokens):
-    if tokens > MATVEC_TOKENS and not NVIDIA:
-        pytest.skip("many tokens take the tensor-core kernels, NVIDIA's alone")
+    if tokens > MATVEC_TOKENS and not MATRIX_CORES:
+        pytest.skip("many tokens take the tensor-core kernels")
     rng = np.random.default_rng(9)
     w, blocks = random_matrix(Q4_K, 256, 4096, rng)
     x = (rng.standard_normal((1, tokens, 4096)) * 3).astype(np.float32)
@@ -413,8 +415,8 @@ def test_norm_and_residual(tokens):
      (70, 1024, Q8_0, Q8_0, "oai")],
 )  # fmt: skip
 def test_feed_forward(tokens, hidden, gate_type, down_type, kind):
-    if tokens > MATVEC_TOKENS and not NVIDIA:
-        pytest.skip("many tokens take the tensor-core kernels, NVIDIA's alone")
+    if tokens > MATVEC_TOKENS and not MATRIX_CORES:
+        pytest.skip("many tokens take the tensor-core kernels")
     rng = np.random.default_rng(12)
     dim = 2048
     (gate, gate_blocks), (up, up_blocks) = (
