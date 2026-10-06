@@ -209,11 +209,28 @@ def _xml_call(text: str, functions: dict[str, Any]) -> dict[str, Any] | None:
         return None
     arguments: dict[str, Any] = {}
     for key, value in _PARAMETER.findall(match[2]):
-        arguments[key] = value
-        if _schema(functions[match[1]], "parameters", "properties", key, "type") != "string":
-            with contextlib.suppress(ValueError, RecursionError):
-                arguments[key] = json.loads(value)
+        kind = _schema(functions[match[1]], "parameters", "properties", key, "type")
+        types = {kind} if isinstance(kind, str) else set(kind) if isinstance(kind, list) else set()
+        arguments[key] = _typed(value, types)
     return {"name": match[1], "arguments": arguments}
+
+
+def _typed(text: str, types: set[str]) -> Any:
+    # a parameter's value as llama.cpp's Qwen3.5 parser reads it: as text where its schema takes
+    # strings alone, else as JSON, of one of its other types where it takes strings too; as text
+    # where that fails
+    if types == {"string"}:
+        return text
+    try:
+        value = json.loads(text)
+    except (ValueError, RecursionError):
+        return text
+    return text if "string" in types and not types & _JSON_TYPES[type(value)] else value
+
+
+# the JSON schema types a decoded value is of
+_JSON_TYPES = {type(None): {"null"}, bool: {"boolean"}, int: {"integer", "number"},
+               float: {"number"}, str: {"string"}, list: {"array"}, dict: {"object"}}  # fmt: skip
 
 
 def _schema(value: Any, *keys: str) -> Any:
@@ -234,26 +251,38 @@ def _gemma_call(name: str, text: str, names: Container[str]) -> dict[str, Any] |
 
 def _gemma_value(text: str, i: int) -> tuple[Any, int]:
     # the value at text[i:] in Gemma 4's call syntax, and where it ends: strings between quotes,
-    # objects of bare or quoted keys, lists, and JSON's numbers, true, false and null
+    # objects of bare or quoted keys, lists, and JSON's numbers, true, false and null, with
+    # whitespace about their parts, as llama.cpp's grammar takes
+    i = _blank(text, i)
     if text.startswith(_QUOTE, i):
         end = text.index(_QUOTE, i + len(_QUOTE))
         return text[i + len(_QUOTE) : end], end + len(_QUOTE)
     if text[i] in "{[":
-        close, items, keys, i = "}" if text[i] == "{" else "]", [], [], i + 1
+        close, items, keys, i = "}" if text[i] == "{" else "]", [], [], _blank(text, i + 1)
         while text[i] != close:
             if close == "}":
                 if text.startswith(_QUOTE, i):
                     key, i = _gemma_value(text, i)
                 else:
-                    key, i = text[i : text.index(":", i)], text.index(":", i)
+                    key, i = text[i : text.index(":", i)].rstrip(), text.index(":", i)
+                if text[i := _blank(text, i)] != ":":
+                    raise ValueError(f"no colon after key {key!r}")
                 keys.append(key)
-                i += 1  # the colon
+                i += 1
             value, i = _gemma_value(text, i)
             items.append(value)
-            i += text[i] == ","
+            i = _blank(text, i)
+            i = _blank(text, i + 1) if text[i] == "," else i
         return (dict(zip(keys, items, strict=True)) if close == "}" else items), i + 1
     end = min((j for c in ",}]" if (j := text.find(c, i)) >= 0), default=len(text))
     return json.loads(text[i:end]), end
+
+
+def _blank(text: str, i: int) -> int:
+    # past any whitespace at text[i:]
+    while i < len(text) and text[i].isspace():
+        i += 1
+    return i
 
 
 def _message(message: dict[str, Any]) -> dict[str, Any]:

@@ -96,6 +96,7 @@ PARIS = {"name": "weather", "arguments": {"city": "Paris"}}
         ("<tool_call>\n<function=weather>\n<parameter=city>\nParis\n</parameter>\n</function>\n"
          "</tool_call>", ""),  # Qwen3.5
         ('<|tool_call>call:weather{city:<|"|>Paris<|"|>}<tool_call|>', ""),  # Gemma 4
+        ('<|tool_call>call:weather{ city : <|"|>Paris<|"|> }<tool_call|>', ""),  # with spaces
     ],
 )  # fmt: skip
 def test_tool_calls(reply, text):
@@ -127,15 +128,30 @@ def test_tool_call_schema_as_written():
 def test_tool_call_parameters():
     # Qwen3.5's syntax: values of several lines, as text where the tool takes a string and else
     # as JSON, or as text where that fails; several calls in a row
-    properties = {"q": {"type": "string"}, "n": {"type": "integer"}, "tags": {"type": "array"}}
+    properties = {
+        "q": {"type": "string"},
+        "n": {"type": "integer"},
+        "tags": {"type": "array"},
+        "id": {"type": ["string", "null"]},
+        "k": {"type": ["integer", "string"]},
+    }
     tools = [{"type": "function", "function": {"name": "search", "parameters": {
         "type": "object", "properties": properties}}}]  # fmt: skip
     call = (
         "<tool_call>\n<function=search>\n<parameter=q>\n12\nmore lines\n</parameter>\n"
         '<parameter=n>\n5\n</parameter>\n<parameter=tags>\n["a"]\n</parameter>\n'
-        "<parameter=other>\nnot json\n</parameter>\n</function>\n</tool_call>"
+        "<parameter=other>\nnot json\n</parameter>\n<parameter=id>\n123\n</parameter>\n"
+        "<parameter=k>\n7\n</parameter>\n</function>\n</tool_call>"
     )
-    arguments = {"q": "12\nmore lines", "n": 5, "tags": ["a"], "other": "not json"}
+    # of several types, one of them string, JSON only of another: as llama.cpp's parser
+    arguments = {
+        "q": "12\nmore lines",
+        "n": 5,
+        "tags": ["a"],
+        "other": "not json",
+        "id": "123",
+        "k": 7,
+    }
     assert parse_tool_calls("Searching.\n\n" + call + "\n" + call, tools) == (
         "Searching.",
         [{"name": "search", "arguments": arguments}] * 2,
