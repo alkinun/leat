@@ -3,7 +3,7 @@ import pytest
 
 from leat.chat import ChatTemplate, Reply, parse_tool_calls, split_reply, tool_call_start
 from leat.gguf import GGUF
-from leat.tokenizer import Tokenizer
+from leat.tokenizer import USER_DEFINED, Tokenizer
 from tests.helpers import ids, tiny_metadata
 
 TEMPLATE = (
@@ -61,6 +61,25 @@ def test_openai_messages():
     assert c.render(messages) == "a\nb;Oslo;c;"
     with pytest.raises(ValueError, match="only text"):
         c.render([{"role": "user", "content": [{"type": "image_url", "image_url": {}}]}])
+
+
+def with_marker(marker: str) -> ChatTemplate:
+    # chat()'s template, of a vocab that holds a reasoning marker, user-defined as in those models
+    metadata = tiny_metadata(**{"tokenizer.chat_template": TEMPLATE})
+    metadata["tokenizer.ggml.tokens"] = [*metadata["tokenizer.ggml.tokens"], marker]
+    metadata["tokenizer.ggml.token_type"] = [*metadata["tokenizer.ggml.token_type"], USER_DEFINED]
+    return ChatTemplate(metadata, Tokenizer(metadata))
+
+
+def test_form():
+    # how replies mark their reasoning, by the vocab's markers or the template's, and whether a
+    # prompt opened a block of it
+    think = chat(TEMPLATE + "<think>")[0]
+    assert chat()[0].form is None and think.form == "think" and think.opens_thinking("a<think>\n")
+    assert with_marker("<|channel|>").form == "harmony"
+    gemma = with_marker("<|channel>")
+    assert gemma.form == "gemma4" and gemma.opens_thinking("<|turn>model\n<|channel>thought\n")
+    assert not gemma.opens_thinking("<|turn>model\n<|channel>thought\n<channel|>")
 
 
 WEATHER = [{"type": "function", "function": {"name": "weather"}}]
@@ -190,6 +209,9 @@ HARMONY_CALL = (
         ("Hi.", "think", False, Reply(content="Hi.")),
         ("<think>still", "think", False, Reply("still")),
         ("a <think>b", None, False, Reply(content="a <think>b")),
+        # Gemma 4's thought channel
+        ("<|channel>thought\nhmm<channel|>Hi.", "gemma4", False, Reply("hmm", "Hi.")),
+        ("Hi.", "gemma4", False, Reply(content="Hi.")),
         (HARMONY, "harmony", False, Reply("The user wants weather.", "It is sunny.")),
         (HARMONY_CALL, "harmony", False,
          Reply("Need a tool.", "", [{"name": "weather", "arguments": '{"city": "Paris"}'}])),
@@ -209,7 +231,12 @@ def test_split_reply_done():
 
 @pytest.mark.parametrize(
     "text, form",
-    [(HARMONY, "harmony"), ("<think>a b</think> c d", "think"), ("\n<think>a</think> b", "think")],
+    [
+        (HARMONY, "harmony"),
+        ("<think>a b</think> c d", "think"),
+        ("\n<think>a</think> b", "think"),
+        ("<|channel>thought\na b<channel|> c d", "gemma4"),
+    ],
 )
 def test_split_reply_streams(text, form):
     # every prefix splits into prefixes of the whole reply's parts: what a stream sent stays

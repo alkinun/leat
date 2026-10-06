@@ -306,6 +306,7 @@ def test_tool_call(client, replies_with, stream, reply, content):
     "form, reply",
     [("think", "<think>Sunny, I recall.</think>It is sunny."),
      ("think", "\n<think>Sunny, I recall.</think>It is sunny."),  # its newline not the text's
+     ("gemma4", "<|channel>thought\nSunny, I recall.<channel|>It is sunny."),
      ("harmony", "<|channel|>analysis<|message|>Sunny, I recall.<|end|><|start|>assistant"
                  "<|channel|>final<|message|>It is sunny.")],
 )  # fmt: skip

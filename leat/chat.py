@@ -37,15 +37,18 @@ class ChatTemplate:
         tokens = metadata["tokenizer.ggml.tokens"]
         self._bos = "" if tokenizer.bos_id is None else tokens[tokenizer.bos_id]
         self._eos = "" if tokenizer.eos_id is None else tokens[tokenizer.eos_id]
-        # how replies mark their reasoning: gpt-oss's harmony channels, or the <think> blocks of
-        # Qwen3 and DeepSeek-R1's distillations, whose templates write them
+        # how replies mark their reasoning: gpt-oss's harmony channels, Gemma 4's thought channel,
+        # or the <think> blocks of Qwen3 and DeepSeek-R1's distillations, whose templates write them
         self._form = (
-            "harmony" if "<|channel|>" in tokens else "think" if "<think>" in source else None
-        )
+            "harmony" if "<|channel|>" in tokens
+            else "gemma4" if "<|channel>" in tokens
+            else "think" if "<think>" in source
+            else None
+        )  # fmt: skip
 
     @property
     def form(self) -> str | None:
-        """How replies mark their reasoning: "harmony", "think", or None."""
+        """How replies mark their reasoning: "harmony", "gemma4", "think", or None."""
         return self._form
 
     def render(
@@ -71,9 +74,9 @@ class ChatTemplate:
         return self._tokenizer.encode(text, bos=bos, special=True)
 
     def opens_thinking(self, text: str) -> bool:
-        """Whether a rendered prompt ends inside a <think> block, which the reply then continues,
-        as DeepSeek-R1's distillations' templates open it."""
-        return self.form == "think" and text.rstrip().endswith("<think>")
+        """Whether a rendered prompt ends inside a block of reasoning, which the reply then
+        continues, as DeepSeek-R1's distillations' templates open their <think>."""
+        return self.form in _THINKING and text.rstrip().endswith(_THINKING[self.form][0])
 
 
 @dataclass
@@ -87,28 +90,32 @@ class Reply:
     calls: list[dict[str, Any]] = field(default_factory=list)
 
 
-# the harmony format's markers, and those of <think> blocks
+# where a form's block of reasoning opens and closes, before the text: <think> blocks, and Gemma
+# 4's thought channel
+_THINKING = {"think": ("<think>", "</think>"), "gemma4": ("<|channel>thought", "<channel|>")}
+# the harmony format's markers, and those blocks'
 _REPLY_MARKERS = ("<|start|>", "<|channel|>", "<|message|>", "<|end|>", "<|constrain|>",
-                      "<think>", "</think>")  # fmt: skip
+                  *(marker for markers in _THINKING.values() for marker in markers))  # fmt: skip
 
 
 def split_reply(text: str, form: str | None, thinking: bool = False, done: bool = False) -> Reply:
     """A reply, or as much of it as there is so far: what is surely reasoning, surely text, and
     the calls. Until the reply is `done`, an end that may be the start of a marker waits for
-    more, so that what a stream has split stays so. `thinking` says the prompt opened a <think>
-    block."""
+    more, so that what a stream has split stays so. `thinking` says the prompt opened a block of
+    reasoning."""
     if not done:
         text = text[: len(text) - _partial(text, _REPLY_MARKERS)]
     if form == "harmony":
         return _harmony(text)
-    if form == "think":
-        start = text.find("<think>")
+    if form in _THINKING:
+        opens, closes = _THINKING[form]
+        start = text.find(opens)
         if start >= 0 and not text[:start].strip():
-            text, thinking = text[start + len("<think>") :], True
-        elif not (thinking or done or text.strip()):  # what may yet come before a <think>
+            text, thinking = text[start + len(opens) :], True
+        elif not (thinking or done or text.strip()):  # what may yet come before the block
             return Reply()
         if thinking:
-            reasoning, _, content = text.partition("</think>")
+            reasoning, _, content = text.partition(closes)
             return Reply(reasoning.lstrip(), content.lstrip() if _ else "")
     return Reply(content=text)
 
