@@ -52,7 +52,7 @@ Architectures, text only, with their tokenizers and chat templates:
 | `qwen3`, `qwen3moe` | Qwen3 and its mixtures of experts |
 | `qwen35moe` | Qwen3.5 and Qwen3.6's mixtures of experts |
 | `gemma3` | Gemma 3 |
-| `gemma4` | Gemma 4 |
+| `gemma4` | Gemma 4 26B A4B and 31B, not E2B and E4B, whose per-layer embeddings and shared KV layers it lacks |
 | `gpt-oss` | gpt-oss |
 | `phi3` | Phi-4-mini, Phi-3 mini |
 

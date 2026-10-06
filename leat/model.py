@@ -114,6 +114,10 @@ class Config:
         rotated = m.get("rope.dimension_count", head_dim)
         if m.get("rope.dimension_count_swa", swa_dim) != swa_dim:
             raise NotImplementedError("partial rotary embeddings of sliding layers")
+        # Gemma 4 E2B's and E4B's: an embedding of each token for each layer, and the last layers
+        # attending over the keys and values of those before
+        if m.get("embedding_length_per_layer_input") or m.get("attention.shared_kv_layers"):
+            raise NotImplementedError("per-layer embeddings and layers that share keys and values")
         ropes = [
             _rope(m, arch, s, d if s else rotated) for s, d in zip(sliding, head_dims, strict=True)
         ]

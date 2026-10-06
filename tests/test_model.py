@@ -99,6 +99,11 @@ def test_config():
                "rope.dimension_count_swa": 32, "block_count": 2}  # fmt: skip
     with pytest.raises(NotImplementedError, match="partial rotary"):
         config("gemma4", partial)
+    # Gemma 4 E2B's and E4B's embeddings per layer and shared keys and values are refused, not
+    # left unread
+    for values in ({"embedding_length_per_layer_input": 256}, {"attention.shared_kv_layers": 20}):
+        with pytest.raises(NotImplementedError, match="per-layer embeddings"):
+            config("gemma4", values)
 
 
 YARN, YARN_SCALE = {"rope.scaling.type": "yarn", "rope.scaling.factor": 4.0}, 1 + 0.1 * math.log(4)
