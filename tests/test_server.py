@@ -122,7 +122,7 @@ def test_app(server):
         assert b"<title>leat</title>" in response.read()
     with urllib.request.urlopen(f"{url}/markdown.mjs") as response:
         assert response.headers["Content-Type"] == "text/javascript; charset=utf-8"
-        assert b"export function markdown" in response.read()
+        assert b"export function markdown(" in response.read()
 
 
 def test_reply(client, expected):

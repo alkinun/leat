@@ -1,9 +1,23 @@
 // Markdown as models write it. parse() reads text to a tree in JsonML, a string or
 // [tag, attributes?, ...children], of the elements a reply can hold and no others: none of the
-// HTML a model writes reaches the page. markdown() makes the tree elements.
+// HTML a model writes reaches the page. markdown() shows the tree in an element.
 
-export function markdown(text) {
-  return render(parse(text));
+const shown = new WeakMap(); // each element's blocks, as JSON
+
+// shows text in element, keeping the elements of the blocks that are as they were: as a reply
+// streams, those before its last, and what is selected in them
+export function markdown(element, text) {
+  const trees = parse(text), before = shown.get(element) ?? [];
+  const keys = trees.map((tree) => JSON.stringify(tree));
+  keys.forEach((key, i) => {
+    const old = element.children[i];
+    if (old && key === before[i]) return;
+    const [e] = render([trees[i]]);
+    if (old) old.replaceWith(e);
+    else element.append(e);
+  });
+  while (element.children.length > keys.length) element.lastElementChild.remove();
+  shown.set(element, keys);
 }
 
 export function parse(text) {

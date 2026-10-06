@@ -436,9 +436,9 @@ function message(m) {
     thinking.hidden = !(tool || m.reasoning);
     item.hidden = Boolean(m.tool_calls) && !m.content && !m.reasoning; // its calls show it
     if (tool) reasoning.textContent = m.content?.trim() ?? ""; // a tool's answer, as it is
-    else reasoning.replaceChildren(...markdown(m.reasoning ?? ""));
-    text.replaceChildren(...markdown(tool ? "" : m.content));
-    item.querySelectorAll("pre").forEach(codeBar);
+    else markdown(reasoning, m.reasoning ?? "");
+    markdown(text, tool ? "" : m.content);
+    item.querySelectorAll(":not(.code) > pre").forEach(codeBar); // the blocks new since
     note.textContent = m.note ?? "";
   };
   item.update();
