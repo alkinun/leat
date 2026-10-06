@@ -450,7 +450,10 @@ def _flash_attention_kernel(
 
 
 def _flash_shape(positions: int, dim: int) -> tuple[int, int] | None:
-    # the key tile and parts the kernel takes for heads of `dim`, if it fits them
+    # the key tile and parts the kernel takes for heads of `dim`, if it fits them: of 64 or more,
+    # as tinygrad's rewrites of the kernel stall on narrower ones, which no supported model has
+    if dim < 64:
+        return None
     parts = -(-dim // PART)
     width = dim // parts
     for key_tile in (KEY_TILE, KEY_TILE // 2):
