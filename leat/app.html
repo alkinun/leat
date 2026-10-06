@@ -85,7 +85,7 @@
   }
   details summary { cursor: pointer; color: var(--muted); font-size: 14px; }
   .message details { margin-bottom: 12px; }
-  .message details div {
+  .message details > div {
     margin-top: 8px; padding-left: 14px; border-left: 2px solid var(--line);
     color: var(--muted); font-size: 14px;
   }
@@ -435,9 +435,10 @@ function message(m) {
     if (tool && !m.content) summary.textContent += " …";
     thinking.hidden = !(tool || m.reasoning);
     item.hidden = Boolean(m.tool_calls) && !m.content && !m.reasoning; // its calls show it
-    reasoning.textContent = (tool ? m.content : m.reasoning)?.trim() ?? "";
+    if (tool) reasoning.textContent = m.content?.trim() ?? ""; // a tool's answer, as it is
+    else reasoning.replaceChildren(...markdown(m.reasoning ?? ""));
     text.replaceChildren(...markdown(tool ? "" : m.content));
-    text.querySelectorAll("pre").forEach(codeBar);
+    item.querySelectorAll("pre").forEach(codeBar);
     note.textContent = m.note ?? "";
   };
   item.update();
