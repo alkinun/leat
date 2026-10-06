@@ -36,10 +36,11 @@ const FENCE = /^( {0,3})(`{3,}|~{3,})\s*([^\s`]*)/;
 const HEADING = /^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$/;
 const RULE = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
 const QUOTE = /^ {0,3}> ?/;
+const ITEM = /^( {0,3})([-*+]|(\d{1,9})[.)])([ \t]+|$)/;
 
 // each block but the paragraph: a test of whether a line starts one, and what reads it to out
 // from there, returning the line after it
-const BLOCKS = [[FENCE, code], [HEADING, heading], [RULE, rule], [QUOTE, quote]];
+const BLOCKS = [[FENCE, code], [HEADING, heading], [RULE, rule], [QUOTE, quote], [ITEM, list]];
 
 // a fenced code block, to its closing fence or, still streaming, to the end
 function code(lines, i, out) {
@@ -70,6 +71,39 @@ function quote(lines, i, out) {
   const start = i;
   while (i < lines.length && QUOTE.test(lines[i])) i++;
   out.push(["blockquote", ...blocks(lines.slice(start, i).map((l) => l.replace(QUOTE, "")))]);
+  return i;
+}
+
+// a list's items, while their markers are of a kind. An item runs on to the lines indented past
+// its marker's width, items indented past its marker, and a paragraph's lines run on lazily. A
+// blank line between items, or between an item's blocks, makes the list loose: its items'
+// paragraphs stay paragraphs.
+function list(lines, i, out) {
+  const [, , marker, start] = ITEM.exec(lines[i]);
+  const items = [];
+  let loose = false, gap = false;
+  for (let item; i < lines.length && (item = ITEM.exec(lines[i])); ) {
+    const [whole, indent, mark, , spaces] = item;
+    if (mark.at(-1) !== marker.at(-1)) break;
+    const width = spaces && spaces.length <= 4 ? whole.length : indent.length + mark.length + 1;
+    const body = [lines[i].slice(whole.length)];
+    for (i++; i < lines.length; i++) {
+      const line = lines[i], indented = /^ */.exec(line)[0].length;
+      if (!line.trim()) body.push("");
+      else if (indented >= width || (indented > indent.length && ITEM.test(line))) {
+        body.push(line.slice(Math.min(indented, width)));
+      } else if (body.at(-1).trim() && !BLOCKS.some(([b]) => b.test(line))) body.push(line);
+      else break;
+    }
+    loose ||= gap;
+    for (gap = false; body.at(-1) === ""; gap = true) body.pop();
+    loose ||= body.includes("");
+    items.push(blocks(body));
+  }
+  const unwrap = (block) => (!loose && block[0] === "p" ? block.slice(1) : [block]);
+  const attributes = start !== undefined && +start !== 1 ? [{ start: +start }] : [];
+  const tag = start === undefined ? "ul" : "ol";
+  out.push([tag, ...attributes, ...items.map((item) => ["li", ...item.flatMap(unwrap)])]);
   return i;
 }
 
