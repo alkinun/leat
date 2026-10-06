@@ -116,9 +116,13 @@ def test_load(tiny_model, tmp_path):
 
 
 def test_app(server):
-    with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/") as response:
+    url = f"http://127.0.0.1:{server.server_port}"
+    with urllib.request.urlopen(f"{url}/") as response:
         assert response.headers["Content-Type"] == "text/html; charset=utf-8"
         assert b"<title>leat</title>" in response.read()
+    with urllib.request.urlopen(f"{url}/markdown.mjs") as response:
+        assert response.headers["Content-Type"] == "text/javascript; charset=utf-8"
+        assert b"export function markdown" in response.read()
 
 
 def test_reply(client, expected):
