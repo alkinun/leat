@@ -45,12 +45,12 @@ def speed(
     # first of which captures the graph. Generation runs `sequences` at once, timed while all
     # are past their prompts, as llama-batched-bench's.
     rng = random.Random(0)
-    prompt = [rng.randrange(engine.config.vocab_size) for _ in range(prompt_tokens)]
+    prompt = [rng.randrange(engine.config.vocab_size) for _ in range(max(prompt_tokens, sequences))]
     prefill, decode = [], []
     for _ in range(reps + 2):
         engine.reset()
         start = time.perf_counter()
-        next(engine.generate(prompt, 1))
+        next(engine.generate(prompt[:prompt_tokens], 1))
         prefill.append(prompt_tokens / (time.perf_counter() - start))
     for _ in range(reps + 2):
         engine.reset()
@@ -81,8 +81,9 @@ def speed(
 def perplexity(
     engine: Engine, text: str, ctx: int = 512, chunks: int | None = None, decode: bool = False
 ) -> Quality:
+    _check(ctx, chunks)
     tokens = engine.tokenizer.encode(text)
-    n = min(len(tokens) // ctx, chunks or len(tokens))
+    n = min(len(tokens) // ctx, len(tokens) if chunks is None else chunks)
     if n < 1:
         raise ValueError(f"the text has {len(tokens)} tokens, fewer than one chunk of {ctx}")
     nll = 0.0
@@ -104,6 +105,7 @@ def kl_divergence(
     """Compares against logits saved by `llama-perplexity --kl-divergence-base`."""
     with open(base, "rb") as f:
         ctx, vocab, n_chunks = _header(f, base)
+        _check(ctx, chunks)
         if vocab != engine.config.vocab_size:
             raise ValueError(f"{base} has a vocab of {vocab}, the model {engine.config.vocab_size}")
         if ctx > engine.max_context:
@@ -113,7 +115,7 @@ def kl_divergence(
         tokens = list(memoryview(f.read(4 * ctx * n_chunks)).cast("i"))
         first, row = ctx // 2, 2 * ((vocab + 1) // 2) + 4  # uint16s per position
         nll, same, kls = 0.0, 0, list[float]()
-        for i in range(min(n_chunks, chunks or n_chunks)):
+        for i in range(n_chunks if chunks is None else min(n_chunks, chunks)):
             chunk = tokens[i * ctx : (i + 1) * ctx]
             lp = _logprobs(engine, chunk, decode)
             stored = Tensor(f.read(2 * row * (ctx - 1 - first))).bitcast(dtypes.uint16)
@@ -127,7 +129,22 @@ def kl_divergence(
             nll += _nll(lp, chunk)
     kls.sort()
     n = len(kls)
-    return Quality(math.exp(nll / n), sum(kls) / n, kls[int(0.99 * (n - 1))], kls[-1], same / n)
+    return Quality(math.exp(nll / n), sum(kls) / n, _percentile(kls, 0.99), kls[-1], same / n)
+
+
+def _check(ctx: int, chunks: int | None) -> None:
+    # chunks of at least one position scored, and at least one of them
+    if ctx < 3:
+        raise ValueError(f"chunks of {ctx} tokens score none: they take 3 or more")
+    if chunks is not None and chunks < 1:
+        raise ValueError(f"chunks must be at least 1, got {chunks}")
+
+
+def _percentile(ordered: list[float], fraction: float) -> float:
+    # between the two values about it, as llama-perplexity's
+    at = fraction * (len(ordered) - 1)
+    i, part = int(at), at - int(at)
+    return (1 - part) * ordered[i] + part * ordered[min(i + 1, len(ordered) - 1)]
 
 
 def _header(f: BinaryIO, base: Path) -> tuple[int, int, int]:

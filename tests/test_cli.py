@@ -5,6 +5,7 @@ import jinja2
 import numpy as np
 import pytest
 
+from leat import bench
 from leat.chat import ChatTemplate
 from leat.cli import main
 from leat.gguf import GGUF
@@ -47,9 +48,9 @@ def run_json(capsys, *args) -> dict:
     return json.loads(capsys.readouterr().out)
 
 
-@pytest.mark.parametrize("sequences", [1, 3])
-def test_bench(tiny_model, capsys, sequences):
-    args = ("-p", 8, "-n", 6, "-r", 1, "-s", sequences)
+@pytest.mark.parametrize("prompt, sequences", [(8, 1), (8, 3), (2, 3)])  # more than its tokens
+def test_bench(tiny_model, capsys, prompt, sequences):
+    args = ("-p", prompt, "-n", 6, "-r", 1, "-s", sequences)
     result = run_json(capsys, "bench", tiny_model[0], *args)
     assert result["prefill"] > 0 and result["decode"] > 0 and result["weight_gbs"] > 0
     assert result["sequences"] == sequences
@@ -79,6 +80,28 @@ def test_kl_divergence(tiny_model, tmp_path, capsys, mode):
     # the file's chunks set the context: the default --ctx is over the tiny model's
     result = run_json(capsys, "perplexity", path, "--kl-base", base, *mode)
     assert result["kl_mean"] < 1e-4 and result["top1"] == 1.0
+
+
+def test_perplexity_arguments(tiny_model, tmp_path, monkeypatch, capsys):
+    # counts of one at least, chunks that score a position, and the text's bytes as they are
+    path = tiny_model[0]
+    (text := tmp_path / "text.txt").write_bytes(TEXT.replace(" ", "\r\n").encode())
+    for bad in (["--ctx", "0"], ["--chunks", "0"]):
+        with pytest.raises(SystemExit):
+            main(["perplexity", str(path), "--text", str(text), *bad])
+    assert "must be at least 1, got 0" in capsys.readouterr().err
+    with pytest.raises(ValueError, match="chunks of 2 tokens score none"):
+        main(["perplexity", str(path), "--text", str(text), "--ctx", "2"])
+    read = []
+    monkeypatch.setattr(bench, "perplexity", lambda e, t, *_: read.append(t) or bench.Quality(1))
+    main(["perplexity", str(path), "--text", str(text), "--ctx", str(CTX)])
+    assert read == [TEXT.replace(" ", "\r\n")]
+
+
+def test_percentile():
+    # between the two values about it, as llama-perplexity's
+    assert bench._percentile([0.0, 1.0, 2.0, 3.0], 0.5) == 1.5
+    assert bench._percentile([float(i) for i in range(101)], 0.99) == pytest.approx(99.0)
 
 
 def test_run(tiny_model, monkeypatch, capsys):

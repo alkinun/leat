@@ -25,7 +25,7 @@ def main(argv: list[str] | None = None) -> None:
 
     run = commands.add_parser("run", help="chat with a model in the terminal")
     run.add_argument("model", type=Path, help="GGUF file")
-    run.add_argument("--max-context", type=int, default=4096)
+    run.add_argument("--max-context", type=_positive, default=4096)
     run.add_argument("--temperature", type=float, default=0.7)
     run.add_argument(
         "--top-k", type=int, default=0, help="keep the k likeliest tokens; 0 keeps all"
@@ -44,19 +44,19 @@ def main(argv: list[str] | None = None) -> None:
     )  # fmt: skip
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8080)
-    serve.add_argument("--max-context", type=int, default=4096)
+    serve.add_argument("--max-context", type=_positive, default=4096)
     serve.add_argument(
-        "--slots", type=int, default=4,
+        "--slots", type=_positive, default=4,
         help="sequences generating at once, each in a slot of the KV cache that keeps its tokens",
     )  # fmt: skip
 
     speed = commands.add_parser("bench", help="measure prefill and decode speed")
     speed.add_argument("model", type=Path, help="GGUF file")
-    speed.add_argument("-p", "--prompt", type=int, default=512, help="prompt tokens")
-    speed.add_argument("-n", "--generate", type=int, default=128, help="generated tokens")
-    speed.add_argument("-r", "--reps", type=int, default=3)
+    speed.add_argument("-p", "--prompt", type=_positive, default=512, help="prompt tokens")
+    speed.add_argument("-n", "--generate", type=_positive, default=128, help="generated tokens")
+    speed.add_argument("-r", "--reps", type=_positive, default=3)
     speed.add_argument(
-        "-s", "--sequences", type=int, default=1, help="sequences generating at once"
+        "-s", "--sequences", type=_positive, default=1, help="sequences generating at once"
     )
     speed.add_argument("--json", action="store_true", help="print one JSON object")
 
@@ -70,10 +70,10 @@ def main(argv: list[str] | None = None) -> None:
         "--kl-base", type=Path, help="logits from llama-perplexity --kl-divergence-base"
     )
     quality.add_argument(
-        "--ctx", type=int, default=512,
+        "--ctx", type=_positive, default=512,
         help="chunk size, as in llama-perplexity -c; a --kl-base file has its own",
     )  # fmt: skip
-    quality.add_argument("--chunks", type=int, help="score only the first N chunks")
+    quality.add_argument("--chunks", type=_positive, help="score only the first N chunks")
     quality.add_argument(
         "--decode", action="store_true", help="score one token at a time, as generation runs"
     )
@@ -81,6 +81,13 @@ def main(argv: list[str] | None = None) -> None:
 
     args = parser.parse_args(argv)
     {"run": _run, "serve": _serve, "bench": _bench, "perplexity": _perplexity}[args.command](args)
+
+
+def _positive(text: str) -> int:
+    # an argument that counts something, of which there must be one at least
+    if (n := int(text)) < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, got {n}")
+    return n
 
 
 def _run(args: argparse.Namespace) -> None:
@@ -171,7 +178,9 @@ def _perplexity(args: argparse.Namespace) -> None:
     if args.kl_base:
         result = bench.kl_divergence(engine, args.kl_base, args.chunks, args.decode)
     else:
-        result = bench.perplexity(engine, args.text.read_text(), args.ctx, args.chunks, args.decode)
+        # its bytes as they are, \r\n too, as llama-perplexity reads them
+        text = args.text.read_bytes().decode()
+        result = bench.perplexity(engine, text, args.ctx, args.chunks, args.decode)
     if args.json:
         print(json.dumps({"model": engine.gguf.path.stem} | asdict(result)))
         return
