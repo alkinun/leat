@@ -71,7 +71,7 @@ Storage types, and the kernels that take them on the GPU; the reference ops take
 
 Devices: any tinygrad backend runs the reference ops. NVIDIA GPUs (`DEV=NV` or `CUDA`) run every kernel; AMD's RDNA 3 and 4 GPUs (`DEV=AMD`), as Strix Halo's, run the warp-level ones: matrix-vector products, norms, quantization, RoPE, decode attention, the mixtures' routing and their few-token path, Gated DeltaNet's convolution and recurrence, and sampling: every kernel of a decode step, batched or not. Prompts there take the reference ops for now, but for Gated DeltaNet's.
 
-Server: `/v1/chat/completions`, whole or streamed, `/v1/models` and `/v1/models/load`, and a chat app at `/`. Replies split into `reasoning_content`, as Qwen3's `<think>` blocks and gpt-oss's analysis channel, text, and tool calls in Llama 3's, Qwen's, Qwen3.5's, Gemma 4's and gpt-oss's syntax. Requests take stop strings, seeds and `chat_template_kwargs` such as `{"enable_thinking": false}`. Sampling is greedy or by temperature; requests for `top_p`, penalties, `logprobs` or several choices are refused.
+Server: `/v1/chat/completions`, whole or streamed, `/v1/models` and `/v1/models/load`, and a chat app at `/`. Replies split into `reasoning_content`, as Qwen3's `<think>` blocks and gpt-oss's analysis channel, text, and tool calls in Llama 3's, Qwen's, Qwen3.5's, Gemma 4's and gpt-oss's syntax. Requests take stop strings, seeds and `chat_template_kwargs` such as `{"enable_thinking": false}`. Sampling, on the device, is greedy or by temperature, with `top_k`, `top_p` and `min_p`, which the kernels cut within a hundredth of a nat, and `presence_penalty` on the tokens a reply has generated; requests for other penalties, `logprobs` or several choices are refused.
 
 Concurrent requests: completions run together, one in each of `--slots` slots of the KV cache, 4 by default; more wait their turn. Each step prefills a chunk of one prompt, of 256 tokens at most while others decode, then decodes a token of every running completion in one batch, of up to 8, whose matrices read each weight once for all of them. A client that hangs up frees its slot at the next step. A slot past the others holds the padding of batches of 3, 5, 6 or 7, which run in the graphs of 4 and 8.
 
@@ -79,7 +79,7 @@ Prefix caching: a conversation continues in its slot, and a prompt that shares a
 
 Models: `leat serve` takes GGUF files and directories of them, and holds one model at a time, which answers every request whatever model it names. The first file loads at start. `POST /v1/models/load` with `{"model": id}`, an id that `/v1/models` lists, loads another once the completions before it have finished, the last one freed first.
 
-Chat app: a single page with no dependencies. It loads and switches models, keeps separate chats in the browser's local storage, and streams replies, their reasoning folded away, until done or stopped; one system prompt and temperature apply to every chat.
+Chat app: a single page with no dependencies. It loads and switches models, keeps separate chats in the browser's local storage, and streams replies, their reasoning folded away, until done or stopped; one system prompt and sampling, by default as Qwen3.6 recommends for general tasks, apply to every chat.
 
 Tools: given a tools server in its settings, the chat app offers the model its tools and runs the calls it makes there, up to 8 replies a turn. [examples/tools.py](examples/tools.py) is one, of web search through a SearXNG on the machine and page reading; search results and pages take context, so serve with `--max-context 16384` or more.
 
@@ -96,7 +96,7 @@ RTX 3090, one sequence, in tokens per second; Q4_K_M files but for gpt-oss's, MX
 | Qwen2.5 7B Instruct | 5830 | 5263 | 152.6 | 165.7 |
 | Qwen3 8B | 5296 | 4745 | 142.0 | 149.2 |
 | Qwen3 30B A3B | 4697 | 5036 | 213.1 | 233.1 |
-| Qwen3.6 35B A3B | 3516 | 3686 | 168.0 | 194.2 |
+| Qwen3.6 35B A3B | 3516 | 3708 | 168.0 | 192.2 |
 | Gemma 3 4B it | 9795 | 8436 | 203.0 | 226.8 |
 | Gemma 3 12B it | 3463 | 2749 | 89.0 | 97.6 |
 | Gemma 4 26B A4B it | 4823 | 4919 | 158.2 | 190.6 |

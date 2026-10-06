@@ -134,6 +134,10 @@
     <summary>Settings</summary>
     <label>System prompt <textarea id="system" rows="5"></textarea></label>
     <label>Temperature <input id="temperature" type="number" min="0" max="2" step="0.1"></label>
+    <label>Top K <input id="top_k" type="number" min="0" step="1"></label>
+    <label>Top P <input id="top_p" type="number" min="0" max="1" step="0.05"></label>
+    <label>Min P <input id="min_p" type="number" min="0" max="1" step="0.01"></label>
+    <label>Presence penalty <input id="presence_penalty" type="number" min="-2" max="2" step="0.1"></label>
     <label>Tools server <input id="tools" placeholder="http://host:8081"></label>
   </details>
 </nav>
@@ -167,7 +171,13 @@ let loaded = null, loading = null; // the ids of the loaded model and of one loa
 const replies = new Map(); // each chat replying, to the controller that stops its reply
 const ROUNDS = 8; // replies a turn takes at most, each after the tools the last one called
 
-for (const [id, value] of [["system", ""], ["temperature", "0.7"], ["tools", ""]]) {
+// sampling as Qwen3.6 recommends for general tasks
+const SETTINGS = {
+  system: "", temperature: "1.0", top_k: "20", top_p: "0.95", min_p: "0", presence_penalty: "1.5",
+  tools: "",
+};
+const SAMPLING = ["temperature", "top_k", "top_p", "min_p", "presence_penalty"];
+for (const [id, value] of Object.entries(SETTINGS)) {
   $(id).value = localStorage.getItem(`leat.${id}`) ?? value;
   $(id).oninput = () => localStorage.setItem(`leat.${id}`, $(id).value);
 }
@@ -251,8 +261,9 @@ async function reply(c, tools, signal) {
   save();
   render();
   const body = {
-    model: loaded, messages: messages.map(api), tools, temperature: Number($("temperature").value),
-    stream: true, stream_options: { include_usage: true },
+    model: loaded, messages: messages.map(api), tools, stream: true,
+    stream_options: { include_usage: true },
+    ...Object.fromEntries(SAMPLING.map((id) => [id, Number($(id).value)])),
   };
   const start = performance.now();
   const response = await post("/v1/chat/completions", body, signal);
