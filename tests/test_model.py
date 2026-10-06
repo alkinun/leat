@@ -268,6 +268,7 @@ def test_recurrent_state_resumes_where_kept(tiny, monkeypatch):
     prompt = (PROMPT * 2)[:20]
     list(engine.generate(prompt, 3))
     starts, turn = prefill_starts(engine, monkeypatch), prompt[:18] + [7, 1, 2]
+    assert engine.cached_prefix(turn) == len(prompt) - KEEP_BACK  # as the server reports it
     assert list(engine.generate(turn, 4)) == generated(path, turn, 4)
     assert starts == [len(prompt) - KEEP_BACK, len(turn) - KEEP_BACK, 13]
 

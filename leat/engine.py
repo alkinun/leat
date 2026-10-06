@@ -222,8 +222,11 @@ class Engine:
         self.reset()
 
     def cached_prefix(self, prompt: list[int]) -> int:
-        """How many leading tokens of `prompt` the cache holds: generation prefills the rest."""
-        return max(self._shared(prompt))
+        """How many leading tokens of `prompt` the cache holds: generation prefills the rest. Of
+        a model with recurrent state, those of a slot's or of a free slot's kept state."""
+        busy = {s.slot for s in self.active}
+        kept = [len(k) for s, k in enumerate(self._kept) if s not in busy and _resumes(prompt, k)]
+        return max(self._shared(prompt) + kept)
 
     def reset(self) -> None:
         """Forgets every cached prefix, so the next prompt is prefilled from scratch, and ends
@@ -259,7 +262,7 @@ class Engine:
         # takes a free slot back to its kept recurrent state, where the prompt shares all the
         # tokens before it, and more than all of any slot's
         best = max(self._shared(prompt))
-        kept = [s for s in free if best < len(self._kept[s]) == _shared(prompt, self._kept[s])]
+        kept = [s for s in free if best < len(self._kept[s]) and _resumes(prompt, self._kept[s])]
         if kept:
             slot = max(kept, key=lambda s: len(self._kept[s]))
             self._restore(self._slot_vars[0].bind(slot))
@@ -383,6 +386,11 @@ def _ids(tokens: list[int], size: int) -> Tensor:
     # (1, size) token ids, padded: from bytes, as tinygrad converts a list value by value
     padded = array.array("i", tokens + [0] * (size - len(tokens))).tobytes()
     return Tensor(padded, dtype=dtypes.int32).reshape(1, size)
+
+
+def _resumes(prompt: list[int], kept: list[int]) -> bool:
+    # whether a prompt may go on from a state kept after `kept`: it shares all of them
+    return len(kept) == _shared(prompt, kept)
 
 
 def _shared(prompt: list[int], cached: list[int]) -> int:
