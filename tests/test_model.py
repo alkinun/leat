@@ -1,3 +1,4 @@
+import math
 import subprocess
 
 import numpy as np
@@ -7,9 +8,9 @@ from tinygrad import Tensor, UOp, dtypes
 from leat import bench
 from leat.engine import FEW_TOKENS, KEEP_BACK, Engine
 from leat.gguf import GGUF
-from leat.model import CACHE_TILE, Config, Transformer
+from leat.model import CACHE_TILE, Config, Transformer, _rope_table
 from leat.sampler import GREEDY, Sampling
-from tests.helpers import CONTEXT, reference_logits
+from tests.helpers import CONTEXT, P3_MSCALE, P3_ORIGINAL, P3_ROTATED, reference_logits
 
 PROMPT = [5, 77, 120, 3, 299, 42, 8, 150, 61, 200, 9, 33]
 ARCHS = [
@@ -68,6 +69,77 @@ def test_cache_whole_tiles(tiny_model):
     assert model.cache[0].shape[3] == CACHE_TILE and model.max_context == 50
 
 
+def test_bad_models(tiny_model):
+    path, _ = tiny_model
+    with pytest.raises(ValueError, match=r"max_context must be in \[1, 64\]"):
+        transformer(path, CONTEXT + 1)
+    f = GGUF.open(path)
+    weights = {n: w for n, w in f.load().items() if n != "blk.1.ffn_down.weight"}
+    with pytest.raises(ValueError, match="missing 1 tensors, first: blk.1.ffn_down"):
+        Transformer(Config.from_gguf(f.metadata), weights, CONTEXT)
+    with pytest.raises(NotImplementedError, match="architecture 'mamba'"):
+        config("mamba")
+
+
+def config(arch: str, values: dict | None = None) -> Config:
+    # the Config of the least metadata an architecture takes, and `values`, without the prefix
+    least = {"block_count": 4, "embedding_length": 256, "attention.head_count": 4,
+             "context_length": 64, "attention.layer_norm_rms_epsilon": 1e-5}  # fmt: skip
+    metadata = {f"{arch}.{k}": v for k, v in (least | (values or {})).items()}
+    return Config.from_gguf(metadata | {"general.architecture": arch, "tokenizer.ggml.tokens": []})
+
+
+def test_config():
+    # Gemma 3 27B scales its scores by dim / heads, as llama.cpp, rather than its heads' size
+    gemma = {"block_count": 62, "embedding_length": 5376, "attention.head_count": 32,
+             "attention.key_length": 128}  # fmt: skip
+    assert config("gemma3", gemma).scales == (168**-0.5,) * 62
+    # Qwen3.5's layers are Gated DeltaNet's but every full_attention_interval-th, 4 by default
+    delta_net = {"ssm.inner_size": 64, "ssm.time_step_rank": 2, "ssm.group_count": 1,
+                 "ssm.state_size": 32, "ssm.conv_kernel": 4, "block_count": 8}  # fmt: skip
+    assert config("qwen35moe", delta_net).recurrent == (True, True, True, False) * 2
+    delta_net["full_attention_interval"] = 2
+    assert config("qwen35moe", delta_net).recurrent == (True, False) * 4
+    # sliding-window layers rotate all their dimensions
+    partial = {"attention.sliding_window": 4, "attention.sliding_window_pattern": [True, False],
+               "rope.dimension_count_swa": 32, "block_count": 2}  # fmt: skip
+    with pytest.raises(NotImplementedError, match="partial rotary"):
+        config("gemma4", partial)
+
+
+YARN, YARN_SCALE = {"rope.scaling.type": "yarn", "rope.scaling.factor": 4.0}, 1 + 0.1 * math.log(4)
+
+
+@pytest.mark.parametrize(
+    "scaling, scale",
+    [
+        ({}, 1.0),
+        (YARN, 1 + 0.1 * math.log(4)),
+        (YARN | {"rope.scaling.attn_factor": 0.5}, 0.5 * (1 + 0.1 * math.log(4))),
+        (
+            YARN | {"rope.scaling.yarn_log_multiplier": 0.5},
+            (1 + 0.1 * math.log(4)) / (1 + 0.05 * math.log(4)),
+        ),
+    ],
+)
+def test_rope_scale(scaling, scale):
+    # RoPE's cos and sin times YaRN's 1 + 0.1 ln(factor) and rope.scaling.attn_factor, or with a
+    # log multiplier, as llama.cpp, mscale(factor, 1) / mscale(factor, multiplier) instead
+    cos, sin = _rope_table(config("llama", scaling).ropes[0], 8, None)
+    np.testing.assert_allclose(np.hypot(cos.numpy(), sin.numpy()), scale, rtol=1e-6)
+
+
+def test_longrope(tiny):
+    # Phi-3's frequencies are divided by LongRoPE's long factors past its original context, and
+    # by its short ones within it
+    path, weights = tiny("phi3")
+    for context, kind in ((P3_ORIGINAL, "short"), (CONTEXT, "long")):
+        cos, _ = transformer(path, context).rope[0]
+        freqs = 10000.0 ** (-np.arange(0, P3_ROTATED, 2) / P3_ROTATED)
+        angles = np.arange(context)[:, None] * freqs / weights[f"rope_factors_{kind}.weight"]
+        np.testing.assert_allclose(cos.numpy(), np.cos(angles) * P3_MSCALE, rtol=1e-5, atol=1e-5)
+
+
 @pytest.mark.usefixtures("reference_ops")
 @pytest.mark.parametrize("arch", ARCHS)
 def test_generate_matches_reference(tiny, arch):
@@ -78,8 +150,10 @@ def test_generate_matches_reference(tiny, arch):
     expected = reference_logits(weights, PROMPT + out, arch)[len(PROMPT) - 1 :].argmax(-1)
     assert out == expected[: len(out)].tolist()
 
-    # a prompt that extends the previous one reuses the cache: only the new tokens are prefilled
+    # a prompt that extends the previous one reuses the cache: only the new tokens are prefilled,
+    # but for a model with recurrent state, which holds every token its slot ran
     longer = PROMPT + out[:3] + [7]
+    assert engine.cached_prefix(longer) == (0 if arch == "qwen35moe" else len(PROMPT) + 3)
     again = list(engine.generate(longer, 4))
     assert again == list(Engine(path, max_context=CONTEXT, prefill_chunk=5).generate(longer, 4))
 
@@ -224,6 +298,24 @@ def test_one_generation_at_a_time(tiny_model):
         next(engine.generate(PROMPT, 6))
     tokens.close()
     next(engine.generate(PROMPT, 6))
+
+
+def test_end_of_generation(tiny_model, monkeypatch):
+    # a generation ends at an end-of-generation token, which it yields, unless it ignores them
+    engine = Engine(tiny_model[0], max_context=CONTEXT, prefill_chunk=8)
+    out = list(engine.generate(PROMPT, 8))
+    monkeypatch.setattr(engine.tokenizer, "eog_ids", {out[3]})
+    assert list(engine.generate(PROMPT, 8)) == out[: out.index(out[3]) + 1]
+    assert list(engine.generate(PROMPT, 8, ignore_eog=True)) == out
+
+
+def test_least_recently_used_slot(tiny_model):
+    # a prompt that shares no slot's tokens takes the slot that least recently started one
+    engine = Engine(tiny_model[0], max_context=CONTEXT, prefill_chunk=8, slots=2)
+    for prompt in (PROMPT, [9, 8, 7, 6], PROMPT + [1], [3, 3, 3]):
+        list(engine.generate(prompt, 2))
+    assert engine.cached_prefix(PROMPT + [5]) == len(PROMPT)
+    assert engine.cached_prefix([9, 8, 7, 6, 5]) == 0
 
 
 def test_seeded_sampling(tiny_model):

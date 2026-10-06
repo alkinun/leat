@@ -1,3 +1,5 @@
+import struct
+
 import gguf
 import numpy as np
 import pytest
@@ -23,6 +25,9 @@ def tiny_gguf(tmp_path):
     w.add_string("general.name", "tiny")
     w.add_uint32("llama.block_count", 2)
     w.add_float32("llama.rope.freq_base", 500000.0)
+    w.add_uint64("test.uint64", 2**40)
+    w.add_int64("test.int64", -(2**40))
+    w.add_float64("test.float64", 0.1)
     w.add_bool("tokenizer.ggml.add_bos_token", True)
     w.add_array("tokenizer.ggml.tokens", ["<s>", "a", "ab"])
     w.add_array("tokenizer.ggml.token_type", [3, 1, 1])
@@ -43,6 +48,8 @@ def test_metadata(tiny_gguf):
     assert f.metadata["general.name"] == "tiny"
     assert f.metadata["llama.block_count"] == 2
     assert f.metadata["llama.rope.freq_base"] == 500000.0
+    assert (f.metadata["test.uint64"], f.metadata["test.int64"]) == (2**40, -(2**40))
+    assert f.metadata["test.float64"] == 0.1
     assert f.metadata["tokenizer.ggml.add_bos_token"] is True
     assert f.metadata["tokenizer.ggml.tokens"] == ["<s>", "a", "ab"]
     assert f.metadata["tokenizer.ggml.token_type"] == [3, 1, 1]
@@ -72,6 +79,9 @@ def test_load(tiny_gguf):
     ):
         expected = dequantize(tensors[name], qtype).reshape(loaded[name].shape)
         np.testing.assert_array_equal(loaded[name].dequant().numpy(), expected)
+    # or only those named
+    assert list(GGUF.open(path).load(names=["q6_k"])) == ["q6_k"]
+    assert GGUF.open(path).load(names=[]) == {}
 
 
 def test_not_gguf(tmp_path):
@@ -84,4 +94,28 @@ def test_truncated(tiny_gguf, tmp_path):
     data = tiny_gguf[0].read_bytes()
     (path := tmp_path / "cut.gguf").write_bytes(data[:-100])
     with pytest.raises(ValueError, match="truncated"):
+        GGUF.open(path)
+
+
+def string(s: str) -> bytes:
+    return struct.pack("<Q", len(s)) + s.encode()
+
+
+# a field to overwrite, found `skip` bytes past the first `after`
+@pytest.mark.parametrize(
+    "after, skip, value, error",
+    [
+        (b"GGUF", 0, struct.pack("<I", 4), "unsupported GGUF version 4"),
+        (string("general.name"), 0, struct.pack("<I", 13), "unknown GGUF metadata value type 13"),
+        # a tensor's name, then its dimensions' count and each one, then its type
+        (string("f32"), 4 + 2 * 8, struct.pack("<I", 99), "tensor 'f32' has unknown ggml type 99"),
+        (string("q8_0"), 4, struct.pack("<Q", 63), "'q8_0' has 252 elements, not a multiple of 32"),
+    ],
+)
+def test_malformed(tiny_gguf, tmp_path, after, skip, value, error):
+    data = bytearray(tiny_gguf[0].read_bytes())
+    at = data.index(after) + len(after) + skip
+    data[at : at + len(value)] = value
+    (path := tmp_path / "bad.gguf").write_bytes(data)
+    with pytest.raises(ValueError, match=error):
         GGUF.open(path)

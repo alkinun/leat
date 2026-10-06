@@ -3,6 +3,7 @@ import json
 import statistics
 import threading
 import time
+import urllib.error
 import urllib.request
 import weakref
 from collections.abc import Iterator
@@ -13,7 +14,8 @@ import pytest
 
 from leat.chat import ChatTemplate
 from leat.engine import Engine
-from leat.server import Server
+from leat.sampler import Sampling
+from leat.server import Server, _completion
 from tests.helpers import CONTEXT, chat_template
 
 WEATHER = {
@@ -142,6 +144,29 @@ def test_stop(client, expected, stream):
     stops = ["never there", full[6:9]]
     reply = complete(client, "stop me", max_tokens=16, temperature=0, stop=stops, stream=stream)
     assert reply == (full[: full.index(stops[1])], "stop")
+
+
+def test_completion(server):
+    # what a request asks for: OpenAI's fields and vLLM's, top_k of -1 keeping every token as 0
+    messages = [{"role": "user", "content": "hi"}]
+    body = {"messages": messages, "temperature": 0.5, "top_k": -1, "top_p": 0.9, "min_p": 0.05,
+            "presence_penalty": 1.5, "max_tokens": 9, "max_completion_tokens": 7, "stop": "x",
+            "seed": 3}  # fmt: skip
+    asked = _completion(body, server)
+    assert asked.sampling == Sampling(0.5, 0, 0.9, 0.05, 1.5)
+    hi = server.loaded.engine.tokenizer.encode("hi")
+    assert (asked.prompt, asked.max_tokens, asked.stop, asked.seed) == (hi, 7, ["x"], 3)
+    # and by default, OpenAI's temperature of 1, up to the context and without empty stops
+    asked = _completion({"messages": messages, "stop": ["", "y"], "top_p": None}, server)
+    assert (asked.sampling, asked.max_tokens, asked.stop) == (Sampling(1.0), CONTEXT, ["y"])
+
+
+def test_end_of_generation(client, engine, monkeypatch):
+    # a reply ends at an end-of-generation token, which its text leaves out
+    tokens = list(engine.generate(engine.tokenizer.encode("hello"), 8))
+    monkeypatch.setattr(engine.tokenizer, "eog_ids", {tokens[3]})
+    text = engine.tokenizer.decode(tokens[: tokens.index(tokens[3])])
+    assert complete(client, "hello", max_tokens=8, temperature=0) == (text, "stop")
 
 
 def test_seed(client):
@@ -278,6 +303,8 @@ def test_text_is_not_a_tool_call(client, replies_with, stream, text, choice):
         ({"frequency_penalty": 0.5}, "frequency_penalty=0.5 is not supported"),
         ({"top_p": 1.5}, "top_p must be a number from 0 to 1"),
         ({"temperature": 3}, "temperature must be a number from 0 to 2"),
+        ({"temperature": True}, "temperature must be a number from 0 to 2"),
+        ({"extra_body": {"top_k": 1.5}}, "top_k must be an integer"),
         ({"max_tokens": 0}, "max_tokens must be a positive integer"),
         ({"tools": [WEATHER], "tool_choice": "required"}, "tool_choice='required' is not"),
         ({"messages": []}, "messages must be a non-empty list of objects"),
@@ -291,9 +318,14 @@ def test_bad_request(client, kwargs, error):
         client.chat.completions.create(**request)
 
 
-def test_unknown_route(client):
+def test_unknown_route(client, server):
     with pytest.raises(openai.NotFoundError):
         client.completions.create(model="tiny", prompt="hi")
+    url = f"http://127.0.0.1:{server.server_port}"
+    with pytest.raises(urllib.error.HTTPError, match="404"):
+        urllib.request.urlopen(f"{url}/v1/nothing")
+    with pytest.raises(urllib.error.HTTPError, match="400"):  # not JSON
+        urllib.request.urlopen(urllib.request.Request(f"{url}/v1/chat/completions", b"{"))
 
 
 def test_client_hangs_up(client):
