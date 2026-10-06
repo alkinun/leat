@@ -55,6 +55,27 @@ CASES = [
     ("~5 to ~10, ~~~", [["p", "~5 to ~10, ~~~"]]),
     ("**a\nb**", [["p", ["strong", "a\nb"]]]),
     ("**unclosed", [["p", "**unclosed"]]),
+    # HTML, as its text
+    ('<b>a</b><img src=x onerror="alert(1)">', [["p", '<b>a</b><img src=x onerror="alert(1)">']]),
+    # links, to the web or mail only
+    ("[a **b**](https://x.io)", [["p", ["a", {"href": "https://x.io"}, "a ", ["strong", "b"]]]]),
+    ('[a](<https://x.io/a b> "title")', [["p", ["a", {"href": "https://x.io/a b"}, "a"]]]),
+    ("[a](https://w.org/A_(b)) c", [["p", ["a", {"href": "https://w.org/A_(b)"}, "a"], " c"]]),
+    ("[[1]](mailto:a@x.io)", [["p", ["a", {"href": "mailto:a@x.io"}, "[1]"]]]),
+    ("[`]`](https://x.io)", [["p", ["a", {"href": "https://x.io"}, ["code", "]"]]]]),
+    ("![a cat](https://x.io/cat.png)", [["p", ["a", {"href": "https://x.io/cat.png"}, "a cat"]]]),
+    ("[a](javascript:alert(1)) [b](data:text/html,x) [c](/path) [d](HTTPS://X.IO)",
+     [["p", "[a](javascript:alert(1)) [b](data:text/html,x) [c](/path) ",
+       ["a", {"href": "HTTPS://X.IO"}, "d"]]]),
+    ("[a] (b) [c](d [e]", [["p", "[a] (b) [c](d [e]"]]),
+    ("<https://x.io/a_b_c> <javascript:x>",
+     [["p", ["a", {"href": "https://x.io/a_b_c"}, "https://x.io/a_b_c"], " <javascript:x>"]]),
+    ("see https://x.io/a_b_c.", [["p", "see ", ["a", {"href": "https://x.io/a_b_c"},
+                                                "https://x.io/a_b_c"], "."]]),
+    ("(https://w.org/A_(b)), **https://x.io**",
+     [["p", "(", ["a", {"href": "https://w.org/A_(b)"}, "https://w.org/A_(b)"], "), ",
+       ["strong", ["a", {"href": "https://x.io"}, "https://x.io"]]]]),
+    ("xhttps://x.io https:// https://. http", [["p", "xhttps://x.io https:// https://. http"]]),
     # escapes, of ASCII punctuation only
     ("\\*a\\* \\` \\\\ \\a", [["p", "*a* ` \\ \\a"]]),
 ]  # fmt: skip

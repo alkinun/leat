@@ -16,6 +16,7 @@ function render(nodes) {
     const [tag, ...children] = node;
     const e = document.createElement(tag);
     const attributes = children[0]?.constructor === Object ? children.shift() : {};
+    if (tag === "a") Object.assign(attributes, { target: "_blank", rel: "noopener noreferrer" });
     for (const [name, value] of Object.entries(attributes)) e.setAttribute(name, value);
     e.append(...render(children));
     return e;
@@ -78,10 +79,16 @@ function inline(text) {
 
 // the span at i, or the text that stands for itself there, and where either ends
 function span(text, i) {
-  const c = text[i];
-  if (c === "\\" && PUNCTUATION.test(text[i + 1] ?? "")) return [text[i + 1], i + 2];
-  if (c === "`") return codeSpan(text, i);
-  return ("*_~".includes(c) && emphasis(text, i)) || [c, i + 1];
+  return SPANS[text[i]]?.(text, i) ?? [text[i], i + 1];
+}
+
+const SPANS = {
+  "\\": escape, "`": codeSpan, "*": emphasis, _: emphasis, "~": emphasis,
+  "[": link, "!": link, "<": autolink, h: url,
+};
+
+function escape(text, i) {
+  return PUNCTUATION.test(text[i + 1] ?? "") ? [text[i + 1], i + 2] : null;
 }
 
 // `code`, between runs of as many backticks, its one space each side dropped if both have one
@@ -132,6 +139,55 @@ function closer(text, j, c, n) {
   return -1;
 }
 
+// [text](url "title"), and ![alt](url) as a link to the image: a link to anything but the web or
+// mail stays text, so that none runs script
+function link(text, i) {
+  const open = text[i] === "!" ? i + 1 : i, close = bracket(text, open);
+  if (text[open] !== "[" || close < 0) return null;
+  const destination = DESTINATION.exec(text.slice(close + 1));
+  const href = destination?.[1] ?? destination?.[2];
+  if (!SAFE.test(href ?? "")) return null;
+  const end = close + 1 + destination[0].length;
+  return [["a", { href }, ...inline(text.slice(open + 1, close))], end];
+}
+
+// where the ] that closes the [ at i is, past the code spans and escapes within
+function bracket(text, i) {
+  for (let j = i, depth = 0; j < text.length; ) {
+    if (text[j] === "\\") {
+      j += 2;
+    } else if (text[j] === "`") {
+      j = codeSpan(text, j)[1];
+    } else {
+      depth += { "[": 1, "]": -1 }[text[j]] ?? 0;
+      if (depth === 0) return j;
+      j++;
+    }
+  }
+  return -1;
+}
+
+// <https://example.com>
+function autolink(text, i) {
+  const match = /^<((?:https?|mailto):[^\s<>]+)>/i.exec(text.slice(i));
+  return match && [["a", { href: match[1] }, match[1]], i + match[0].length];
+}
+
+// https://example.com bare, after a space or the start, without the punctuation that ends a
+// sentence or wraps it
+function url(text, i) {
+  let href = /^https?:\/\/[^\s<]+/.exec(text.slice(i))?.[0];
+  if (!href || /[^\s(*_~]/.test(text[i - 1] ?? " ")) return null;
+  const unbalanced = () => href.split(")").length > href.split("(").length;
+  while (/[?!.,:;*_~'"]$/.test(href) || (href.endsWith(")") && unbalanced())) {
+    href = href.slice(0, -1);
+  }
+  return /^https?:\/\/./.test(href) ? [["a", { href }, href], i + href.length] : null;
+}
+
+// a link's (destination "title"), the destination in <> or with its parentheses balanced
+const DESTINATION = /^\(\s*(?:<([^<>\n]*)>|((?:[^\s()]|\([^\s()]*\))+))(?:\s+"[^"]*")?\s*\)/;
+const SAFE = /^(?:https?:\/\/|mailto:)/i;
 const PUNCTUATION = /[!-/:-@[-`{-~]/; // ASCII's, which a backslash escapes
 const WORD = /[\p{L}\p{N}]/u;
 
