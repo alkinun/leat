@@ -381,7 +381,8 @@ class Transformer:
         # normed and then their sum, and the layer's output scaled, or as in Qwen3.5 experts beside
         # a shared one
         c, w, s = self.config, self.layers[i], self.small[i]
-        norm, eps, scale = (s["ffn_norm"], c.norm_eps), c.norm_eps, s.get("layer_output_scale")
+        eps, scale = c.norm_eps, s.get("layer_output_scale")
+        norm = (s["ffn_norm"], eps)
         mlp = (w["ffn_gate"], w["ffn_up"], w["ffn_down"]) if "ffn_gate" in w else None
         if mlp and not c.experts:
             if "post_ffw_norm" not in s:

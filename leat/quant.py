@@ -119,7 +119,7 @@ def _q8_0(b: Tensor) -> Tensor:
     return _f16(b[:, :2]) * b[:, 2:].bitcast(dtypes.int8).cast(dtypes.float32)
 
 
-# IQ4_NL's and IQ4_XS's values, and MXFP4's E2M1 ones, doubled
+# IQ4_NL's and IQ4_XS's values; and MXFP4's E2M1 values, doubled, as ggml's kvalues_mxfp4
 IQ4_VALUES = (-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113)
 FP4_VALUES = (0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12)
 
