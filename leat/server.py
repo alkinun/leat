@@ -175,6 +175,8 @@ class Server(ThreadingHTTPServer):
         self.options, self.created = options, int(time.time())
         self.loaded: _Loaded | None = None
         self.loading: str | None = None  # the id of the model the worker is loading
+        self.ready = threading.Event()  # set but while a model loads, which completions wait for
+        self.ready.set()
         self.requests: queue.SimpleQueue[_Completion | _Load | None] = queue.SimpleQueue()
         super().__init__((host, port), _Handler)
         threading.Thread(target=self._work, name="leat engine", daemon=True).start()
@@ -274,6 +276,7 @@ class Server(ThreadingHTTPServer):
         # replaces the loaded model, whose memory is freed first: a GPU holds one model at most
         if self.loaded is not None and self.loaded.name == load.name:
             return load.done.put(None)
+        self.ready.clear()
         self.loaded, self.loading = None, load.name
         gc.collect()  # an engine's graphs refer back to it
         error: Exception | None = None
@@ -285,6 +288,7 @@ class Server(ThreadingHTTPServer):
         except Exception as e:  # for the client; the server carries on with no model
             error = e
         self.loading = None
+        self.ready.set()
         load.done.put(error)
 
     def _arrivals(self, wait: bool) -> Iterator[_Completion | _Load | None]:
@@ -368,6 +372,7 @@ class _Handler(BaseHTTPRequestHandler):
         self._json(200, self._model(name))
 
     def _complete(self, body: Any) -> None:
+        self.server.ready.wait()  # for the model loading, if one is, whose template renders it
         try:
             completion = _completion(body, self.server)
         except (ValueError, TypeError, jinja2.TemplateError) as e:

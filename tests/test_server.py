@@ -116,6 +116,20 @@ def test_load(tiny_model, tmp_path):
             load(client, "tinier")
 
 
+def test_completion_waits_for_a_load(tiny_model, monkeypatch):
+    # a completion asked for while a model loads waits for it, rather than finding none loaded
+    warm_up = Engine.warm_up
+    monkeypatch.setattr(Engine, "warm_up", lambda self: time.sleep(0.5) or warm_up(self))
+    with serving(tiny_model[0], max_context=CONTEXT) as server:
+        client = connect(server)
+        loading = threading.Thread(target=load, args=(client, "tiny"))
+        loading.start()
+        while server.loading is None:
+            time.sleep(0.01)
+        assert chat(client, "hello", max_tokens=2).model == "tiny"
+        loading.join()
+
+
 def test_app(server):
     url = f"http://127.0.0.1:{server.server_port}"
     with urllib.request.urlopen(f"{url}/") as response:
