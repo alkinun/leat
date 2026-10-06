@@ -538,6 +538,9 @@ def _flash_attention_kernel(
         total.store(UOp.stack(*(prev_total[r].load() * rescale[r] + sums[r] for r in range(n)))),
     ).end(tiles)
     acc, mx, total = acc.after(update), mx.after(update), total.after(update)
+    # past the loop, the fragments of an opaque copy of the lane: see common.opaque
+    frags = type(frags)(opaque(lane))
+    rows = [tile * QUERIES + r for r in frags.queries]
     results = []
     for i in range(width // 2):
         r, d = frags.place(i)

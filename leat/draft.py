@@ -1,7 +1,9 @@
 """Drafters for speculative decoding: small models that guess the tokens a target model will
 generate next, which the target then checks all at once, reading its weights once for them all."""
 
+from dataclasses import replace
 from pathlib import Path
+from typing import Protocol
 
 from tinygrad import Tensor, UOp
 
@@ -9,6 +11,38 @@ from leat import ops
 from leat.gguf import GGUF
 from leat.model import Transformer, rope_table
 from leat.ops import Span
+
+
+class Drafter(Protocol):
+    def draft(
+        self, token: Tensor, hidden: Tensor, slot: int | UOp, pos: int | UOp, count: int
+    ) -> Tensor:
+        """`count` tokens drafted greedily after `token` (1, 1) at position `pos` of cache slot
+        `slot`, which the target has run up to pos, given its normed hidden state (1, 1, dim)
+        at pos - 1: (1, count) int32."""
+        ...
+
+    def follow(self, tokens: Tensor, hidden: Tensor, spans: list[Span]) -> None:
+        """Takes in what the target ran: tokens (1, T), its spans', and the target's normed
+        hidden states (1, T, dim) at the positions before theirs."""
+        ...
+
+    def copy(self, source: int | UOp, slot: int | UOp) -> None:
+        """Copies what the drafter holds of slot `source` to slot `slot`."""
+        ...
+
+
+def load(path: str | Path, target: Transformer) -> Drafter:
+    """The drafter in a GGUF for a target model: Gemma 4's assistant, or the target's own file
+    for Qwen3.5's MTP layer."""
+    gguf = GGUF.open(path)
+    arch = gguf.metadata["general.architecture"]
+    if arch == "gemma4-assistant":
+        return Gemma4Assistant(gguf, target)
+    if gguf.metadata.get(f"{arch}.nextn_predict_layers") and arch == "qwen35moe":
+        return Qwen35Mtp(gguf, target)
+    raise ValueError(f"a {arch} model drafts for no {target.config.arch} model")
+
 
 _LAYER = (
     "attn_norm", "attn_q", "attn_q_norm", "attn_output", "post_attention_norm",
@@ -24,8 +58,7 @@ class Gemma4Assistant:
     projected, and gives the next token and a hidden state as the target's, from which the next
     step drafts another at the same position, as llama.cpp's."""
 
-    def __init__(self, path: str | Path, target: Transformer):
-        gguf = GGUF.open(path)
+    def __init__(self, gguf: GGUF, target: Transformer):
         arch, c = gguf.metadata["general.architecture"], target.config
         if arch != "gemma4-assistant" or c.arch != "gemma4":
             raise ValueError(f"a {arch} model drafts for no {c.arch} model")
@@ -62,9 +95,6 @@ class Gemma4Assistant:
     def draft(
         self, token: Tensor, hidden: Tensor, slot: int | UOp, pos: int | UOp, count: int
     ) -> Tensor:
-        """`count` tokens drafted greedily after `token` (1, 1) at position `pos` of cache slot
-        `slot`, which the target has run up to pos, given its normed hidden state (1, 1, dim)
-        at pos - 1: (1, count) int32."""
         scale, drafted = self.target.config.embed_scale, []
         for _ in range(count):
             x = ops.embedding(token, self.target.embed) * scale
@@ -72,6 +102,12 @@ class Gemma4Assistant:
             token = ops.argmax(logits.reshape(1, -1)).reshape(1, 1)
             drafted.append(token)
         return drafted[0].cat(*drafted[1:], dim=1)
+
+    def follow(self, tokens: Tensor, hidden: Tensor, spans: list[Span]) -> None:
+        pass  # it reads the target's own keys and values
+
+    def copy(self, source: int | UOp, slot: int | UOp) -> None:
+        pass
 
     def _step(self, x: Tensor, slot: int | UOp, pos: int | UOp) -> tuple[Tensor, Tensor]:
         # the hidden state for the next step and the logits, after x (1, 1, width)
@@ -95,3 +131,58 @@ class Gemma4Assistant:
             x = (x + ops.rms_norm(out, small["post_ffw_norm"], eps)) * small["layer_output_scale"]
         x = ops.rms_norm(x, self.norm, eps)
         return ops.linear(x, self.post), ops.linear(x, self.embed)
+
+
+class Qwen35Mtp:
+    """Qwen3.5's and Qwen3.6's MTP layer, past the model's own in its GGUF: a full-attention layer
+    of the model's kind, with its own keys and values, whose inputs are a token's embedding and
+    the model's hidden state at the position before, each normed, joined and projected, and whose
+    output, normed by a weight of its own, the model's output head reads. A step takes a token
+    and the hidden state before it and gives the next token and its own hidden state, from which
+    the next step drafts another at the next position, as llama.cpp's. The keys and values of
+    every position the target runs come from its tokens and its hidden states."""
+
+    def __init__(self, gguf: GGUF, target: Transformer):
+        c, prefix = target.config, f"blk.{target.config.n_layers}."
+        w = {n.removeprefix(prefix): t for n, t in gguf.load(
+            names=[n for n in gguf.tensors if n.startswith(prefix)]).items()}  # fmt: skip
+        self.target, self.eps = target, c.norm_eps
+        self.proj = w.pop("nextn.eh_proj.weight")
+        self.e_norm, self.h_norm = (
+            w.pop(f"nextn.{n}.weight").dequant().realize() for n in ("enorm", "hnorm")
+        )
+        head_norm = w.pop("nextn.shared_head_norm.weight")
+        # the layer as a model of its own, of the target's attention layers' shape, its output
+        # normed with the shared head's norm
+        full = max(i for i in range(c.n_layers) if not c.recurrent[i])
+        one = {
+            f: getattr(c, f)[full : full + 1]
+            for f in ("kv_heads", "head_dims", "windows", "ropes", "scales", "recurrent")
+        }
+        weights = {f"blk.0.{n}": t for n, t in w.items()}
+        weights |= {"token_embd.weight": target.embed, "output.weight": target.output}
+        weights["output_norm.weight"] = head_norm
+        config = replace(c, n_layers=1, **one)
+        self.layer = Transformer(config, weights, target.max_context, target.slots)
+
+    def draft(
+        self, token: Tensor, hidden: Tensor, slot: int | UOp, pos: int | UOp, count: int
+    ) -> Tensor:
+        drafted = []
+        for i in range(count):
+            hidden = self.layer.forward(self._inputs(token, hidden), [Span(slot, pos + i)])
+            token = ops.argmax(self.target.logits(hidden).reshape(1, -1)).reshape(1, 1)
+            drafted.append(token)
+        return drafted[0].cat(*drafted[1:], dim=1)
+
+    def follow(self, tokens: Tensor, hidden: Tensor, spans: list[Span]) -> None:
+        self.layer.store(0, self._inputs(tokens, hidden), spans)
+
+    def copy(self, source: int | UOp, slot: int | UOp) -> None:
+        self.layer.copy(source, slot)
+
+    def _inputs(self, tokens: Tensor, hidden: Tensor) -> Tensor:
+        # the layer's inputs: the tokens' embeddings and the hidden states before them
+        e = ops.rms_norm(ops.embedding(tokens, self.target.embed), self.e_norm, self.eps)
+        h = ops.rms_norm(hidden, self.h_norm, self.eps)
+        return ops.linear(e.cat(h, dim=-1), self.proj)

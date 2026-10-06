@@ -685,7 +685,8 @@ def _write_qwen35moe(path: Path) -> dict[str, np.ndarray]:
     add("output.weight", *TENSORS["output.weight"])
     add("output_norm.weight", (D,))
     rng = np.random.default_rng(1)
-    for i in range(Q35_EVERY):
+    # the model's layers, then its MTP layer, of full attention, which drafts its next tokens
+    for i in range(Q35_EVERY + 1):
         b = f"blk.{i}."
         for name in ("attn_norm", "post_attention_norm"):
             add(b + name + ".weight", (D,))
@@ -715,15 +716,31 @@ def _write_qwen35moe(path: Path) -> dict[str, np.ndarray]:
         add(b + "ffn_gate_shexp.weight", (Q35_SHARED, D), GGMLType.Q4_K, 2e-4)
         add(b + "ffn_up_shexp.weight", (Q35_SHARED, D), GGMLType.Q6_K, 5e-5)
         add(b + "ffn_down_shexp.weight", (D, Q35_SHARED), GGMLType.Q8_0, 1e-3)
-    add(f"blk.{Q35_EVERY}.nextn.enorm.weight", (D,))
+    b = f"blk.{Q35_EVERY}.nextn."
+    for name in ("enorm", "hnorm", "shared_head_norm"):
+        add(b + name + ".weight", (D,))
+    add(b + "eh_proj.weight", (D, 2 * D), GGMLType.Q8_0, 1e-3)
     _finish(w)
     return weights
 
 
 def _reference_qwen35moe(w: dict[str, np.ndarray], tokens: list[int]) -> np.ndarray:
-    T, positions = len(tokens), np.arange(len(tokens))
-    freqs = 1e7 ** (-np.arange(0, Q35_ROTATED, 2) / Q35_ROTATED)
-    angles = positions[:, None, None] * freqs
+    return _qwen35_hidden(w, tokens) @ w["output.weight"].T
+
+
+def _qwen35_hidden(w: dict[str, np.ndarray], tokens: list[int]) -> np.ndarray:
+    # the normed hidden states
+    x = w["token_embd.weight"][tokens].astype(np.float64)
+    for i in range(Q35_EVERY):
+        x = _qwen35_layer(_layer(w, i), x, i < Q35_EVERY - 1)
+    return norm(x, w["output_norm.weight"])
+
+
+def _qwen35_layer(lw: dict[str, np.ndarray], x: np.ndarray, recurrent: bool) -> np.ndarray:
+    # a Gated DeltaNet or full-attention layer of positions 0..T-1, then its experts and shared
+    # expert
+    T = len(x)
+    angles = np.arange(T)[:, None, None] * 1e7 ** (-np.arange(0, Q35_ROTATED, 2) / Q35_ROTATED)
     cos, sin = np.cos(angles), np.sin(angles)
 
     def rope(z):  # the first Q35_ROTATED dimensions, i with i + Q35_ROTATED / 2
@@ -731,30 +748,43 @@ def _reference_qwen35moe(w: dict[str, np.ndarray], tokens: list[int]) -> np.ndar
             [rotate_halves(z[..., :Q35_ROTATED], cos, sin), z[..., Q35_ROTATED:]], -1
         )
 
-    x = w["token_embd.weight"][tokens].astype(np.float64)
-    for i in range(Q35_EVERY):
-        lw = _layer(w, i)
-        h = norm(x, lw["attn_norm"])
-        if i < Q35_EVERY - 1:
-            out = _gated_delta_net(lw, h)
-        else:
-            q, gate = np.split((h @ lw["attn_q"].T).reshape(T, HEADS, 2 * Q35_HEAD), 2, -1)
-            k, v = ((h @ lw[n].T).reshape(T, KV_HEADS, Q35_HEAD) for n in ("attn_k", "attn_v"))
-            q, k = rope(norm(q, lw["attn_q_norm"])), rope(norm(k, lw["attn_k_norm"]))
-            out = attention(q, k, v, _mask(T, 0), 1 / np.sqrt(Q35_HEAD))
-            out = out * sigmoid(gate.reshape(T, -1)) @ lw["attn_output"].T
-        x = x + out
-        h = norm(x, lw["post_attention_norm"])
-        x = x + experts(
-            h,
-            h @ lw["ffn_gate_inp"].T,
-            lambda e, row, lw=lw: mlp(
-                row, lw["ffn_gate_exps"][e], lw["ffn_up_exps"][e], lw["ffn_down_exps"][e]
-            ),
-        )
-        shared = mlp(h, lw["ffn_gate_shexp"], lw["ffn_up_shexp"], lw["ffn_down_shexp"])
-        x = x + shared * sigmoid(h @ lw["ffn_gate_inp_shexp"])[:, None]
-    return norm(x, w["output_norm.weight"]) @ w["output.weight"].T
+    h = norm(x, lw["attn_norm"])
+    if recurrent:
+        out = _gated_delta_net(lw, h)
+    else:
+        q, gate = np.split((h @ lw["attn_q"].T).reshape(T, HEADS, 2 * Q35_HEAD), 2, -1)
+        k, v = ((h @ lw[n].T).reshape(T, KV_HEADS, Q35_HEAD) for n in ("attn_k", "attn_v"))
+        q, k = rope(norm(q, lw["attn_q_norm"])), rope(norm(k, lw["attn_k_norm"]))
+        out = attention(q, k, v, _mask(T, 0), 1 / np.sqrt(Q35_HEAD))
+        out = out * sigmoid(gate.reshape(T, -1)) @ lw["attn_output"].T
+    x = x + out
+    h = norm(x, lw["post_attention_norm"])
+    x = x + experts(
+        h,
+        h @ lw["ffn_gate_inp"].T,
+        lambda e, row: mlp(
+            row, lw["ffn_gate_exps"][e], lw["ffn_up_exps"][e], lw["ffn_down_exps"][e]
+        ),
+    )
+    shared = mlp(h, lw["ffn_gate_shexp"], lw["ffn_up_shexp"], lw["ffn_down_shexp"])
+    return x + shared * sigmoid(h @ lw["ffn_gate_inp_shexp"])[:, None]
+
+
+def reference_mtp_drafts(w: dict[str, np.ndarray], tokens: list[int], count: int) -> list[int]:
+    # the MTP layer's `count` greedy drafts after `tokens`, the last at a position the model has
+    # not run: the layer runs every position, of each token with the model's hidden state before
+    # it, none before the first; then the drafts', each with the layer's own state before it
+    hidden, lw = _qwen35_hidden(w, tokens[:-1]), _layer(w, Q35_EVERY)
+    tokens, before, drafts = list(tokens), [np.zeros(D), *hidden], []
+    for _ in range(count):
+        e = norm(w["token_embd.weight"][tokens].astype(np.float64), lw["nextn.enorm"])
+        h = norm(np.stack(before), lw["nextn.hnorm"])
+        x = np.concatenate([e, h], -1) @ lw["nextn.eh_proj"].T
+        out = norm(_qwen35_layer(lw, x, False), lw["nextn.shared_head_norm"])[-1]
+        drafts.append(int((out @ w["output.weight"].T).argmax()))
+        tokens.append(drafts[-1])
+        before.append(out)
+    return drafts
 
 
 def _gated_delta_net(lw: dict[str, np.ndarray], h: np.ndarray) -> np.ndarray:

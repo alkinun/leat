@@ -216,13 +216,14 @@ class Transformer:
     """
 
     def __init__(
-        self, config: Config, weights: dict[str, QTensor], max_context: int, slots: int = 1
-    ):
+        self, config: Config, weights: dict[str, QTensor], max_context: int, slots: int = 1,
+        saved_tokens: int = 0,
+    ):  # fmt: skip
         if not 0 < max_context <= config.context_length:
             raise ValueError(
                 f"max_context must be in [1, {config.context_length}], got {max_context}"
             )
-        self.config, self.max_context = config, max_context
+        self.config, self.max_context, self.slots = config, max_context, slots
         # each layer's tensors by name, without "blk.{i}." and ".weight"
         self.layers: list[dict[str, QTensor]] = [{} for _ in range(config.n_layers)]
         for name, w in weights.items():
@@ -283,25 +284,44 @@ class Transformer:
             None if s is None else (_zeros(*map(int, s[0].shape)), _zeros(*map(int, s[1].shape)))
             for s in self.states
         ]
+        # and those after each of a run's `saved_tokens` tokens, from which it may go back
+        self.saved = [
+            None if s is None or not saved_tokens
+            else (_zeros(saved_tokens, *map(int, s[0].shape[1:])),
+                  _zeros(saved_tokens, *map(int, s[1].shape[1:])))
+            for s in self.states
+        ]  # fmt: skip
 
     def __call__(self, tokens: Tensor, start_pos: int | UOp, slot: int | UOp = 0) -> Tensor:
         """Runs `tokens` (1, T) at positions `start_pos...` of cache slot `slot` and returns normed
         hidden states."""
         return self.run(tokens, [Span(slot, start_pos, tokens.shape[1])])
 
-    def run(self, tokens: Tensor, spans: list[Span], live: int | UOp | None = None) -> Tensor:
+    def run(
+        self, tokens: Tensor, spans: list[Span], live: int | UOp | None = None, save: bool = False
+    ) -> Tensor:
         """Runs `tokens` (1, T), the spans' in turn, each in its slot and at its positions, and
         returns normed hidden states. Several sequences share the reads of every weight; each
         attends over its own slot alone. Tokens past the first `live`, if given, pad a batch:
-        the mixtures of experts skip them."""
-        if len(spans) > 1 and not all(isinstance(s.length, int) for s in spans):
-            raise ValueError("several spans need lengths known in advance")
+        the mixtures of experts skip them. With `save`, a single span's tokens keep the recurrent
+        states after each of them, from which rewind() goes back."""
         x = ops.embedding(tokens, self.embed)
         if (scale := self.config.embed_scale) != 1:
             x = x * scale
+        return self.forward(x, spans, live, save)
+
+    def forward(
+        self, x: Tensor, spans: list[Span], live: int | UOp | None = None, save: bool = False
+    ) -> Tensor:
+        """run() from the tokens' embeddings x (1, T, dim), or any inputs of the first layer."""
+        if len(spans) > 1 and not all(isinstance(s.length, int) for s in spans):
+            raise ValueError("several spans need lengths known in advance")
         for i in range(self.config.n_layers):
-            mix = self._delta_net if self.config.recurrent[i] else self._attention
-            x = self._feed_forward(i, mix(i, x, spans), live)
+            if self.config.recurrent[i]:
+                x = self._delta_net(i, x, spans, save)
+            else:
+                x = self._attention(i, x, spans)
+            x = self._feed_forward(i, x, live)
         return ops.rms_norm(x, self.output_norm, self.config.norm_eps)
 
     def logits(self, hidden: Tensor) -> Tensor:
@@ -330,11 +350,46 @@ class Transformer:
         """Copies the kept recurrent states of slot `slot` back."""
         _copy_slot(self.kept, self.states, slot)
 
+    def rewind(self, slot: int | UOp, token: int | UOp) -> None:
+        """Sets the recurrent states of slot `slot` to those a saving run kept after its token
+        `token`, as if the run had stopped there."""
+        writes = [
+            state[slot : slot + 1].assign(after[token : token + 1])
+            for states, saved in zip(self.states, self.saved, strict=True) if states and saved
+            for state, after in zip(states, saved, strict=True)
+        ]  # fmt: skip
+        if writes:
+            Tensor.realize(*writes)
+
+    def store(self, i: int, x: Tensor, spans: list[Span]) -> None:
+        """Stores layer i's keys and values of x, its inputs, in its cache, as running it would."""
+        Tensor.realize(self._rotated(i, x, spans)[1])
+
     def _attention(self, i: int, x: Tensor, spans: list[Span]) -> Tensor:
         # x + the attention block's output
         c, w, s = self.config, self.layers[i], self.small[i]
+        (q, gate), cache = self._rotated(i, x, spans)
+        out = ops.attention(q, cache, spans, c.scales[i], c.windows[i], s.get("attn_sinks"))
+        if gate is not None:
+            out = out * gate.reshape(out.shape).sigmoid()
+        # gpt-oss's output bias joins the residual
+        residual = x + s["attn_output.bias"] if "attn_output.bias" in s else x
+        if "post_attention_norm" not in s:
+            return ops.linear(out, w["attn_output"], residual=residual)
+        return ops.add_normed(
+            residual, [(ops.linear(out, w["attn_output"]), s["post_attention_norm"])], None,
+            c.norm_eps,
+        )  # fmt: skip
+
+    def _rotated(
+        self, i: int, x: Tensor, spans: list[Span]
+    ) -> tuple[tuple[Tensor, Tensor | None], Tensor]:
+        # layer i's queries of x, rotated, and the gates of their heads' outputs if any, and its
+        # cache with x's keys and values stored
+        c, w, s = self.config, self.layers[i], self.small[i]
         B, T, _ = x.shape
         kv_heads, dim, eps = c.kv_heads[i], c.head_dims[i], c.norm_eps
+        gate = None
         # Gemma 4's full-attention layers have no values of their own: the keys are, before norm
         proj = [w["attn_q"], w["attn_k"]] + ([w["attn_v"]] if "attn_v" in w else [])
         q, k, *values = ops.linears(x, *proj, norm=(s["attn_norm"], eps))
@@ -352,18 +407,9 @@ class Transformer:
         assert cache is not None
         q, cache = ops.rotate(q, k, v, cache, spans, rope, c.rope_halves, biases, norms, c.v_norm,
                               eps)  # fmt: skip
-        out = ops.attention(q, cache, spans, c.scales[i], c.windows[i], s.get("attn_sinks"))
-        if c.q_gate:
-            out = out * gate.reshape(out.shape).sigmoid()
-        # gpt-oss's output bias joins the residual
-        residual = x + s["attn_output.bias"] if "attn_output.bias" in s else x
-        if "post_attention_norm" not in s:
-            return ops.linear(out, w["attn_output"], residual=residual)
-        return ops.add_normed(
-            residual, [(ops.linear(out, w["attn_output"]), s["post_attention_norm"])], None, eps
-        )
+        return (q, gate), cache
 
-    def _delta_net(self, i: int, x: Tensor, spans: list[Span]) -> Tensor:
+    def _delta_net(self, i: int, x: Tensor, spans: list[Span], save: bool = False) -> Tensor:
         # x + a Gated DeltaNet block's output, in place of attention: queries, keys and values
         # and the output's gate z projected together, the decay's alpha and beta together
         w, s, eps = self.layers[i], self.small[i], self.config.norm_eps
@@ -372,8 +418,9 @@ class Transformer:
         mixed, z = ops.linears(x, w["attn_qkv"], w["attn_gate"], norm=(s["attn_norm"], eps))
         gates = ops.router(x, (s["attn_norm"], eps), w["ssm_alpha_beta"])
         decay = (s["ssm_a"], s["ssm_dt.bias"])
+        saved = self.saved[i] if save else None
         out = ops.delta_net(mixed, z, gates, w["ssm_conv1d"].dequant(), decay,
-                            (s["ssm_norm"], eps), states, spans)  # fmt: skip
+                            (s["ssm_norm"], eps), states, spans, saved)  # fmt: skip
         return ops.linear(out, w["ssm_out"], residual=x)
 
     def _feed_forward(self, i: int, x: Tensor, live: int | UOp | None = None) -> Tensor:

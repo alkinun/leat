@@ -37,7 +37,8 @@ def main(argv: list[str] | None = None) -> None:
     run.add_argument(
         "--draft",
         type=Path,
-        help="a drafter's GGUF, for speculative decoding: Gemma 4's assistant for Gemma 4",
+        help="a drafter's GGUF, for speculative decoding: Gemma 4's assistant for Gemma 4, or "
+        "for Qwen3.5's MTP layer the model's own",
     )
 
     serve = commands.add_parser(
@@ -69,7 +70,8 @@ def main(argv: list[str] | None = None) -> None:
     speed.add_argument(
         "--draft",
         type=Path,
-        help="a drafter's GGUF, for speculative decoding: Gemma 4's assistant for Gemma 4",
+        help="a drafter's GGUF, for speculative decoding: Gemma 4's assistant for Gemma 4, or "
+        "for Qwen3.5's MTP layer the model's own",
     )
     speed.add_argument("--json", action="store_true", help="print one JSON object")
 

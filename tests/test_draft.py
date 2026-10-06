@@ -3,9 +3,18 @@ from tinygrad import Tensor, UOp, dtypes
 
 from leat.engine import DRAFT_TOKENS, Engine
 from leat.sampler import GREEDY, Sampling
-from tests.helpers import CONTEXT, reference_drafts
+from tests.helpers import CONTEXT, reference_drafts, reference_mtp_drafts
 
 PROMPT = [5, 77, 120, 3, 299, 42, 8, 150, 61, 200, 9, 33]
+# Gemma 4 with its assistant, and Qwen3.5 with its MTP layer, of recurrent state that a step
+# goes back on where it keeps fewer tokens than it ran
+ARCHS = ["gemma4", "qwen35moe"]
+
+
+def models(tiny, tiny_assistant, arch: str):
+    # a tiny model's path and its drafter's
+    path = tiny(arch)[0]
+    return path, tiny_assistant[0] if arch == "gemma4" else path
 
 
 @pytest.mark.usefixtures("reference_ops")
@@ -21,6 +30,20 @@ def test_drafts_match_reference(tiny, tiny_assistant):
     engine.cancel(sequence)
 
 
+@pytest.mark.usefixtures("reference_ops")
+def test_mtp_drafts_match_reference(tiny):
+    # after a prompt of two chunks, whose second takes the first's last hidden state
+    path, weights = tiny("qwen35moe")
+    engine = Engine(path, max_context=CONTEXT, prefill_chunk=8, draft=path)
+    assert engine.drafter is not None
+    sequence = engine.start(PROMPT, 4)
+    engine.step()
+    ((_, token),) = engine.step()
+    drafts = engine.drafter.draft(Tensor([[token]]), engine._hidden[:1], 0, len(PROMPT), 3)
+    assert drafts.tolist() == [reference_mtp_drafts(weights, PROMPT + [token], 3)]
+    engine.cancel(sequence)
+
+
 class _Oracle:
     """Drafts the tokens a list holds at the positions after a draft's, as a drafter that guessed
     them would."""
@@ -31,16 +54,23 @@ class _Oracle:
     def draft(self, token: Tensor, hidden: Tensor, slot: UOp, pos: UOp, count: int) -> Tensor:
         return self.tokens[pos + 1 : pos + 1 + count].reshape(1, count)
 
+    def follow(self, tokens: Tensor, hidden: Tensor, spans: list) -> None:
+        pass
+
+    def copy(self, source: UOp, slot: UOp) -> None:
+        pass
+
 
 @pytest.mark.usefixtures("reference_ops")
+@pytest.mark.parametrize("arch", ARCHS)
 @pytest.mark.parametrize("sampling", [GREEDY, Sampling(temperature=0.9, top_k=50)])
 @pytest.mark.parametrize("guessed", ["none", "all", "some"])
-def test_speculative_generates_as_plain(tiny, tiny_assistant, sampling, guessed):
+def test_speculative_generates_as_plain(tiny, tiny_assistant, arch, sampling, guessed):
     # whatever the drafter guesses, the tokens are those plain decoding generates; a drafter that
     # guesses them all has each step keep all its drafts
-    path, _ = tiny("gemma4")
+    path, draft = models(tiny, tiny_assistant, arch)
     plain = list(Engine(path, max_context=CONTEXT).generate(PROMPT, 20, sampling, seed=3))
-    engine = Engine(path, max_context=CONTEXT, draft=tiny_assistant[0])
+    engine = Engine(path, max_context=CONTEXT, draft=draft)
     tokens = PROMPT + plain
     if guessed == "some":  # every third position wrong
         tokens = [t if i % 3 else (t + 1) % 300 for i, t in enumerate(tokens)]
@@ -62,15 +92,16 @@ def test_speculative_generates_as_plain(tiny, tiny_assistant, sampling, guessed)
 
 
 @pytest.mark.usefixtures("reference_ops")
-def test_speculative_stops_where_plain_does(tiny, tiny_assistant):
+@pytest.mark.parametrize("arch", ARCHS)
+def test_speculative_stops_where_plain_does(tiny, tiny_assistant, arch):
     # at max_tokens, though the step generated more, and at the end of the context
-    path, _ = tiny("gemma4")
+    path, draft = models(tiny, tiny_assistant, arch)
     plain = list(Engine(path, max_context=CONTEXT).generate(PROMPT, 7))
-    engine = Engine(path, max_context=CONTEXT, draft=tiny_assistant[0])
+    engine = Engine(path, max_context=CONTEXT, draft=draft)
     engine.drafter = _Oracle(PROMPT + plain)  # type: ignore[assignment]
     assert list(engine.generate(PROMPT, 7)) == plain
     full = list(Engine(path, max_context=CONTEXT).generate(PROMPT, CONTEXT))
-    engine = Engine(path, max_context=CONTEXT, draft=tiny_assistant[0])
+    engine = Engine(path, max_context=CONTEXT, draft=draft)
     engine.drafter = _Oracle(PROMPT + full)  # type: ignore[assignment]
     assert list(engine.generate(PROMPT, CONTEXT)) == full
 

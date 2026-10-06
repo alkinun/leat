@@ -345,7 +345,7 @@ def test_warm_up(tiny, tiny_assistant, monkeypatch, arch, slots, batches):
     engine.warm_up()
     graphs = [engine._chunk, engine._few_chunk, *engine._decode.values(), engine._copy]
     graphs += [engine._keep, engine._restore] if arch == "qwen35moe" else []
-    graphs += [engine._speculate, engine._take] if draft else []
+    graphs += [engine._speculate, engine._settle] if draft else []
     assert list(engine._decode) == batches
     captured = [jit.captured for jit in graphs]
     assert all(captured) and engine.cached_prefix(PROMPT) == 0
