@@ -35,8 +35,10 @@ _FIM_EOG = {
 # message that do not end a generation, as llama.cpp's workaround has it
 _HARMONY = {"<|channel|>", "<|message|>", "<|start|>", "<|constrain|>"}
 SPACE = "\u2581"  # how SentencePiece spells a space
+_CACHED = 1 << 24  # characters of words a tokenizer keeps the tokens of, to encode them again
 
 
+@functools.cache
 def _category_classes() -> dict[str, str]:
     # regex class bodies for the Unicode letter, mark, number and separator categories, as ranges
     # so `re` stays fast on long inputs. Python's own \s, \d and \w differ from llama.cpp's
@@ -201,7 +203,8 @@ class Tokenizer:
             raise ValueError(f"vocab lacks {len(missing)} byte tokens, it is not byte-level BPE")
         merges = metadata.get("tokenizer.ggml.merges", [])
         self._ranks = {_pair(m): r for r, m in enumerate(merges)}
-        self._cache: dict[str, tuple[int, ...]] = {}
+        self._cache: dict[str, tuple[int, ...]] = {}  # words' tokens, of _CACHED characters
+        self._cached = 0
 
         self._bytes = [_spell(t, ty, self._byte_level) for t, ty in zip(tokens, types, strict=True)]
         # tokens special text spells, as llama.cpp's: <unk> too, which plain text never matches
@@ -290,8 +293,11 @@ class Tokenizer:
         if word in self._vocab and (self._ignore_merges or not word.strip("\n")):
             return (self._vocab[word],)
         ids = tuple(i for part in _merge(word, self._priority) for i in self._ids(part))
-        if len(self._cache) > 1 << 16:
+        # by their characters, as SentencePiece's and Gemma 4's words are whole lines
+        self._cached += len(word)
+        if self._cached > _CACHED:
             self._cache.clear()
+            self._cached = len(word)
         self._cache[word] = ids
         return ids
 
