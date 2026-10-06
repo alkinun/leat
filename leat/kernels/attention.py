@@ -4,6 +4,7 @@ readied for it: biased, normed, rotated by RoPE, and the keys and values stored 
 
 import functools
 import math
+from collections.abc import Callable
 
 from tinygrad import Tensor, UOp, dtypes
 from tinygrad.dtype import AddrSpace
@@ -20,12 +21,13 @@ from leat.kernels.common import (
     lane_range,
     load_vector,
     on_gpu,
-    on_nvidia,
+    on_matrix_cores,
+    on_rdna3,
     opaque,
     pick,
     register,
+    shfl_xor,
     turns,
-    warp_max,
     warp_sum,
 )
 
@@ -262,15 +264,17 @@ def attention(
 # ******** several query tokens: FlashAttention-2 ********
 # A block takes 16 query tokens and one kv head, with a warp for each query head of the GQA group;
 # the warps share tiles of 32 keys and values in shared memory, and each keeps its rows' scores,
-# softmax statistics and outputs in registers. Tiles of 32 keys leave room for more blocks per SM
-# than 64: 9 to 17% faster from 0 to 8k cached tokens. Heads wider than 256, Gemma 4's of 512,
-# would not fit in registers: blocks take parts of 256 of their outputs, each working out every
-# score, and read the queries as they go, with tiles of 16 keys to fit in shared memory. A single
-# tile of queries, as while prefilling up to 16 tokens, would leave SMs idle: blocks split its key
-# tiles, as FlashDecoding does, and FlashDecoding's combine kernel merges their outputs.
+# softmax statistics and outputs in registers, on NVIDIA's tensor cores or RDNA 3's. Tiles of 32
+# keys leave room for more blocks per SM than 64: 9 to 17% faster from 0 to 8k cached tokens. Heads
+# wider than 256, Gemma 4's of 512, would not fit in registers: blocks take parts of 256 of their
+# outputs, each working out every score, and read the queries as they go, with tiles of 16 keys to
+# fit in shared memory. A single tile of queries, as while prefilling up to 16 tokens, would leave
+# SMs idle: blocks split its key tiles, as FlashDecoding does, and FlashDecoding's combine kernel
+# merges their outputs.
 
 QUERIES, KEY_TILE, PART = 16, 32, 256
 SPLIT_BLOCKS = 64  # blocks that split one tile of queries' keys aim for
+HELD = 128  # the widest heads whose queries WMMA's warps hold in registers for the whole loop
 
 # mma.sync on f16 with f32 accumulation: c (4 f32) + a 16 x 16 tile times a 16 x 8 tile, from the
 # lane's 4 and 2 words of f16 pairs; results return as in matmul's _MMA
@@ -283,12 +287,26 @@ _MMA_F16 = (
     "{0}[1] = d1; {0}[2] = d2; {0}[3] = d3; return d0; }}()"
 )
 
+# WMMA on f16 with f32 accumulation: c (8 f32) + a 16 x 16 tile times a 16 x 16 tile, k = 16, from
+# the lane's 8 words of f16 pairs of each; results return as in matmul's _WMMA
+_WMMA_F16 = (
+    "[&]{{ typedef unsigned v8u __attribute__((ext_vector_type(8))); "
+    "typedef _Float16 v16h __attribute__((ext_vector_type(16))); "
+    "typedef float v8f __attribute__((ext_vector_type(8))); "
+    "v8u a = {{{1}, {2}, {3}, {4}, {5}, {6}, {7}, {8}}}; "
+    "v8u b = {{{9}, {10}, {11}, {12}, {13}, {14}, {15}, {16}}}; "
+    "v8f c = {{{17}, {18}, {19}, {20}, {21}, {22}, {23}, {24}}}; "
+    "v8f d = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32("
+    "__builtin_bit_cast(v16h, a), __builtin_bit_cast(v16h, b), c); "
+    "for (int i = 1; i < 8; i++) {0}[i] = d[i]; return d[0]; }}()"
+)
 
-def _mma_f16(a: list[UOp], b: list[UOp], c: list[UOp]) -> list[UOp]:
-    d = UOp.alloc((4,), dtypes.float32, addrspace=AddrSpace.REG)
-    product = UOp(Ops.CUSTOM, src=(d[0], *a, *b, *c), arg=(_MMA_F16, dtypes.float32))
+
+def _products(code: str, a: list[UOp], b: list[UOp], c: list[UOp]) -> list[UOp]:
+    d = UOp.alloc((len(c),), dtypes.float32, addrspace=AddrSpace.REG)
+    product = UOp(Ops.CUSTOM, src=(d[0], *a, *b, *c), arg=(code, dtypes.float32))
     d = d.after(d[0].store(product))
-    return [d[i].load() for i in range(4)]
+    return [d[i].load() for i in range(len(c))]
 
 
 def _f16_pair(lo: UOp, hi: UOp) -> UOp:
@@ -305,18 +323,131 @@ def _halves_word(lo: UOp, hi: UOp) -> UOp:
     return lo | (hi << 16)
 
 
+class _MmaQueries:
+    """A warp's products of 16 queries on mma.sync's fragments, of 8 keys or 8 dimensions: lane
+    4g + t holds queries g and g + 8, the scores of keys 2t and 2t + 1 of each 8 and the outputs of
+    dimensions 2t and 2t + 1 of each 8; the 4 lanes of a query share its max and sum. `queries`
+    are the lane's of the tile, and `leads`, whether it writes their statistics."""
+
+    def __init__(self, lane: UOp):
+        self.g, self.t = lane // 4, lane % 4
+        self.queries: tuple[UOp, ...] = (self.g, self.g + 8)
+        self.leads = self.t.eq(0)
+
+    def reduce(self, x: UOp, op: Callable[[UOp, UOp], UOp]) -> UOp:
+        # op over the lanes that hold x's query
+        return warp_sum(x, 4, op)
+
+    def scores(
+        self, query: Callable[[int, int | UOp], UOp], keys: UOp, dim: int, key_tile: int
+    ) -> list[tuple[int, UOp, UOp]]:  # fmt: skip
+        # the lane's q.k of a tile of keys, as (its query r, the key, the score), query(r, w)
+        # giving word w of query r
+        zero = UOp.const(0.0, dtypes.float32)
+        products = [[zero] * 4 for _ in range(key_tile // 8)]  # by tiles of 8 keys
+        for k in range(dim // 16):
+            a = [query(r, 8 * k + 4 * h + self.t) for h in (0, 1) for r in (0, 1)]
+            for j, c in enumerate(products):
+                b = [keys[8 * j + self.g, 8 * k + 4 * h + self.t].load() for h in (0, 1)]
+                products[j] = _products(_MMA_F16, a, b, c)
+        keys_ = [8 * j + 2 * self.t + e % 2 for j in range(key_tile // 8) for e in range(4)]
+        return [(e % 4 // 2, keys_[e], c) for e, c in enumerate(x for p in products for x in p)]
+
+    def place(self, i: int) -> tuple[int, UOp]:
+        # output i's query r and dimension, of the part
+        n, e = divmod(i, 4)
+        return e // 2, 8 * n + 2 * self.t + e % 2
+
+    def weigh(
+        self, p: list[UOp], values: UOp, acc: list[UOp], width: int, key_tile: int
+    ) -> list[UOp]:  # fmt: skip
+        # acc plus the weights p, in the order of scores, times the values: the results of two
+        # tiles of 8 keys make one A fragment of 16
+        weights = [
+            [_f16_pair(*p[8 * k + 4 * i + 2 * r : 8 * k + 4 * i + 2 * r + 2])
+             for i in (0, 1) for r in (0, 1)]
+            for k in range(key_tile // 16)
+        ]  # fmt: skip
+        outs: list[UOp] = []
+        for n in range(width // 8):
+            c = acc[4 * n : 4 * n + 4]
+            for k in range(key_tile // 16):
+                b = [values[8 * n + self.g, 8 * k + 4 * h + self.t].load() for h in (0, 1)]
+                c = _products(_MMA_F16, weights[k], b, c)
+            outs += c
+        return outs
+
+
+class _WmmaQueries(_MmaQueries):
+    """WMMA's, of 16 keys or 16 dimensions by the 16 queries, transposed so that a lane holds one
+    query: lane l holds query l % 16, the scores of keys 8h + e of each 16, e < 8, for h = l // 16,
+    lane l ^ 16 the others, and the outputs of dimensions 2e + h of each 16."""
+
+    def __init__(self, lane: UOp):
+        self.i, self.h = lane % 16, lane // 16
+        self.queries, self.leads = (self.i,), self.h.eq(0)
+
+    def reduce(self, x: UOp, op: Callable[[UOp, UOp], UOp]) -> UOp:
+        return op(x, shfl_xor(x, 16))
+
+    def scores(
+        self, query: Callable[[int, int | UOp], UOp], keys: UOp, dim: int, key_tile: int
+    ) -> list[tuple[int, UOp, UOp]]:  # fmt: skip
+        # row i of a tile of 16 keys is its key 8 (i % 2) + i // 2, so that the results of rows
+        # 2e + h are keys 8h + e
+        zero = UOp.const(0.0, dtypes.float32)
+        products = [[zero] * 8 for _ in range(key_tile // 16)]
+        key = 8 * (self.i % 2) + self.i // 2
+        for k in range(dim // 16):
+            b = [query(0, 8 * k + w) for w in range(8)]
+            for j, c in enumerate(products):
+                a = [keys[16 * j + key, 8 * k + w].load() for w in range(8)]
+                products[j] = _products(_WMMA_F16, a, b, c)
+        return [
+            (0, 16 * j + 8 * self.h + e, c[e]) for j, c in enumerate(products) for e in range(8)
+        ]
+
+    def place(self, i: int) -> tuple[int, UOp]:
+        n, e = divmod(i, 8)
+        return 0, 16 * n + 2 * e + self.h
+
+    def weigh(
+        self, p: list[UOp], values: UOp, acc: list[UOp], width: int, key_tile: int
+    ) -> list[UOp]:  # fmt: skip
+        # the B fragment of 16 keys is a lane's 4 words of weights and lane l ^ 16's, keys 0..7
+        # first
+        first, weights = self.h.eq(0), []
+        for j in range(key_tile // 16):
+            halves = [x.cast(dtypes.half) for x in p[8 * j : 8 * j + 8]]
+            mine = [_halves_word(*halves[2 * m : 2 * m + 2]) for m in range(4)]
+            theirs = [shfl_xor(w, 16) for w in mine]
+            pairs = list(zip(mine, theirs, strict=True))
+            weights.append(
+                [first.where(a, b) for a, b in pairs] + [first.where(b, a) for a, b in pairs]
+            )
+        outs: list[UOp] = []
+        for n in range(width // 16):
+            c = acc[8 * n : 8 * n + 8]
+            for j in range(key_tile // 16):
+                a = [values[16 * n + self.i, 8 * j + w].load() for w in range(8)]
+                c = _products(_WMMA_F16, a, weights[j], c)
+            outs += c
+        return outs
+
+
 @functools.cache
 def _flash_attention_kernel(
     out: UOp, *srcs: UOp, slot: int | UOp, start: int | UOp, tokens: int | UOp, window: int,
-    key_tile: int, parts: int, splits: int,
+    key_tile: int, parts: int, splits: int, wmma: bool = False,
 ) -> UOp:  # fmt: skip
     # srcs: q (count, heads, dim) in f16, scaled so that exp2 gives the softmax, and the f16
     # cache, read as words of f16 pairs; query i is at position start + i and sees the slot's
     # positions up to it, or the last `window` of them. Blocks take key_tile keys at a time, and
-    # 1 / parts of their outputs. Split, the queries are one tile, whose key tiles blocks take in
-    # turn, each writing out (count * heads, splits, dim) unnormalized and first in srcs the max
-    # and sum of each row's weights, for _attention_combine_kernel to merge. A sink per head,
-    # last in srcs if given, starts each row's max and sum where one block takes all its keys.
+    # 1 / parts of their outputs, which warps work out on WMMA's fragments if wmma, else on
+    # mma.sync's. Split, the queries are one tile, whose key tiles blocks take in turn, each
+    # writing out (count * heads, splits, dim) unnormalized and first in srcs the max and sum of
+    # each row's weights, for _attention_combine_kernel to merge. A sink per head, last in srcs if
+    # given, starts each row's max and sum where one block takes all its keys.
     stats, (q, cache, *sinks) = (srcs[0], srcs[1:]) if splits > 1 else (None, srcs)
     heads, dim = int(q.shape[1]), int(q.shape[2])
     _, slots, kv_heads, positions, _ = (int(d) for d in cache.shape)
@@ -330,10 +461,11 @@ def _flash_attention_kernel(
     kv_head = UOp.range(kv_heads, 1, AxisType.GLOBAL)
     lane, warp = lane_range(), UOp.range(group, 2, AxisType.LOCAL)
     part = UOp.range(parts, 4, AxisType.GLOBAL) if parts > 1 else UOp.const(0, dtypes.weakint)
-    head, tid, g, t = kv_head * group + warp, warp * WARP + lane, lane // 4, lane % 4
-    rows = (tile * QUERIES + g, tile * QUERIES + g + 8)  # the lane's rows of each mma result
+    head, tid = kv_head * group + warp, warp * WARP + lane
+    frags = (_WmmaQueries if wmma else _MmaQueries)(lane)
+    rows = [tile * QUERIES + r for r in frags.queries]  # the lane's queries
     # the keys and values from the tile's first query's window to its last query, key_tile at a
-    # time: keys as they are in the cache, values transposed so that B fragments of keys are words
+    # time: keys as they are in the cache, values transposed so that fragments of keys are words
     end = start + (tile * QUERIES + QUERIES).minimum(tokens)
     first = _since(start + tile * QUERIES + 1, window) // key_tile
     seen_tiles = (end + key_tile - 1) // key_tile - first
@@ -345,15 +477,13 @@ def _flash_attention_kernel(
     else:
         tiles = UOp.range(seen_tiles, 3, AxisType.LOOP)
         kt = first + tiles
+    # the queries in registers for the whole loop with one part, if they fit; else read again
+    # each time
+    held = parts == 1 and (not wmma or dim <= HELD)
+    src = q if held else q.after(tiles)
 
-    def queries(k: int) -> list[UOp]:  # the A fragment of the queries' dimensions 16k..
-        # in registers for the whole loop with one part; read again each time with more
-        src = q if parts == 1 else q.after(tiles)
-        return [
-            _halves_word(*(src[r, head, 16 * k + 8 * h + 2 * t + i].load() for i in (0, 1)))
-            for h in (0, 1)
-            for r in rows
-        ]
+    def query(r: int, w: int | UOp) -> UOp:  # word w of the lane's query r
+        return _halves_word(*(src[rows[r], head, 2 * w + i].load() for i in (0, 1)))
 
     keys = UOp.alloc((key_tile, words + 4), dtypes.uint32, addrspace=AddrSpace.LOCAL)
     values = UOp.alloc((width, key_tile // 2 + 4), dtypes.uint32, addrspace=AddrSpace.LOCAL)
@@ -373,68 +503,53 @@ def _flash_attention_kernel(
     keys, values = keys.after(*stores), values.after(*stores)
 
     # a finite initial max keeps exp2 from seeing -inf - -inf
-    acc, mx, total = register((width // 2,), 0.0), register((2,), -1e30), register((2,), 0.0)
+    n = len(rows)
+    acc, mx, total = register((width // 2,), 0.0), register((n,), -1e30), register((n,), 0.0)
     if sinks and splits == 1:  # in the scores' units, of exp2
         sink = sinks[0][head].load() * LOG2E
-        mx = UOp.alloc((2,), dtypes.float32, addrspace=AddrSpace.REG)
-        mx = mx.after(mx.store(UOp.stack(sink, sink)))
-        total = register((2,), 1.0)
+        mx = UOp.alloc((n,), dtypes.float32, addrspace=AddrSpace.REG)
+        mx = mx.after(mx.store(UOp.stack(*[sink] * n)))
+        total = register((n,), 1.0)
     prev_acc, prev_max, prev_total = acc.after(tiles), mx.after(tiles), total.after(tiles)
-    zero = UOp.const(0.0, dtypes.float32)
-    products = [[zero] * 4 for _ in range(key_tile // 8)]  # by tiles of 8 keys
-    for k in range(dim // 16):
-        a = queries(k)
-        for j, c in enumerate(products):
-            b = [keys[8 * j + g, 8 * k + 4 * h + t].load() for h in (0, 1)]
-            products[j] = _mma_f16(a, b, c)
-    scores = []  # masked to the positions each row sees
-    for j, c in enumerate(products):
-        position = kt * key_tile + 8 * j + 2 * t
-        back = [start + rows[e // 2] - position - e % 2 for e in range(4)]  # how far each key is
-        seen = [(b >= 0) & (b < window) if window else b >= 0 for b in back]
-        scores.append([seen[e].where(c[e], -math.inf) for e in range(4)])
-    # over the 4 lanes that hold a row of an mma result
-    row_max = [
-        warp_max(
-            functools.reduce(UOp.maximum, (s[e] for s in scores for e in (2 * r, 2 * r + 1))), 4
-        )
-        for r in (0, 1)
-    ]
-    new_max = [prev_max[r].load().maximum(row_max[r]) for r in (0, 1)]
-    rescale = [(prev_max[r].load() - new_max[r]).exp2() for r in (0, 1)]
-    p = [[(s[e] - new_max[e // 2]).exp2() for e in range(4)] for s in scores]
-    sums = [warp_sum(sum((x[e] for x in p for e in (2 * r, 2 * r + 1)), zero), 4) for r in (0, 1)]
-    # the weights as A fragments: the results of two 8-key tiles make one of 16 keys
-    weights = [
-        [_f16_pair(*p[2 * k + i][2 * r : 2 * r + 2]) for i in (0, 1) for r in (0, 1)]
-        for k in range(key_tile // 16)
-    ]
-    outs: list[UOp] = []
-    for n in range(width // 8):
-        c = [prev_acc[4 * n + e].load() * rescale[e // 2] for e in range(4)]
-        for k in range(key_tile // 16):
-            b = [values[8 * n + g, 8 * k + 4 * h + t].load() for h in (0, 1)]
-            c = _mma_f16(weights[k], b, c)
-        outs += c
+    of, scores = [], []  # the query of each of the lane's scores, and the scores masked to the
+    # positions it sees
+    for r, key, score in frags.scores(query, keys, dim, key_tile):
+        back = start + rows[r] - (kt * key_tile + key)  # how far the key is
+        seen = (back >= 0) & (back < window) if window else back >= 0
+        of.append(r)
+        scores.append(seen.where(score, -math.inf))
+
+    def per_query(xs: list[UOp], op: Callable[[UOp, UOp], UOp]) -> list[UOp]:
+        # op over each of the lane's queries' xs, and over the lanes that hold the query
+        mine = [
+            functools.reduce(op, (x for i, x in zip(of, xs, strict=True) if i == r))
+            for r in range(n)
+        ]
+        return [frags.reduce(x, op) for x in mine]
+
+    new_max = [prev_max[r].load().maximum(x) for r, x in enumerate(per_query(scores, UOp.maximum))]
+    rescale = [(prev_max[r].load() - new_max[r]).exp2() for r in range(n)]
+    p = [(x - new_max[r]).exp2() for r, x in zip(of, scores, strict=True)]
+    sums = per_query(p, UOp.__add__)
+    before = [prev_acc[i].load() * rescale[frags.place(i)[0]] for i in range(width // 2)]
     update = UOp.group(
-        acc.store(UOp.stack(*outs)),
+        acc.store(UOp.stack(*frags.weigh(p, values, before, width, key_tile))),
         mx.store(UOp.stack(*new_max)),
-        total.store(UOp.stack(*(prev_total[r].load() * rescale[r] + sums[r] for r in (0, 1)))),
+        total.store(UOp.stack(*(prev_total[r].load() * rescale[r] + sums[r] for r in range(n)))),
     ).end(tiles)
     acc, mx, total = acc.after(update), mx.after(update), total.after(update)
     results = []
-    for n in range(width // 8):
-        for e in range(4):
-            value, at = acc[4 * n + e].load(), part * width + 8 * n + 2 * t + e % 2
-            if splits > 1:
-                results.append(out[rows[e // 2] * heads + head, split, at].store(value))
-                continue
-            value = value / total[e // 2].load()
-            results.append(out[rows[e // 2], head * dim + at].store(value))
+    for i in range(width // 2):
+        r, d = frags.place(i)
+        value, at = acc[i].load(), part * width + d
+        if splits > 1:
+            results.append(out[rows[r] * heads + head, split, at].store(value))
+            continue
+        results.append(out[rows[r], head * dim + at].store(value / total[r].load()))
     if stats is not None:  # the max in units of e, as the combine kernel takes it
         for r, row in enumerate(rows):
             for i, x in enumerate((mx[r].load() / LOG2E, total[r].load())):
-                results.append(stats[(row * heads + head).valid(t.eq(0)), split, i].store(x))
+                results.append(stats[(row * heads + head).valid(frags.leads), split, i].store(x))
     ranges = (kv_head, lane, warp, *(x for x in (tile, part, split) if x.op is Ops.RANGE))
     info = KernelInfo(name="flash_attention", opts_to_apply=())
     return UOp.group(*results).end(*ranges).sink(arg=info)
@@ -457,7 +572,7 @@ def _flash_shape(positions: int, dim: int) -> tuple[int, int] | None:
 def supports_flash_attention(q: Tensor, cache: Tensor) -> bool:
     # one sequence's queries, and heads and an f16 cache the kernel's tiles fit
     positions, dim = cache.shape[3:]
-    if not on_nvidia(q) or cache.dtype != dtypes.half:
+    if not on_matrix_cores(q) or cache.dtype != dtypes.half:
         return False
     if not isinstance(positions, int) or not isinstance(dim, int):
         return False
@@ -491,7 +606,7 @@ def flash_attention(
     outs[0], slot = carry(outs[0], slot)
     fxn = functools.partial(
         _flash_attention_kernel, slot=slot, start=start, tokens=bound, window=window,
-        key_tile=shape[0], parts=shape[1], splits=splits,
+        key_tile=shape[0], parts=shape[1], splits=splits, wmma=on_rdna3(q),
     )  # fmt: skip
     extra = () if sinks is None else (sinks.float().contiguous(),)
     outs = Tensor.custom_kernel(*outs, q, cache, *(extra if splits == 1 else ()), fxn=fxn)

@@ -12,12 +12,10 @@ from leat.kernels.cutoff import BINS, RANGE
 from leat.quant import BLOCK, GGMLType, QTensor
 from tests.helpers import cuts, glu, random_blocks
 
-# the warp-level kernels run on NVIDIA's GPUs and AMD's RDNA, tinygrad's emulated one too; matmul's
-# on tensor cores on NVIDIA's and RDNA 3's, FlashAttention on NVIDIA's alone
+# the warp-level kernels run on NVIDIA's GPUs and AMD's RDNA, tinygrad's emulated one too, and those
+# on tensor cores on NVIDIA's and RDNA 3's
 pytestmark = [pytest.mark.gpu]
-NVIDIA = os.environ.get("DEV", "").split(":")[0] in ("NV", "CUDA")
-MATRIX_CORES = NVIDIA or os.environ.get("DEV", "").split(":")[0] in ("AMD", "MOCK+AMD")
-nvidia = pytest.mark.skipif(not NVIDIA, reason="FlashAttention needs DEV=NV or CUDA")
+MATRIX_CORES = os.environ.get("DEV", "").split(":")[0] in ("NV", "CUDA", "AMD", "MOCK+AMD")
 matrix_cores = pytest.mark.skipif(not MATRIX_CORES, reason="tensor-core kernels need a GPU of them")
 Q4_K, Q5_K, Q6_K, Q5_0, Q8_0, MXFP4 = (
     GGMLType[t] for t in ("Q4_K", "Q5_K", "Q6_K", "Q5_0", "Q8_0", "MXFP4")
@@ -568,7 +566,7 @@ def chunk_len(tokens: int) -> UOp:
 )
 @pytest.mark.parametrize("heads, kv_heads, dim", [(32, 8, 128), (28, 4, 128), (32, 32, 96)])
 @pytest.mark.parametrize("symbolic", [False, True])
-@nvidia
+@matrix_cores
 def test_flash_attention(tokens, start, heads, kv_heads, dim, symbolic):
     rng = np.random.default_rng(tokens + start)
     cache = rng.standard_normal((2, SLOTS, kv_heads, 4096, dim)).astype(np.float16)
@@ -608,7 +606,7 @@ def test_attention_window(kv_heads, dim, window, n, length, symbolic):
 @pytest.mark.parametrize("tokens, start", [(37, 0), (100, 1000), (512, 3584), (11, 1500)])
 @pytest.mark.parametrize("dim, window", [(256, 1024), (128, 100)])
 @pytest.mark.parametrize("symbolic", [False, True])
-@nvidia
+@matrix_cores
 def test_flash_attention_window(tokens, start, dim, window, symbolic):
     rng = np.random.default_rng(tokens + start + dim)
     cache = rng.standard_normal((2, SLOTS, 8, 4096, dim)).astype(np.float16)
@@ -718,7 +716,7 @@ def test_rotate_rows(monkeypatch, symbolic):
     [(37, 0, 0), (100, 1000, 0), (512, 1500, 1024), (7, 1000, 0), (3, 1900, 1024)],
 )
 @pytest.mark.parametrize("symbolic", [False, True])
-@nvidia
+@matrix_cores
 def test_flash_attention_wide(tokens, start, window, symbolic):
     rng = np.random.default_rng(tokens + start)
     cache = rng.standard_normal((2, SLOTS, 2, 2048, 512)).astype(np.float16) * np.float16(0.2)
@@ -780,8 +778,8 @@ def test_attention_sinks(tokens, start, window):
     q = rng.standard_normal((1, 64, tokens, 64)).astype(np.float32)
     sinks = rng.uniform(-2, 4, 64).astype(np.float32)
     q_t, cache_t, sinks_t = Tensor(q).realize(), Tensor(cache).realize(), Tensor(sinks)
-    if tokens > 1 and not NVIDIA:
-        pytest.skip("FlashAttention is on NVIDIA's tensor cores")
+    if tokens > 1 and not MATRIX_CORES:
+        pytest.skip("FlashAttention is on tensor cores")
     if tokens == 1:
         assert kernels.supports_attention(q_t, cache_t)
         got = kernels.attention(q_t, cache_t, [SLOT], [start + 1], 0.125, window, sinks_t)
