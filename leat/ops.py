@@ -406,3 +406,30 @@ def argmax(x: Tensor) -> Tensor:
     if _fast() and kernels.supports_argmax(x):
         return kernels.argmax(x)
     return x.argmax(-1, keepdim=True).cast(dtypes.int32)
+
+
+def cutoff(scores: Tensor, top_k: Tensor, top_p: Tensor, min_p: Tensor) -> Tensor:
+    """The score below which each row of scores (B, V), log-probabilities but for a constant,
+    drops its tokens, each option (B, 1): -inf where no option is set. top_k keeps the k likeliest
+    tokens, at 0 all; top_p then the likeliest of those whose probabilities, renormalized, sum to
+    top_p; min_p those at least min_p times as likely as the likeliest. The kernels cut within a
+    hundredth below where this would, and keep no token 20 nats below the likeliest."""
+    if _fast() and kernels.supports_cutoff(scores):
+        top, by_k, by_p = kernels.cutoff(scores, top_k, top_p)
+    else:
+        top, by_k, by_p = _cutoff(scores, top_k, top_p)
+    cut = (top_p < 1).where(by_p, by_k).maximum(top + min_p.log())
+    return ((top_k > 0) | (top_p < 1) | (min_p > 0)).where(cut, -math.inf)
+
+
+def _cutoff(scores: Tensor, top_k: Tensor, top_p: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    # the top score, the k-th, and the last of the top k that top_p keeps: each token while the
+    # likelier ones' share of the top k's probability falls short of top_p
+    ranked, n = scores.sort(-1, descending=True)[0], int(scores.shape[-1])
+    rank = Tensor.arange(1, n + 1).reshape(1, n)
+    k = (top_k > 0).where(top_k, n)
+    weights = (rank <= k).where((ranked - ranked[:, :1]).exp(), 0.0)
+    likelier, kept = weights.cumsum(-1) - weights, weights.sum(-1, keepdim=True)
+    by_k = (rank == k.minimum(n)).where(ranked, 0.0).sum(-1, keepdim=True)
+    by_p = ((rank <= k) & (likelier < top_p * kept)).where(ranked, math.inf).min(-1, keepdim=True)
+    return ranked[:, :1], by_k, by_p

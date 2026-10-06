@@ -7,6 +7,7 @@ from gguf.quants import dequantize
 from tinygrad import Tensor, UOp, dtypes
 
 from leat import kernels, ops
+from leat.kernels.cutoff import BINS, RANGE
 from leat.kernels.matvec import MATVEC_TOKENS
 from leat.quant import BLOCK, GGMLType, QTensor
 from tests.helpers import glu, random_blocks
@@ -727,6 +728,27 @@ def test_argmax(rows, n):
     x[:, ::7] = -np.inf
     assert kernels.supports_argmax(Tensor(x))
     np.testing.assert_array_equal(ops.argmax(Tensor(x)).numpy(), x.argmax(-1, keepdims=True))
+
+
+# ******** cutoff ********
+
+
+@pytest.mark.parametrize("rows, n", [(1, 248320), (4, 32000), (2, 300)])
+def test_cutoff(rows, n):
+    # within a step below the exact cuts, of top_k alone, top_p alone or both; top_k 0 keeps
+    # every token, which the kernel takes as the step of its grid RANGE below the top
+    rng = np.random.default_rng(n)
+    x = (rng.standard_normal((rows, n)) * 2.5).astype(np.float32)
+    x[:, : n // 100] += 9  # a head of likely tokens
+    top_k = Tensor([[20.0], [0.0], [5.0], [1.0]][:rows])
+    top_p = Tensor([[0.95], [0.9], [1.0], [0.5]][:rows])
+    assert kernels.supports_cutoff(Tensor(x))
+    got = np.hstack([t.numpy() for t in kernels.cutoff(Tensor(x), top_k, top_p)])
+    expected = np.hstack([t.numpy() for t in ops._cutoff(Tensor(x), top_k, top_p)])
+    step = RANGE / BINS
+    expected[:, 1] = np.where(top_k.numpy()[:, 0] > 0, expected[:, 1], expected[:, 0] - RANGE)
+    above = np.where(top_k.numpy() > 0, 1e-4, step)
+    assert ((got <= expected + above) & (got >= expected - 1.5 * step)).all(), got - expected
 
 
 # gpt-oss's attention sinks: 64 heads of 64 over 8 kv heads, for one token, a tile of few, and
