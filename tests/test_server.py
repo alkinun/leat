@@ -16,7 +16,7 @@ import pytest
 from leat.chat import ChatTemplate
 from leat.engine import Engine
 from leat.sampler import Sampling
-from leat.server import Server, _completion
+from leat.server import Server, _completion, _Writer
 from tests.helpers import CONTEXT, chat_template
 
 WEATHER = {
@@ -152,6 +152,9 @@ def check_timings(timings: dict, usage) -> None:
     assert timings["predicted_n"] == usage.completion_tokens
     for name in ("prompt", "predicted"):
         n, ms = timings[f"{name}_n"], timings[f"{name}_ms"]
+        if name == "predicted" and n == 1:  # one token takes no step, of no rate
+            assert timings["predicted_per_token_ms"] == timings["predicted_per_second"] == 0
+            continue
         assert ms > 0 and timings[f"{name}_per_token_ms"] == pytest.approx(ms / n)
         assert timings[f"{name}_per_second"] == pytest.approx(1e3 * n / ms)
 
@@ -161,6 +164,8 @@ def test_reply(client, expected):
     assert response.choices[0].message.content == expected("hello", 8)
     assert response.choices[0].finish_reason == "length"
     assert (response.usage.prompt_tokens, response.usage.completion_tokens) == (5, 8)
+    check_timings(response.model_extra["timings"], response.usage)
+    response = chat(client, "hello", max_tokens=1)
     check_timings(response.model_extra["timings"], response.usage)
 
 
@@ -420,6 +425,9 @@ def test_unknown_route(client, server):
         urllib.request.urlopen(f"{url}/v1/nothing")
     with pytest.raises(urllib.error.HTTPError, match="400"):  # not JSON
         urllib.request.urlopen(urllib.request.Request(f"{url}/v1/chat/completions", b"{"))
+    for path in ("/v1/models?x=1", "/?v=2"):  # paths with a query are the paths
+        with urllib.request.urlopen(url + path) as response:
+            assert response.status == 200
 
 
 def test_concurrent_requests(client, server, engine, expected, monkeypatch):
@@ -492,6 +500,18 @@ def test_engine_error(client, engine, monkeypatch):
 
     monkeypatch.setattr(engine, "step", fail)
     with pytest.raises(openai.InternalServerError, match="out of memory"):
+        chat(client, "hello", max_tokens=4)
+    assert complete(client, "hello", max_tokens=2)[1] == "length"
+
+
+def test_worker_error(client, monkeypatch):
+    # a failure past the engine's step, a bug's, fails the completions rather than the worker
+    def fail(self, token):
+        monkeypatch.undo()
+        raise KeyError("a bug")
+
+    monkeypatch.setattr(_Writer, "take", fail)
+    with pytest.raises(openai.InternalServerError, match="a bug"):
         chat(client, "hello", max_tokens=4)
     assert complete(client, "hello", max_tokens=2)[1] == "length"
 

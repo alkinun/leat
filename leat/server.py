@@ -203,15 +203,32 @@ class Server(ThreadingHTTPServer):
         running: dict[Sequence, _Writer] = {}
         stopping = False
         while not stopping or waiting or running:
-            for request in self._arrivals(wait=not (waiting or running)):
-                if request is None:
-                    stopping = True
-                else:
-                    waiting.append(request)
-            while waiting and self._start(waiting[0], running):
-                waiting.popleft()
-            if running:
-                self._step(running)
+            try:
+                for request in self._arrivals(wait=not (waiting or running)):
+                    if request is None:
+                        stopping = True
+                    else:
+                        waiting.append(request)
+                while waiting and self._start(waiting[0], running):
+                    waiting.popleft()
+                if running:
+                    self._step(running)
+            except Exception as e:  # a bug's, for every client, rather than a worker gone
+                self._fail(e, waiting, running)
+
+    def _fail(
+        self, error: Exception, waiting: collections.deque[_Completion | _Load],
+        running: dict[Sequence, "_Writer"],
+    ) -> None:  # fmt: skip
+        # ends every request with the error, the running completions' sequences too
+        for sequence, writer in running.items():
+            if self.loaded is not None:
+                self.loaded.engine.cancel(sequence)
+            writer.c.out.put(error)
+        for request in waiting:
+            (request.done if isinstance(request, _Load) else request.out).put(error)
+        running.clear()
+        waiting.clear()
 
     def _step(self, running: dict[Sequence, "_Writer"]) -> None:
         # steps every running completion, after ending those whose clients hung up. The engine
@@ -262,15 +279,15 @@ class Server(ThreadingHTTPServer):
         engine = loaded.engine
         if len(engine.active) == engine.slots:
             return False
-        try:
-            cached = engine.cached_prefix(request.prompt)
+        try:  # timed from before start(), which copies a prefix in or restores a kept state
+            started, cached = time.perf_counter(), engine.cached_prefix(request.prompt)
             sequence = engine.start(
                 request.prompt, request.max_tokens, request.sampling, request.seed
             )
         except Exception as e:  # for the client; the server carries on
             request.out.put(e)
             return True
-        running[sequence] = _Writer(request, engine.tokenizer, cached)
+        running[sequence] = _Writer(request, engine.tokenizer, cached, started)
         return True
 
     def _load(self, load: _Load) -> None:
@@ -304,12 +321,12 @@ class _Writer:
     """Puts a completion's reply into its out queue piece by piece as tokens come: decoded, and
     holding back any end of the text that may begin a stop string."""
 
-    def __init__(self, c: _Completion, tokenizer: Tokenizer, cached: int):
+    def __init__(self, c: _Completion, tokenizer: Tokenizer, cached: int, started: float):
         self.c, self.tokenizer, self.cached = c, tokenizer, cached
         self.decode, self.text, self.sent, self.count = tokenizer.stream(), "", 0, 0
         self.stopped = False  # by a stop string, the text cut where it begins
         # when generation started, after any wait for a slot, and when the first token came
-        self.started, self.first = time.perf_counter(), 0.0
+        self.started, self.first = started, 0.0
 
     def take(self, token: int) -> bool:
         """Takes the next token; True if it ends the reply: end of generation or a stop string."""
@@ -344,6 +361,7 @@ class _Handler(BaseHTTPRequestHandler):
     server: Server
 
     def do_GET(self) -> None:
+        self.path = urllib.parse.urlsplit(self.path).path  # without a query, ?v=2 say
         if (name := "app.html" if self.path == "/" else self.path[1:]) in _APP:
             file = Path(__file__).parent / name
             return self._send(200, _TYPES[file.suffix], file.read_bytes())
@@ -352,6 +370,7 @@ class _Handler(BaseHTTPRequestHandler):
         self._json(200, {"object": "list", "data": [self._model(m) for m in self.server.models]})
 
     def do_POST(self) -> None:
+        self.path = urllib.parse.urlsplit(self.path).path
         routes = {"/v1/chat/completions": self._complete, "/v1/models/load": self._load}
         if (route := routes.get(self.path)) is None:
             return self._error(404, f"there is no POST {self.path}")
@@ -591,15 +610,16 @@ def _timings(c: _Completion) -> dict[str, Any]:
     # as llama.cpp's server reports them: the prompt's tokens past those cached, timed from the
     # start of generation, after any wait for a slot, to the first token; and the reply's tokens,
     # timed from the first to the last: the first comes of the prompt's last step, so that time
-    # holds one step fewer than there are tokens
+    # holds one step fewer than there are tokens, and of a reply of one token, no rate
     f = c.finish
     timings: dict[str, Any] = {"cache_n": f.cached}
-    for name, n, seconds in (("prompt", len(c.prompt) - f.cached, f.prefill_time),
-                             ("predicted", f.tokens, f.decode_time)):  # fmt: skip
+    parts = (("prompt", len(c.prompt) - f.cached, f.prefill_time, True),
+             ("predicted", f.tokens, f.decode_time, f.tokens > 1))  # fmt: skip
+    for name, n, seconds, timed in parts:
         timings |= {
             f"{name}_n": n,
             f"{name}_ms": 1e3 * seconds,
-            f"{name}_per_token_ms": 1e3 * seconds / n if n else 0.0,
-            f"{name}_per_second": n / seconds if seconds else 0.0,
+            f"{name}_per_token_ms": 1e3 * seconds / n if n and timed else 0.0,
+            f"{name}_per_second": n / seconds if seconds and timed else 0.0,
         }
     return timings
