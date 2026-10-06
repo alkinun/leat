@@ -122,15 +122,16 @@ def write_tiny_model(path: Path, arch: str = "llama") -> dict[str, np.ndarray]:
             add(f"blk.{i}.{name}.weight", *TENSORS[name])
         if arch == "qwen2":
             for name in ("attn_q", "attn_k", "attn_v"):
-                add(f"blk.{i}.{name}.bias", (TENSORS[name][0][0],), GGMLType.F32, 2.0)
+                add(f"blk.{i}.{name}.bias", (TENSORS[name][0][0],), GGMLType.F32)
     _finish(w)
     return weights
 
 
 def _writer(path: Path, arch: str):
     # a GGUF writer with the tiny tokenizer, its weights, and add(name, shape, type, scale), which
-    # writes a random tensor and keeps it decoded; a norm weight by default, uniform from 1 to 1.5
-    # (or to `scale` for F32 vectors), and else blocks whose f16 fields are up to `scale`
+    # writes a random tensor and keeps it decoded: a norm weight by default, an F32 vector uniform
+    # from 1 to `scale`, 1.5; other F32 tensors, biases too, normal times `scale`; and else blocks
+    # whose f16 fields are up to `scale`
     rng = np.random.default_rng(0)
     w = gguf.GGUFWriter(path, arch=arch)
     w.add_uint32(f"{arch}.context_length", CONTEXT)
@@ -145,7 +146,7 @@ def _writer(path: Path, arch: str):
 
     def add(name: str, shape: tuple[int, ...], ggml_type=GGMLType.F32, scale: float = 1.5) -> None:
         if ggml_type == GGMLType.F32:
-            uniform = len(shape) == 1
+            uniform = len(shape) == 1 and not name.endswith(".bias")
             values = (
                 rng.uniform(1.0, scale, shape) if uniform else rng.standard_normal(shape) * scale
             )
@@ -461,12 +462,12 @@ def _write_gpt_oss(path: Path) -> dict[str, np.ndarray]:
             ("attn_v", KV_HEADS * HEAD_DIM),
         ):
             add(b + name + ".weight", (rows, D), GGMLType.Q8_0, 1e-3)
-            add(b + name + ".bias", (1, rows), GGMLType.F32, 0.5)
+            add(b + name + ".bias", (rows,), GGMLType.F32, 0.5)
         add(b + "attn_output.weight", (D, D), GGMLType.Q8_0, 1e-3)
-        add(b + "attn_output.bias", (1, D), GGMLType.F32, 0.5)
+        add(b + "attn_output.bias", (D,), GGMLType.F32, 0.5)
         add(b + "attn_sinks.weight", (HEADS,), GGMLType.F32, 2.0)
         add(b + "ffn_gate_inp.weight", (EXPERTS, D), GGMLType.F32, 0.05)
-        add(b + "ffn_gate_inp.bias", (1, EXPERTS), GGMLType.F32, 0.5)
+        add(b + "ffn_gate_inp.bias", (EXPERTS,), GGMLType.F32, 0.5)
         for name, shape in (
             ("gate", (EXPERT_HIDDEN, D)),
             ("up", (EXPERT_HIDDEN, D)),
@@ -475,8 +476,6 @@ def _write_gpt_oss(path: Path) -> dict[str, np.ndarray]:
             add(b + f"ffn_{name}_exps.weight", (EXPERTS, *shape), GGMLType.MXFP4, 0.25)
             add(b + f"ffn_{name}_exps.bias", (EXPERTS, shape[0]), GGMLType.F32, 0.2)
     _finish(w)
-    for name in [n for n in weights if n.endswith(".bias") and weights[n].shape[0] == 1]:
-        weights[name] = weights[name][0]
     return weights
 
 
@@ -618,7 +617,7 @@ def _write_qwen35moe(path: Path) -> dict[str, np.ndarray]:
             for name in ("ssm_alpha", "ssm_beta"):
                 add(b + name + ".weight", (Q35_V_HEADS, D), GGMLType.F32, 0.1)
             add(b + "ssm_conv1d.weight", (Q35_CHANNELS, Q35_CONV), GGMLType.F32, 0.5)
-            add(b + "ssm_dt.bias", (Q35_V_HEADS,), GGMLType.F32, 2.0)
+            add(b + "ssm_dt.bias", (Q35_V_HEADS,), GGMLType.F32)
             add(b + "ssm_norm.weight", (Q35_DIM,))
             add(b + "ssm_out.weight", (D, inner), GGMLType.Q8_0, 1e-3)
             # -exp(A_log), as GGUF holds it

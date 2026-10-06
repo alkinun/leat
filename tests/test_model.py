@@ -2,7 +2,7 @@ import subprocess
 
 import numpy as np
 import pytest
-from tinygrad import Tensor, dtypes
+from tinygrad import Tensor, UOp, dtypes
 
 from leat import bench
 from leat.engine import FEW_TOKENS, KEEP_BACK, Engine
@@ -32,23 +32,39 @@ def reference_ops(monkeypatch):
     monkeypatch.setenv("LEAT_KERNELS", "ref")
 
 
+def transformer(path, max_context: int = CONTEXT, slots: int = 1) -> Transformer:
+    f = GGUF.open(path)
+    return Transformer(Config.from_gguf(f.metadata), f.load(), max_context, slots)
+
+
 @pytest.mark.usefixtures("reference_ops")
 @pytest.mark.parametrize("arch", ARCHS)
 def test_forward_matches_reference(tiny, arch):
     path, weights = tiny(arch)
-    f = GGUF.open(path)
-    model = Transformer(Config.from_gguf(f.metadata), f.load(), CONTEXT)
-    tokens = Tensor([PROMPT], dtype=dtypes.int32)
-    logits = model.logits(model(tokens, 0)).numpy()[0]
-    expected = reference_logits(weights, PROMPT, arch)
+    model, expected = transformer(path), reference_logits(weights, PROMPT, arch)
+    logits = model.logits(model(Tensor([PROMPT], dtype=dtypes.int32), 0)).numpy()[0]
     np.testing.assert_allclose(logits, expected, rtol=2e-3, atol=2e-3)
 
 
+@pytest.mark.gpu
+@pytest.mark.parametrize("arch", ARCHS)
+def test_kernels_match_reference(tiny, arch):
+    # the kernels, where they take the tiny models' shapes, run every architecture as the f64
+    # reference does but for their int8 activations' rounding, some hundredths of the largest
+    # logit: a whole prompt, as prefilling, and a token at a time, as decoding
+    path, weights = tiny(arch)
+    model, expected = transformer(path), reference_logits(weights, PROMPT, arch)
+    whole = model.logits(model(Tensor([PROMPT], dtype=dtypes.int32), 0)).numpy()[0]
+    pos = UOp.variable("start_pos", 0, CONTEXT - 1)
+    each = [model.logits(model(Tensor([[t]], dtype=dtypes.int32), pos.bind(i))).numpy()[0, 0]
+            for i, t in enumerate(PROMPT)]  # fmt: skip
+    for got in (whole, np.stack(each)):
+        np.testing.assert_allclose(got, expected, atol=0.05 * np.abs(expected).max())
+
+
 def test_cache_whole_tiles(tiny_model):
-    # attention kernels take caches of whole tiles; generation still stops at max_context
-    path, _ = tiny_model
-    f = GGUF.open(path)
-    model = Transformer(Config.from_gguf(f.metadata), f.load(), 50)
+    # attention kernels take caches of whole tiles; the model still holds max_context positions
+    model = transformer(tiny_model[0], 50)
     assert model.cache[0].shape[3] == CACHE_TILE and model.max_context == 50
 
 
@@ -176,9 +192,7 @@ def test_recurrent_state_resumes_where_kept(tiny, monkeypatch):
 
 @pytest.mark.usefixtures("reference_ops")
 def test_copy_takes_recurrent_state(tiny):
-    path, _ = tiny("qwen35moe")
-    f = GGUF.open(path)
-    model = Transformer(Config.from_gguf(f.metadata), f.load(), CONTEXT, slots=2)
+    model = transformer(tiny("qwen35moe")[0], slots=2)
     model(Tensor([PROMPT], dtype=dtypes.int32), 0, 0)
     model.copy(0, 1)
     after = Tensor([[7]], dtype=dtypes.int32)
