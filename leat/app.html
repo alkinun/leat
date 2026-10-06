@@ -94,10 +94,13 @@
   .message h1 { font-size: 1.5em; }
   .message h2 { font-size: 1.3em; }
   .message h3 { font-size: 1.15em; }
-  .message > div > :first-child { margin-top: 0; }
+  .message :is(div, blockquote) > :first-child { margin-top: 0; }
+  .message blockquote {
+    margin: 0 0 12px; padding-left: 14px; border-left: 3px solid var(--line); color: var(--muted);
+  }
   .message a { color: var(--accent); text-underline-offset: 2px; }
   .message hr { margin: 24px 0; border: none; border-top: 1px solid var(--line); }
-  .message > div > :last-child { margin-bottom: 0; }
+  .message :is(div, blockquote) > :last-child { margin-bottom: 0; }
   .note { margin-top: 8px; color: var(--muted); font-size: 12px; }
   .note:empty { display: none; }
   pre, code { font: 14px/1.5 ui-monospace, monospace; background: var(--side); }

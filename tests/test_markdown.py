@@ -25,6 +25,14 @@ CASES = [
     ("#", [["h1"]]),
     ("one\n***\n- - -\n___", [["p", "one"], ["hr"], ["hr"], ["hr"]]),
     ("--", [["p", "--"]]),
+    # quotes, of blocks of their own
+    ("> one\n>two\n>\n> # three", [["blockquote", ["p", "one\ntwo"], ["h1", "three"]]]),
+    ("text\n> quote\n\n> again\nafter",
+     [["p", "text"], ["blockquote", ["p", "quote"]], ["blockquote", ["p", "again"]],
+      ["p", "after"]]),
+    ("> > nested\n> ```\n> code", [["blockquote", ["blockquote", ["p", "nested"]],
+                                     ["pre", ["code", "code"]]]]),
+    ("a > b", [["p", "a > b"]]),
     # code blocks, unclosed while streaming, their info string a language
     ("```\nx = 1\n\ny = 2\n```", [["pre", ["code", "x = 1\n\ny = 2"]]]),
     ("```py\nx\n```\nafter", [["pre", ["code", {"class": "language-py"}, "x"]], ["p", "after"]]),

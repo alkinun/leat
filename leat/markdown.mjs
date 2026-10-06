@@ -23,36 +23,25 @@ function render(nodes) {
   });
 }
 
-const FENCE = /^( {0,3})(`{3,}|~{3,})\s*([^\s`]*)/;
-const HEADING = /^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$/;
-const RULE = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
-const BREAKS = [FENCE, HEADING, RULE]; // the blocks that break into a paragraph
-
 function blocks(lines) {
   const out = [];
   for (let i = 0; i < lines.length; ) {
-    const line = lines[i];
-    let match;
-    if (!line.trim()) {
-      i++;
-    } else if (FENCE.test(line)) {
-      i = code(lines, i, out);
-    } else if ((match = HEADING.exec(line))) {
-      out.push([`h${match[1].length}`, ...inline(match[2] ?? "")]);
-      i++;
-    } else if (RULE.test(line)) {
-      out.push(["hr"]);
-      i++;
-    } else { // a paragraph, to a blank line or a block that breaks in
-      const start = i++;
-      while (i < lines.length && lines[i].trim() && !BREAKS.some((b) => b.test(lines[i]))) i++;
-      out.push(["p", ...inline(lines.slice(start, i).map((l) => l.trim()).join("\n"))]);
-    }
+    if (!lines[i].trim()) i++;
+    else i = (BLOCKS.find(([start]) => start.test(lines[i]))?.[1] ?? paragraph)(lines, i, out);
   }
   return out;
 }
 
-// a fenced code block, to its closing fence or, still streaming, to the end: the line after it
+const FENCE = /^( {0,3})(`{3,}|~{3,})\s*([^\s`]*)/;
+const HEADING = /^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$/;
+const RULE = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
+const QUOTE = /^ {0,3}> ?/;
+
+// each block but the paragraph: a test of whether a line starts one, and what reads it to out
+// from there, returning the line after it
+const BLOCKS = [[FENCE, code], [HEADING, heading], [RULE, rule], [QUOTE, quote]];
+
+// a fenced code block, to its closing fence or, still streaming, to the end
 function code(lines, i, out) {
   const [, indent, fence, language] = FENCE.exec(lines[i]);
   const close = new RegExp(`^ {0,3}${fence[0]}{${fence.length},}\\s*$`);
@@ -63,6 +52,33 @@ function code(lines, i, out) {
   const attributes = language ? [{ class: `language-${language}` }] : [];
   out.push(["pre", ["code", ...attributes, body.join("\n")]]);
   return i + 1;
+}
+
+function heading(lines, i, out) {
+  const [, hashes, text = ""] = HEADING.exec(lines[i]);
+  out.push([`h${hashes.length}`, ...inline(text)]);
+  return i + 1;
+}
+
+function rule(lines, i, out) {
+  out.push(["hr"]);
+  return i + 1;
+}
+
+// > a quote's lines, of blocks of their own
+function quote(lines, i, out) {
+  const start = i;
+  while (i < lines.length && QUOTE.test(lines[i])) i++;
+  out.push(["blockquote", ...blocks(lines.slice(start, i).map((l) => l.replace(QUOTE, "")))]);
+  return i;
+}
+
+// lines to a blank one or one that starts another block
+function paragraph(lines, i, out) {
+  const start = i++;
+  while (i < lines.length && lines[i].trim() && !BLOCKS.some(([b]) => b.test(lines[i]))) i++;
+  out.push(["p", ...inline(lines.slice(start, i).map((l) => l.trim()).join("\n"))]);
+  return i;
 }
 
 // a paragraph's text, its spans set apart
