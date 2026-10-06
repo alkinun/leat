@@ -118,7 +118,7 @@ def _run(args: argparse.Namespace) -> None:
         except KeyboardInterrupt:
             pass
         text += step(None)
-        parts = split_reply(text, chat.form, thinking)
+        parts = split_reply(text, chat.form, thinking, done=True)
         _show(parts, shown)
         rate = len(reply) / (time.perf_counter() - start)
         print(f"\n\033[2m[{len(reply)} tokens, {rate:.1f} tok/s]\033[0m")

@@ -186,6 +186,14 @@ def test_split_reply(text, form, thinking, reply):
     assert split_reply(text, form, thinking) == reply
 
 
+def test_split_reply_done():
+    # an end that may begin a marker waits for more, but not once the reply is done
+    assert split_reply("<think>a <", "think") == Reply("a ")
+    assert split_reply("<think>a <", "think", done=True) == Reply("a <")
+    assert split_reply("x </", None) == Reply(content="x ")
+    assert split_reply("x </", None, done=True) == Reply(content="x </")
+
+
 @pytest.mark.parametrize("text, form", [(HARMONY, "harmony"), ("<think>a b</think> c d", "think")])
 def test_split_reply_streams(text, form):
     # every prefix splits into prefixes of the whole reply's parts: what a stream sent stays

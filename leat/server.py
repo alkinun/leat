@@ -9,6 +9,7 @@ model once the completions before have finished; the rest wait their turn in the
 import collections
 import contextlib
 import gc
+import itertools
 import json
 import queue
 import threading
@@ -358,7 +359,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _reply(self, c: _Completion) -> None:
         try:
-            reply = split_reply("".join(c.pieces()), c.form, c.thinking)
+            reply = split_reply("".join(c.pieces()), c.form, c.thinking, done=True)
         except RuntimeError as e:
             return self._error(500, str(e))
         message: dict[str, Any] = {"role": "assistant", "content": reply.content}
@@ -379,12 +380,13 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         self._chunk(c, {"role": "assistant", "content": ""})
-        # what may yet be part of a tool call is held back
+        # what may yet be part of a tool call is held back; the reply is split once more when
+        # done, the end that may have begun a marker then its own
         text, reasoned, sent, reply = "", 0, 0, Reply()
         try:
-            for piece in c.pieces():
-                text += piece
-                reply = split_reply(text, c.form, c.thinking)
+            for piece in itertools.chain(c.pieces(), [None]):
+                text += piece or ""
+                reply = split_reply(text, c.form, c.thinking, done=piece is None)
                 if len(reply.reasoning) > reasoned:
                     self._chunk(c, {"reasoning_content": reply.reasoning[reasoned:]})
                     reasoned = len(reply.reasoning)

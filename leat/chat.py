@@ -92,11 +92,13 @@ _REPLY_MARKERS = ("<|start|>", "<|channel|>", "<|message|>", "<|end|>", "<|const
                       "<think>", "</think>")  # fmt: skip
 
 
-def split_reply(text: str, form: str | None, thinking: bool = False) -> Reply:
+def split_reply(text: str, form: str | None, thinking: bool = False, done: bool = False) -> Reply:
     """A reply, or as much of it as there is so far: what is surely reasoning, surely text, and
-    the calls. An end that may be the start of a marker waits for more, so that what a stream
-    has split stays so. `thinking` says the prompt opened a <think> block."""
-    text = text[: len(text) - _partial(text, _REPLY_MARKERS)]
+    the calls. Until the reply is `done`, an end that may be the start of a marker waits for
+    more, so that what a stream has split stays so. `thinking` says the prompt opened a <think>
+    block."""
+    if not done:
+        text = text[: len(text) - _partial(text, _REPLY_MARKERS)]
     if form == "harmony":
         return _harmony(text)
     if form == "think":

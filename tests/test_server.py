@@ -309,6 +309,21 @@ def test_reasoning(client, replies_with, monkeypatch, stream, form, reply):
 
 
 @pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    "form, reply, content",
+    [(None, "if a <", "if a <"), ("think", "<think>b</think>a </", "a </"),
+     ("harmony", "<|channel|>final<|message|>a <|", "a <|")],
+)  # fmt: skip
+def test_reply_ends_as_a_marker_begins(
+    client, replies_with, monkeypatch, stream, form, reply, content
+):
+    # an end that may begin a marker waits for more only until the reply is done
+    monkeypatch.setattr(ChatTemplate, "form", property(lambda self: form))
+    replies_with(reply)
+    assert complete(client, "Weather in Paris?", stream=stream)[0] == content
+
+
+@pytest.mark.parametrize("stream", [False, True])
 def test_harmony_tool_call(client, replies_with, monkeypatch, stream):
     monkeypatch.setattr(ChatTemplate, "form", property(lambda self: "harmony"))
     replies_with(
