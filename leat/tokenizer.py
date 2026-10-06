@@ -204,7 +204,10 @@ class Tokenizer:
         self._cache: dict[str, tuple[int, ...]] = {}
 
         self._bytes = [_spell(t, ty, self._byte_level) for t, ty in zip(tokens, types, strict=True)]
-        special = {t: i for i, t in enumerate(tokens) if types[i] in (CONTROL, USER_DEFINED)}
+        # tokens special text spells, as llama.cpp's: <unk> too, which plain text never matches
+        special = {
+            t: i for i, t in enumerate(tokens) if types[i] in (CONTROL, USER_DEFINED, UNKNOWN)
+        }
         user = {t: i for t, i in special.items() if types[i] == USER_DEFINED}
         self._special, self._user = special, user
         self._split_special, self._split_user = _alternation(special), _alternation(user)
@@ -221,6 +224,8 @@ class Tokenizer:
         if pre in ("chatglm-bpe", "glm4", "glm5"):  # llama.cpp drops their BOS
             self.bos_id = None
         self.add_bos: bool = metadata.get("tokenizer.ggml.add_bos_token", default_bos)
+        if model == "gemma4":  # llama.cpp's workaround: Gemma 4 starts with BOS whatever it says
+            self.add_bos = True
         self.eog_ids: set[int] = eog
 
     def encode(self, text: str, bos: bool | None = None, special: bool = False) -> list[int]:
@@ -298,12 +303,19 @@ class Tokenizer:
         return self._ranks.get((left, right))
 
     def _ids(self, part: str) -> list[int]:
-        # a merged part's token, or else its bytes': as <0xXX> tokens where they are not byte-level
+        # a merged part's token, or else its bytes': as <0xXX> tokens where they are not
+        # byte-level, or the byte's own character, as llama.cpp; bytes the vocab lacks are dropped
         if part in self._vocab:
             return [self._vocab[part]]
         if self._byte_level:
             return [self._vocab[c] for c in part if c in self._vocab]
-        return [self._vocab[f"<0x{b:02X}>"] for b in part.encode()]
+        ids = []
+        for b in part.encode():
+            for spelled in (f"<0x{b:02X}>", chr(b)):
+                if spelled in self._vocab:
+                    ids.append(self._vocab[spelled])
+                    break
+        return ids
 
 
 def _pair(merge: str) -> tuple[str, str]:
@@ -339,8 +351,8 @@ def _merge(word: str, priority: Callable[[str, str], float | None]) -> list[str]
 
 
 def _spell(token: str, ttype: int, byte_level: bool) -> bytes:
-    # the bytes a token decodes to: none for control and unused tokens, as in llama.cpp
-    if ttype in (CONTROL, UNUSED):
+    # the bytes a token decodes to: none for control, unknown and unused tokens, as in llama.cpp
+    if ttype in (CONTROL, UNKNOWN, UNUSED):
         return b""
     if ttype == USER_DEFINED:
         return token.encode()

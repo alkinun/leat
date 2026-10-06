@@ -66,6 +66,21 @@ def test_end_of_generation_tokens():
     assert gemma.eog_ids == {gemma.eos_id, *ids(gemma, "<|tool_response>")}
 
 
+def test_sentencepiece_bytes_it_lacks():
+    # a byte the vocab has no <0xXX> token of is its own character's token, or else dropped, as
+    # llama.cpp
+    tokens = ["<unk>", "<s>", "\u2581", "a", "b", "<0x41>"]
+    types = [UNKNOWN, CONTROL, NORMAL, NORMAL, NORMAL, BYTE]
+    tok = Tokenizer(
+        {"tokenizer.ggml.model": "llama", "tokenizer.ggml.tokens": tokens,
+         "tokenizer.ggml.scores": [0.0] * len(tokens), "tokenizer.ggml.token_type": types,
+         "tokenizer.ggml.bos_token_id": 1, "tokenizer.ggml.add_space_prefix": False}
+    )  # fmt: skip
+    assert tok.encode("aAb\u00e9", bos=False) == [3, 5, 4]
+    # <unk> is special: matched in special text, decoded as nothing
+    assert tok.encode("a<unk>", bos=False, special=True) == [3, 0] and tok.decode([3, 0]) == "a"
+
+
 def test_decode_skips_control_tokens():
     tok = tiny_tokenizer()
     assert tok.decode(tok.encode("ab<|eot|>héllo 🚀", special=True)) == "abhéllo 🚀"
@@ -104,6 +119,7 @@ def test_sentencepiece_style():
         0xA9,
     ]
     assert tok.decode(tok.encode(text)) == text and tok.eog_ids == {tokens.index("<turn|>")}
+    assert tok.add_bos  # whatever its metadata says, as llama.cpp's workaround
 
 
 def test_sentencepiece():
@@ -145,6 +161,7 @@ CORPUS = [
     "é ä 👨‍👩‍👧‍👦 🚀🔥 ❤️ 🇹🇷 ​‍﻿",
     "<|eot_id|> plain <|start_header_id|>user<|end_header_id|>\n\nhi<|eot_id|>",
     "<|user|>\nHello<|end|>\n<|assistant|>\n \t hi <|end|>  </s> x<s> y",  # Phi-3's, stripped after
+    "a<unk>b <unk> c",  # an unknown token's text, which only special text matches
     'def f(x):\n    return x**2  # comment\n\n\tif x: pass\n{"a": [1, {"b": null}]}',
     "",
     " ",
