@@ -890,9 +890,9 @@ def delta_net_states(rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
     return conv_state, state
 
 
-def run_delta_net(x, rows, tokens, states):
+def run_delta_net(x, rows, tokens, states, saved=None):
     # ops.delta_net() on the kernel, rows (slot, start) of `tokens` tokens each, or of a bound
-    # number for one row
+    # number for one row, saving the states after each token if `saved` is given
     count = tokens if len(rows) == 1 else len(rows) * tokens
 
     def tensor(name):
@@ -904,7 +904,7 @@ def run_delta_net(x, rows, tokens, states):
     mixed, z, gates, conv = (tensor(n) for n in ("mixed", "z", "gates", "conv"))
     assert kernels.supports_delta_net(mixed, states[1])
     decay, norm = (tensor("a"), tensor("bias")), (tensor("norm"), 1e-6)
-    return ops.delta_net(mixed, z, gates, conv, decay, norm, states, spans)
+    return ops.delta_net(mixed, z, gates, conv, decay, norm, states, spans, saved)
 
 
 @pytest.mark.parametrize("tokens", [1, 12, 37, UOp.variable("tokens", 1, 64).bind(37)])
@@ -930,6 +930,24 @@ def test_delta_net(tokens, start):
     for other in (0, 2):
         np.testing.assert_array_equal(got_conv[other], conv_state[other])
         np.testing.assert_array_equal(got[other], state[other])
+
+
+@pytest.mark.parametrize("tokens", [4, 12])
+def test_delta_net_saved(tokens):
+    # the states after each token, from which a sequence goes back to any of them, as after
+    # running only the tokens up to it
+    rng = np.random.default_rng(29)
+    x, (conv_state, state) = delta_net_inputs(tokens, rng), delta_net_states(rng)
+    states = (Tensor(conv_state).contiguous().realize(), Tensor(state).contiguous().realize())
+    saved = (Tensor.zeros(tokens, DN_WIDTH - 1, DN_CHANNELS).contiguous().realize(),
+             Tensor.zeros(tokens, DN_HEADS, DN_DIMS, DN_DIMS).contiguous().realize())  # fmt: skip
+    run_delta_net(x, [(1, 5)], tokens, states, saved).realize()
+    got_conv, got = saved[0].numpy(), saved[1].numpy()
+    for t in range(tokens):
+        first = {k: v[: t + 1] if v.shape[0] == tokens else v for k, v in x.items()}
+        _, conv_after, after = reference_delta_net(first, conv_state[1], state[1], 1e-6)
+        np.testing.assert_allclose(got_conv[t], conv_after, rtol=1e-6, atol=1e-6)
+        assert_close(got[t], after, 2e-4)
 
 
 def test_delta_net_rows():

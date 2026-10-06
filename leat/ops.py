@@ -317,7 +317,7 @@ def _attention(
 def delta_net(
     mixed: Tensor, z: Tensor, gates: Tensor, conv: Tensor,
     decay: tuple[Tensor, Tensor], norm: tuple[Tensor, float], states: tuple[Tensor, Tensor],
-    spans: list[Span],
+    spans: list[Span], saved: tuple[Tensor, Tensor] | None = None,
 ) -> Tensor:  # fmt: skip
     # Gated DeltaNet, Qwen3.5's linear attention, over the spans' tokens in turn, each from and
     # into its slot's states, as llama.cpp's. mixed (1, T, channels) holds each token's queries,
@@ -330,15 +330,18 @@ def delta_net(
     # the token's values, gates (1, T, 2 * heads) holding its alphas, then betas; the output,
     # the values the state holds for the token's query, is
     # normed with norm and gated by SiLU of z (1, T, heads * value dims). A span from position 0
-    # starts its sequence, from zero states. Returns (1, T, heads * value dims).
+    # starts its sequence, from zero states. A single span of T tokens keeps the states after
+    # each token in `saved`, if given, (T, width - 1, channels) and (T, heads, key dims, value
+    # dims), from which a sequence may go back to any of them. Returns (1, T, heads * value dims).
     args = (mixed, z, gates, conv, decay, norm, states)
+    assert saved is None or len(spans) == 1, "states are saved for a single span's tokens"
     rows = _rows(spans)
     if _fast() and kernels.supports_delta_net(mixed, states[1]) and rows is not None:
         slots, starts = (r if isinstance(r, list) else [r] for r in rows)
         tokens = 1 if len(spans) > 1 else mixed.shape[1]
-        return kernels.delta_net(*args, slots, starts, tokens)
+        return kernels.delta_net(*args, slots, starts, tokens, saved)
     if len(spans) == 1:
-        return _delta_net(mixed, z, gates, conv, decay, norm, states, spans[0])
+        return _delta_net(mixed, z, gates, conv, decay, norm, states, spans[0], saved)
     outs, at = [], 0
     for span in spans:
         n = int(span.length)
@@ -351,7 +354,7 @@ def delta_net(
 def _delta_net(
     mixed: Tensor, z: Tensor, gates: Tensor, conv: Tensor,
     decay: tuple[Tensor, Tensor], norm: tuple[Tensor, float], states: tuple[Tensor, Tensor],
-    span: Span,
+    span: Span, saved: tuple[Tensor, Tensor] | None = None,
 ) -> Tensor:  # fmt: skip
     # delta_net() for one span, a token at a time. A bound number of tokens runs as many as there
     # may be, those past the span's with no decay or update, which leave the states as they are.
@@ -379,16 +382,21 @@ def _delta_net(
     real = (Tensor.arange(n) < Tensor(T)).reshape(1, n, 1)  # tokens, not padding
     decays = real.where(decay[0] * _softplus(alpha + decay[1]), 0.0).exp()
     shares = real.where(beta.sigmoid(), 0.0)
-    out = []
+    out, after = [], []
     for t in range(n):
         state = state * decays[:, t].reshape(1, heads, 1, 1)
         key = k[:, t].unsqueeze(-1)
         delta = (v[:, t] - (state * key).sum(2)) * shares[:, t].unsqueeze(-1)
         state = state + key * delta.unsqueeze(2)
         out.append((state * q[:, t].unsqueeze(-1)).sum(2))
+        after.append(state)
     # realized now: no later op reads them, so the step's outputs would not
-    Tensor.realize(states[0][slot : slot + 1].assign(inputs[:, T : T + width - 1]),
-                   states[1][slot : slot + 1].assign(state))  # fmt: skip
+    writes = [states[0][slot : slot + 1].assign(inputs[:, T : T + width - 1]),
+              states[1][slot : slot + 1].assign(state)]  # fmt: skip
+    if saved is not None:  # after token t, the inputs t + 1 .. t + width - 1 and the state
+        windows = [inputs[:, t + 1 : t + width] for t in range(n)]
+        writes += [saved[0].assign(Tensor.cat(*windows)), saved[1].assign(Tensor.cat(*after))]
+    Tensor.realize(*writes)
     gated = rms_norm(Tensor.stack(*out, dim=1), *norm) * z.reshape(1, n, heads, v_dim).silu()
     return gated.reshape(1, n, heads * v_dim).shrink_to((1, T, heads * v_dim))
 

@@ -32,11 +32,12 @@ CONV_TILE = 8  # tokens the convolution takes at a time, their inputs loaded tog
 
 @functools.cache
 def _conv_kernel(
-    out: UOp, conv_state: UOp, mixed: UOp, conv: UOp, slots: tuple[int | UOp, ...],
+    out: UOp, conv_state: UOp, mixed: UOp, conv: UOp, *saved: UOp, slots: tuple[int | UOp, ...],
     starts: tuple[int | UOp, ...], tokens: int | UOp,
 ) -> UOp:  # fmt: skip
     # A thread per row and channel: the channel's causal convolution over the row's tokens in
-    # turn, then SiLU, its last inputs carried in registers and left in the conv state
+    # turn, then SiLU, its last inputs carried in registers and left in the conv state, and for a
+    # single row, after each token in saved (tokens, width - 1, channels) if given
     channels, width = (int(d) for d in conv.shape)
     history = width - 1
     row = UOp.range(len(slots), 0, AxisType.GLOBAL)
@@ -60,6 +61,7 @@ def _conv_kernel(
         products = [a * b for a, b in zip([*past, x], weights, strict=True)]
         stores.append(out[at, c].store(_silu(_sum(products))))
         past = [real.where(new, old) for new, old in zip([*past[1:], x], past, strict=True)]
+        stores += [saved[0][at, w, c].store(v) for w, v in enumerate(past) if saved]
     held = held.after(UOp.group(held.store(UOp.stack(*past)), *stores).end(n))
     # past the loop, indices of opaque copies of the coordinates: see common.opaque
     ranges = (lane, wave, block, row)
@@ -72,7 +74,7 @@ def _conv_kernel(
 
 @functools.cache
 def _recurrence_kernel(
-    out: UOp, state: UOp, conved: UOp, gates: UOp, decay: UOp, bias: UOp,
+    out: UOp, state: UOp, conved: UOp, gates: UOp, decay: UOp, bias: UOp, *saved: UOp,
     slots: tuple[int | UOp, ...], starts: tuple[int | UOp, ...], tokens: int | UOp, eps: float,
 ) -> UOp:  # fmt: skip
     # A block, a warp, per row, value head and COLUMNS of its dimensions, whose columns of the
@@ -80,7 +82,9 @@ def _recurrence_kernel(
     # its keys each. For each token, the lanes L2-norm the queries and keys of the head's key
     # head, each taking every 32nd dimension, and share them through shared memory; each then
     # sums its share of its column's products with them, the column's lanes their shares, and
-    # works out the column's update and output and its share of the new column.
+    # works out the column's update and output and its share of the new column. For a single
+    # row, the state after each token goes to saved (tokens, heads, key dims, value dims) if
+    # given.
     _, heads, dims, _ = (int(d) for d in state.shape)
     k_heads = (int(conved.shape[1]) - heads * dims) // (2 * dims)
     keys = dims // (WARP // COLUMNS)  # of a lane's share
@@ -113,11 +117,11 @@ def _recurrence_kernel(
     by_key = _column_sum(_chains([s * x for s, x in zip(old, ks, strict=True)]))
     by_query = _column_sum(_chains([s * x for s, x in zip(old, qs, strict=True)]))
     delta = gain * (conved[at, (2 * k_heads + head) * dims + dim].load() - decayed * by_key)
+    new = [decayed * s + x * delta for s, x in zip(old, ks, strict=True)]
+    saves = [saved[0][t, head, share * keys + i, dim].store(x) for i, x in enumerate(new) if saved]
     update = UOp.group(
-        *(
-            cell[0].store(decayed * s + x * delta)
-            for cell, s, x in zip(cells, old, ks, strict=True)
-        ),
+        *(cell[0].store(x) for cell, x in zip(cells, new, strict=True)),
+        *saves,
         out[at, (head * dims + dim).valid(share.eq(0))].store(decayed * by_query + delta * overlap),
     ).end(t)
     cells = [cell.after(update) for cell in cells]
@@ -180,9 +184,11 @@ def delta_net(
     mixed: Tensor, z: Tensor, gates: Tensor, conv: Tensor,
     decay: tuple[Tensor, Tensor], norm: tuple[Tensor, float], states: tuple[Tensor, Tensor],
     slots: list[int | UOp], starts: list[int | UOp], tokens: int | UOp,
+    saved: tuple[Tensor, Tensor] | None = None,
 ) -> Tensor:  # fmt: skip
     """ops.delta_net() for rows of `tokens` tokens each, row r from position starts[r] of slot
-    slots[r]: one row of a bound number of tokens, or several of one each."""
+    slots[r]: one row of a bound number of tokens, or several of one each; of one row, the states
+    after each token into `saved`, if given, as ops.delta_net() has it."""
     T, count = mixed.shape[1], int(mixed.max_shape[1])
     heads, dims = int(states[1].shape[1]), int(states[1].shape[3])
 
@@ -197,15 +203,18 @@ def delta_net(
             "tokens": n,
         }
 
+    assert saved is None or len(slots) == 1, "states are saved for a single row's tokens"
+    conv_saved, state_saved = ((saved[0],), (saved[1],)) if saved else ((), ())
     conved = Tensor.empty(count, int(mixed.shape[-1]), dtype=dtypes.float32, device=mixed.device)
     mixed, args = bound(rows(mixed))
     fxn = functools.partial(_conv_kernel, **args)
-    conved = Tensor.custom_kernel(conved, states[0], mixed, conv.float().contiguous(), fxn=fxn)[0]
+    conv = conv.float().contiguous()
+    conved = Tensor.custom_kernel(conved, states[0], mixed, conv, *conv_saved, fxn=fxn)[0]
     out = Tensor.empty(count, heads * dims, dtype=dtypes.float32, device=conved.device)
     conved, args = bound(conved)
     fxn = functools.partial(_recurrence_kernel, eps=norm[1], **args)
     small = (rows(gates), *(t.float().contiguous() for t in decay))
-    out = Tensor.custom_kernel(out, states[1], conved, *small, fxn=fxn)[0]
+    out = Tensor.custom_kernel(out, states[1], conved, *small, *state_saved, fxn=fxn)[0]
     # each head's output normed, and gated by SiLU of z
     out = out[:T].reshape(T, heads, dims)
     gated = out * (out.square().mean(-1, keepdim=True) + norm[1]).rsqrt() * norm[0]
