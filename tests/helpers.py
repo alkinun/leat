@@ -318,11 +318,11 @@ def attention(q, k, v, mask, scale, sinks=None):
 def cuts(scores, top_k, top_p):
     # a row's top score, where top_k cuts it, at its k-th score or its last for 0, and where top_p
     # then does: at the last of the top k whose likelier ones' share of their probability falls
-    # short of top_p
+    # short of top_p, the top one at least
     ranked = np.sort(scores.astype(np.float64))[::-1][: int(top_k) or len(scores)]
     weights = np.exp(ranked - ranked[0])
     likelier = np.cumsum(weights) - weights
-    return ranked[0], ranked[-1], ranked[likelier < top_p * weights.sum()][-1]
+    return ranked[0], ranked[-1], ranked[max((likelier < top_p * weights.sum()).sum(), 1) - 1]
 
 
 def _reference_gemma4(w: dict[str, np.ndarray], tokens: list[int]) -> np.ndarray:

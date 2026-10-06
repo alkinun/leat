@@ -61,6 +61,12 @@ def test_cut_tokens_never_drawn(sampling, kept):
     np.testing.assert_allclose(frequencies(sampling), expected, atol=0.015)
 
 
+def test_top_p_zero_keeps_the_likeliest():
+    # as llama.cpp and the kernels: not none, of which every draw would be the first token
+    reversed_logits = [LOGITS[::-1]] * 100
+    assert set(draws(reversed_logits, Sampling(1.0, top_p=0.0), list(range(100)), 0)) == {4}
+
+
 def test_presence_penalty():
     # off the logits of tokens seen, greedy too
     seen = [[True, False, False, False, False]]

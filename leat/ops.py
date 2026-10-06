@@ -413,7 +413,8 @@ def cutoff(scores: Tensor, top_k: Tensor, top_p: Tensor, min_p: Tensor) -> Tenso
     # the score below which each row of scores (B, V), log-probabilities but for a constant, drops
     # its tokens, each option (B, 1): -inf where no option is set. top_k keeps the k likeliest
     # tokens, at 0 all; top_p then the likeliest of those whose probabilities, renormalized, sum
-    # to top_p; min_p those at least min_p times as likely as the likeliest. The kernels cut within
+    # to top_p, one at least; min_p those at least min_p times as likely as the likeliest. The
+    # kernels cut within
     # a hundredth below where this would, and keep no token 20 nats below the likeliest.
     if _fast() and kernels.supports_cutoff(scores):
         top, by_k, by_p = kernels.cutoff(scores, top_k, top_p)
@@ -432,5 +433,6 @@ def _cutoff(scores: Tensor, top_k: Tensor, top_p: Tensor) -> tuple[Tensor, Tenso
     weights = (rank <= k).where((ranked - ranked[:, :1]).exp(), 0.0)
     likelier, kept = weights.cumsum(-1) - weights, weights.sum(-1, keepdim=True)
     by_k = (rank == k.minimum(n)).where(ranked, 0.0).sum(-1, keepdim=True)
-    by_p = ((rank <= k) & (likelier < top_p * kept)).where(ranked, math.inf).min(-1, keepdim=True)
+    keep = (rank == 1) | (likelier < top_p * kept)  # the likeliest even at top_p 0
+    by_p = ((rank <= k) & keep).where(ranked, math.inf).min(-1, keepdim=True)
     return ranked[:, :1], by_k, by_p

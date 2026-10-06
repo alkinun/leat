@@ -735,14 +735,15 @@ def test_argmax(rows, n):
 # ******** cutoff ********
 
 
-@pytest.mark.parametrize("rows, n", [(1, 248320), (4, 32000), (2, 300)])
+@pytest.mark.parametrize("rows, n", [(1, 248320), (5, 32000), (2, 300)])
 def test_cutoff(rows, n):
     # within a step below the exact cuts, of top_k alone, top_p alone or both; top_k 0 keeps
-    # every token, which the kernel takes as the step of its grid RANGE below the top
+    # every token, which the kernel takes as the step of its grid RANGE below the top, and top_p
+    # 0 the top one
     rng = np.random.default_rng(n)
     x = (rng.standard_normal((rows, n)) * 2.5).astype(np.float32)
     x[:, : n // 100] += 9  # a head of likely tokens
-    top_k, top_p = np.array([20, 0, 5, 1][:rows]), np.array([0.95, 0.9, 1.0, 0.5][:rows])
+    top_k, top_p = np.array([20, 0, 5, 1, 0][:rows]), np.array([0.95, 0.9, 1.0, 0.5, 0.0][:rows])
     options = (Tensor(o.reshape(-1, 1).astype(np.float32)) for o in (top_k, top_p))
     assert kernels.supports_cutoff(Tensor(x))
     got = np.hstack([t.numpy() for t in kernels.cutoff(Tensor(x), *options)])
