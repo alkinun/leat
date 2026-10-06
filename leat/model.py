@@ -65,7 +65,6 @@ class Config:
     arch: str
     n_layers: int
     dim: int
-    hidden_dim: int
     n_heads: int
     vocab_size: int
     norm_eps: float
@@ -141,7 +140,6 @@ class Config:
             arch=arch,
             n_layers=n_layers,
             dim=dim,
-            hidden_dim=m.get("feed_forward_length", 0),
             n_heads=n_heads,
             vocab_size=len(metadata["tokenizer.ggml.tokens"]),
             norm_eps=m["attention.layer_norm_rms_epsilon"],
