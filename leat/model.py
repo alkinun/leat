@@ -170,24 +170,30 @@ class Config:
 
 
 def _rope(m: dict[str, Any], arch: str, sliding: bool, dims: int) -> Rope:
-    # a layer's RoPE, of a sliding-window layer or else one that sees all positions
-    swa_theta = m.get("rope.freq_base_swa", 10000.0)
-    if sliding and arch != "gpt-oss":  # their own base, unscaled; gpt-oss's are as the others
-        return Rope(swa_theta, dims)
+    # a layer's RoPE, of a sliding-window layer or else one that sees all positions, its cos and
+    # sin times rope.scaling.attn_factor, as llama.cpp's every layer
+    attn_factor, base = m.get("rope.scaling.attn_factor", 1.0), m.get("rope.freq_base", 10000.0)
+    swa_base = m.get("rope.freq_base_swa", base if arch == "gpt-oss" else 10000.0)
+    if (
+        sliding and arch != "gpt-oss"
+    ):  # their own base, unscaled; gpt-oss's are scaled as the others
+        return Rope(swa_base, dims, mscale=attn_factor)
     # rope_freqs divides the frequencies of the layers that see all positions: all of Llama
     # 3.1's, few of Gemma 4's
-    rope = Rope(m.get("rope.freq_base", 10000.0), dims, freqs=not sliding)
-    kind, factor = m.get("rope.scaling.type"), m.get("rope.scaling.factor", 0.0)
+    rope = Rope(swa_base if sliding else base, dims, freqs=not sliding, mscale=attn_factor)
+    # as llama.cpp, a factor of no type scales positions, and of its old key too
+    kind = m.get("rope.scaling.type", "linear")
+    factor = m.get("rope.scaling.factor", m.get("rope.scale_linear", 0.0))
     original = m.get("rope.scaling.original_context_length", m["context_length"])
     if arch == "phi3" and original < m["context_length"]:  # LongRoPE
-        return replace(rope, longrope=original, mscale=m.get("rope.scaling.attn_factor", 1.0))
+        return replace(rope, longrope=original)
     if kind == "linear" and factor:
         return replace(rope, scale=1 / factor)
     if kind == "yarn" and factor:
         beta = m.get("rope.scaling.yarn_beta_fast", 32.0), m.get("rope.scaling.yarn_beta_slow", 1.0)
         # llama.cpp's attention factor, which with no log multiplier leaves ggml's own
         # 1 + 0.1 ln(factor), times rope.scaling.attn_factor
-        mscale = m.get("rope.scaling.attn_factor", 1.0)
+        mscale = attn_factor
         if log_mul := m.get("rope.scaling.yarn_log_multiplier", 0.0):
             mscale *= _yarn_mscale(factor, 1) / _yarn_mscale(factor, log_mul)
             mscale /= 1 + 0.1 * math.log(factor)

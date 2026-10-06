@@ -121,6 +121,7 @@ YARN, YARN_SCALE = {"rope.scaling.type": "yarn", "rope.scaling.factor": 4.0}, 1 
         ({}, 1.0),
         (YARN, 1 + 0.1 * math.log(4)),
         (YARN | {"rope.scaling.attn_factor": 0.5}, 0.5 * (1 + 0.1 * math.log(4))),
+        ({"rope.scaling.attn_factor": 0.5}, 0.5),  # with no scaling too, as llama.cpp
         (
             YARN | {"rope.scaling.yarn_log_multiplier": 0.5},
             (1 + 0.1 * math.log(4)) / (1 + 0.05 * math.log(4)),
@@ -132,6 +133,20 @@ def test_rope_scale(scaling, scale):
     # log multiplier, as llama.cpp, mscale(factor, 1) / mscale(factor, multiplier) instead
     cos, sin = _rope_table(config("llama", scaling).ropes[0], 8, None)
     np.testing.assert_allclose(np.hypot(cos.numpy(), sin.numpy()), scale, rtol=1e-6)
+
+
+def test_rope_metadata():
+    # as llama.cpp: a scaling factor of no type, or of the old key, scales positions linearly;
+    # attn_factor scales sliding layers' cos and sin too; gpt-oss's sliding layers take
+    # freq_base_swa where given, scaled as the others
+    for key in ("rope.scaling.factor", "rope.scale_linear"):
+        assert config("llama", {key: 4.0}).ropes[0].scale == 0.25
+    gemma = {"attention.sliding_window": 4, "rope.scaling.attn_factor": 0.5, "block_count": 6}
+    assert {r.mscale for r in config("gemma3", gemma).ropes} == {0.5}
+    oss = {"attention.sliding_window": 4, "rope.freq_base": 1e5, "block_count": 2} | YARN
+    assert [r.theta for r in config("gpt-oss", oss).ropes] == [1e5, 1e5]
+    ropes = config("gpt-oss", oss | {"rope.freq_base_swa": 5e5}).ropes
+    assert [r.theta for r in ropes] == [5e5, 1e5] and ropes[0].yarn == ropes[1].yarn
 
 
 def test_longrope(tiny):
