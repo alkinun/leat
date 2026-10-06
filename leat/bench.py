@@ -9,6 +9,7 @@ import random
 import statistics
 import struct
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, cast
@@ -86,10 +87,10 @@ def perplexity(
     n = min(len(tokens) // ctx, len(tokens) if chunks is None else chunks)
     if n < 1:
         raise ValueError(f"the text has {len(tokens)} tokens, fewer than one chunk of {ctx}")
-    nll = 0.0
+    nll, score = 0.0, _scorer(engine, ctx, decode)
     for i in range(n):
         chunk = tokens[i * ctx : (i + 1) * ctx]
-        nll += _nll(_logprobs(engine, chunk, decode), chunk)
+        nll += _nll(score(chunk), chunk)
     return Quality(math.exp(nll / (n * (ctx - 1 - ctx // 2))))
 
 
@@ -114,10 +115,10 @@ def kl_divergence(
             )
         tokens = list(memoryview(f.read(4 * ctx * n_chunks)).cast("i"))
         first, row = ctx // 2, 2 * ((vocab + 1) // 2) + 4  # uint16s per position
-        nll, same, kls = 0.0, 0, list[float]()
+        nll, same, kls, score = 0.0, 0, list[float](), _scorer(engine, ctx, decode)
         for i in range(n_chunks if chunks is None else min(n_chunks, chunks)):
             chunk = tokens[i * ctx : (i + 1) * ctx]
-            lp = _logprobs(engine, chunk, decode)
+            lp = score(chunk)
             stored = Tensor(f.read(2 * row * (ctx - 1 - first))).bitcast(dtypes.uint16)
             stored = stored.reshape(-1, row)
             scale, low = stored[:, :4].bitcast(dtypes.float32).chunk(2, dim=1)  # per position
@@ -155,16 +156,19 @@ def _header(f: BinaryIO, base: Path) -> tuple[int, int, int]:
     return ctx, vocab, n_chunks
 
 
-def _logprobs(engine: Engine, chunk: list[int], decode: bool) -> Tensor:
-    # log-probabilities at positions ctx/2 .. ctx-2, each predicting the next token. With decode,
-    # those positions run one token at a time, through the kernels generation uses.
-    ctx, first, model = len(chunk), len(chunk) // 2, engine.model
-    tok = engine.tokenizer
-    tokens = [tok.bos_id] + chunk[1:] if tok.add_bos and tok.bos_id is not None else chunk
+def _scorer(engine: Engine, ctx: int, decode: bool) -> Callable[[list[int]], Tensor]:
+    # a chunk's log-probabilities at positions ctx/2 .. ctx-2, each predicting the next token,
+    # from graphs captured for the first chunk and replayed for the rest, whose log-probabilities
+    # each overwrite the last's. With decode, those positions run one token at a time, through
+    # the kernels generation uses.
+    first, model, tok = ctx // 2, engine.model, engine.tokenizer
+
+    def tokens(chunk: list[int]) -> list[int]:
+        return [tok.bos_id] + chunk[1:] if tok.add_bos and tok.bos_id is not None else chunk
+
     if not decode:  # in a graph, which plans its buffers: a plain call holds every layer's at once
         score = graph(lambda t: model.logits(model(t, 0)[:, first : ctx - 1])[0].log_softmax(-1))
-        return score(Tensor([tokens], dtype=dtypes.int32))
-    model(Tensor([tokens[:first]], dtype=dtypes.int32), 0).realize()
+        return lambda chunk: score(Tensor([tokens(chunk)], dtype=dtypes.int32))
     rows = Tensor.zeros(ctx - 1 - first, engine.config.vocab_size).contiguous().realize()
 
     def step(token: Tensor, pos: UOp) -> None:
@@ -174,9 +178,15 @@ def _logprobs(engine: Engine, chunk: list[int], decode: bool) -> Tensor:
         rows.realize()
 
     jit, pos = TinyJit(step), UOp.variable("start_pos", 0, engine.max_context - 1)
-    for i in range(first, ctx - 1):
-        jit(Tensor([[tokens[i]]], dtype=dtypes.int32), pos.bind(i))
-    return rows
+
+    def run(chunk: list[int]) -> Tensor:
+        ids = tokens(chunk)
+        model(Tensor([ids[:first]], dtype=dtypes.int32), 0).realize()
+        for i in range(first, ctx - 1):
+            jit(Tensor([[ids[i]]], dtype=dtypes.int32), pos.bind(i))
+        return rows
+
+    return run
 
 
 def _nll(logprobs: Tensor, chunk: list[int]) -> float:
