@@ -290,6 +290,7 @@ def test_tool_call(client, replies_with, stream, reply, content):
 @pytest.mark.parametrize(
     "form, reply",
     [("think", "<think>Sunny, I recall.</think>It is sunny."),
+     ("think", "\n<think>Sunny, I recall.</think>It is sunny."),  # its newline not the text's
      ("harmony", "<|channel|>analysis<|message|>Sunny, I recall.<|end|><|start|>assistant"
                  "<|channel|>final<|message|>It is sunny.")],
 )  # fmt: skip

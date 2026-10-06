@@ -194,7 +194,10 @@ def test_split_reply_done():
     assert split_reply("x </", None, done=True) == Reply(content="x </")
 
 
-@pytest.mark.parametrize("text, form", [(HARMONY, "harmony"), ("<think>a b</think> c d", "think")])
+@pytest.mark.parametrize(
+    "text, form",
+    [(HARMONY, "harmony"), ("<think>a b</think> c d", "think"), ("\n<think>a</think> b", "think")],
+)
 def test_split_reply_streams(text, form):
     # every prefix splits into prefixes of the whole reply's parts: what a stream sent stays
     whole = split_reply(text, form)

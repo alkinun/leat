@@ -105,6 +105,8 @@ def split_reply(text: str, form: str | None, thinking: bool = False, done: bool 
         start = text.find("<think>")
         if start >= 0 and not text[:start].strip():
             text, thinking = text[start + len("<think>") :], True
+        elif not (thinking or done or text.strip()):  # what may yet come before a <think>
+            return Reply()
         if thinking:
             reasoning, _, content = text.partition("</think>")
             return Reply(reasoning.lstrip(), content.lstrip() if _ else "")
