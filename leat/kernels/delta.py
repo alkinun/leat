@@ -50,9 +50,12 @@ def _conv_kernel(
     held = held.after(held.store(UOp.stack(*loads)))
     n = UOp.range((tokens + CONV_TILE - 1) // CONV_TILE, 3, AxisType.LOOP)
     past, stores = [held.after(n)[w].load() for w in range(history)], []
+    # indices of an opaque copy of the tile: a constant number of tokens may leave a token of
+    # every tile to the first alone, whose loads tinygrad would then take out of the loop
+    tile = opaque(n)
     for u in range(CONV_TILE):  # tokens past the row's leave the inputs held as they are
         real = n * CONV_TILE + u < tokens
-        at = (row * tokens + n * CONV_TILE + u).valid(real)
+        at = (row * tokens + tile * CONV_TILE + u).valid(real)
         x = mixed[at, c].load()
         products = [a * b for a, b in zip([*past, x], weights, strict=True)]
         stores.append(out[at, c].store(_silu(_sum(products))))

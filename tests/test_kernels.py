@@ -891,11 +891,11 @@ def run_delta_net(x, rows, tokens, states):
     return ops.delta_net(mixed, z, gates, conv, decay, norm, states, spans)
 
 
-@pytest.mark.parametrize("tokens", [1, 37, UOp.variable("tokens", 1, 64).bind(37)])
+@pytest.mark.parametrize("tokens", [1, 12, 37, UOp.variable("tokens", 1, 64).bind(37)])
 @pytest.mark.parametrize("start", [0, 5])
 def test_delta_net(tokens, start):
     # a sequence's tokens from its slot's states, or from zero ones at position 0; the states
-    # after in its slot, the others' as they were
+    # after in its slot, the others' as they were. 12 leave the convolution's second tile 4.
     rng = np.random.default_rng(23)
     n = tokens if isinstance(tokens, int) else tokens.unbind()[1]
     x, (conv_state, state) = delta_net_inputs(64, rng), delta_net_states(rng)
