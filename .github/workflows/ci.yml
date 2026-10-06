@@ -72,6 +72,29 @@ jobs:
           path: .coverage.kernels
           include-hidden-files: true
 
+  tokenizer:
+    # the tokenizers against llama.cpp's on the vocabs it tests its own with: its llama-tokenize,
+    # built at a commit pinned here, which a bump moves deliberately
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      LLAMA_CPP_COMMIT: 889edf43ddae0cfe9a4564a882764dc879759870
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          src="$RUNNER_TEMP/llama.cpp"
+          git clone --quiet --filter=blob:none https://github.com/ggml-org/llama.cpp.git "$src"
+          git -C "$src" checkout --quiet "$LLAMA_CPP_COMMIT"
+          cmake -S "$src" -B "$src/build" -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF \
+            -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_SERVER=OFF
+          cmake --build "$src/build" --target llama-tokenize -j 4
+      - uses: astral-sh/setup-uv@v10.2.0
+      - run: uv sync --locked
+      - run: uv run pytest tests/test_tokenizer.py -k vocab_matches -n auto
+        env:
+          DEV: CPU
+          LLAMA_CPP: ${{ runner.temp }}/llama.cpp/build/bin
+
   coverage:
     # of the CPU's and the emulated GPU's runs together: what neither reaches is either untested
     # or NVIDIA's alone, the tensor cores' kernels
