@@ -100,6 +100,13 @@
   .message blockquote {
     margin: 0 0 12px; padding-left: 14px; border-left: 3px solid var(--line); color: var(--muted);
   }
+  .message table {
+    display: block; width: max-content; max-width: 100%; overflow-x: auto; margin: 0 0 12px;
+    border-collapse: collapse; white-space: normal; font-size: 15px;
+  }
+  .message :is(th, td) { padding: 6px 12px; border: 1px solid var(--line); }
+  .message th { background: var(--side); }
+  .message th:not([align]) { text-align: left; }
   .message a { color: var(--accent); text-underline-offset: 2px; }
   .message hr { margin: 24px 0; border: none; border-top: 1px solid var(--line); }
   .message :is(div, blockquote, li) > :last-child { margin-bottom: 0; }

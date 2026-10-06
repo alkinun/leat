@@ -27,7 +27,7 @@ function blocks(lines) {
   const out = [];
   for (let i = 0; i < lines.length; ) {
     if (!lines[i].trim()) i++;
-    else i = (BLOCKS.find(([start]) => start.test(lines[i]))?.[1] ?? paragraph)(lines, i, out);
+    else i = (starts(lines, i) ?? paragraph)(lines, i, out);
   }
   return out;
 }
@@ -37,10 +37,22 @@ const HEADING = /^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$/;
 const RULE = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
 const QUOTE = /^ {0,3}> ?/;
 const ITEM = /^( {0,3})([-*+]|(\d{1,9})[.)])([ \t]+|$)/;
+const DELIMITER = /^ {0,3}\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$/;
+const TABLE = {
+  test: (line, next = "") => line.includes("|") && DELIMITER.test(next)
+    && cells(line).length === cells(next).length,
+};
 
-// each block but the paragraph: a test of whether a line starts one, and what reads it to out
-// from there, returning the line after it
-const BLOCKS = [[FENCE, code], [HEADING, heading], [RULE, rule], [QUOTE, quote], [ITEM, list]];
+// each block but the paragraph: a test of whether a line, before the next, starts one, and what
+// reads it to out from there, returning the line after it
+const BLOCKS = [
+  [FENCE, code], [HEADING, heading], [RULE, rule], [QUOTE, quote], [ITEM, list], [TABLE, table],
+];
+
+// what reads the block that starts at line i, if one but a paragraph does
+function starts(lines, i) {
+  return BLOCKS.find(([start]) => start.test(lines[i], lines[i + 1]))?.[1];
+}
 
 // a fenced code block, to its closing fence or, still streaming, to the end
 function code(lines, i, out) {
@@ -92,7 +104,7 @@ function list(lines, i, out) {
       if (!line.trim()) body.push("");
       else if (indented >= width || (indented > indent.length && ITEM.test(line))) {
         body.push(line.slice(Math.min(indented, width)));
-      } else if (body.at(-1).trim() && !BLOCKS.some(([b]) => b.test(line))) body.push(line);
+      } else if (body.at(-1).trim() && !starts(lines, i)) body.push(line);
       else break;
     }
     loose ||= gap;
@@ -107,10 +119,36 @@ function list(lines, i, out) {
   return i;
 }
 
+// | a table | its header |, a row of its columns' alignments, then rows to a blank line or a block
+function table(lines, i, out) {
+  const align = cells(lines[i + 1]).map((c) => ALIGN[c[0] + c.at(-1)]);
+  const row = (line, tag) => {
+    const texts = cells(line);
+    return ["tr", ...align.map((a, j) => {
+      const attributes = a ? [{ align: a }] : [];
+      return [tag, ...attributes, ...inline(texts[j] ?? "")];
+    })];
+  };
+  const head = row(lines[i], "th"), body = [];
+  for (i += 2; i < lines.length && lines[i].trim() && !starts(lines, i); i++) {
+    body.push(row(lines[i], "td"));
+  }
+  out.push(["table", ["thead", head], ...(body.length ? [["tbody", ...body]] : [])]);
+  return i;
+}
+
+const ALIGN = { ":-": "left", "-:": "right", "::": "center" }; // by a delimiter's ends
+
+// a row's cells, split at the pipes not escaped
+function cells(line) {
+  const row = line.trim().replace(/^\|/, "").replace(/(?<!\\)\|$/, "");
+  return row.split(/(?<!\\)\|/).map((cell) => cell.trim().replaceAll("\\|", "|"));
+}
+
 // lines to a blank one or one that starts another block
 function paragraph(lines, i, out) {
   const start = i++;
-  while (i < lines.length && lines[i].trim() && !BLOCKS.some(([b]) => b.test(lines[i]))) i++;
+  while (i < lines.length && lines[i].trim() && !starts(lines, i)) i++;
   out.push(["p", ...inline(lines.slice(start, i).map((l) => l.trim()).join("\n"))]);
   return i;
 }
