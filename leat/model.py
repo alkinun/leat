@@ -232,10 +232,12 @@ class Transformer:
         for n, layer in enumerate(self.layers):
             _unfuse(layer, config, n)
         mlp = _EXPERTS if config.experts else _MLP
+        # values of their own, but in Gemma 4, whose full-attention layers' keys are their values
+        attention = _LAYER + (() if config.arch == "gemma4" else ("attn_v",))
         missing = [
             f"blk.{i}.{n}"
             for i, (layer, recurrent) in enumerate(zip(self.layers, config.recurrent, strict=True))
-            for n in (_DELTA_NET if recurrent else _LAYER) + mlp
+            for n in (_DELTA_NET if recurrent else attention) + mlp
             if n not in layer
         ]
         if missing:

@@ -71,6 +71,10 @@ def test_bad_models(tiny_model):
     weights = {n: w for n, w in f.load().items() if n != "blk.1.ffn_down.weight"}
     with pytest.raises(ValueError, match="missing 1 tensors, first: blk.1.ffn_down"):
         Transformer(Config.from_gguf(f.metadata), weights, CONTEXT)
+    # values, which only Gemma 4's full-attention layers take from their keys
+    weights = {n: w for n, w in f.load().items() if n != "blk.0.attn_v.weight"}
+    with pytest.raises(ValueError, match="missing 1 tensors, first: blk.0.attn_v"):
+        Transformer(Config.from_gguf(f.metadata), weights, CONTEXT)
     with pytest.raises(NotImplementedError, match="architecture 'mamba'"):
         config("mamba")
 
