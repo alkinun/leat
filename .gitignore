@@ -9,3 +9,4 @@ dist/
 .ruff_cache/
 *.gguf
 .claude/worktrees/
+.coverage*

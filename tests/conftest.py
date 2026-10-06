@@ -9,6 +9,11 @@ import pytest
 # It reads DEV when imported, so this comes first.
 os.environ.setdefault("DEV", "CPU")
 GPU_BACKENDS = {"NV", "CUDA", "AMD", "MOCK+AMD"}
+if worker := os.environ.get("PYTEST_XDIST_WORKER"):
+    # each of pytest-xdist's workers its own cache of compiled kernels, beside tinygrad's: workers
+    # sharing one crash now and then
+    cache = Path(os.environ.get("XDG_CACHE_HOME", "~/.cache")).expanduser() / "tinygrad"
+    os.environ.setdefault("CACHEDB", str(cache / f"cache-{worker}.db"))
 if os.environ["DEV"].split(":")[0] == "MOCK+AMD":
     # tinygrad's emulated RDNA 3 GPU, whose kernels the system's clang compiles: see tests/hip.py.
     # Compiles run in this process, where the compiler is replaced, not in a pool of workers.

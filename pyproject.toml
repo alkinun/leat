@@ -15,7 +15,7 @@ dependencies = [
 leat = "leat.cli:main"
 
 [dependency-groups]
-dev = ["gguf", "mypy", "numpy", "openai", "pytest", "ruff"]
+dev = ["gguf", "mypy", "numpy", "openai", "pytest", "pytest-cov", "pytest-xdist", "ruff"]
 
 [build-system]
 requires = ["hatchling"]
@@ -41,8 +41,16 @@ warn_redundant_casts = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "-ra --strict-markers"
+addopts = "-ra --strict-markers --strict-config"
 markers = [
-  "gpu: needs a GPU backend (DEV=NV, CUDA or AMD)",
+  "gpu: needs a GPU backend (DEV=NV, CUDA, AMD or MOCK+AMD)",
   "model: needs a real GGUF model (LEAT_MODEL=path.gguf)",
 ]
+
+[tool.coverage.run]
+source = ["leat"]
+core = "sysmon"  # Python's monitoring: the default tracer slows the emulated GPU's tests 2x
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

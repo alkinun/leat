@@ -156,20 +156,22 @@ Gemma 4's instruction-tuned model does not model raw text: both engines score wi
 
 ```bash
 uv sync
-uv run ruff check && uv run ruff format --check && uv run mypy && uv run pytest
+uv run ruff check && uv run ruff format --check && uv run mypy && uv run pytest -n auto
 ```
 
-The default run is hermetic and needs only a CPU. GPU and real-model tests are opt-in. `LLAMA_CPP` and `WIKITEXT` add the comparisons against llama.cpp: token ids, and KL divergence of the output distribution.
+The default run is hermetic and needs only a CPU: every architecture's tiny random model against an independent NumPy reference, and generation, batching, sampling, the server and the CLI on the reference ops. GPU and real-model tests are opt-in. `LLAMA_CPP` and `WIKITEXT` add the comparisons against llama.cpp: token ids, and KL divergence of the output distribution.
 
 ```bash
 DEV=NV LEAT_MODEL=model.gguf LLAMA_CPP=llama.cpp/build/bin WIKITEXT=wiki.test.raw uv run pytest
 ```
 
-Without an AMD GPU, the warp-level kernels run on tinygrad's emulated RDNA 3 GPU, as [tests/hip.py](tests/hip.py) sets up: its HIP C compiled by the system's clang, and tinygrad's source tree, of the commit pyproject.toml pins, on PYTHONPATH for the emulator. The emulator is slow; the kernel tests take about half an hour.
+Without an AMD GPU, the warp-level kernels run on tinygrad's emulated RDNA 3 GPU, as [tests/hip.py](tests/hip.py) sets up: its HIP C compiled by the system's clang, and tinygrad's source tree, of the commit pyproject.toml pins, on PYTHONPATH for the emulator. The emulator is slow: the GPU tests, the kernels' and every tiny model through them, take about 10 minutes on 8 cores.
 
 ```bash
-PYTHONPATH=path/to/tinygrad DEV=MOCK+AMD uv run pytest tests/test_kernels.py
+PYTHONPATH=path/to/tinygrad DEV=MOCK+AMD uv run pytest -m gpu -n auto
 ```
+
+CI runs all but the real-model tests on every push: lint and types, the CPU suite on Python 3.12 and 3.14, and the GPU tests on the emulator. It fails if together they run less than 80% of leat; most of what they leave is NVIDIA's alone, the tensor cores' kernels, which the GPU run above covers.
 
 ## License
 
