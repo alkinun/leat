@@ -25,6 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SEARXNG = "http://127.0.0.1:8888"
 RESULTS, PAGE = 5, 8000  # search results a search gives, and characters of a page
+READ = 2 << 20  # bytes of a response read at most: a page's first characters are within them
 # elements whose text is not a page's content: code, and the menus around it
 HIDDEN = ("script", "style", "noscript", "nav", "header", "footer", "aside")
 
@@ -82,7 +83,8 @@ class _Text(HTMLParser):
 def _get(url: str) -> str:
     request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (leat tools)"})
     with urllib.request.urlopen(request, timeout=15) as response:
-        return response.read().decode(response.headers.get_content_charset() or "utf-8", "replace")
+        data = response.read(READ)
+        return data.decode(response.headers.get_content_charset() or "utf-8", "replace")
 
 
 class _Handler(BaseHTTPRequestHandler):
