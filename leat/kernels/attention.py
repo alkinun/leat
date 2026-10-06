@@ -529,10 +529,13 @@ def _rotate_kernel(
     _, cache_slots, kv_heads, cache_positions, dim = (int(d) for d in cache.shape)
     tokens = int(k.shape[0]) // (kv_heads * dim)
     heads, half, turning = int(out.shape[0]) // (tokens * dim), dim // 2, rotated // 2
-    head, lane = UOp.range(heads + kv_heads, 0, AxisType.GLOBAL), lane_range()
+    warp, lane = UOp.range(heads + kv_heads, 0, AxisType.GLOBAL), lane_range()
     token = UOp.range(tokens, 1, AxisType.GLOBAL)
     slot = pick(token, slots) if isinstance(slots, tuple) else slots
     pos = pick(token, positions) if isinstance(positions, tuple) else positions + token
+    # opaque: where k has a single head, tinygrad would find its warp's index a constant under
+    # its gate, and then drop the warp from the launch or the gate from its stores
+    head = opaque(warp)
     is_q, is_kv, kv = head < heads, head >= heads, head - heads
     zero = UOp.const(0.0, dtypes.float32)
     pairs = [lane + WARP * m for m in range(half // WARP)]
@@ -591,7 +594,7 @@ def _rotate_kernel(
     for value, d in zip(values, flat, strict=True):
         stores.append(stored(1, d).store(value.cast(dtypes.half)))
     info = KernelInfo(name="rotate", opts_to_apply=())
-    return UOp.group(*stores).end(head, token, lane).sink(arg=info)
+    return UOp.group(*stores).end(warp, token, lane).sink(arg=info)
 
 
 def supports_rotate(q: Tensor, cache: Tensor) -> bool:

@@ -610,7 +610,7 @@ def test_flash_attention_window(tokens, start, dim, window, symbolic):
 
 
 # llama: adjacent pairs; qwen2: halves and biases; qwen3: halves and norms of q and k; gemma4: v
-# normed too, two kv heads
+# normed too, two kv heads; gemma3 1B: a single kv head
 @pytest.mark.parametrize(
     "halves, biased, normed, v_norm, kv_heads",
     [
@@ -618,6 +618,7 @@ def test_flash_attention_window(tokens, start, dim, window, symbolic):
         (True, True, False, False, 8),
         (True, False, True, False, 8),
         (True, False, True, True, 2),
+        (True, False, True, False, 1),
     ],
 )
 @pytest.mark.parametrize("symbolic", [False, True])

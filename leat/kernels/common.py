@@ -268,8 +268,10 @@ def register(shape: tuple[int, ...], value: float) -> UOp:
 
 
 def opaque(x: UOp) -> UOp:
-    # x, as an expression tinygrad's codegen cannot match with another: it declares an index at
-    # its first use inside a loop and reuses it after the loop, out of scope, where it recurs
+    # x, as an expression tinygrad's codegen can neither match with another nor work out: it
+    # declares an index at its first use inside a loop and reuses it after the loop, out of
+    # scope, where it recurs; and where a gate leaves an index a single value, it folds it to a
+    # constant, then drops the gate, or hoists the load out of its loop
     return UOp(Ops.CUSTOMI, src=(x.cast(dtypes.int32),), arg=("{0}", dtypes.int32))
 
 
