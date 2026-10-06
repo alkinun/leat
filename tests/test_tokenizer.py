@@ -6,7 +6,7 @@ import subprocess
 import pytest
 
 from leat.gguf import GGUF
-from leat.tokenizer import _BYTE_CHAR, BYTE, CONTROL, NORMAL, UNKNOWN, Tokenizer
+from leat.tokenizer import _BYTE_CHAR, BYTE, CONTROL, NORMAL, UNKNOWN, USER_DEFINED, Tokenizer
 from tests.helpers import ids, tiny_metadata
 
 
@@ -43,6 +43,27 @@ def test_phi3_strips_after_special_tokens():
     text = "<|eot|>\n ab<user> \tab"
     assert phi3.encode(text, bos=False, special=True) == ids(tok, "<|eot|>", "ab", "<user>", "ab")
     assert len(tok.encode(text, bos=False, special=True)) > 4  # but for Phi-3, none is
+
+
+def with_tokens(added: dict[str, int], **overrides) -> Tokenizer:
+    # tiny_tokenizer() with more tokens, of their types
+    base = tiny_metadata(**overrides)
+    tokens = base["tokenizer.ggml.tokens"] + list(added)
+    types = base["tokenizer.ggml.token_type"] + list(added.values())
+    return Tokenizer(base | {"tokenizer.ggml.tokens": tokens, "tokenizer.ggml.token_type": types})
+
+
+def test_end_of_generation_tokens():
+    # as llama.cpp: those of their texts, which text spells out but with special parsing whatever
+    # their type, and fill-in-the-middle's padding and file separator
+    tok = with_tokens({"</s>": USER_DEFINED, "<|fim_pad|>": NORMAL, "<|file_sep|>": NORMAL})
+    assert tok.eog_ids == {tok.eos_id, *ids(tok, "</s>", "<|fim_pad|>", "<|file_sep|>")}
+    assert ids(tok, "</s>")[0] not in tok.encode("</s>", bos=False)
+    # Solar Open's <|end|> ends a message, not the generation; Gemma 4's </s> is a normal token
+    solar = with_tokens({"<|end|>": CONTROL, "<|calls|>": CONTROL, "<|flush|>": CONTROL})
+    assert ids(solar, "<|end|>")[0] not in solar.eog_ids
+    gemma = with_tokens({"</s>": NORMAL, "<|tool_response>": CONTROL})
+    assert gemma.eog_ids == {gemma.eos_id, *ids(gemma, "<|tool_response>")}
 
 
 def test_decode_skips_control_tokens():
@@ -123,7 +144,7 @@ CORPUS = [
     "你好世界，こんにちは、안녕하세요。नमस्ते مرحبا שלום สวัสดี",
     "é ä 👨‍👩‍👧‍👦 🚀🔥 ❤️ 🇹🇷 ​‍﻿",
     "<|eot_id|> plain <|start_header_id|>user<|end_header_id|>\n\nhi<|eot_id|>",
-    "<|user|>\nHello<|end|>\n<|assistant|>\n \t hi <|end|>  x<s> y",  # Phi-3's, stripped after
+    "<|user|>\nHello<|end|>\n<|assistant|>\n \t hi <|end|>  </s> x<s> y",  # Phi-3's, stripped after
     'def f(x):\n    return x**2  # comment\n\n\tif x: pass\n{"a": [1, {"b": null}]}',
     "",
     " ",

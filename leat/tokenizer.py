@@ -21,8 +21,16 @@ NORMAL, UNKNOWN, CONTROL, USER_DEFINED, UNUSED, BYTE = 1, 2, 3, 4, 5, 6
 # llama.cpp treats these as end of generation in addition to the eos/eot/eom ids, and as control
 # tokens whatever their type
 _EOG_TEXT = {"<|eot_id|>", "<|eom_id|>", "<|end_of_text|>", "<|im_end|>", "<|endoftext|>",
-             "<|end|>", "<|return|>", "<|call|>", "<end_of_turn>", "<eos>", "<turn|>",
-             "<|tool_response>", "<EOT>", "_<EOT>"}  # fmt: skip
+             "<|end|>", "<|return|>", "<|call|>", "<|flush|>", "<|calls|>", "<end_of_turn>",
+             "</s>", "<EOT>", "_<EOT>", "[EOT]", "[EOS]", "<end_of_utterance>", "<eos>", "<turn|>",
+             "<|tool_response>", "<\uff5cend\u2581of\u2581sentence\uff5c>", "[e~["}  # fmt: skip
+# and fill-in-the-middle's padding, repository and file separator, each the id metadata gives or
+# else its tokens of these texts
+_FIM_EOG = {
+    "fim_pad": {"<|fim_pad|>", "<fim-pad>", "<fim_pad>", "<PAD>", "[PAD]"},
+    "fim_rep": {"<|fim_repo|>", "<|repo_name|>", "<fim-repo>", "<REPO>", "<reponame>"},
+    "fim_sep": {"<|file_sep|>"},
+}
 # gpt-oss's harmony format: tokens that decode as text, as llama.cpp has them, and its ends of a
 # message that do not end a generation, as llama.cpp's workaround has it
 _HARMONY = {"<|channel|>", "<|message|>", "<|start|>", "<|constrain|>"}
@@ -160,11 +168,26 @@ class Tokenizer:
                 f"tokenizer {model!r} with pre-tokenizer {pre!r} is not supported"
             )
         self._ignore_merges = ignore_merges  # whole-word vocab hits skip BPE
-        eog = {i for i, t in enumerate(tokens) if t in _EOG_TEXT}
-        harmony = {"<|return|>", "<|call|>", "<|end|>"} <= set(tokens)
+        ids = (metadata.get(f"tokenizer.ggml.{k}_token_id") for k in ("eos", "eot", "eom"))
+        eog = {i for i in ids if i is not None} | {
+            i for i, t in enumerate(tokens) if t in _EOG_TEXT
+        }
+        for kind, texts in _FIM_EOG.items():
+            if (fim := metadata.get(f"tokenizer.ggml.{kind}_token_id")) is not None:
+                eog.add(fim)
+            else:
+                eog |= {i for i, t in enumerate(tokens) if t in texts}
+        ends = {tokens[i] for i in eog}
+        # gpt-oss's and Solar Open's <|end|> ends a message, not a generation; Gemma 4's and
+        # PLaMo's </s> is a normal token
+        harmony = {"<|return|>", "<|call|>"} <= ends or {"<|calls|>", "<|flush|>"} <= ends
+        normal_s = bool(ends & {"<|tool_response>", "<|plamo:eos|>"})
         for i, t in enumerate(tokens):  # as llama.cpp overrides them
             if t in _HARMONY or (harmony and t == "<|end|>"):
                 types[i] = USER_DEFINED
+                eog.discard(i)
+            elif normal_s and t == "</s>":
+                types[i] = NORMAL
                 eog.discard(i)
             elif i in eog:
                 types[i] = CONTROL
@@ -198,8 +221,7 @@ class Tokenizer:
         if pre in ("chatglm-bpe", "glm4", "glm5"):  # llama.cpp drops their BOS
             self.bos_id = None
         self.add_bos: bool = metadata.get("tokenizer.ggml.add_bos_token", default_bos)
-        ids = (metadata.get(f"tokenizer.ggml.{k}_token_id") for k in ("eos", "eot", "eom"))
-        self.eog_ids: set[int] = {i for i in ids if i is not None} | eog
+        self.eog_ids: set[int] = eog
 
     def encode(self, text: str, bos: bool | None = None, special: bool = False) -> list[int]:
         ids = (
