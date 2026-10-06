@@ -85,6 +85,8 @@ class _Finish:
     reason: str  # "stop" or "length"
     cached: int  # prompt tokens the cache held
     tokens: int  # tokens generated
+    prefill_time: float  # seconds from the start of generation to the first token
+    decode_time: float  # seconds from the first token to the last
 
 
 @dataclass(frozen=True)
@@ -276,10 +278,14 @@ class _Writer:
         self.c, self.tokenizer, self.cached = c, tokenizer, cached
         self.decode, self.text, self.sent, self.count = tokenizer.stream(), "", 0, 0
         self.stopped = False  # by a stop string, the text cut where it begins
+        # when generation started, after any wait for a slot, and when the first token came
+        self.started, self.first = time.perf_counter(), 0.0
 
     def take(self, token: int) -> bool:
         """Takes the next token; True if it ends the reply: end of generation or a stop string."""
         self.count += 1
+        if self.count == 1:
+            self.first = time.perf_counter()
         if token in self.tokenizer.eog_ids:
             return True
         self.text += self.decode(token)
@@ -298,7 +304,10 @@ class _Writer:
             self.text += self.decode(None)
         if len(self.text) > self.sent:
             self.c.out.put(self.text[self.sent :])
-        self.c.out.put(_Finish(reason, self.cached, self.count))
+        end = time.perf_counter()
+        first = self.first if self.count else end
+        finish = _Finish(reason, self.cached, self.count, first - self.started, end - first)
+        self.c.out.put(finish)
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -361,8 +370,8 @@ class _Handler(BaseHTTPRequestHandler):
             message |= {"content": content or None, "tool_calls": _tool_calls(calls)}
             reason = "tool_calls"
         choice = {"index": 0, "message": message, "logprobs": None, "finish_reason": reason}
-        body = self._head(c, "chat.completion") | {"choices": [choice], "usage": _usage(c)}
-        self._json(200, body)
+        body = {"choices": [choice], "usage": _usage(c), "timings": _timings(c)}
+        self._json(200, self._head(c, "chat.completion") | body)
 
     def _stream(self, c: _Completion) -> None:
         self.send_response(200)
@@ -395,9 +404,11 @@ class _Handler(BaseHTTPRequestHandler):
                 {"tool_calls": [{"index": i} | call for i, call in enumerate(_tool_calls(calls))]},
             )
             reason = "tool_calls"
-        self._chunk(c, {}, reason)
+        # the timings on the last chunk, as llama.cpp's server sends them
+        timings = {"timings": _timings(c)}
+        self._chunk(c, {}, reason, {} if c.stream_usage else timings)
         if c.stream_usage:
-            usage = {"choices": [], "usage": _usage(c)}
+            usage = {"choices": [], "usage": _usage(c)} | timings
             self._event(self._head(c, "chat.completion.chunk") | usage)
         self._event("[DONE]")
 
@@ -411,9 +422,12 @@ class _Handler(BaseHTTPRequestHandler):
     def _head(self, c: _Completion, kind: str) -> dict[str, Any]:
         return {"id": c.id, "object": kind, "created": c.created, "model": c.model}
 
-    def _chunk(self, c: _Completion, delta: dict[str, Any], reason: str | None = None) -> None:
+    def _chunk(
+        self, c: _Completion, delta: dict[str, Any], reason: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:  # fmt: skip
         choice = {"index": 0, "delta": delta, "logprobs": None, "finish_reason": reason}
-        self._event(self._head(c, "chat.completion.chunk") | {"choices": [choice]})
+        self._event(self._head(c, "chat.completion.chunk") | {"choices": [choice]} | (extra or {}))
 
     def _event(self, data: dict[str, Any] | str) -> None:
         text = data if isinstance(data, str) else json.dumps(data)
@@ -523,3 +537,21 @@ def _usage(c: _Completion) -> dict[str, Any]:
         "total_tokens": prompt + generated,
         "prompt_tokens_details": {"cached_tokens": c.finish.cached},
     }
+
+
+def _timings(c: _Completion) -> dict[str, Any]:
+    # as llama.cpp's server reports them: the prompt's tokens past those cached, timed from the
+    # start of generation, after any wait for a slot, to the first token; and the reply's tokens,
+    # timed from the first to the last: the first comes of the prompt's last step, so that time
+    # holds one step fewer than there are tokens
+    f = c.finish
+    timings: dict[str, Any] = {"cache_n": f.cached}
+    for name, n, seconds in (("prompt", len(c.prompt) - f.cached, f.prefill_time),
+                             ("predicted", f.tokens, f.decode_time)):  # fmt: skip
+        timings |= {
+            f"{name}_n": n,
+            f"{name}_ms": 1e3 * seconds,
+            f"{name}_per_token_ms": 1e3 * seconds / n if n else 0.0,
+            f"{name}_per_second": n / seconds if seconds else 0.0,
+        }
+    return timings

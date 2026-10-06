@@ -130,11 +130,23 @@ def test_app(server):
             urllib.request.urlopen(f"{url}{path}")
 
 
+def check_timings(timings: dict, usage) -> None:
+    # llama.cpp's timings of a reply, as its usage counts its tokens
+    prompt = (timings["cache_n"], timings["prompt_n"])
+    assert prompt == (usage.prompt_tokens_details.cached_tokens, usage.prompt_tokens - prompt[0])
+    assert timings["predicted_n"] == usage.completion_tokens
+    for name in ("prompt", "predicted"):
+        n, ms = timings[f"{name}_n"], timings[f"{name}_ms"]
+        assert ms > 0 and timings[f"{name}_per_token_ms"] == pytest.approx(ms / n)
+        assert timings[f"{name}_per_second"] == pytest.approx(1e3 * n / ms)
+
+
 def test_reply(client, expected):
     response = chat(client, "hello", max_tokens=8, temperature=0)
     assert response.choices[0].message.content == expected("hello", 8)
     assert response.choices[0].finish_reason == "length"
     assert (response.usage.prompt_tokens, response.usage.completion_tokens) == (5, 8)
+    check_timings(response.model_extra["timings"], response.usage)
 
 
 def test_stream(client, expected):
@@ -145,6 +157,28 @@ def test_stream(client, expected):
     assert "".join(c.choices[0].delta.content or "" for c in chunks[:-1]) == expected("hello", 8)
     assert chunks[-2].choices[0].finish_reason == "length"
     assert chunks[-1].choices == [] and chunks[-1].usage.completion_tokens == 8
+    # the timings on the last chunk, as llama.cpp's: the usage's, or else the finish's
+    assert all("timings" not in c.model_extra for c in chunks[:-1])
+    check_timings(chunks[-1].model_extra["timings"], chunks[-1].usage)
+    *_, last = chat(client, "hello", max_tokens=8, temperature=0, stream=True)
+    assert last.choices[0].finish_reason == "length"
+    assert last.model_extra["timings"]["predicted_n"] == 8
+
+
+def test_timings_leave_out_the_wait(client):
+    # a request that waits for a slot, both taken by longer replies, is timed from when it gets
+    # one: the wait is in the time its client takes to see the first token, not in its timings
+    contents = ("a long reply", "another long reply")
+    streams = [chat(client, content, max_tokens=30, stream=True) for content in contents]
+    for stream in streams:  # both are generating
+        next(c for c in stream if c.choices and c.choices[0].delta.content)
+    start = time.perf_counter()
+    response = chat(client, "a short one", max_tokens=2)
+    elapsed = 1e3 * (time.perf_counter() - start)
+    for stream in streams:
+        assert [c for c in stream if c.choices][-1].choices[0].finish_reason == "length"
+    timings = response.model_extra["timings"]
+    assert timings["prompt_ms"] + timings["predicted_ms"] < elapsed / 4
 
 
 @pytest.mark.parametrize("stream", [False, True])

@@ -303,7 +303,6 @@ async function reply(c, tools, signal) {
   render();
   const body = {
     model: loaded, messages: messages.map(api), tools, stream: true,
-    stream_options: { include_usage: true },
     ...Object.fromEntries(SAMPLING.map((id) => [id, Number($(id).value)])),
   };
   const start = performance.now();
@@ -315,13 +314,18 @@ async function reply(c, tools, signal) {
     m.reasoning += delta.reasoning_content ?? "";
     if (delta.tool_calls) m.tool_calls = delta.tool_calls; // leat sends them whole, at the end
     m.note = data.model;
-    if (data.usage) {
-      const n = data.usage.completion_tokens, seconds = (performance.now() - start) / 1000;
-      m.note += ` · ${n} tokens, ${(n / seconds).toFixed(1)} tok/s`;
-    }
+    if (data.timings) m.note += ` · ${speed(data.timings, performance.now() - start)}`;
     if (c === chat) follow(() => $("log").lastChild.update());
   }
   return m.tool_calls ?? [];
+}
+
+// a reply's tokens, how fast they came after the first, and how long the first took, waiting
+// for a slot and the prompt's prefill included, from the server's timings and the reply's time
+function speed({ predicted_n: n, predicted_ms: ms }, elapsed) {
+  const rate = n > 1 ? `, ${((1000 * (n - 1)) / ms).toFixed(1)} tok/s` : "";
+  const tokens = n === 1 ? "1 token" : `${n} tokens`;
+  return `${tokens}${rate}, the first after ${((elapsed - ms) / 1000).toFixed(1)} s`;
 }
 
 // what a tool the tools server runs answers
