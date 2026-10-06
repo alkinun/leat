@@ -71,9 +71,17 @@ def either(cuda: str, amd: str) -> str:
 
 @functools.cache
 def compute_units(device: str) -> int:
-    # the GPU's SMs: those of the TPCs each GPC has enabled; the 3090's 82 where the backend
-    # does not say
+    # the GPU's SMs: as CUDA counts them, or those of the TPCs each GPC has enabled; the 3090's
+    # 82 where the backend does not say
     dev: Any = Device[device]
+    if hasattr(dev, "cu_device"):
+        import ctypes
+
+        from tinygrad.runtime.autogen import cuda
+
+        count, attribute = ctypes.c_int(), cuda.CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT
+        if cuda.cuDeviceGetAttribute(ctypes.byref(count), attribute, dev.cu_device) == 0:
+            return count.value
     if not hasattr(dev, "num_gpcs"):
         return 82
     from tinygrad.runtime.ops_nv import nv_gpu
