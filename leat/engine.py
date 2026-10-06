@@ -1,6 +1,7 @@
 """Generation: chunked prefill and batched decode, replayed from compiled graphs."""
 
 import array
+import functools
 import itertools
 import random
 from collections.abc import Callable, Generator
@@ -13,7 +14,7 @@ from leat.gguf import GGUF
 from leat.kernels import MATVEC_TOKENS
 from leat.model import Config, Transformer
 from leat.ops import Span
-from leat.sampler import sample
+from leat.sampler import GREEDY, Sampling, sample
 from leat.tokenizer import Tokenizer
 
 # prompt tokens up to which a chunk takes a graph bound to that many, whose kernels size their
@@ -37,19 +38,19 @@ class Sequence:
 
     prompt: list[int]
     max_tokens: int
-    temperature: float
+    sampling: Sampling
     seed: int
     ignore_eog: bool
     slot: int
     tokens: list[int] = field(default_factory=list)  # generated so far, the last not yet run
     done: bool = False  # generated all it will, or cancelled
-    # its temperature and seed for the graphs, as (1,) tensors
-    sampling: tuple[Tensor, Tensor] = field(init=False, repr=False)
+    # its sampling options and seed for the graphs, as (1, 5) and (1,) tensors
+    options: tuple[Tensor, Tensor] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         # uploaded along with the first chunk's tokens
-        temperature = Tensor([self.temperature], dtype=dtypes.float32)
-        self.sampling = temperature, Tensor([self.seed], dtype=dtypes.uint32)
+        values = Tensor([self.sampling.values()], dtype=dtypes.float32)
+        self.options = values, Tensor([self.seed], dtype=dtypes.uint32)
 
 
 @dataclass
@@ -57,7 +58,7 @@ class _Batch:
     # a decode batch's sequences, and what the next with the same ones reuses
     sequences: list[Sequence]
     tokens: Tensor  # the step's output, the sequences' next tokens: (1, n)
-    sampling: tuple[Tensor, Tensor]  # their temperatures and seeds
+    options: tuple[Tensor, Tensor]  # their sampling options and seeds
 
 
 class Engine:
@@ -99,6 +100,9 @@ class Engine:
         cache_slots = slots + bool(self._padded)
         weights = gguf.load(names=filter(self.config.uses, gguf.tensors))
         self.model = Transformer(self.config, weights, max_context, cache_slots)
+        # the tokens each slot's sequence has generated, for presence_penalty
+        vocab = int(self.model.output.shape[0])
+        self._seen = Tensor.zeros(cache_slots, vocab, dtype=dtypes.bool).contiguous().realize()
         self.max_context, self.prefill_chunk, self.slots = max_context, prefill_chunk, slots
         self._len = UOp.variable("chunk_len", 1, prefill_chunk)
         self._few = UOp.variable("few_len", 1, min(FEW_TOKENS, prefill_chunk))
@@ -111,7 +115,7 @@ class Engine:
         # padding row would read experts of its own
         self._live = UOp.variable("live", 1, most) if self.config.experts else None
         self._chunk, self._few_chunk = graph(self._step), graph(self._step)
-        self._decode = {n: graph(self._step) for n in self._batches}
+        self._decode = {n: graph(functools.partial(self._step, decode=True)) for n in self._batches}
         self._copy = graph(self.model.copy)
         self._recurrent = any(self.config.recurrent)
         self._keep, self._restore = graph(self.model.keep), graph(self.model.restore)
@@ -126,19 +130,19 @@ class Engine:
         self,
         prompt: list[int],
         max_tokens: int,
-        temperature: float = 0.0,
+        sampling: Sampling = GREEDY,
         seed: int | None = None,
         ignore_eog: bool = False,
     ) -> Generator[int, None, None]:
         """Yields up to `max_tokens` ids; stops early at end of generation or the context limit.
 
-        Sampling is greedy at temperature 0; above, a `seed` makes it repeatable. The sequence
+        `sampling` is greedy by default; a `seed` makes a draw repeatable. The sequence
         generates alone: no other may be active, and none may start until this one is exhausted
         or closed. start() and step() generate several at once.
         """
         if self.active:
             raise RuntimeError("another generation is unfinished: exhaust or close it first")
-        sequence = self.start(prompt, max_tokens, temperature, seed, ignore_eog)
+        sequence = self.start(prompt, max_tokens, sampling, seed, ignore_eog)
         try:
             while not sequence.done:
                 for _, token in self.step():
@@ -150,7 +154,7 @@ class Engine:
         self,
         prompt: list[int],
         max_tokens: int,
-        temperature: float = 0.0,
+        sampling: Sampling = GREEDY,
         seed: int | None = None,
         ignore_eog: bool = False,
     ) -> Sequence:
@@ -164,7 +168,7 @@ class Engine:
         if len(self.active) == self.slots:
             raise RuntimeError(f"all {self.slots} slots are generating")
         seed = random.getrandbits(32) if seed is None else seed % 2**32
-        sequence = Sequence(prompt, max_tokens, temperature, seed, ignore_eog, self._claim(prompt))
+        sequence = Sequence(prompt, max_tokens, sampling, seed, ignore_eog, self._claim(prompt))
         self.active.append(sequence)
         return sequence
 
@@ -203,12 +207,12 @@ class Engine:
             for _ in self.generate(prompt, n, ignore_eog=True):
                 pass
         for n in self._batches[1:]:  # decode steps of several, each at a slot's first position
-            sampling = Tensor([0.0] * n), Tensor([0] * n, dtype=dtypes.uint32)
+            options = Tensor([[0.0] * 5] * n), Tensor([0] * n, dtype=dtypes.uint32)
             rows = [
                 x for i in range(n) for x in (self._slot_vars[i].bind(i), self._pos_vars[i].bind(0))
             ]
             live = self._live.bind(n) if self._live is not None and n in self._padded else None
-            self._decode[n](_ids([0] * n, n), *sampling, *rows, live=live)
+            self._decode[n](_ids([0] * n, n), *options, *rows, live=live)
         self._last = {}
         if self.slots > 1:  # copying a cached prefix to another slot has a graph too
             self._copy(self._source.bind(0), self._slot_vars[0].bind(1))
@@ -270,22 +274,18 @@ class Engine:
         return shared
 
     def _prefill(self, sequence: Sequence, size: int) -> int | None:
-        # runs the next chunk of the sequence's prompt, of up to `size` tokens: a single token as
-        # a decode step, up to FEW_TOKENS in the graph bound to that many, more in the one bound
-        # to prefill_chunk. Returns the token sampled after the prompt's last chunk.
+        # runs the next chunk of the sequence's prompt, of up to `size` tokens: up to FEW_TOKENS in
+        # the graph bound to that many, more in the one bound to prefill_chunk. Returns the token
+        # sampled after the prompt's last chunk.
         cached, mark = self._cached[sequence.slot], len(sequence.prompt) - KEEP_BACK
         if self._recurrent and len(cached) < mark:  # a chunk ends where the state is kept
             size = min(size, mark - len(cached))
         pos, chunk = len(cached), sequence.prompt[len(cached) : len(cached) + size]
         row = self._slot_vars[0].bind(sequence.slot), self._pos_vars[0].bind(pos)
-        if (n := len(chunk)) == 1:
-            graph, tokens = self._decode[1], _ids(chunk, 1)
-            self._last.pop(1, None)  # whose output this graph overwrites
-        else:
-            few = n <= FEW_TOKENS
-            graph, length = (self._few_chunk, self._few) if few else (self._chunk, self._len)
-            tokens = _ids(chunk, int(length.vmax)).shrink(((0, 1), (0, length.bind(n))))
-        token = graph(tokens, *sequence.sampling, *row)
+        few = (n := len(chunk)) <= FEW_TOKENS
+        graph, length = (self._few_chunk, self._few) if few else (self._chunk, self._len)
+        tokens = _ids(chunk, int(length.vmax)).shrink(((0, 1), (0, length.bind(n))))
+        token = graph(tokens, *sequence.options, *row)
         cached += chunk
         if self._recurrent and len(cached) == mark:
             self._keep(self._slot_vars[0].bind(sequence.slot))
@@ -295,8 +295,8 @@ class Engine:
     def _decode_step(self, sequences: list[Sequence]) -> list[int]:
         # runs each sequence's last token, in batches of BATCH at most. A batch of the same
         # sequences as the last step's batch in its graph takes that batch's output as its
-        # tokens, and its temperatures and seeds, uploading nothing, unless another batch of this
-        # step takes the graph too, overwriting the output
+        # tokens, and its sampling options and seeds, uploading nothing, unless another batch of
+        # this step takes the graph too, overwriting the output
         batches = [sequences[i : i + BATCH] for i in range(0, len(sequences), BATCH)]
         sizes = [next(n for n in self._batches if n >= len(b)) for b in batches]
         last, self._last, out = self._last, {}, []
@@ -311,20 +311,20 @@ class Engine:
         # runs each sequence's last token in the graph of n, padded with rows in the spare slot
         k = len(sequences)
         if last is not None:
-            tokens, sampling = last.tokens, last.sampling
+            tokens, options = last.tokens, last.options
         else:
             pad = [0] * (n - k)
             tokens = _ids([s.tokens[-1] for s in sequences] + pad, n)
-            temperature = Tensor([s.temperature for s in sequences] + pad, dtype=dtypes.float32)
+            values = [s.sampling.values() for s in sequences] + [[0.0] * 5] * (n - k)
             seed = Tensor([s.seed for s in sequences] + pad, dtype=dtypes.uint32)
-            sampling = temperature, seed
+            options = Tensor(values, dtype=dtypes.float32), seed
         rows = [(s.slot, len(self._cached[s.slot])) for s in sequences]
         bound = []
         for i, (slot, pos) in enumerate(rows + [(self._spare, 0)] * (n - k)):
             bound += [self._slot_vars[i].bind(slot), self._pos_vars[i].bind(pos)]
         live = self._live.bind(k) if self._live is not None and n in self._padded else None
-        out = self._decode[n](tokens, *sampling, *bound, live=live)
-        self._last[n] = _Batch(list(sequences), out.reshape(1, n), sampling)
+        out = self._decode[n](tokens, *options, *bound, live=live)
+        self._last[n] = _Batch(list(sequences), out.reshape(1, n), options)
         for s in sequences:
             self._cached[s.slot].append(s.tokens[-1])
         return out.numpy().ravel()[:k].tolist()
@@ -337,22 +337,38 @@ class Engine:
             self.cancel(sequence)
 
     def _step(
-        self, tokens: Tensor, temperature: Tensor, seed: Tensor, *rows: UOp,
-        live: UOp | None = None,
+        self, tokens: Tensor, options: Tensor, seed: Tensor, *rows: UOp, live: UOp | None = None,
+        decode: bool = False,
     ) -> Tensor:  # fmt: skip
         # rows: the slot and start position of each span, in turn. A single span takes every
-        # token, as a chunk of prompt; several take one each, as a decode step does, the first
-        # `live` of them its sequences' if given, the rest padding.
+        # token, as a chunk of prompt or a decode step of one; several take one each, as a decode
+        # step does, the first `live` of them its sequences' if given, the rest padding.
         pairs = list(zip(rows[::2], rows[1::2], strict=True))
+        slots = [slot for slot, _ in pairs]
+        seen = self._generated(tokens, slots, decode)
         if len(pairs) == 1:
             (slot, start), length = pairs[0], tokens.shape[1]
             hidden = self.model.run(tokens, [Span(slot, start, length)])
             logits = self.model.logits(hidden[:, -1, :])
-            return sample(logits, temperature, seed, start + length).realize()
+            return sample(logits, options, seed, start + length, seen).realize()
         hidden = self.model.run(tokens, [Span(slot, start) for slot, start in pairs], live)
         logits = self.model.logits(hidden).reshape(len(pairs), -1)
         positions = Tensor.stack(*(Tensor(start + 1) for _, start in pairs))
-        return sample(logits, temperature, seed, positions).realize()
+        return sample(logits, options, seed, positions, seen).realize()
+
+    def _generated(self, tokens: Tensor, slots: list[UOp], decode: bool) -> Tensor:
+        # the tokens each row's sequence has generated, for presence_penalty: a decode step runs
+        # the last, which it adds to its slot's, a chunk of prompt none, and empties its slot's.
+        # Adding a token twice changes nothing, so the step needs not wait for these writes.
+        if not decode:
+            self._seen[slots[0] : slots[0] + 1].assign(self._seen[:1].zeros_like()).realize()
+            return self._seen[:1].zeros_like()
+        hot = Tensor.arange(self._seen.shape[1]).reshape(1, -1) == tokens.reshape(-1, 1)
+        seen = Tensor.cat(*(self._seen[slot : slot + 1] for slot in slots)) | hot
+        Tensor.realize(
+            *(self._seen[s : s + 1].assign(seen[i : i + 1]) for i, s in enumerate(slots))
+        )
+        return seen
 
 
 def graph[T](fxn: Callable[..., T]) -> Callable[..., T]:

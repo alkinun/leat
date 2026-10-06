@@ -148,6 +148,10 @@ def test_seed(client):
     # sampled, as temperature is 1 unless given
     first, again = (complete(client, "seeded", max_tokens=8, seed=3) for _ in range(2))
     assert first == again
+    # and cut, as Qwen3.6 recommends: top_k and min_p in OpenAI's client's extra_body
+    options = {"top_p": 0.95, "presence_penalty": 1.5, "extra_body": {"top_k": 20, "min_p": 0.0}}
+    first, again = (complete(client, "cut", max_tokens=8, seed=3, **options) for _ in range(2))
+    assert first == again
 
 
 def test_cached_tokens(client):
@@ -271,7 +275,8 @@ def test_text_is_not_a_tool_call(client, replies_with, stream, text, choice):
     "kwargs, error",
     [
         ({"n": 2}, "n=2 is not supported"),
-        ({"top_p": 0.5}, "top_p=0.5 is not supported"),
+        ({"frequency_penalty": 0.5}, "frequency_penalty=0.5 is not supported"),
+        ({"top_p": 1.5}, "top_p must be a number from 0 to 1"),
         ({"temperature": 3}, "temperature must be a number from 0 to 2"),
         ({"max_tokens": 0}, "max_tokens must be a positive integer"),
         ({"tools": [WEATHER], "tool_choice": "required"}, "tool_choice='required' is not"),

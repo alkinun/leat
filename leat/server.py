@@ -24,6 +24,7 @@ import jinja2
 
 from leat.chat import ChatTemplate, Reply, parse_tool_calls, split_reply, tool_call_start
 from leat.engine import Engine, Sequence
+from leat.sampler import Sampling
 from leat.tokenizer import Tokenizer
 
 _APP = Path(__file__).with_name("app.html")
@@ -33,12 +34,19 @@ def _integer(v: Any) -> bool:
     return isinstance(v, int) and not isinstance(v, bool)
 
 
+def _between(low: float, high: float) -> Callable[[Any], bool]:
+    return lambda v: (_integer(v) or isinstance(v, float)) and low <= v <= high
+
+
 # the request fields leat reads, when present: what makes them valid, and how to say so
 _FIELDS: dict[str, tuple[Callable[[Any], bool], str]] = {
     "messages": (lambda v: isinstance(v, list) and bool(v) and all(isinstance(m, dict) for m in v),
                  "a non-empty list of objects"),
-    "temperature": (lambda v: (_integer(v) or isinstance(v, float)) and 0 <= v <= 2,
-                    "a number from 0 to 2"),
+    "temperature": (_between(0, 2), "a number from 0 to 2"),
+    "top_k": (_integer, "an integer"),
+    "top_p": (_between(0, 1), "a number from 0 to 1"),
+    "min_p": (_between(0, 1), "a number from 0 to 1"),
+    "presence_penalty": (_between(-2, 2), "a number from -2 to 2"),
     "max_tokens": (lambda v: _integer(v) and v > 0, "a positive integer"),
     "max_completion_tokens": (lambda v: _integer(v) and v > 0, "a positive integer"),
     "seed": (_integer, "an integer"),
@@ -53,8 +61,8 @@ _FIELDS: dict[str, tuple[Callable[[Any], bool], str]] = {
 
 # what leat does not implement, each with the value that asks for nothing more
 _UNSUPPORTED = {
-    "n": 1, "top_p": 1, "frequency_penalty": 0, "presence_penalty": 0, "logit_bias": {},
-    "logprobs": False, "response_format": {"type": "text"},
+    "n": 1, "frequency_penalty": 0, "repetition_penalty": 1, "logit_bias": {}, "logprobs": False,
+    "response_format": {"type": "text"},
 }  # fmt: skip
 
 
@@ -87,7 +95,7 @@ class _Completion:
     prompt: list[int]
     model: str  # whose chat template rendered the prompt
     max_tokens: int
-    temperature: float
+    sampling: Sampling
     seed: int | None
     stop: list[str]
     tools: list[dict[str, Any]] | None
@@ -213,7 +221,7 @@ class Server(ThreadingHTTPServer):
         try:
             cached = engine.cached_prefix(request.prompt)
             sequence = engine.start(
-                request.prompt, request.max_tokens, request.temperature, request.seed
+                request.prompt, request.max_tokens, request.sampling, request.seed
             )
         except Exception as e:  # for the client; the server carries on
             request.out.put(e)
@@ -433,12 +441,19 @@ def _completion(body: Any, server: Server) -> _Completion:
     prompt = loaded.chat.tokens(text)
     if len(prompt) >= (context := loaded.engine.max_context):
         raise ValueError(f"the prompt has {len(prompt)} tokens, too many for {context} of context")
-    stop, temperature = body.get("stop") or [], body.get("temperature")
+    stop, given = body.get("stop") or [], {k: v for k, v in body.items() if v is not None}
+    sampling = Sampling(
+        temperature=given.get("temperature", 1.0),  # OpenAI's default
+        top_k=max(given.get("top_k", 0), 0),  # vLLM's -1 keeps every token too
+        top_p=given.get("top_p", 1.0),
+        min_p=given.get("min_p", 0.0),
+        presence_penalty=given.get("presence_penalty", 0.0),
+    )
     return _Completion(
         prompt,
         loaded.name,
         max_tokens=body.get("max_completion_tokens") or body.get("max_tokens") or context,
-        temperature=1.0 if temperature is None else temperature,  # OpenAI's default
+        sampling=sampling,
         seed=body.get("seed"),
         stop=[s for s in ([stop] if isinstance(stop, str) else stop) if s],
         tools=tools,

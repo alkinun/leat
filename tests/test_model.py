@@ -8,6 +8,7 @@ from leat import bench
 from leat.engine import FEW_TOKENS, KEEP_BACK, Engine
 from leat.gguf import GGUF
 from leat.model import CACHE_TILE, Config, Transformer
+from leat.sampler import GREEDY, Sampling
 from tests.helpers import CONTEXT, reference_logits
 
 PROMPT = [5, 77, 120, 3, 299, 42, 8, 150, 61, 200, 9, 33]
@@ -215,11 +216,22 @@ def test_seeded_sampling(tiny_model):
     # a seed repeats a sampled generation, whatever part of its prompt was cached; graphs captured
     # on the first call draw anew in every generation without one
     engine = Engine(tiny_model[0], max_context=CONTEXT, prefill_chunk=8)
-    first = list(engine.generate(PROMPT, 8, temperature=1.0, seed=1))
-    assert list(engine.generate(PROMPT, 8, temperature=1.0, seed=1)) == first  # prefix cached
+    first = list(engine.generate(PROMPT, 8, Sampling(1.0), seed=1))
+    assert list(engine.generate(PROMPT, 8, Sampling(1.0), seed=1)) == first  # prefix cached
     engine.reset()
-    assert list(engine.generate(PROMPT, 8, temperature=1.0, seed=1)) == first
-    assert len({tuple(engine.generate(PROMPT, 8, temperature=1.0)) for _ in range(3)}) == 3
+    assert list(engine.generate(PROMPT, 8, Sampling(1.0), seed=1)) == first
+    assert len({tuple(engine.generate(PROMPT, 8, Sampling(1.0))) for _ in range(3)}) == 3
+
+
+def test_presence_penalty(tiny_model):
+    # off the logits of every token a generation has generated, the first from its prompt's last
+    # chunk, a single token here, and none of another generation's
+    engine = Engine(tiny_model[0], max_context=CONTEXT, prefill_chunk=8)
+    penalized = Sampling(presence_penalty=100.0)
+    out = list(engine.generate(PROMPT, 12, penalized, ignore_eog=True))
+    assert len(set(out)) == len(out)
+    list(engine.generate(PROMPT[:11], 4, ignore_eog=True))  # 11 of its 12 tokens cached
+    assert list(engine.generate(PROMPT, 12, penalized, ignore_eog=True)) == out
 
 
 # ******** several sequences at once ********
@@ -250,9 +262,9 @@ def test_batched_matches_alone(tiny, arch):
     engine = Engine(path, max_context=CONTEXT, prefill_chunk=8, slots=4)
     starts = {
         0: (PROMPT, 9),
-        1: (PROMPT[:9] + [1, 2], 6, 1.0, 5),
+        1: (PROMPT[:9] + [1, 2], 6, Sampling(1.0, top_k=3, presence_penalty=1.0), 5),
         3: ([4, 2], 4),
-        12: (PROMPT[::-1] * 2, 5, 0.8, 7),
+        12: (PROMPT[::-1] * 2, 5, Sampling(0.8, top_p=0.9), 7),
     }
     got = run_all(engine, starts)
     for n, args in starts.items():
@@ -269,7 +281,7 @@ def test_batches_past_the_largest(tiny_model, monkeypatch):
     starts = {
         0: (PROMPT, 7),
         1: ([4, 2], 6),
-        2: (PROMPT[3:], 5, 1.0, 3),
+        2: (PROMPT[3:], 5, Sampling(1.0, min_p=0.1), 3),
         3: ([7, 7, 1], 6),
         4: ([9], 4),
     }
@@ -278,9 +290,9 @@ def test_batches_past_the_largest(tiny_model, monkeypatch):
         assert got[n] == generated_with(path, *args), n
 
 
-def generated_with(path, prompt, n, temperature=0.0, seed=None) -> list[int]:
+def generated_with(path, prompt, n, sampling=GREEDY, seed=None) -> list[int]:
     engine = Engine(path, max_context=CONTEXT, prefill_chunk=8)
-    return list(engine.generate(prompt, n, temperature, seed))
+    return list(engine.generate(prompt, n, sampling, seed))
 
 
 @pytest.mark.usefixtures("reference_ops")

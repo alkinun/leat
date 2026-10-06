@@ -13,6 +13,7 @@ from tinygrad import Device
 from leat import bench
 from leat.chat import ChatTemplate, split_reply
 from leat.engine import Engine
+from leat.sampler import Sampling
 from leat.server import Server
 
 
@@ -26,6 +27,12 @@ def main(argv: list[str] | None = None) -> None:
     run.add_argument("model", type=Path, help="GGUF file")
     run.add_argument("--max-context", type=int, default=4096)
     run.add_argument("--temperature", type=float, default=0.7)
+    run.add_argument(
+        "--top-k", type=int, default=0, help="keep the k likeliest tokens; 0 keeps all"
+    )
+    run.add_argument("--top-p", type=float, default=1.0)
+    run.add_argument("--min-p", type=float, default=0.0)
+    run.add_argument("--presence-penalty", type=float, default=0.0)
     run.add_argument("--system", help="system prompt")
 
     serve = commands.add_parser(
@@ -79,6 +86,7 @@ def main(argv: list[str] | None = None) -> None:
 def _run(args: argparse.Namespace) -> None:
     engine = Engine(args.model, max_context=args.max_context)
     chat, tok = ChatTemplate(engine.gguf.metadata, engine.tokenizer), engine.tokenizer
+    sampling = Sampling(args.temperature, args.top_k, args.top_p, args.min_p, args.presence_penalty)
     messages = [{"role": "system", "content": args.system}] if args.system else []
     print(f"{engine.gguf.path.stem} on {Device.DEFAULT}, compiling...", end="", flush=True)
     engine.warm_up()
@@ -101,7 +109,7 @@ def _run(args: argparse.Namespace) -> None:
         reply, step, start = [], tok.stream(), time.perf_counter()
         text, shown = "", ("", "")  # the reply so far, and its reasoning and text printed
         try:
-            for t in engine.generate(prompt, engine.max_context - len(prompt), args.temperature):
+            for t in engine.generate(prompt, engine.max_context - len(prompt), sampling):
                 if t in tok.eog_ids:
                     break
                 reply.append(t)
