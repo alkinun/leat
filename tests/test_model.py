@@ -94,6 +94,12 @@ def test_config():
     assert config("qwen35moe", delta_net).recurrent == (True, True, True, False) * 2
     delta_net["full_attention_interval"] = 2
     assert config("qwen35moe", delta_net).recurrent == (True, False) * 4
+    # a sliding_window_pattern of a period n, as llama.cpp's: every n-th layer sees all positions,
+    # the others the window, and 0 all of them; with none, Gemma 3's own period of 6
+    gemma = {"attention.sliding_window": 4, "block_count": 12}
+    full = config("gemma3", gemma | {"attention.sliding_window_pattern": 6}).windows
+    assert full == config("gemma3", gemma).windows == ((4,) * 5 + (0,)) * 2
+    assert config("gemma3", gemma | {"attention.sliding_window_pattern": 0}).windows == (4,) * 12
     # sliding-window layers rotate all their dimensions
     partial = {"attention.sliding_window": 4, "attention.sliding_window_pattern": [True, False],
                "rope.dimension_count_swa": 32, "block_count": 2}  # fmt: skip

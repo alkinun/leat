@@ -26,8 +26,7 @@ _ROPE_HALVES = {
     "llama": False, "qwen2": True, "qwen3": True, "qwen3moe": True, "gemma3": True,
     "gemma4": True, "gpt-oss": True, "phi3": True, "qwen35moe": True,
 }  # fmt: skip
-# where a GGUF has no attention.sliding_window_pattern, as llama.cpp: every n-th layer sees all
-# positions, the others the window
+# the period of attention.sliding_window_pattern where a GGUF has none, as llama.cpp's
 _SLIDING_EVERY = {"gemma3": 6, "gpt-oss": 2}
 
 
@@ -102,10 +101,14 @@ class Config:
         def per_layer(value: Any) -> tuple:
             return tuple(value[:n_layers]) if isinstance(value, list) else (value,) * n_layers
 
+        # whether each layer sees the window: a list, or as llama.cpp a period n, every n-th layer
+        # seeing all positions, the others the window, all of them for 0
         pattern = m.get("attention.sliding_window_pattern")
-        if pattern is None and m.get("attention.sliding_window") and arch in _SLIDING_EVERY:
-            n = _SLIDING_EVERY[arch]
-            pattern = [i % n < n - 1 for i in range(n_layers)]
+        if pattern is None and m.get("attention.sliding_window"):
+            pattern = _SLIDING_EVERY.get(arch)
+        if isinstance(pattern, int) and not isinstance(pattern, bool):
+            n = pattern
+            pattern = [n == 0 or i % n < n - 1 for i in range(n_layers)]
         sliding = per_layer(bool(pattern) if not isinstance(pattern, list) else pattern)
         head_dim = m.get("attention.key_length", dim // n_heads)
         # Gemma 4's sliding-window layers have their own head size and RoPE
