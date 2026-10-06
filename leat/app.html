@@ -281,6 +281,10 @@ async function send() {
   } catch (error) {
     const last = c.messages.at(-1);
     if (error.name === "AbortError") {
+      // each call the stop left unanswered answered so, for the model's next turn too
+      for (const m of c.messages.slice(turn)) {
+        if (m.role === "tool" && !m.content) m.content = "Stopped before it answered.";
+      }
       last.note = last.note ? `${last.note} · stopped` : "stopped";
     } else { // the turn is taken back, to send again
       c.messages.splice(turn);
