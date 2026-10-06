@@ -90,6 +90,12 @@
     color: var(--muted); font-size: 14px;
   }
   .message p { margin: 0 0 12px; }
+  .message :is(h1, h2, h3, h4, h5, h6) { margin: 24px 0 8px; font-size: 1em; line-height: 1.4; }
+  .message h1 { font-size: 1.5em; }
+  .message h2 { font-size: 1.3em; }
+  .message h3 { font-size: 1.15em; }
+  .message > div > :first-child { margin-top: 0; }
+  .message hr { margin: 24px 0; border: none; border-top: 1px solid var(--line); }
   .message > div > :last-child { margin-bottom: 0; }
   .note { margin-top: 8px; color: var(--muted); font-size: 12px; }
   .note:empty { display: none; }

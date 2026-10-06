@@ -17,6 +17,14 @@ CASES = [
     ("hello", [["p", "hello"]]),
     ("  one\n  two  ", [["p", "one\ntwo"]]),
     ("one\n\n\ntwo", [["p", "one"], ["p", "two"]]),
+    # headings, their closing hashes dropped, and rules, each breaking into a paragraph
+    ("# One\n###### Six ##", [["h1", "One"], ["h6", "Six"]]),
+    ("text\n## **Bold** #5#\nmore",
+     [["p", "text"], ["h2", ["strong", "Bold"], " #5#"], ["p", "more"]]),
+    ("#hashtag\n####### seven", [["p", "#hashtag\n####### seven"]]),
+    ("#", [["h1"]]),
+    ("one\n***\n- - -\n___", [["p", "one"], ["hr"], ["hr"], ["hr"]]),
+    ("--", [["p", "--"]]),
     # code blocks, unclosed while streaming, their info string a language
     ("```\nx = 1\n\ny = 2\n```", [["pre", ["code", "x = 1\n\ny = 2"]]]),
     ("```py\nx\n```\nafter", [["pre", ["code", {"class": "language-py"}, "x"]], ["p", "after"]]),

@@ -23,17 +23,28 @@ function render(nodes) {
 }
 
 const FENCE = /^( {0,3})(`{3,}|~{3,})\s*([^\s`]*)/;
+const HEADING = /^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$/;
+const RULE = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
+const BREAKS = [FENCE, HEADING, RULE]; // the blocks that break into a paragraph
 
 function blocks(lines) {
   const out = [];
   for (let i = 0; i < lines.length; ) {
-    if (!lines[i].trim()) {
+    const line = lines[i];
+    let match;
+    if (!line.trim()) {
       i++;
-    } else if (FENCE.test(lines[i])) {
+    } else if (FENCE.test(line)) {
       i = code(lines, i, out);
+    } else if ((match = HEADING.exec(line))) {
+      out.push([`h${match[1].length}`, ...inline(match[2] ?? "")]);
+      i++;
+    } else if (RULE.test(line)) {
+      out.push(["hr"]);
+      i++;
     } else { // a paragraph, to a blank line or a block that breaks in
       const start = i++;
-      while (i < lines.length && lines[i].trim() && !FENCE.test(lines[i])) i++;
+      while (i < lines.length && lines[i].trim() && !BREAKS.some((b) => b.test(lines[i]))) i++;
       out.push(["p", ...inline(lines.slice(start, i).map((l) => l.trim()).join("\n"))]);
     }
   }
