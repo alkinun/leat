@@ -27,9 +27,21 @@ from leat.engine import Engine, Sequence
 from leat.sampler import Sampling
 from leat.tokenizer import Tokenizer
 
-# the chat app's files, by the path that serves each, and their types by their suffixes
-_APP = {"/": "app.html", "/markdown.mjs": "markdown.mjs"}
-_TYPES = {".html": "text/html; charset=utf-8", ".mjs": "text/javascript; charset=utf-8"}
+# the chat app's files, each served at its path in leat/ and the app at /, and their types
+_APP = (
+    "app.html",
+    "markdown.mjs",
+    "vendor/temml/temml.mjs",
+    "vendor/temml/Temml-Latin-Modern.css",
+    "vendor/temml/Temml.woff2",
+    "vendor/temml/latinmodernmath.woff2",
+)
+_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".mjs": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".woff2": "font/woff2",
+}
 
 
 def _integer(v: Any) -> bool:
@@ -293,7 +305,7 @@ class _Handler(BaseHTTPRequestHandler):
     server: Server
 
     def do_GET(self) -> None:
-        if (name := _APP.get(self.path)) is not None:
+        if (name := "app.html" if self.path == "/" else self.path[1:]) in _APP:
             file = Path(__file__).parent / name
             return self._send(200, _TYPES[file.suffix], file.read_bytes())
         if self.path != "/v1/models":

@@ -123,6 +123,11 @@ def test_app(server):
     with urllib.request.urlopen(f"{url}/markdown.mjs") as response:
         assert response.headers["Content-Type"] == "text/javascript; charset=utf-8"
         assert b"export function markdown(" in response.read()
+    with urllib.request.urlopen(f"{url}/vendor/temml/Temml.woff2") as response:
+        assert response.headers["Content-Type"] == "font/woff2"
+    for path in ("/server.py", "/vendor/temml/LICENSE", "/../pyproject.toml"):
+        with pytest.raises(urllib.error.HTTPError, match="404"):
+            urllib.request.urlopen(f"{url}{path}")
 
 
 def test_reply(client, expected):
