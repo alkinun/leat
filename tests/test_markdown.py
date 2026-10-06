@@ -37,7 +37,26 @@ CASES = [
     ("`a\nb`", [["p", ["code", "a b"]]]),
     ("`open", [["p", "`open"]]),
     ("`**a**`", [["p", ["code", "**a**"]]]),
+    # emphasis, opened before a non-space and closed after one, an _ neither within a word
+    ("*a* _b_ **c** __d__ ~~e~~", [["p", ["em", "a"], " ", ["em", "b"], " ", ["strong", "c"], " ",
+                                   ["strong", "d"], " ", ["del", "e"]]]),
+    ("***a***", [["p", ["em", ["strong", "a"]]]]),
+    ("*a **b** c*", [["p", ["em", "a ", ["strong", "b"], " c"]]]),
+    ("**a *b* c**", [["p", ["strong", "a ", ["em", "b"], " c"]]]),
+    ("*a **b***", [["p", ["em", "a ", ["strong", "b"]]]]),
+    ("***a** b*", [["p", ["em", ["strong", "a"], " b"]]]),
+    ("***a* b**", [["p", ["strong", ["em", "a"], " b"]]]),
+    ("**a*", [["p", "*", ["em", "a"]]]),
     ("**bold** and **`code`**", [["p", ["strong", "bold"], " and ", ["strong", ["code", "code"]]]]),
+    ("**a `**` b**", [["p", ["strong", "a ", ["code", "**"], " b"]]]),
+    ("**Note:**text", [["p", ["strong", "Note:"], "text"]]),
+    ("2 * 3 * 4, a ** b, ** c **", [["p", "2 * 3 * 4, a ** b, ** c **"]]),
+    ("_snake_case_ and _x_y_", [["p", ["em", "snake_case"], " and ", ["em", "x_y"]]]),
+    ("~5 to ~10, ~~~", [["p", "~5 to ~10, ~~~"]]),
+    ("**a\nb**", [["p", ["strong", "a\nb"]]]),
+    ("**unclosed", [["p", "**unclosed"]]),
+    # escapes, of ASCII punctuation only
+    ("\\*a\\* \\` \\\\ \\a", [["p", "*a* ` \\ \\a"]]),
 ]  # fmt: skip
 
 
