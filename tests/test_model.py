@@ -8,9 +8,17 @@ from tinygrad import Tensor, UOp, dtypes
 from leat import bench
 from leat.engine import FEW_TOKENS, KEEP_BACK, Engine
 from leat.gguf import GGUF
-from leat.model import CACHE_TILE, Config, Transformer, _rope_table
+from leat.model import CACHE_TILE, Config, Transformer, _rope_table, _stack
+from leat.quant import GGMLType, QTensor
 from leat.sampler import GREEDY, Sampling
-from tests.helpers import CONTEXT, P3_MSCALE, P3_ORIGINAL, P3_ROTATED, reference_logits
+from tests.helpers import (
+    CONTEXT,
+    P3_MSCALE,
+    P3_ORIGINAL,
+    P3_ROTATED,
+    random_blocks,
+    reference_logits,
+)
 
 PROMPT = [5, 77, 120, 3, 299, 42, 8, 150, 61, 200, 9, 33]
 ARCHS = [
@@ -98,6 +106,11 @@ def test_config():
     assert config("qwen35moe", delta_net).recurrent == (True, True, True, False) * 2
     delta_net["full_attention_interval"] = 2
     assert config("qwen35moe", delta_net).recurrent == (True, False) * 4
+    # or as recurrent_layers says, where given
+    layers = [True, True, False, True, False, False, True, False]
+    assert config("qwen35moe", delta_net | {"attention.recurrent_layers": layers}).recurrent == (
+        tuple(layers)
+    )
     # a sliding_window_pattern of a period n, as llama.cpp's: every n-th layer sees all positions,
     # the others the window, and 0 all of them; with none, Gemma 3's own period of 6
     gemma = {"attention.sliding_window": 4, "block_count": 12}
@@ -137,6 +150,19 @@ def test_rope_scale(scaling, scale):
     # log multiplier, as llama.cpp, mscale(factor, 1) / mscale(factor, multiplier) instead
     cos, sin = _rope_table(config("llama", scaling).ropes[0], 8, None)
     np.testing.assert_allclose(np.hypot(cos.numpy(), sin.numpy()), scale, rtol=1e-6)
+
+
+def test_stack_alpha_beta():
+    # Qwen3.5's alpha and beta projections stacked as F32, whatever each is stored as
+    rng = np.random.default_rng(0)
+    alpha = rng.standard_normal((4, 32)).astype(np.float32)
+    beta = QTensor(Tensor(random_blocks(GGMLType.Q8_0, 4, rng)), GGMLType.Q8_0, (4, 32))
+    layer = {"ssm_alpha": QTensor(Tensor(alpha.ravel()), GGMLType.F32, (4, 32)), "ssm_beta": beta}
+    _stack(layer)
+    stacked = layer["ssm_alpha_beta"]
+    assert stacked.type == GGMLType.F32 and stacked.shape == (8, 32)
+    expected = np.concatenate([alpha, beta.dequant().numpy()])
+    np.testing.assert_array_equal(stacked.dequant().numpy(), expected)
 
 
 def test_rope_metadata():

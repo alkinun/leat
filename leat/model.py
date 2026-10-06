@@ -9,7 +9,7 @@ from tinygrad.dtype import DType
 
 from leat import ops
 from leat.ops import Span
-from leat.quant import BLOCK, NATIVE, QTensor
+from leat.quant import BLOCK, NATIVE, GGMLType, QTensor
 
 CACHE_TILE = 256  # positions
 _LAYER = ("attn_norm", "attn_q", "attn_k", "attn_output", "ffn_norm")
@@ -136,6 +136,8 @@ class Config:
             delta_net = DeltaNet(m["ssm.group_count"], v_heads, m["ssm.state_size"],
                                  m["ssm.inner_size"] // v_heads, m["ssm.conv_kernel"])  # fmt: skip
             recurrent = tuple((i + 1) % every != 0 for i in range(n_layers))
+            if isinstance(layers := m.get("attention.recurrent_layers"), list):  # as llama.cpp
+                recurrent = tuple(bool(r) for r in layers[:n_layers])
         return Config(
             arch=arch,
             n_layers=n_layers,
@@ -432,12 +434,13 @@ def _rows(w: QTensor, start: int, stop: int) -> QTensor:
 
 
 def _stack(layer: dict[str, QTensor]) -> None:
-    # Qwen3.5's F32 projections of the normed input, as matrices the router's kernel takes:
-    # alpha's and beta's stacked, scored together, and the shared expert's gate a row
+    # Qwen3.5's projections of the normed input, as F32 matrices the router's kernel takes:
+    # alpha's and beta's stacked, scored together, whatever each is stored as, and the shared
+    # expert's gate a row
     if "ssm_alpha" in layer:
         alpha, beta = layer.pop("ssm_alpha"), layer.pop("ssm_beta")
-        data = alpha.data.cat(beta.data).contiguous().realize()
-        layer["ssm_alpha_beta"] = QTensor(data, alpha.type, (2 * alpha.shape[0], alpha.shape[1]))
+        data = alpha.dequant().cat(beta.dequant()).flatten().contiguous().realize()
+        layer["ssm_alpha_beta"] = QTensor(data, GGMLType.F32, (2 * alpha.shape[0], alpha.shape[1]))
     if (gate := layer.get("ffn_gate_inp_shexp")) is not None:
         layer["ffn_gate_inp_shexp"] = QTensor(gate.data, gate.type, (1, *gate.shape))
 
