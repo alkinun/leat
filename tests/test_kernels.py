@@ -117,15 +117,16 @@ def test_matvec(ggml_type, shape):
 
 @pytest.mark.parametrize("ggml_type", [Q4_K, Q5_K, Q6_K, Q5_0, Q8_0, MXFP4, *LEGACY])
 @pytest.mark.parametrize("tokens", [3, MATVEC_TOKENS])
-def test_matvec_tokens(ggml_type, tokens):
+@pytest.mark.parametrize("rows", [24, 26])  # whole warps' rows, or a last warp's of fewer
+def test_matvec_tokens(ggml_type, tokens, rows):
     # each row's weights read once for every token, a residual added per token
     rng = np.random.default_rng(4)
-    w, blocks = random_matrix(ggml_type, 24, 2816, rng)
+    w, blocks = random_matrix(ggml_type, rows, 2816, rng)
     x = rng.standard_normal((1, tokens, 2816)).astype(np.float32)
-    r = rng.standard_normal((1, tokens, 24)).astype(np.float32)
+    r = rng.standard_normal((1, tokens, rows)).astype(np.float32)
     assert kernels.supports_matvec(Tensor(x), w)
     got = ops.linear(Tensor(x), w, residual=Tensor(r)).numpy()
-    assert got.shape == (1, tokens, 24)
+    assert got.shape == (1, tokens, rows)
     assert_close(got[0], reference_matmul(x[0], blocks, ggml_type) + r[0], 1e-4)
 
 
@@ -159,7 +160,8 @@ SHORT = [5, UOp.variable("tokens", 1, 16).bind(11)]
 
 @pytest.mark.parametrize("ggml_type", [Q4_K, Q5_K, Q6_K, Q8_0, *TILED])
 @pytest.mark.parametrize("tokens", [64, 100, UOp.variable("tokens", 1, 128).bind(70), *SHORT])
-@pytest.mark.parametrize("shape", [(256, 2048), (4096, 512)])  # tiles of 128 and 256 rows
+# tiles of 128 and 256 rows, and of 96, gpt-oss's 2880 rows, which 128 do not divide
+@pytest.mark.parametrize("shape", [(256, 2048), (4096, 512), (2880, 512)])
 @nvidia
 def test_matmul(ggml_type, tokens, shape):
     rng = np.random.default_rng(8)
