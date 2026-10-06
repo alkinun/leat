@@ -684,7 +684,7 @@ def _gated_delta_net(lw: dict[str, np.ndarray], h: np.ndarray) -> np.ndarray:
 
     def unit(z):
         z = z.reshape(T, Q35_K_HEADS, Q35_DIM)
-        return z / np.maximum(np.sqrt((z * z).sum(-1, keepdims=True)), 1e-5)
+        return z / np.sqrt((z * z).sum(-1, keepdims=True) + 1e-5)  # as llama.cpp
 
     q, k, v = unit(q) / np.sqrt(Q35_DIM), unit(k), v.reshape(T, Q35_V_HEADS, Q35_DIM)
     rate = h @ lw["ssm_alpha"].T + lw["ssm_dt.bias"]

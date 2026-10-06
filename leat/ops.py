@@ -394,7 +394,8 @@ def _delta_net(
 
 
 def _l2_norm(x: Tensor, eps: float) -> Tensor:
-    return x / x.square().sum(-1, keepdim=True).sqrt().maximum(eps)
+    # x / sqrt(|x|^2 + eps), as llama.cpp's Gated DeltaNet and transformers' have it
+    return x * (x.square().sum(-1, keepdim=True) + eps).rsqrt()
 
 
 def _softplus(x: Tensor) -> Tensor:
