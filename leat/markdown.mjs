@@ -375,7 +375,7 @@ function closes(text, j, run) {
 // code, its comments, strings, numbers and keywords set apart as the languages models write most
 // have them, the rest as it is
 function highlight(code, language) {
-  const grammar = GRAMMARS[language.toLowerCase()];
+  const grammar = GRAMMARS.get(language.toLowerCase());
   if (!grammar || !code) return code ? [code] : [];
   const out = [];
   let end = 0;
@@ -409,7 +409,7 @@ const TEMPLATE = String.raw`\x60(?:\\[\s\S]|[^\x60\\])*\x60`;
 const TRIPLE = String.raw`"""[\s\S]*?(?:"""|$)|'''[\s\S]*?(?:'''|$)`;
 
 // each grammar, by the names a code block's language has for it
-const GRAMMARS = Object.fromEntries(Object.entries({
+const GRAMMARS = new Map(Object.entries({ // a Map, which holds no constructor or __proto__
   "py python python3": grammar(HASH, [TRIPLE, DOUBLE, SINGLE], "False None True and as assert "
     + "async await break case class continue def del elif else except finally for from global if "
     + "import in is lambda match nonlocal not or pass raise return self try while with yield"),

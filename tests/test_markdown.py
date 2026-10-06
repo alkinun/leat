@@ -86,6 +86,8 @@ CASES = [
     # code blocks, unclosed while streaming, their info string a language
     ("```\nx = 1\n\ny = 2\n```", [["pre", ["code", "x = 1\n\ny = 2"]]]),
     ("```md\nx\n```\nafter", [["pre", ["code", {"class": "language-md"}, "x"]], ["p", "after"]]),
+    ("```constructor\nx\n```", [["pre", ["code", {"class": "language-constructor"}, "x"]]]),
+    ("```__proto__\nx\n```", [["pre", ["code", {"class": "language-__proto__"}, "x"]]]),
     ("text\n```\nx", [["p", "text"], ["pre", ["code", "x"]]]),
     ("~~~~\n```\n~~~~", [["pre", ["code", "```"]]]),
     ("  ```\n  x\n    y\n  ```", [["pre", ["code", "x\n  y"]]]),
