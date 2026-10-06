@@ -74,9 +74,7 @@ def speed(
         t.nbytes * share[n] for n, t in tensors.items() if n != "token_embd.weight" or tied
     )
     tg = statistics.median(decode[2:])
-    reads = (
-        -(-sequences // BATCH) / sequences
-    )  # weight reads per token: a step reads them per batch
+    reads = -(-sequences // BATCH) / sequences  # weight reads per token: one per batch a step
     return Speed(statistics.median(prefill[2:]), tg, streamed * tg * reads / 1e9, sequences)
 
 

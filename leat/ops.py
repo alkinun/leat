@@ -410,11 +410,11 @@ def argmax(x: Tensor) -> Tensor:
 
 
 def cutoff(scores: Tensor, top_k: Tensor, top_p: Tensor, min_p: Tensor) -> Tensor:
-    """The score below which each row of scores (B, V), log-probabilities but for a constant,
-    drops its tokens, each option (B, 1): -inf where no option is set. top_k keeps the k likeliest
-    tokens, at 0 all; top_p then the likeliest of those whose probabilities, renormalized, sum to
-    top_p; min_p those at least min_p times as likely as the likeliest. The kernels cut within a
-    hundredth below where this would, and keep no token 20 nats below the likeliest."""
+    # the score below which each row of scores (B, V), log-probabilities but for a constant, drops
+    # its tokens, each option (B, 1): -inf where no option is set. top_k keeps the k likeliest
+    # tokens, at 0 all; top_p then the likeliest of those whose probabilities, renormalized, sum
+    # to top_p; min_p those at least min_p times as likely as the likeliest. The kernels cut within
+    # a hundredth below where this would, and keep no token 20 nats below the likeliest.
     if _fast() and kernels.supports_cutoff(scores):
         top, by_k, by_p = kernels.cutoff(scores, top_k, top_p)
     else:

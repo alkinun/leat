@@ -269,7 +269,7 @@ class Engine:
         # how many leading tokens of the prompt each slot holds that generation may start from: of
         # a slot with recurrent state, all its tokens or none
         shared = [_shared(prompt, cached) for cached in self._cached]
-        if any(self.config.recurrent):
+        if self._recurrent:
             shared = [n if n == len(c) else 0 for n, c in zip(shared, self._cached, strict=True)]
         return shared
 
