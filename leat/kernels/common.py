@@ -1,8 +1,7 @@
-"""What the kernels share: warp intrinsics, loads, conversions and bound variables.
+"""What the kernels share: warp intrinsics, reductions, loads, conversions and bound variables.
 
-The intrinsics render as C for CUDA and for HIP alike, each choosing its own when compiled: the
-warp-level kernels run on NVIDIA GPUs and on AMD's RDNA GPUs, whose waves of 32 lanes are warps.
-The kernels on tensor cores, matmul's and FlashAttention's, are NVIDIA's alone.
+The intrinsics render as C for CUDA and for HIP alike, each compiler choosing its own: AMD's RDNA
+GPUs run waves of 32 lanes, which are warps.
 """
 
 import functools
@@ -15,7 +14,7 @@ from tinygrad import Device, Tensor, UOp, dtypes
 from tinygrad.dtype import AddrSpace
 from tinygrad.uop.ops import AxisType, Ops
 
-from leat.quant import GGMLType, QTensor
+from leat.quant import FP4_VALUES, IQ4_VALUES, GGMLType, QTensor
 
 WARP = 32
 GROUP = 32  # activations per int8 scale
@@ -40,6 +39,11 @@ def on_gpu(t: Tensor) -> bool:
     # an NVIDIA GPU, or an AMD one of waves of 32 that tinygrad renders C for: RDNA 3 and 4, as
     # Strix Halo's
     return isinstance(t.device, str) and (on_nvidia(t) or _rdna(t.device.split(":")[0]))
+
+
+def one_sequence(x: Tensor) -> bool:
+    # tokens x (1, T, dim) of a single sequence, or of a batch of one
+    return all(isinstance(b, int) and b == 1 for b in x.shape[:-2])
 
 
 @functools.cache
@@ -153,6 +157,42 @@ def warp_max(value: UOp, lanes: int = WARP) -> UOp:
     return warp_sum(value, lanes, UOp.maximum)
 
 
+def argmax_step(best: UOp, index: UOp, value: UOp, at: UOp) -> tuple[UOp, UOp]:
+    # keep the larger value, and on ties the lower index, as argmax does
+    take = (value > best) | (value.eq(best) & (at < index))
+    return take.where(value, best), take.where(at, index)
+
+
+def warp_argmax(best: UOp, index: UOp) -> tuple[UOp, UOp]:
+    for mask in (16, 8, 4, 2, 1):
+        best, index = argmax_step(best, index, shfl_xor(best, mask), shfl_xor(index, mask))
+    return best, index
+
+
+def tree(op: Callable[[UOp, UOp], UOp], values: list[UOp]) -> UOp:
+    # op over values in a tree, whose operations overlap, rather than in one chain
+    while len(values) > 1:
+        paired = [op(a, b) for a, b in zip(values[::2], values[1::2], strict=False)]
+        values = paired + values[len(values) // 2 * 2 :]
+    return values[0]
+
+
+def block_sum(value: UOp, wave: UOp, lane: UOp, op: Callable[[UOp, UOp], UOp] = UOp.__add__) -> UOp:
+    # op over a block's warps of a value each warp holds in every lane, through shared memory: in
+    # every thread
+    warps = int(wave.vmax) + 1
+    shared = UOp.alloc((warps,), dtypes.float32, addrspace=AddrSpace.LOCAL)
+    shared = shared.after(shared[wave.valid(lane.eq(0))].store(value))
+    return tree(op, [shared[w].load() for w in range(warps)])
+
+
+def turns(items: int, threads: int, thread: UOp) -> list[UOp]:
+    # the items a block's thread takes, its threads taking them in turn; where the last turn has
+    # more threads than items, the others repeat the last item, storing what its thread stores
+    at = [i * threads + thread for i in range(-(-items // threads))]
+    return at if items % threads == 0 else [i.minimum(items - 1) for i in at]
+
+
 def load_vector(ptr: UOp, lanes: int) -> tuple[UOp, ...]:
     # `lanes` consecutive values from an index, as one vector load, widened to f32
     buf, coords = ptr.src[0], ptr.src[1:]
@@ -173,7 +213,7 @@ def word16(w: UOp, i: UOp) -> UOp:
     return w[i].load().cast(dtypes.uint32) | (w[i + 1].load().cast(dtypes.uint32) << 16)
 
 
-def byte_perm(a: UOp | int, b: UOp | int, selector: UOp | int) -> UOp:
+def _byte_perm(a: UOp | int, b: UOp | int, selector: UOp | int) -> UOp:
     # the bytes of (b, a) that the low 4 nibbles of the selector pick, as CUDA's __byte_perm; AMD's
     # v_perm takes a byte per pick, from (its first, its second)
     srcs = tuple(x if isinstance(x, UOp) else UOp.const(x, dtypes.uint32) for x in (a, b, selector))
@@ -194,15 +234,18 @@ def table16(q: UOp, table: tuple[int, int, int, int]) -> tuple[UOp, UOp]:
     # get_int_from_table_16, picking from each half of the table and then by the nibble's top bit
     halves, pick = [], (q & 0x88888888) >> 1 | 0x32103210
     for shift in (0, 16):
-        low, high = (byte_perm(table[i], table[i + 1], q >> shift) for i in (0, 2))
-        halves.append(byte_perm(low, high, pick >> shift))
-    return byte_perm(halves[0], halves[1], 0x6420), byte_perm(halves[0], halves[1], 0x7531)
+        low, high = (_byte_perm(table[i], table[i + 1], q >> shift) for i in (0, 2))
+        halves.append(_byte_perm(low, high, pick >> shift))
+    return _byte_perm(halves[0], halves[1], 0x6420), _byte_perm(halves[0], halves[1], 0x7531)
 
 
-def table_words(values: tuple[int, ...]) -> tuple[int, int, int, int]:
+def _table_words(values: tuple[int, ...]) -> tuple[int, int, int, int]:
     # 16 int8 values as the 4 words table16 takes
     raw = bytes(v & 0xFF for v in values)
     return tuple(int.from_bytes(raw[i : i + 4], "little") for i in range(0, 16, 4))  # type: ignore[return-value]
+
+
+FP4_TABLE, IQ4_TABLE = _table_words(FP4_VALUES), _table_words(IQ4_VALUES)
 
 
 def e8m0_half(e: UOp) -> UOp:

@@ -4,7 +4,6 @@ readied for it: biased, normed, rotated by RoPE, and the keys and values stored 
 
 import functools
 import math
-from collections.abc import Callable
 
 from tinygrad import Tensor, UOp, dtypes
 from tinygrad.dtype import AddrSpace
@@ -14,6 +13,7 @@ from leat.kernels.common import (
     LOG2E,
     SHARED,
     WARP,
+    at_least,
     at_most,
     carry,
     carry_all,
@@ -24,7 +24,8 @@ from leat.kernels.common import (
     opaque,
     pick,
     register,
-    shfl_xor,
+    turns,
+    warp_max,
     warp_sum,
 )
 
@@ -100,10 +101,8 @@ def _attention_partial_kernel(
     acc, mx, total = acc.after(update), mx.after(update), total.after(update)
 
     # merge the warps through shared memory: each writes its output normalized to f16 (sum >= 1
-    # unless empty), as [head, dimension within lane, lane], then its max and sum.
-    # tinygrad's codegen declares an index at its first use in the rounds loop and reuses it after
-    # the loop, out of scope, if the same expression recurs there: indices from here on are made
-    # of opaque copies of the block's and thread's coordinates, which it cannot match.
+    # unless empty), as [head, dimension within lane, lane], then its max and sum. Past the rounds
+    # loop, indices of opaque copies of the coordinates: see common.opaque.
     ranges = (lane, wave, block, head, token)
     lane, wave, block, head, token = (opaque(u) for u in ranges)
     shared = UOp.alloc((waves, group * dim), dtypes.half, addrspace=AddrSpace.LOCAL)
@@ -155,8 +154,7 @@ def _attention_combine_kernel(
     lane = lane_range()
     dims = [part * tile + lane * per_lane + i for i in range(per_lane)]
     c1 = UOp.range(live, 100, AxisType.LOOP)
-    top = UOp.alloc((1,), dtypes.float32, addrspace=AddrSpace.REG)
-    top = top.after(top.store(top.const_like(-math.inf)))
+    top = register((1,), -math.inf)
     top = top.after(top.store(top.after(c1).maximum(stats[head, c1, 0].load())).end(c1))
     sink = sinks[0][head % int(sinks[0].shape[0])].load() if sinks else None
     best = top[0].load() if sink is None else top[0].load().maximum(sink)
@@ -181,9 +179,7 @@ def _attention_combine_kernel(
 
 def _since(length: int | UOp, window: int) -> int | UOp:
     # the first of `length` positions that a window of the last `window` holds, 0 for no window
-    if not window:
-        return 0
-    return (length - window).maximum(0) if isinstance(length, UOp) else max(length - window, 0)
+    return at_least(length - window, 0) if window else 0
 
 
 def _chunks(length: int | UOp, window: int) -> int | UOp:
@@ -301,17 +297,10 @@ def _halves_word(lo: UOp, hi: UOp) -> UOp:
     return lo | (hi << 16)
 
 
-def _quad(value: UOp, op: Callable[[UOp, UOp], UOp]) -> UOp:
-    # reduces over the 4 lanes that hold a row of an mma result
-    for mask in (1, 2):
-        value = op(value, shfl_xor(value, mask))
-    return value
-
-
 @functools.cache
 def _flash_attention_kernel(
     out: UOp, *srcs: UOp, slot: int | UOp, start: int | UOp, tokens: int | UOp, window: int,
-    key_tile: int, parts: int, splits: int = 1,
+    key_tile: int, parts: int, splits: int,
 ) -> UOp:  # fmt: skip
     # srcs: q (count, heads, dim) in f16, scaled so that exp2 gives the softmax, and the f16
     # cache, read as words of f16 pairs; query i is at position start + i and sees the slot's
@@ -362,15 +351,10 @@ def _flash_attention_kernel(
     values = UOp.alloc((width, key_tile // 2 + 4), dtypes.uint32, addrspace=AddrSpace.LOCAL)
     stores = []
 
-    # threads take words in turn; where the last turn has more threads than words, the others
-    # repeat the last word, storing what its thread stores
-    def turns(words: int) -> list[UOp]:
-        return [(i * threads + tid).minimum(words - 1) for i in range(-(-words // threads))]
-
-    for item in turns(key_tile * words):
+    for item in turns(key_tile * words, threads, tid):
         key, w = item // words, item % words
         stores.append(keys[key, w].store(cache[0, slot, kv_head, kt * key_tile + key, w].load()))
-    for item in turns(key_tile // 2 * width // 2):
+    for item in turns(key_tile // 2 * width // 2, threads, tid):
         pair, w = item % (key_tile // 2), item // (key_tile // 2)
         a, b = (
             cache[1, slot, kv_head, kt * key_tile + 2 * pair + j, part * width // 2 + w].load()
@@ -386,8 +370,7 @@ def _flash_attention_kernel(
         sink = sinks[0][head].load() * LOG2E
         mx = UOp.alloc((2,), dtypes.float32, addrspace=AddrSpace.REG)
         mx = mx.after(mx.store(UOp.stack(sink, sink)))
-        total = UOp.alloc((2,), dtypes.float32, addrspace=AddrSpace.REG)
-        total = total.after(total.store(UOp.stack(*(UOp.const(1.0, dtypes.float32),) * 2)))
+        total = register((2,), 1.0)
     prev_acc, prev_max, prev_total = acc.after(tiles), mx.after(tiles), total.after(tiles)
     zero = UOp.const(0.0, dtypes.float32)
     products = [[zero] * 4 for _ in range(key_tile // 8)]  # by tiles of 8 keys
@@ -402,17 +385,17 @@ def _flash_attention_kernel(
         back = [start + rows[e // 2] - position - e % 2 for e in range(4)]  # how far each key is
         seen = [(b >= 0) & (b < window) if window else b >= 0 for b in back]
         scores.append([seen[e].where(c[e], -math.inf) for e in range(4)])
+    # over the 4 lanes that hold a row of an mma result
     row_max = [
-        _quad(functools.reduce(UOp.maximum, (s[e] for s in scores for e in (2 * r, 2 * r + 1))),
-              UOp.maximum)
+        warp_max(
+            functools.reduce(UOp.maximum, (s[e] for s in scores for e in (2 * r, 2 * r + 1))), 4
+        )
         for r in (0, 1)
-    ]  # fmt: skip
+    ]
     new_max = [prev_max[r].load().maximum(row_max[r]) for r in (0, 1)]
     rescale = [(prev_max[r].load() - new_max[r]).exp2() for r in (0, 1)]
     p = [[(s[e] - new_max[e // 2]).exp2() for e in range(4)] for s in scores]
-    sums = [
-        _quad(sum((x[e] for x in p for e in (2 * r, 2 * r + 1)), zero), UOp.__add__) for r in (0, 1)
-    ]
+    sums = [warp_sum(sum((x[e] for x in p for e in (2 * r, 2 * r + 1)), zero), 4) for r in (0, 1)]
     # the weights as A fragments: the results of two 8-key tiles make one of 16 keys
     weights = [
         [_f16_pair(*p[2 * k + i][2 * r : 2 * r + 2]) for i in (0, 1) for r in (0, 1)]
@@ -464,6 +447,7 @@ def _flash_shape(positions: int, dim: int) -> tuple[int, int] | None:
 
 
 def supports_flash_attention(q: Tensor, cache: Tensor) -> bool:
+    # one sequence's queries, and heads and a cache the kernel's tiles fit
     positions, dim = cache.shape[3:]
     if not on_nvidia(q) or not isinstance(positions, int) or not isinstance(dim, int):
         return False

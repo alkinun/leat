@@ -4,12 +4,12 @@ import functools
 import math
 
 from tinygrad import Tensor, UOp, dtypes
-from tinygrad.dtype import AddrSpace
 from tinygrad.uop.ops import AxisType, KernelInfo, Ops
 
 from leat.kernels.common import (
     GROUP,
     WARP,
+    block_sum,
     carry,
     lane_range,
     load_vector,
@@ -18,7 +18,7 @@ from leat.kernels.common import (
     warp_sum,
 )
 
-WARPS = 8  # per block
+WARPS = 8  # per block, at most
 SPREAD_ROWS = 16  # rows up to which a row's turns take blocks of their own
 
 
@@ -77,9 +77,7 @@ def _quantize_q8_kernel(
     if weight:
         chunks = (load((i * threads + thread) * 4) for i in range(turns))
         squares = sum((v * v for chunk in chunks for v in chunk), zero)
-        partial = UOp.alloc((warps,), dtypes.float32, addrspace=AddrSpace.LOCAL)
-        partial = partial.after(partial[wave.valid(lane.eq(0))].store(warp_sum(squares)))
-        inv = (sum((partial[w].load() for w in range(warps)), zero) / n + eps).rsqrt()
+        inv = (block_sum(warp_sum(squares), wave, lane) / n + eps).rsqrt()
         scale = load_vector(weight[0][at.minimum(n - 4) if ragged else at], 4)
         values = [v * inv * w for v, w in zip(values, scale, strict=True)]
     group = row * (n // GROUP) + at // GROUP

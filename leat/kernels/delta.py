@@ -61,7 +61,7 @@ def _conv_kernel(
         stores.append(out[at, c].store(_silu(_sum(products))))
         past = [real.where(new, old) for new, old in zip([*past[1:], x], past, strict=True)]
     held = held.after(UOp.group(held.store(UOp.stack(*past)), *stores).end(n))
-    # past the loop, indices of opaque copies of the coordinates: see attention's partial kernel
+    # past the loop, indices of opaque copies of the coordinates: see common.opaque
     ranges = (lane, wave, block, row)
     lane, wave, block, row = (opaque(u) for u in ranges)
     c, slot = (block * CONV_WARPS + wave) * WARP + lane, pick(row, slots)
@@ -121,7 +121,7 @@ def _recurrence_kernel(
         out[at, (head * dims + dim).valid(share.eq(0))].store(decayed * by_query + delta * overlap),
     ).end(t)
     cells = [cell.after(update) for cell in cells]
-    # past the loop, indices of opaque copies of the coordinates: see attention's partial kernel
+    # past the loop, indices of opaque copies of the coordinates: see common.opaque
     ranges = (lane, block, head, row)
     lane, block, head, row = (opaque(u) for u in ranges)
     slot, dim, share = pick(row, slots), block * COLUMNS + lane % COLUMNS, lane // COLUMNS

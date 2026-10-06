@@ -332,7 +332,8 @@ def delta_net(
     # normed with norm and gated by SiLU of z (1, T, heads * value dims). A span from position 0
     # starts its sequence, from zero states. Returns (1, T, heads * value dims).
     args = (mixed, z, gates, conv, decay, norm, states)
-    if _fast() and kernels.supports_delta_net(mixed, states[1]) and (rows := _rows(spans)):
+    rows = _rows(spans)
+    if _fast() and kernels.supports_delta_net(mixed, states[1]) and rows is not None:
         slots, starts = (r if isinstance(r, list) else [r] for r in rows)
         tokens = 1 if len(spans) > 1 else mixed.shape[1]
         return kernels.delta_net(*args, slots, starts, tokens)

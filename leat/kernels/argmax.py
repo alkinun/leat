@@ -6,21 +6,9 @@ import math
 from tinygrad import Tensor, UOp, dtypes
 from tinygrad.uop.ops import AxisType, KernelInfo
 
-from leat.kernels.common import WARP, lane_range, on_gpu, shfl_xor
+from leat.kernels.common import WARP, argmax_step, lane_range, on_gpu, warp_argmax
 
 PARTS = 256  # warps per row in the first pass
-
-
-def argmax_step(best: UOp, index: UOp, value: UOp, at: UOp) -> tuple[UOp, UOp]:
-    # keep the larger value, and on ties the lower index, as argmax does
-    take = (value > best) | (value.eq(best) & (at < index))
-    return take.where(value, best), take.where(at, index)
-
-
-def warp_argmax(best: UOp, index: UOp) -> tuple[UOp, UOp]:
-    for mask in (16, 8, 4, 2, 1):
-        best, index = argmax_step(best, index, shfl_xor(best, mask), shfl_xor(index, mask))
-    return best, index
 
 
 @functools.cache
@@ -46,6 +34,7 @@ def _argmax_partial_kernel(values: UOp, indices: UOp, x: UOp) -> UOp:
 
 @functools.cache
 def _argmax_final_kernel(out: UOp, values: UOp, indices: UOp) -> UOp:
+    # one warp per row, over its parts' best
     row, lane = UOp.range(int(out.shape[0]), 0, AxisType.GLOBAL), lane_range()
     best, index = UOp.const(-math.inf, dtypes.float32), UOp.const(0, dtypes.int32)
     for k in range(PARTS // WARP):
@@ -57,6 +46,7 @@ def _argmax_final_kernel(out: UOp, values: UOp, indices: UOp) -> UOp:
 
 
 def supports_argmax(x: Tensor) -> bool:
+    # rows of a known number of values
     return on_gpu(x) and x.ndim == 2 and all(isinstance(d, int) for d in x.shape)
 
 

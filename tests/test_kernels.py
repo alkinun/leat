@@ -7,8 +7,8 @@ from gguf.quants import dequantize
 from tinygrad import Tensor, UOp, dtypes
 
 from leat import kernels, ops
+from leat.kernels import MATVEC_TOKENS
 from leat.kernels.cutoff import BINS, RANGE
-from leat.kernels.matvec import MATVEC_TOKENS
 from leat.quant import BLOCK, GGMLType, QTensor
 from tests.helpers import cuts, glu, random_blocks
 

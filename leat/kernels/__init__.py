@@ -2,8 +2,8 @@
 
 The warp-level kernels, which carry decoding, run on NVIDIA GPUs (DEV=NV or CUDA) and on AMD's RDNA
 GPUs (DEV=AMD), as Strix Halo's; those on tensor cores, matmul's and FlashAttention's, on NVIDIA's
-alone. Each kernel family has a `supports_*` check and the op itself; leat.ops chooses between them
-and the reference ops.
+alone. Each family the model's ops dispatch to has a `supports_*` check beside the op itself:
+leat.ops chooses between them and the reference ops.
 """
 
 from leat.kernels.argmax import argmax, supports_argmax

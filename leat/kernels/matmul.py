@@ -3,9 +3,8 @@
 The activations are quantized as for the matrix-vector kernels. A block stages a tile of weights,
 unpacked to int8, and 64 tokens in shared memory, 128 weights of each row per step, while it fetches
 the next step into registers. Each of its warps multiplies 32 rows by the 64 tokens on tensor cores
-and scales every group of 32 in f32. Tiles of 256 rows of Q4_K reach 68 to 79 TOPS on 512 tokens,
-against 54 to 67 for 128; matrices with few rows take 128, to occupy more SMs, and 64 where 128 do
-not divide them. Up to 16 tokens take tiles of 16, to waste fewer products.
+and scales every group of 32 in f32. Tiles are of 64 to 256 rows, as _tile picks them for each
+matrix. Up to 16 tokens take tiles of 16, to waste fewer products.
 
 Where the tiles' last wave would leave SMs idle, a block per SM takes whole tiles in turn and
 then the tiles left over, split into chunks of their steps, and a fixup kernel adds up the chunks'
@@ -23,7 +22,9 @@ from tinygrad.dtype import AddrSpace
 from tinygrad.uop.ops import AxisType, KernelInfo, Ops
 
 from leat.kernels.common import (
+    FP4_TABLE,
     GROUP,
+    IQ4_TABLE,
     WARP,
     at_least,
     carry,
@@ -36,12 +37,13 @@ from leat.kernels.common import (
     lane_range,
     minus,
     on_nvidia,
+    one_sequence,
     opaque,
     register,
     storage_words,
     table16,
+    turns,
 )
-from leat.kernels.matvec import FP4_TABLE, IQ4_TABLE
 from leat.kernels.quantize import quantize_q8
 from leat.quant import GGMLType, QTensor
 
@@ -464,7 +466,7 @@ class _IQ4XSTile(_IQ4NLTile):
     32 is IQ4_NL's nibbles, with a scale d * (s - 32) of 6 bits, from the block's 16 high bits of
     scales and 4 bytes of low ones."""
 
-    max_rows, block = 256, 256
+    block = 256
 
     def fetch(self, stack: _Stack, step: UOp) -> list[UOp]:
         # for each of the thread's (row, sub-block j, word k) of the step, a word of nibbles;
@@ -557,7 +559,7 @@ class _Items:
 def _matmul_kernel(
     out: UOp, *srcs: UOp, tokens: int | UOp, ggml_type: GGMLType, rows: int,
     heights: tuple[int, ...], gated: bool, routed: tuple[int, bool] | None = None,
-    fused: bool = False, kind: str = "silu", tile_tokens: int = TILE_TOKENS,
+    fused: bool = False, kind: str, tile_tokens: int = TILE_TOKENS,
     schedule: tuple[int, int] = (0, 1),
 ) -> UOp:  # fmt: skip
     # srcs: the stacked matrices, of `heights` rows, then xq, xd, xs, a residual if given and the
@@ -641,14 +643,8 @@ def _matmul_kernel(
     act = UOp.alloc((tile_tokens, 32 + 4), dtypes.int32, addrspace=AddrSpace.LOCAL)
     act_scales = UOp.alloc((2, 4, tile_tokens), dtypes.float32, addrspace=AddrSpace.LOCAL)
 
-    def turns(items: int) -> list[UOp]:
-        # threads take items in turn; where the last turn has more threads than items, the others
-        # repeat the last item, storing what its thread stores
-        at = [i * threads + tid for i in range(-(-items // threads))]
-        return at if items % threads == 0 else [i.minimum(items - 1) for i in at]
-
-    pairs = [_split(i, 32) for i in turns(32 * tile_tokens)]
-    groups = [_split(i, tile_tokens) for i in turns(4 * tile_tokens)]
+    pairs = [_split(i, 32) for i in turns(32 * tile_tokens, threads, tid)]
+    groups = [_split(i, tile_tokens) for i in turns(4 * tile_tokens, threads, tid)]
 
     def fetch(item: UOp, at: UOp) -> list[UOp]:  # an item's step `at`, into registers
         token_tile, row_tile, step = where(item, at)
@@ -863,13 +859,13 @@ def _tile(
 
 def _schedule(tiles: int, rows: int, tile_tokens: int, steps: int, device: str) -> tuple[int, int]:
     # (blocks, chunks) for _matmul_kernel with at most `tiles` tiles, or (0, 1) for a block per
-    # tile: as many blocks as fit at once, taking tiles of 256 rows' worth per SM, and the chunks,
-    # among divisors of `steps`, that finish soonest. That is the busiest block's steps, counting
-    # 2 more for each chunk it starts, plus _fixup_kernel's time to read the chunks' sums back.
-    # On the 3090, a block's step takes about 1 us per million products, and the fixup reads
-    # 800 KB per us and takes 2 us more. Split thus, Llama 3.1 8B's Q4_K down projection of 512
-    # tokens took 730 to 750 us rather than 846, and of 16 tokens, splitting its one tile of
-    # tokens, 61 rather than 187.
+    # tile: as many blocks as fit at once, one per SM or, for tiles of FEW_TOKENS tokens, 256 rows'
+    # worth per SM, and the chunks, among divisors of `steps`, that finish soonest. That is the
+    # busiest block's steps, counting 2 more for each chunk it starts, plus _fixup_kernel's time to
+    # read the chunks' sums back. On the 3090, a block's step takes about 1 us per million
+    # products, and the fixup reads 800 KB per us and takes 2 us more. Split thus, Llama 3.1 8B's
+    # Q4_K down projection of 512 tokens took 730 to 750 us rather than 846, and of 16 tokens,
+    # splitting its one tile of tokens, 61 rather than 187.
     blocks = compute_units(device) * (max(256 // rows, 1) if tile_tokens == FEW_TOKENS else 1)
     left = tiles % blocks
     step_us = 2 * STEP * tile_tokens * rows / 1e6
@@ -934,8 +930,7 @@ def routed_products(
     and `order` (experts, n) and `counts` list each expert's pairs. The activations have a row per
     token if by_token, else per pair. Two matrices are gate and up, combined as common.glu has
     the kind; fused, one stack holds both, each expert's gate rows first. biases, if given, are
-    each matrix's (experts * rows), added before gate and up combine.
-    """
+    each matrix's (experts * rows), added before gate and up combine."""
     experts, rows, _ = ws[0].shape
     ws = (ws[0], ws[0]) if fused else ws
     rows //= 2 if fused else 1
@@ -961,8 +956,7 @@ def matmul_fits(ggml_type: GGMLType, rows: int, cols: int) -> bool:
 
 def supports_matmul(x: Tensor, w: QTensor) -> bool:
     # tokens of one sequence, and a matrix the tiles fit
-    single = all(isinstance(b, int) and b == 1 for b in x.shape[:-2])
-    return on_nvidia(x) and single and matmul_fits(w.type, *w.shape)
+    return on_nvidia(x) and one_sequence(x) and matmul_fits(w.type, *w.shape)
 
 
 def matmuls(
@@ -971,9 +965,8 @@ def matmuls(
     norm: tuple[Tensor, float] | None = None,
     residual: Tensor | None = None,
 ) -> list[Tensor]:
-    """x @ w.T for tokens x (1, T, n) and each w, with the activations quantized to int8 once,
-    after rms_norm(x, *norm) if given. `residual` is added inside the kernel; it needs a single w.
-    """
+    """x @ w.T for tokens x (1, T, n) and each w, with the activations quantized to int8 once, after
+    rms_norm(x, *norm) if given. `residual` is added inside the kernel; it needs a single w."""
     assert residual is None or len(ws) == 1, "a residual goes with one matrix"
     tokens = x.shape[-2]
     q8 = quantize_q8(tiled(x), norm, rows=tokens)

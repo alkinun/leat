@@ -7,7 +7,6 @@ grid, and sums them from the top down to find the cuts."""
 
 import functools
 import math
-from collections.abc import Callable
 
 from tinygrad import Tensor, UOp, dtypes
 from tinygrad.dtype import AddrSpace
@@ -16,10 +15,12 @@ from tinygrad.uop.ops import AxisType, KernelInfo, Ops
 from leat.kernels.common import (
     LOG2E,
     WARP,
+    block_sum,
     either,
     lane_range,
     on_gpu,
     shfl_xor,
+    tree,
     warp_max,
     warp_sum,
 )
@@ -28,7 +29,7 @@ RANGE = 20.0  # below the top score, that the histogram spans: a token below is 
 BINS = 2048  # steps of STEP, 0.01: the cuts land within one below where they would exactly
 STEP = RANGE / BINS
 PARTS = 32  # blocks per row that count its scores
-WARPS = 8  # per block that counts
+COUNT_WARPS = 8  # per block that counts
 CUT_WARPS = 32  # per block that cuts
 
 
@@ -44,15 +45,15 @@ def _histogram_kernel(counts: UOp, tops: UOp, scores: UOp) -> UOp:
     rows, n = (int(d) for d in scores.shape)
     per = -(-n // PARTS)
     row, part = UOp.range(rows, 0, AxisType.GLOBAL), UOp.range(PARTS, 1, AxisType.GLOBAL)
-    lane, wave = lane_range(), UOp.range(WARPS, 2, AxisType.LOCAL)
-    thread, threads = wave * WARP + lane, WARPS * WARP
+    lane, wave = lane_range(), UOp.range(COUNT_WARPS, 2, AxisType.LOCAL)
+    thread, threads = wave * WARP + lane, COUNT_WARPS * WARP
     offsets = [k * threads + thread for k in range(-(-per // threads))]
     ats = [part * per + offset for offset in offsets]
     values = [
         ((offset < per) & (at < n)).where(scores[row, at.minimum(n - 1)].load(), -math.inf)
         for offset, at in zip(offsets, ats, strict=True)
     ]
-    top = _block(warp_max(_reduce(UOp.maximum, values)), wave, lane, UOp.maximum)
+    top = block_sum(warp_max(tree(UOp.maximum, values)), wave, lane, UOp.maximum)
     first = _grid(top) - (BINS - 1)  # the grid's step of the histogram's first
     hist = UOp.alloc((BINS,), dtypes.uint32, addrspace=AddrSpace.LOCAL)
     zero, one = UOp.const(0, dtypes.uint32), UOp.const(1, dtypes.uint32)
@@ -83,7 +84,7 @@ def _cut_kernel(out: UOp, counts: UOp, tops: UOp, options: UOp) -> UOp:
     lane, wave = lane_range(), UOp.range(CUT_WARPS, 1, AxisType.LOCAL)
     thread, threads = wave * WARP + lane, CUT_WARPS * WARP
     part_tops = [tops[row, p].load() for p in range(parts)]
-    top = _reduce(UOp.maximum, part_tops)
+    top = tree(UOp.maximum, part_tops)
     last = _grid(top)
     shifts = [(last - _grid(t)).cast(dtypes.int32) for t in part_tops]
     merged = UOp.alloc((BINS,), dtypes.float32, addrspace=AddrSpace.LOCAL)
@@ -95,7 +96,7 @@ def _cut_kernel(out: UOp, counts: UOp, tops: UOp, options: UOp) -> UOp:
             ok.where(counts[row, p, at.minimum(BINS - 1)].load(), 0)
             for p, (at, ok) in enumerate(shifted)
         ]
-        sums.append(merged[step].store(_reduce(UOp.__add__, parted).cast(dtypes.float32)))
+        sums.append(merged[step].store(tree(UOp.__add__, parted).cast(dtypes.float32)))
     merged = merged.after(*sums)
     per = BINS // threads
     steps = [thread * per + i for i in range(per)]
@@ -107,8 +108,8 @@ def _cut_kernel(out: UOp, counts: UOp, tops: UOp, options: UOp) -> UOp:
     above_masses = _above(masses, wave, lane)
 
     def cut(above: list[UOp], target: UOp) -> UOp:  # the last step whose sum reaches target
-        reached = _reduce(UOp.__add__, [(a >= target).cast(dtypes.float32) for a in above])
-        return (_block(warp_sum(reached), wave, lane) - 1).maximum(0.0)
+        reached = tree(UOp.__add__, [(a >= target).cast(dtypes.float32) for a in above])
+        return (block_sum(warp_sum(reached), wave, lane) - 1).maximum(0.0)
 
     k, p = options[row, 0].load(), options[row, 1].load()
     by_k = cut(above_counts, (k > 0).where(k, math.inf))  # 0 keeps every token
@@ -116,7 +117,7 @@ def _cut_kernel(out: UOp, counts: UOp, tops: UOp, options: UOp) -> UOp:
         s.cast(dtypes.float32).eq(by_k).where(m, 0.0)
         for s, m in zip(steps, above_masses, strict=True)
     ]
-    kept = _block(warp_sum(_reduce(UOp.__add__, picked)), wave, lane)
+    kept = block_sum(warp_sum(tree(UOp.__add__, picked)), wave, lane)
     by_p = cut(above_masses, p * kept)
     first = (last - (BINS - 1)) * STEP
     cuts = (top, first + by_k * STEP, first + by_p * STEP)
@@ -141,16 +142,8 @@ def _above(values: list[UOp], wave: UOp, lane: UOp) -> list[UOp]:
     warps = UOp.alloc((CUT_WARPS,), dtypes.float32, addrspace=AddrSpace.LOCAL)
     warps = warps.after(warps[wave.valid(lane.eq(0))].store(total))
     later = [(wave < w).where(warps[w].load(), 0.0) for w in range(CUT_WARPS)]
-    after = after + _reduce(UOp.__add__, later)
+    after = after + tree(UOp.__add__, later)
     return [s + after for s in sums]
-
-
-def _block(value: UOp, wave: UOp, lane: UOp, op: Callable[[UOp, UOp], UOp] = UOp.__add__) -> UOp:
-    # op over the warps of a block of a value each warp holds in every lane, in every thread
-    warps = int(wave.vmax) + 1
-    shared = UOp.alloc((warps,), dtypes.float32, addrspace=AddrSpace.LOCAL)
-    shared = shared.after(shared[wave.valid(lane.eq(0))].store(value))
-    return _reduce(op, [shared[w].load() for w in range(warps)])
 
 
 def _add(at: UOp, value: UOp, gate: UOp) -> UOp:
@@ -164,16 +157,8 @@ def _add(at: UOp, value: UOp, gate: UOp) -> UOp:
     return UOp(Ops.CUSTOM, src=(at, value, gate), arg=(add + ";", dtypes.void))
 
 
-def _reduce(op: Callable[[UOp, UOp], UOp], values: list[UOp]) -> UOp:
-    # in a tree, whose additions overlap
-    while len(values) > 1:
-        values = [op(a, b) for a, b in zip(values[::2], values[1::2], strict=False)] + values[
-            len(values) // 2 * 2 :
-        ]
-    return values[0]
-
-
 def supports_cutoff(scores: Tensor) -> bool:
+    # rows of a known number of scores
     return on_gpu(scores) and scores.ndim == 2 and all(isinstance(d, int) for d in scores.shape)
 
 

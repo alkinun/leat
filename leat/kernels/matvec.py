@@ -10,6 +10,8 @@ from tinygrad import Tensor, UOp, dtypes
 from tinygrad.uop.ops import AxisType, KernelInfo
 
 from leat.kernels.common import (
+    FP4_TABLE,
+    IQ4_TABLE,
     WARP,
     dp4a,
     e8m0_half,
@@ -24,12 +26,11 @@ from leat.kernels.common import (
     register,
     storage_words,
     table16,
-    table_words,
     warp_sum,
     word16,
 )
 from leat.kernels.quantize import quantize_q8
-from leat.quant import FP4_VALUES, IQ4_VALUES, GGMLType, QTensor
+from leat.quant import GGMLType, QTensor
 
 Dot = Callable[[UOp, UOp, UOp | int], UOp]  # (row, unit, x) -> a unit's share of row . x
 MATVEC_TOKENS = 8  # tokens up to which the matrix-vector kernels run a layer
@@ -43,9 +44,9 @@ def _group(xq: UOp, g: UOp) -> list[UOp]:
 
 def rows_kernel(
     out: UOp, units: int, name: str, dots: list[Callable[[UOp, UOp], UOp]],
-    combine: Callable[..., UOp | list[UOp]], rows: int | UOp | None = None, per_warp: int = 1,
+    combine: Callable[..., UOp | list[UOp]], rows: int | UOp, per_warp: int = 1,
 ) -> UOp:  # fmt: skip
-    # one block of one warp per `per_warp` output rows, of `rows` if given: lanes take the rows'
+    # one block of one warp per `per_warp` output rows, of `rows`: lanes take the rows'
     # `units` in turn, the warp sums each dot product, and out[row] = combine(row, *sums); where
     # combine gives a list, out[k * rows + row] its k-th value. A warp's rows share the loads of
     # their units' activations, which with several tokens cost more than the weights' reads. Whole
@@ -53,11 +54,10 @@ def rows_kernel(
     # last unit, whose loads hit in cache, and drop its share, as rows past the last repeat it.
     # Grouping rows into wider blocks, a warp each, measured slower on the 3090, by up to a
     # quarter for Q6_K.
-    count = out.shape[0] if rows is None else rows
-    warp = UOp.range(-(-count // per_warp), 0, AxisType.GLOBAL)
-    ragged = isinstance(count, int) and count % per_warp != 0
+    warp = UOp.range(-(-rows // per_warp), 0, AxisType.GLOBAL)
+    ragged = isinstance(rows, int) and rows % per_warp != 0
     owned = [warp * per_warp + r for r in range(per_warp)] if per_warp > 1 else [warp]
-    clamped = [r.minimum(count - 1) for r in owned] if ragged else owned
+    clamped = [r.minimum(rows - 1) for r in owned] if ragged else owned
     lane = lane_range()
     zero = UOp.const(0.0, dtypes.float32)
     whole, rest = divmod(units, WARP)
@@ -79,12 +79,12 @@ def rows_kernel(
         ]
     sums, stores = [warp_sum(t) for t in totals], []
     for i, (row, own) in enumerate(zip(clamped, owned, strict=True)):
-        live = lane.eq(0) & (own < count) if ragged else lane.eq(0)
+        live = lane.eq(0) & (own < rows) if ragged else lane.eq(0)
         values = combine(row, *sums[i * len(dots) : (i + 1) * len(dots)])
         if isinstance(values, UOp):
             stores.append(out[row.valid(live)].store(values))
         else:
-            stores += [out[(k * count + row).valid(live)].store(v) for k, v in enumerate(values)]
+            stores += [out[(k * rows + row).valid(live)].store(v) for k, v in enumerate(values)]
     info = KernelInfo(name=f"{name}_{out.shape[0]}_{units}", opts_to_apply=())
     return UOp.group(*stores).end(warp, lane).sink(arg=info)
 
@@ -201,9 +201,6 @@ def _q5_0_dot(w: UOp, xq: UOp, xd: UOp, xs: UOp, cols: int) -> Dot:
     return dot
 
 
-FP4_TABLE, IQ4_TABLE = table_words(FP4_VALUES), table_words(IQ4_VALUES)
-
-
 def _q4_dot(w: UOp, xq: UOp, xd: UOp, xs: UOp, cols: int, kind: GGMLType) -> Dot:
     # Blocks of 32 of 16 bytes of nibbles, the low ones values 0..15 and the high ones 16..31,
     # after f16 fields, read as halfwords: Q4_0's d, a weight d * (q - 8), 9 halfwords; Q4_1's d
@@ -220,7 +217,7 @@ def _q4_dot(w: UOp, xq: UOp, xd: UOp, xs: UOp, cols: int, kind: GGMLType) -> Dot
             acc, group = UOp.const(0, dtypes.int32), _group(xq, g)
             high = word16(w, base + 2) if kind == GGMLType.Q5_1 else None
             for m in range(4):
-                word, values = word16(w, base + first + 2 * m), list[UOp]()
+                word = word16(w, base + first + 2 * m)
                 if kind == GGMLType.IQ4_NL:
                     values = list(table16(word, IQ4_TABLE))
                 else:

@@ -11,10 +11,10 @@ from tinygrad import Tensor, UOp, dtypes
 from tinygrad.dtype import AddrSpace
 from tinygrad.uop.ops import AxisType, KernelInfo
 
-from leat.kernels.argmax import argmax_step, warp_argmax
 from leat.kernels.common import (
     LOG2E,
     WARP,
+    argmax_step,
     ballot,
     carry,
     glu,
@@ -22,9 +22,11 @@ from leat.kernels.common import (
     load_vector,
     on_gpu,
     on_nvidia,
+    one_sequence,
     popcount,
     register,
     storage_words,
+    warp_argmax,
     warp_sum,
 )
 from leat.kernels.matmul import matmul_fits, routed_products, tiled
@@ -52,7 +54,8 @@ def _scores_kernel(
     rs = [v for at in ats for v in _row(router, expert * dim, at, dim)]
     dot = warp_sum(sum((a * b * c for a, b, c in zip(xs, ws, rs, strict=True)), zero))
     store = out[token, expert.valid(lane.eq(0))].store(dot * inv)
-    return store.end(token, expert, lane).sink(arg=KernelInfo(name="router", opts_to_apply=()))
+    info = KernelInfo(name="router", opts_to_apply=())
+    return store.end(token, expert, lane).sink(arg=info)
 
 
 @functools.cache
@@ -100,6 +103,7 @@ def _row(buf: UOp, start: UOp | int, at: UOp, n: int) -> tuple[UOp, ...]:
 
 
 def supports_scores(x: Tensor, router: QTensor) -> bool:
+    # an F32 router, of rows of whole loads of 4 values
     return on_gpu(x) and router.type == GGMLType.F32 and router.shape[1] % 4 == 0
 
 
@@ -179,7 +183,8 @@ def _bucket_kernel(order: UOp, counts: UOp, ids: UOp, pairs: int | UOp) -> UOp:
     put = order[(expert * per + place).valid(mine)].store(pair.cast(dtypes.int32))
     listed = listed.after(UOp.group(put, listed[0].store(before + popcount(votes))).end(turn))
     store = counts[expert.valid(lane.eq(0))].store(listed[0].load())
-    return store.end(expert, lane).sink(arg=KernelInfo(name="bucket", opts_to_apply=()))
+    info = KernelInfo(name="bucket", opts_to_apply=())
+    return store.end(expert, lane).sink(arg=info)
 
 
 def _bucket(ids: Tensor, experts: int, per: int, pairs: int | UOp) -> tuple[Tensor, Tensor]:
@@ -260,9 +265,8 @@ def supports_mixture(x: Tensor, gate: QTensor, up: QTensor | None, down: QTensor
     rows //= 2 if up is None else 1
     same = up is None or (gate.type == up.type and gate.shape == up.shape)
     shapes = experts % WARP == 0 and rows % 64 == 0 and cols % 64 == 0
-    single = all(isinstance(b, int) and b == 1 for b in x.shape[:-2])
     types = gate.type in DOTS and down.type in DOTS and down.shape == (experts, cols, rows)
-    return on_gpu(x) and single and same and shapes and types
+    return on_gpu(x) and one_sequence(x) and same and shapes and types
 
 
 def mixture(
