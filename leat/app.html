@@ -11,11 +11,13 @@
     --page: #faf9f5; --side: #f3f1ea; --card: #fff; --bubble: #ece9e0; --line: #e3dfd4;
     --text: #1f1e1d; --muted: #75736c; --accent: #c96442; --error: #b3261e;
     --round: 10px; --round-large: 24px; /* controls and code; bubbles and the composer */
+    --keyword: #a626a4; --string: #50a14f; --number: #986801;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --page: #262624; --side: #1f1e1d; --card: #30302e; --bubble: #3a3936; --line: #3e3d39;
       --text: #ece9e1; --muted: #a3a097; --accent: #d97757; --error: #f2847b;
+      --keyword: #c678dd; --string: #98c379; --number: #d19a66;
     }
   }
   * { box-sizing: border-box; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
@@ -116,6 +118,10 @@
   pre { margin: 0; padding: 4px 16px 12px; overflow-x: auto; }
   code { padding: 2px 5px; border-radius: 6px; }
   pre code { padding: 0; background: none; }
+  .keyword { color: var(--keyword); }
+  .string { color: var(--string); }
+  .number { color: var(--number); }
+  .comment { color: var(--muted); font-style: italic; }
   /* a code block, below a bar of its language and a button that copies it */
   .code {
     margin: 12px 0; background: var(--side);

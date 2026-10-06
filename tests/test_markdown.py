@@ -11,6 +11,12 @@ NODE = shutil.which("node")
 pytestmark = pytest.mark.skipif(NODE is None, reason="needs Node.js")
 MODULE = (Path(__file__).parents[1] / "leat" / "markdown.mjs").as_uri()
 
+
+def token(kind: str, text: str) -> list:
+    """A highlighted token of a code block."""
+    return ["span", {"class": kind}, text]
+
+
 # text, and its tree: JsonML, a string or [tag, attributes?, ...children]
 CASES = [
     ("", []),
@@ -64,10 +70,27 @@ CASES = [
     ("| a | b |", [["p", "| a | b |"]]),
     # code blocks, unclosed while streaming, their info string a language
     ("```\nx = 1\n\ny = 2\n```", [["pre", ["code", "x = 1\n\ny = 2"]]]),
-    ("```py\nx\n```\nafter", [["pre", ["code", {"class": "language-py"}, "x"]], ["p", "after"]]),
+    ("```md\nx\n```\nafter", [["pre", ["code", {"class": "language-md"}, "x"]], ["p", "after"]]),
     ("text\n```\nx", [["p", "text"], ["pre", ["code", "x"]]]),
     ("~~~~\n```\n~~~~", [["pre", ["code", "```"]]]),
     ("  ```\n  x\n    y\n  ```", [["pre", ["code", "x\n  y"]]]),
+    # highlighting, of the languages models write most
+    ("```py\nx = 1  # a\nreturn '#'\n```",
+     [["pre", ["code", {"class": "language-py"}, "x = ", token("number", "1"), "  ",
+               token("comment", "# a"), "\n", token("keyword", "return"), " ",
+               token("string", "'#'")]]]),
+    ("```Rust\nfn f<'a>() -> char { 'x' }",
+     [["pre", ["code", {"class": "language-Rust"}, token("keyword", "fn"), " f<'a>() -> ",
+               token("keyword", "char"), " { ", token("string", "'x'"), " }"]]]),
+    ("```sql\nSELECT a -- b",
+     [["pre", ["code", {"class": "language-sql"}, token("keyword", "SELECT"), " a ",
+               token("comment", "-- b")]]]),
+    ("```js\n`${a}` /* b",
+     [["pre", ["code", {"class": "language-js"}, token("string", "`${a}`"), " ",
+               token("comment", "/* b")]]]),
+    ("```sh\necho $# # c",
+     [["pre", ["code", {"class": "language-sh"}, "echo $# ", token("comment", "# c")]]]),
+    ("```klingon\nif x\n```", [["pre", ["code", {"class": "language-klingon"}, "if x"]]]),
     # code spans, between runs of as many backticks
     ("a `b` c", [["p", "a ", ["code", "b"], " c"]]),
     ("`` a`b ``", [["p", ["code", "a`b"]]]),

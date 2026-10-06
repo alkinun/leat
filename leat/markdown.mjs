@@ -77,7 +77,7 @@ function code(lines, i, out) {
     body.push(lines[i].replace(new RegExp(`^ {0,${indent.length}}`), ""));
   }
   const attributes = language ? [{ class: `language-${language}` }] : [];
-  out.push(["pre", ["code", ...attributes, body.join("\n")]]);
+  out.push(["pre", ["code", ...attributes, ...highlight(body.join("\n"), language)]]);
   return i + 1;
 }
 
@@ -306,3 +306,68 @@ function opens(text, i, run) {
 function closes(text, j, run) {
   return !/\s/.test(text[j - 1]) && !(text[j] === "_" && WORD.test(text[j + run] ?? ""));
 }
+
+// code, its comments, strings, numbers and keywords set apart as the languages models write most
+// have them, the rest as it is
+function highlight(code, language) {
+  const grammar = GRAMMARS[language.toLowerCase()];
+  if (!grammar || !code) return code ? [code] : [];
+  const out = [];
+  let end = 0;
+  for (const match of code.matchAll(grammar.tokens)) {
+    const [token, comment, string, number, word] = match;
+    const kind = (comment && "comment") || (string && "string") || (number && "number")
+      || (grammar.keywords.has(grammar.caseless ? word.toLowerCase() : word) && "keyword");
+    if (!kind) continue;
+    if (match.index > end) out.push(code.slice(end, match.index));
+    out.push(["span", { class: kind }, token]);
+    end = match.index + token.length;
+  }
+  if (end < code.length) out.push(code.slice(end));
+  return out;
+}
+
+// a language's tokens, each kind a group of one expression, and its keywords
+function grammar(comments, strings, keywords, caseless = false) {
+  const number = String.raw`\b(?:0x[\da-f]+|\d[\d_]*(?:\.\d+)?(?:e[+-]?\d+)?)\b`;
+  const word = String.raw`(?<![\w$])[a-z_$][\w$]*`;
+  const tokens = `(${comments || "(?!)"})|(${strings.join("|")})|(${number})|(${word})`;
+  return { tokens: new RegExp(tokens, "gi"), keywords: new Set(keywords.split(" ")), caseless };
+}
+
+const HASH = String.raw`(?<!\S)#.*`; // after a space, not in $# or a URL's #
+const SLASHES = String.raw`\/\/.*|\/\*[\s\S]*?(?:\*\/|$)`;
+const DOUBLE = String.raw`"(?:\\.|[^"\\\n])*"`;
+const SINGLE = String.raw`'(?:\\.|[^'\\\n])*'`;
+const CHAR = String.raw`'(?:\\[^'\n]+|[^'\\\n])'`; // not a Rust lifetime's '
+const TEMPLATE = String.raw`\x60(?:\\[\s\S]|[^\x60\\])*\x60`;
+const TRIPLE = String.raw`"""[\s\S]*?(?:"""|$)|'''[\s\S]*?(?:'''|$)`;
+
+// each grammar, by the names a code block's language has for it
+const GRAMMARS = Object.fromEntries(Object.entries({
+  "py python python3": grammar(HASH, [TRIPLE, DOUBLE, SINGLE], "False None True and as assert "
+    + "async await break case class continue def del elif else except finally for from global if "
+    + "import in is lambda match nonlocal not or pass raise return self try while with yield"),
+  "js javascript jsx mjs ts typescript tsx": grammar(SLASHES, [DOUBLE, SINGLE, TEMPLATE], "as "
+    + "async await break case catch class const continue default delete do else enum export "
+    + "extends false finally for from function if implements import in instanceof interface let "
+    + "new null of private protected public readonly return static super switch this throw true "
+    + "try type typeof undefined var void while yield"),
+  "sh bash shell zsh console": grammar(HASH, [DOUBLE, "'[^']*'"], "case do done elif else esac "
+    + "export fi for function if in local return then until while"),
+  "c h cpp c++ cc hpp cs csharp java kotlin kt go rust rs swift zig": grammar(SLASHES,
+    [DOUBLE, CHAR], "abstract as async auto await bool break byte case catch char chan class "
+    + "const continue crate default defer delete do double dyn else enum extends extern false "
+    + "final float fn for func go goto if impl implements import in int interface let long loop "
+    + "map match mod move mut namespace new nil null nullptr override package private protected "
+    + "pub public range return select self Self short signed sizeof static struct super switch "
+    + "template this throw trait true try type typedef typename union unsafe unsigned use using "
+    + "var virtual void volatile where while"),
+  sql: grammar("--.*", [SINGLE, DOUBLE], "all alter and as asc between by case create default "
+    + "delete desc distinct drop else end exists foreign from group having in index inner insert "
+    + "into is join key left like limit not null offset on or order outer primary references "
+    + "right select set table then union update values view when where with", true),
+  "json jsonc": grammar("", [DOUBLE], "true false null"),
+  "yaml yml toml ini": grammar(HASH, [DOUBLE, SINGLE], "true false null yes no"),
+  "css scss": grammar(String.raw`\/\*[\s\S]*?(?:\*\/|$)`, [DOUBLE, SINGLE], ""),
+}).flatMap(([names, g]) => names.split(" ").map((name) => [name, g])));
