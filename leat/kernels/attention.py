@@ -215,9 +215,9 @@ def _per_block(group: int, dim: int) -> int:
 
 
 def supports_attention(q: Tensor, cache: Tensor) -> bool:
-    # a token per row, as many rows as known in advance
+    # a token per row, as many rows as known in advance, over an f16 cache
     shape = (*cache.shape[2:], *q.shape)
-    if not on_gpu(q) or not all(isinstance(x, int) for x in shape):
+    if not on_gpu(q) or cache.dtype != dtypes.half or not all(isinstance(x, int) for x in shape):
         return False
     kv_heads, n, dim, batch, heads, _, _ = (int(x) for x in shape)
     group = _per_block(heads // kv_heads, dim)
@@ -455,9 +455,11 @@ def _flash_shape(positions: int, dim: int) -> tuple[int, int] | None:
 
 
 def supports_flash_attention(q: Tensor, cache: Tensor) -> bool:
-    # one sequence's queries, and heads and a cache the kernel's tiles fit
+    # one sequence's queries, and heads and an f16 cache the kernel's tiles fit
     positions, dim = cache.shape[3:]
-    if not on_nvidia(q) or not isinstance(positions, int) or not isinstance(dim, int):
+    if not on_nvidia(q) or cache.dtype != dtypes.half:
+        return False
+    if not isinstance(positions, int) or not isinstance(dim, int):
         return False
     return q.shape[0] == 1 and _flash_shape(positions, dim) is not None
 
@@ -594,8 +596,10 @@ def _rotate_kernel(
 
 
 def supports_rotate(q: Tensor, cache: Tensor) -> bool:
-    # tokens known in advance, and whole warps of pairs of dimensions
-    return on_gpu(q) and isinstance(q.numel(), int) and int(cache.shape[4]) % (2 * WARP) == 0
+    # tokens known in advance, and whole warps of pairs of dimensions of an f16 cache
+    if not on_gpu(q) or cache.dtype != dtypes.half or not isinstance(q.numel(), int):
+        return False
+    return int(cache.shape[4]) % (2 * WARP) == 0
 
 
 def rotate(
