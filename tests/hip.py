@@ -24,7 +24,6 @@ PRELUDE = """
 #define __ocml_exp2_f32 __builtin_amdgcn_exp2f
 #define __ocml_log2_f32 __builtin_amdgcn_logf
 #define __ocml_sqrt_f32 __builtin_sqrtf
-#define __ocml_sin_f32 __builtin_sinf
 #define __ocml_trunc_f32 __builtin_truncf
 """
 
@@ -33,6 +32,8 @@ def install() -> None:
     """Makes tinygrad's HIP renderer compile with clang, so that its AMD device renders C."""
     import tinygrad.runtime.support.compiler_amd as compilers
     from tinygrad.device import CompileError, Compiler
+    from tinygrad.renderer.cstyle import HIPRenderer
+    from tinygrad.uop.ops import Ops
 
     class ClangHIPCompiler(Compiler):
         def __init__(self, arch: str):
@@ -60,3 +61,5 @@ def install() -> None:
                 return out.read_bytes()
 
     compilers.HIPCompiler = ClangHIPCompiler  # type: ignore[misc]
+    # the emulator's sines are 0, as RoPE's tables would be: tinygrad works them out of other ops
+    HIPRenderer.code_for_op = {k: v for k, v in HIPRenderer.code_for_op.items() if k is not Ops.SIN}
