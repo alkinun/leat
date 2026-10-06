@@ -96,6 +96,15 @@ def test_tool_call_arguments():
     )
 
 
+def test_tool_call_schema_as_written():
+    # a tool's parameters as its client wrote them, a JSON schema or not: values as JSON but where
+    # the schema says string
+    call = "<tool_call>\n<function=f>\n<parameter=n>\n5\n</parameter>\n</function>\n</tool_call>"
+    for parameters in ("x", {"properties": "x"}, {"properties": {"n": "x"}}):
+        tools = [{"type": "function", "function": {"name": "f", "parameters": parameters}}]
+        assert parse_tool_calls(call, tools) == ("", [{"name": "f", "arguments": {"n": 5}}])
+
+
 def test_tool_call_parameters():
     # Qwen3.5's syntax: values of several lines, as text where the tool takes a string and else
     # as JSON, or as text where that fails; several calls in a row
@@ -124,6 +133,10 @@ def test_tool_call_parameters():
         "<|tool_call>call:news{}<tool_call|>",
         "<tool_call>\n<function=weather>\nParis\n</function>\n</tool_call>",
         "<|tool_call>call:weather{city:Paris}<tool_call|>",
+        # what is no call however malformed, nested too deep to parse even
+        '{"name": [], "parameters": {}}',
+        "[" * 100000,
+        "<|tool_call>call:weather{city:" + "[" * 100000 + "<tool_call|>",
     ],
 )
 def test_text_is_not_a_tool_call(reply):

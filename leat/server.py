@@ -57,6 +57,15 @@ def _between(low: float, high: float) -> Callable[[Any], bool]:
     return lambda v: (_integer(v) or isinstance(v, float)) and low <= v <= high
 
 
+def _tool(v: Any) -> bool:
+    # a function to call, named; its parameters, a JSON schema, the template reads as it may
+    return (
+        isinstance(v, dict)
+        and isinstance(f := v.get("function"), dict)
+        and isinstance(f.get("name"), str)
+    )
+
+
 # the request fields leat reads, when present: what makes them valid, and how to say so
 _FIELDS: dict[str, tuple[Callable[[Any], bool], str]] = {
     "messages": (lambda v: isinstance(v, list) and bool(v) and all(isinstance(m, dict) for m in v),
@@ -73,8 +82,8 @@ _FIELDS: dict[str, tuple[Callable[[Any], bool], str]] = {
              and all(isinstance(s, str) for s in v), "a string or a list of strings"),
     "stream": (lambda v: isinstance(v, bool), "a boolean"),
     "stream_options": (lambda v: isinstance(v, dict), "an object"),
-    "tools": (lambda v: isinstance(v, list) and all(isinstance(t, dict) for t in v),
-              "a list of objects"),
+    "tools": (lambda v: isinstance(v, list) and all(_tool(t) for t in v),
+              'a list of objects, each {"type": "function", "function": {"name": ...}}'),
     "chat_template_kwargs": (lambda v: isinstance(v, dict), "an object"),
 }  # fmt: skip
 
@@ -343,7 +352,7 @@ class _Handler(BaseHTTPRequestHandler):
             return self._error(404, f"there is no POST {self.path}")
         try:
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
-        except ValueError as e:
+        except (ValueError, RecursionError) as e:  # not JSON, or nested too deep to parse
             return self._error(400, str(e))
         with contextlib.suppress(OSError):  # the client hung up, while a model loaded say
             route(body)

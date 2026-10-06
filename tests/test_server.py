@@ -370,6 +370,12 @@ def test_text_is_not_a_tool_call(client, replies_with, stream, text, choice):
         ({"messages": []}, "messages must be a non-empty list of objects"),
         ({"messages": [{"role": "user", "content": "x" * CONTEXT}]}, "the prompt has 64 tokens"),
         ({"extra_body": {"chat_template_kwargs": "x"}}, "chat_template_kwargs must be an object"),
+        # what a message or tool holds, of the shapes templates read
+        ({"messages": [{"role": "user", "content": [None]}]}, "only text content"),
+        ({"messages": [{"role": "user", "content": [{"type": "text"}]}]}, "text must be a string"),
+        ({"messages": [{"role": "assistant", "tool_calls": [{"id": "x"}]}]}, "each with its"),
+        ({"tools": [{"function": "weather"}]}, "tools must be a list of objects, each"),
+        ({"tools": [{"function": {"name": []}}]}, "tools must be a list of objects, each"),
     ],
 )
 def test_bad_request(client, kwargs, error):

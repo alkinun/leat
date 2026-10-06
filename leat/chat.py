@@ -186,9 +186,10 @@ def tool_call_start(text: str) -> int:
 def _json_call(text: str, names: Container[str]) -> dict[str, Any] | None:
     try:
         call = json.loads(text)
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):  # not JSON, or nested too deep for Python's parser
         return None
-    if not isinstance(call, dict) or call.get("name") not in names:
+    name = call.get("name") if isinstance(call, dict) else None
+    if not isinstance(name, str) or name not in names:
         return None
     arguments = call.get("parameters", call.get("arguments"))
     return {"name": call["name"], "arguments": arguments} if isinstance(arguments, dict) else None
@@ -199,20 +200,26 @@ def _xml_call(text: str, functions: dict[str, Any]) -> dict[str, Any] | None:
         return None
     if _PARAMETER.sub("", match[2]).strip():  # anything but parameters
         return None
-    properties = functions[match[1]].get("parameters", {}).get("properties", {})
     arguments: dict[str, Any] = {}
     for key, value in _PARAMETER.findall(match[2]):
         arguments[key] = value
-        if properties.get(key, {}).get("type") != "string":
-            with contextlib.suppress(ValueError):
+        if _schema(functions[match[1]], "parameters", "properties", key, "type") != "string":
+            with contextlib.suppress(ValueError, RecursionError):
                 arguments[key] = json.loads(value)
     return {"name": match[1], "arguments": arguments}
+
+
+def _schema(value: Any, *keys: str) -> Any:
+    # value[key][key]..., or None where one is missing: a tool's JSON schema, as a client wrote it
+    for key in keys:
+        value = value.get(key) if isinstance(value, dict) else None
+    return value
 
 
 def _gemma_call(name: str, text: str, names: Container[str]) -> dict[str, Any] | None:
     try:
         arguments, end = _gemma_value(text, 0)
-    except (ValueError, IndexError):
+    except (ValueError, IndexError, RecursionError):
         return None
     called = name in names and end == len(text) and isinstance(arguments, dict)
     return {"name": name, "arguments": arguments} if called else None
@@ -247,10 +254,16 @@ def _message(message: dict[str, Any]) -> dict[str, Any]:
     # there are some, with their arguments as objects rather than JSON text
     message = dict(message)
     if isinstance(parts := message.get("content"), list):
-        if any(part.get("type") != "text" for part in parts):
+        if any(not isinstance(part, dict) or part.get("type") != "text" for part in parts):
             raise ValueError("only text content is supported")
+        if any(not isinstance(part.get("text"), str) for part in parts):
+            raise ValueError("a text part's text must be a string")
         message["content"] = "\n".join(part["text"] for part in parts)
     if calls := message.pop("tool_calls", None):
+        if not isinstance(calls, list) or not all(
+            isinstance(call, dict) and isinstance(call.get("function"), dict) for call in calls
+        ):
+            raise ValueError("tool_calls must be a list of objects, each with its function")
         message["tool_calls"] = [_decoded(call) for call in calls]
     return message
 
@@ -258,7 +271,7 @@ def _message(message: dict[str, Any]) -> dict[str, Any]:
 def _decoded(call: dict[str, Any]) -> dict[str, Any]:
     # arguments that are already an object, or not JSON, reach the template as they are
     function = dict(call["function"])
-    with contextlib.suppress(TypeError, ValueError):
+    with contextlib.suppress(TypeError, ValueError, RecursionError):
         function["arguments"] = json.loads(function["arguments"])
     return {**call, "function": function}
 
