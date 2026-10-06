@@ -145,11 +145,13 @@ def _attention_partial_kernel(
 def _attention_combine_kernel(
     o: UOp, partial: UOp, stats: UOp, *sinks: UOp, live: int | UOp
 ) -> UOp:
-    # one warp per query head of a row and 64 dimensions: weights each block's partial by
+    # one warp per query head of a row and tile of dimensions: weights each block's partial by
     # exp(max - max), counting each head's sink, if given, once: a score that adds no value.
     # Blocks that took no keys weigh nothing. Rows of several heads take the sink of row % heads.
     heads, _, dim = partial.shape
-    tile, per_lane = 64, 64 // WARP
+    tile = _combine_tile(int(dim))
+    assert tile is not None, f"no tile of the combine kernel divides heads of {dim}"
+    per_lane = tile // WARP
     head, part = UOp.range(heads, 0, AxisType.GLOBAL), UOp.range(dim // tile, 1, AxisType.GLOBAL)
     lane = lane_range()
     dims = [part * tile + lane * per_lane + i for i in range(per_lane)]
@@ -175,6 +177,12 @@ def _attention_combine_kernel(
     stores = [o[head, d].store(acc[i].load() / total[0].load()) for i, d in enumerate(dims)]
     info = KernelInfo(name="attention_combine", opts_to_apply=())
     return UOp.group(*stores).end(lane, part, head).sink(arg=info)
+
+
+def _combine_tile(dim: int) -> int | None:
+    # the dimensions a warp of the combine kernel takes, if any divide heads of `dim`: 64, two a
+    # lane, or else one a lane, as Phi-3 mini's heads of 96 need
+    return next((tile for tile in (64, WARP) if dim % tile == 0), None)
 
 
 def _since(length: int | UOp, window: int) -> int | UOp:
@@ -470,10 +478,11 @@ def flash_attention(
     q = q.pad_to((count, heads, dim)).contiguous()
     q, start = carry(q, start_pos)
     cache, bound = carry(cache, tokens)
-    # one tile of queries, while prefilling few tokens, leaves SMs idle: blocks split its keys.
-    # For Llama 3.1 8B's 8 kv heads, 8 blocks each took 27 us at 2000 positions, 16 took 29 and
-    # one 170.
-    splits = max(SPLIT_BLOCKS // (int(cache.shape[2]) * shape[1]), 1) if count == QUERIES else 1
+    # one tile of queries, while prefilling few tokens, leaves SMs idle: blocks split its keys,
+    # where the combine kernel takes the heads. For Llama 3.1 8B's 8 kv heads, 8 blocks each took
+    # 27 us at 2000 positions, 16 took 29 and one 170.
+    split = count == QUERIES and _combine_tile(int(dim)) is not None
+    splits = max(SPLIT_BLOCKS // (int(cache.shape[2]) * shape[1]), 1) if split else 1
     rows = count * heads  # of queries and heads
     shapes = [(rows, splits, n) for n in (dim, 2)] if splits > 1 else [(count, heads * dim)]
     outs = [Tensor.empty(*s, dtype=dtypes.float32, device=q.device) for s in shapes]

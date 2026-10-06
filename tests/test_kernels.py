@@ -545,17 +545,18 @@ def chunk_len(tokens: int) -> UOp:
     return UOp.variable("chunk_len", 1, 16 if tokens <= 16 else 512).bind(tokens)
 
 
-# Llama 3.1 8B's groups of 4 query heads, and Qwen2.5 7B's of 7, which do not divide a tile's loads
+# Llama 3.1 8B's groups of 4 query heads, and Qwen2.5 7B's of 7, which do not divide a tile's
+# loads, and Phi-3 mini's heads of 96, whose split keys the combine kernel takes 32 dims at a time
 @pytest.mark.parametrize(
     "tokens, start", [(37, 0), (64, 0), (100, 300), (512, 3584), (5, 0), (16, 2000)]
 )
-@pytest.mark.parametrize("heads, kv_heads", [(32, 8), (28, 4)])
+@pytest.mark.parametrize("heads, kv_heads, dim", [(32, 8, 128), (28, 4, 128), (32, 32, 96)])
 @pytest.mark.parametrize("symbolic", [False, True])
 @nvidia
-def test_flash_attention(tokens, start, heads, kv_heads, symbolic):
+def test_flash_attention(tokens, start, heads, kv_heads, dim, symbolic):
     rng = np.random.default_rng(tokens + start)
-    cache = rng.standard_normal((2, SLOTS, kv_heads, 4096, 128)).astype(np.float16)
-    q = rng.standard_normal((1, heads, 512, 128)).astype(np.float32)
+    cache = rng.standard_normal((2, SLOTS, kv_heads, 4096, dim)).astype(np.float16)
+    q = rng.standard_normal((1, heads, 512, dim)).astype(np.float32)
     q_t, cache_t = Tensor(q).realize(), Tensor(cache).realize()
     if symbolic:  # as while prefilling: a bound start and number of tokens
         pos = UOp.variable("start_pos", 0, 4095).bind(start)
@@ -563,8 +564,8 @@ def test_flash_attention(tokens, start, heads, kv_heads, symbolic):
     else:
         pos, q_t = start, q_t[:, :, :tokens]
     assert kernels.supports_flash_attention(q_t, cache_t)
-    got = kernels.flash_attention(q_t, cache_t, slot(symbolic), pos, 128**-0.5)
-    got = got.pad_to((1, 512, heads * 128)).numpy()[0, :tokens]
+    got = kernels.flash_attention(q_t, cache_t, slot(symbolic), pos, dim**-0.5)
+    got = got.pad_to((1, 512, heads * dim)).numpy()[0, :tokens]
     expected = reference_attention(q[0, :, :tokens], cache, start)
     # queries and weights are rounded to f16 for the tensor cores
     np.testing.assert_allclose(got.reshape(expected.shape), expected, rtol=3e-3, atol=3e-3)
