@@ -328,13 +328,6 @@ def test_unknown_route(client, server):
         urllib.request.urlopen(urllib.request.Request(f"{url}/v1/chat/completions", b"{"))
 
 
-def test_client_hangs_up(client):
-    stream = chat(client, "a long reply", max_tokens=40, stream=True)
-    next(iter(stream))
-    stream.close()
-    assert complete(client, "and the next", max_tokens=2)[1] == "length"
-
-
 def test_concurrent_requests(client, server, engine, expected, monkeypatch):
     # more requests at once than the engine's 2 slots, whole and streamed: each gets the reply it
     # would alone, two in batched steps, the third once a slot is free

@@ -68,7 +68,7 @@ def ids(tok: Tokenizer, *pieces: str) -> list[int]:
 
 V, D, HIDDEN, HEADS, KV_HEADS, LAYERS, CONTEXT = 300, 256, 512, 4, 2, 2, 64
 HEAD_DIM = D // HEADS
-EXPERTS, USED, EXPERT_HIDDEN = 4, 2, 256  # qwen3moe's MLPs
+EXPERTS, USED, EXPERT_HIDDEN = 4, 2, 256  # the mixtures of experts' MLPs
 # (shape, storage type, scale of the block f16 fields) chosen so activations stay O(1)
 TENSORS = {
     "token_embd.weight": ((V, D), GGMLType.Q4_K, 2e-4),
@@ -331,11 +331,7 @@ def _reference_gemma4(w: dict[str, np.ndarray], tokens: list[int]) -> np.ndarray
     for i, (dim, kv_heads, sliding) in enumerate(
         zip(G_DIMS, G_KV_HEADS, (True, False), strict=True)
     ):
-        lw = {
-            n.removeprefix(f"blk.{i}.").removesuffix(".weight"): v
-            for n, v in w.items()
-            if n.startswith(f"blk.{i}.")
-        }
+        lw = _layer(w, i)
         # rotations of dimension j with j + dim / 2, the full layer's frequencies scaled
         freqs = (1000.0 if sliding else 10000.0) ** (-np.arange(0, dim, 2) / dim)
         angles = positions[:, None, None] * (freqs if sliding else freqs / w["rope_freqs.weight"])

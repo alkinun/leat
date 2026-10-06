@@ -37,6 +37,13 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             item.add_marker(pytest.mark.skip(reason="needs LEAT_MODEL=path.gguf"))
 
 
+@pytest.fixture
+def reference_ops(monkeypatch):
+    # the plain tinygrad ops alone, for exact comparisons with the f64 references: the kernels
+    # quantize activations to int8, and on the GPU the logits of up to 8 positions take them
+    monkeypatch.setenv("LEAT_KERNELS", "ref")
+
+
 @pytest.fixture(scope="session")
 def tiny(tmp_path_factory) -> Callable[[str], tuple[Path, dict]]:
     # tiny(arch): a random GGUF of an architecture and its weights decoded independently by

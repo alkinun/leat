@@ -5,6 +5,7 @@ import jinja2
 import numpy as np
 import pytest
 
+from leat.chat import ChatTemplate
 from leat.cli import main
 from leat.gguf import GGUF
 from leat.tokenizer import Tokenizer
@@ -54,13 +55,6 @@ def test_bench(tiny_model, capsys, sequences):
     assert result["sequences"] == sequences
 
 
-@pytest.fixture
-def reference_ops(monkeypatch):
-    # exact comparisons with the f64 reference: the kernels quantize activations to int8, and on
-    # the GPU, the logits of up to 8 positions take them
-    monkeypatch.setenv("LEAT_KERNELS", "ref")
-
-
 @pytest.mark.usefixtures("reference_ops")
 @pytest.mark.parametrize("mode", [[], ["--decode"]])
 def test_perplexity(tiny_model, tmp_path, capsys, mode):
@@ -88,16 +82,26 @@ def test_kl_divergence(tiny_model, tmp_path, capsys, mode):
 
 
 def test_run(tiny_model, monkeypatch, capsys):
-    replies = iter(["hello", "again"])
+    # a chat in the terminal: each reply printed, and kept in the chat for the next turn
+    replies, chats, render = iter(["hello", "again"]), [], ChatTemplate.render
 
     def fake_input(prompt):
         if (reply := next(replies, None)) is None:
             raise EOFError
         return reply
 
+    def rendered(self, messages, **kwargs):
+        chats.append(list(messages))
+        return render(self, messages, **kwargs)
+
     monkeypatch.setattr("builtins.input", fake_input)
-    main(["run", str(tiny_model[0]), "--max-context", "64"])
-    assert capsys.readouterr().out.count("tok/s]") == 2
+    monkeypatch.setattr("leat.cli.ChatTemplate.render", rendered)
+    sampling = ["--temperature", "0.5", "--top-k", "5", "--top-p", "0.9", "--min-p", "0.05",
+                "--presence-penalty", "0.5"]  # fmt: skip
+    main(["run", str(tiny_model[0]), "--max-context", "64", *sampling])
+    out = capsys.readouterr().out
+    assert [m["role"] for m in chats[1]] == ["user", "assistant", "user"]
+    assert chats[1][1]["content"] in out and out.count("tok/s]") == 2
 
 
 def test_run_refused_chat(tiny_model, monkeypatch):

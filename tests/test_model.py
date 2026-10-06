@@ -27,12 +27,6 @@ ARCHS = [
 ]
 
 
-@pytest.fixture
-def reference_ops(monkeypatch):
-    # exact comparisons with the f64 reference: fast kernels quantize activations to int8
-    monkeypatch.setenv("LEAT_KERNELS", "ref")
-
-
 def transformer(path, max_context: int = CONTEXT, slots: int = 1) -> Transformer:
     f = GGUF.open(path)
     return Transformer(Config.from_gguf(f.metadata), f.load(), max_context, slots)
@@ -174,21 +168,24 @@ def test_generate_fills_context(tiny_model):
 
 @pytest.mark.usefixtures("reference_ops")
 def test_prefill_graphs(tiny_model):
-    # chunks of more than FEW_TOKENS tokens take the graph bound to prefill_chunk, of 2 to
-    # FEW_TOKENS the one bound to FEW_TOKENS, and a single token the decode graph
+    # chunks of more than FEW_TOKENS tokens take the graph bound to prefill_chunk, and of up to
+    # FEW_TOKENS, a single token too, the one bound to FEW_TOKENS
     path, _ = tiny_model
     engine = Engine(path, max_context=CONTEXT, prefill_chunk=FEW_TOKENS + 4)
     prompt = PROMPT * 3  # chunks of FEW_TOKENS + 4 and 36 - FEW_TOKENS - 4
     out = list(engine.generate(prompt, 4))
     assert out == generated(path, prompt, 4)
     assert engine._chunk.captured is not None and engine._few_chunk.captured is not None
-    longer = prompt + out[:3] + [7]  # one token past the cached ones
+    longer = prompt + out[:3] + [7]  # a chunk of one token past the cached ones
+    calls = engine._chunk.cnt, engine._few_chunk.cnt
     assert list(engine.generate(longer, 4)) == generated(path, longer, 4)
+    assert (engine._chunk.cnt, engine._few_chunk.cnt) == (calls[0], calls[1] + 1)
 
 
-def generated(path, prompt: list[int], n: int) -> list[int]:
+def generated(path, prompt: list[int], n: int, sampling=GREEDY, seed=None) -> list[int]:
     # what an engine with nothing cached generates
-    return list(Engine(path, max_context=CONTEXT, prefill_chunk=8).generate(prompt, n))
+    engine = Engine(path, max_context=CONTEXT, prefill_chunk=8)
+    return list(engine.generate(prompt, n, sampling, seed))
 
 
 def prefill_starts(engine: Engine, monkeypatch) -> list[int]:
@@ -274,16 +271,21 @@ def test_copy_takes_recurrent_state(tiny):
     np.testing.assert_array_equal(first, copied)
 
 
-@pytest.mark.parametrize("arch", ["llama", "qwen35moe"])
-def test_warm_up(tiny, arch):
+@pytest.mark.parametrize(
+    "arch, slots, batches", [("llama", 5, [1, 2, 4, 5]), ("qwen35moe", 2, [1, 2])]
+)
+def test_warm_up(tiny, monkeypatch, arch, slots, batches):
     # compiles every graph, the copy's and every batch's too, and keeping and restoring recurrent
-    # state's, and leaves nothing cached that a generation could see
+    # state's, and leaves nothing cached that a generation could see. Few tokens are 4 here: the
+    # reference Gated DeltaNet's graphs grow with their tokens.
+    monkeypatch.setattr("leat.engine.FEW_TOKENS", 4)
+    monkeypatch.setattr("leat.engine.KEEP_BACK", 4)
     path, _ = tiny(arch)
-    engine = Engine(path, max_context=CONTEXT, prefill_chunk=FEW_TOKENS + 4, slots=5)
+    engine = Engine(path, max_context=CONTEXT, prefill_chunk=8, slots=slots)
     engine.warm_up()
     graphs = [engine._chunk, engine._few_chunk, *engine._decode.values(), engine._copy]
     graphs += [engine._keep, engine._restore] if arch == "qwen35moe" else []
-    assert list(engine._decode) == [1, 2, 4, 5]
+    assert list(engine._decode) == batches
     captured = [jit.captured for jit in graphs]
     assert all(captured) and engine.cached_prefix(PROMPT) == 0
     assert list(engine.generate(PROMPT, 6)) == generated(path, PROMPT, 6)
@@ -361,9 +363,8 @@ def run_all(engine: Engine, starts: dict[int, tuple]) -> dict[int, list[int]]:
 @pytest.mark.usefixtures("reference_ops")
 @pytest.mark.parametrize("arch", ["llama", "qwen3moe", "gemma4", "gpt-oss", "qwen35moe"])
 def test_batched_matches_alone(tiny, arch):
-    # sequences that join and leave a batch, 3 padded to 4 too, whose padding the mixtures of
-    # experts skip, generate what each would alone: greedy or seeded, and with prompts as long
-    # as a chunk or shared in part
+    # sequences that join and leave a batch, 3 padded to 4 too, generate what each would alone:
+    # greedy or seeded, and with prompts as long as a chunk or shared in part
     path, _ = tiny(arch)
     engine = Engine(path, max_context=CONTEXT, prefill_chunk=8, slots=4)
     starts = {
@@ -374,7 +375,7 @@ def test_batched_matches_alone(tiny, arch):
     }
     got = run_all(engine, starts)
     for n, args in starts.items():
-        assert got[n] == generated_with(path, *args), n
+        assert got[n] == generated(path, *args), n
 
 
 @pytest.mark.usefixtures("reference_ops")
@@ -393,12 +394,7 @@ def test_batches_past_the_largest(tiny_model, monkeypatch):
     }
     got = run_all(engine, starts)
     for n, args in starts.items():
-        assert got[n] == generated_with(path, *args), n
-
-
-def generated_with(path, prompt, n, sampling=GREEDY, seed=None) -> list[int]:
-    engine = Engine(path, max_context=CONTEXT, prefill_chunk=8)
-    return list(engine.generate(prompt, n, sampling, seed))
+        assert got[n] == generated(path, *args), n
 
 
 @pytest.mark.usefixtures("reference_ops")
