@@ -37,6 +37,14 @@ def test_special_tokens():
     assert tok.eog_ids == {tok.eos_id}
 
 
+def test_phi3_strips_after_special_tokens():
+    # as llama.cpp's workaround for Phi-3, named so: whitespace after a special token is dropped
+    tok, phi3 = tiny_tokenizer(), tiny_tokenizer(**{"general.name": "Phi3 Mini"})
+    text = "<|eot|>\n ab<user> \tab"
+    assert phi3.encode(text, bos=False, special=True) == ids(tok, "<|eot|>", "ab", "<user>", "ab")
+    assert len(tok.encode(text, bos=False, special=True)) > 4  # but for Phi-3, none is
+
+
 def test_decode_skips_control_tokens():
     tok = tiny_tokenizer()
     assert tok.decode(tok.encode("ab<|eot|>héllo 🚀", special=True)) == "abhéllo 🚀"
@@ -115,6 +123,7 @@ CORPUS = [
     "你好世界，こんにちは、안녕하세요。नमस्ते مرحبا שלום สวัสดี",
     "é ä 👨‍👩‍👧‍👦 🚀🔥 ❤️ 🇹🇷 ​‍﻿",
     "<|eot_id|> plain <|start_header_id|>user<|end_header_id|>\n\nhi<|eot_id|>",
+    "<|user|>\nHello<|end|>\n<|assistant|>\n \t hi <|end|>  x<s> y",  # Phi-3's, stripped after
     'def f(x):\n    return x**2  # comment\n\n\tif x: pass\n{"a": [1, {"b": null}]}',
     "",
     " ",

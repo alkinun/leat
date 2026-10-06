@@ -185,6 +185,13 @@ class Tokenizer:
         user = {t: i for t, i in special.items() if types[i] == USER_DEFINED}
         self._special, self._user = special, user
         self._split_special, self._split_user = _alternation(special), _alternation(user)
+        # the tokens text drops the whitespace after, as llama.cpp's workaround has Phi-3's: its
+        # special ones but <unk>, <s> and <|endoftext|>, and </s>
+        self._rstrip: set[int] = set()
+        if any(n in metadata.get("general.name", "").lower() for n in ("phi-3", "phi3")):
+            kept = {"<unk>", "<s>", "<|endoftext|>"}
+            self._rstrip = {i for t, i in special.items() if t not in kept}
+            self._rstrip |= {i for i, t in enumerate(tokens) if t == "</s>"}
 
         self.bos_id: int | None = metadata.get("tokenizer.ggml.bos_token_id")
         self.eos_id: int | None = metadata.get("tokenizer.ggml.eos_token_id")
@@ -203,12 +210,12 @@ class Tokenizer:
         split, table = (
             (self._split_special, self._special) if special else (self._split_user, self._user)
         )
-        pos = 0
+        pos, strip = 0, False
         for m in split.finditer(text) if split else ():
-            ids += self._encode_ordinary(text[pos : m.start()])
-            ids.append(table[m.group()])
-            pos = m.end()
-        return ids + self._encode_ordinary(text[pos:])
+            ids += self._encode_ordinary(text[pos : m.start()], strip)
+            ids.append(token := table[m.group()])
+            pos, strip = m.end(), token in self._rstrip
+        return ids + self._encode_ordinary(text[pos:], strip)
 
     def decode(self, ids: list[int]) -> str:
         pieces = [self._bytes[i] for i in ids]
@@ -235,8 +242,11 @@ class Tokenizer:
         # the text starts with BOS
         return piece.removeprefix(b" ") if self._space_prefix else piece
 
-    def _encode_ordinary(self, text: str) -> list[int]:
-        # text between special tokens, which SentencePiece starts with a space, as llama.cpp
+    def _encode_ordinary(self, text: str, strip: bool = False) -> list[int]:
+        # text between special tokens, without its leading whitespace if `strip`, which
+        # SentencePiece starts with a space, as llama.cpp
+        if strip:
+            text = text.lstrip(" \t\n\v\f\r")  # C's isspace()
         if self._space_prefix and text:
             text = " " + text
         out: list[int] = []
