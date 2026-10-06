@@ -16,6 +16,7 @@ import select
 import socket
 import threading
 import time
+import urllib.parse
 import uuid
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
@@ -354,6 +355,8 @@ class _Handler(BaseHTTPRequestHandler):
         routes = {"/v1/chat/completions": self._complete, "/v1/models/load": self._load}
         if (route := routes.get(self.path)) is None:
             return self._error(404, f"there is no POST {self.path}")
+        if not self._same_origin():
+            return self._error(403, "requests from other sites' pages are refused")
         try:
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
         except (ValueError, RecursionError) as e:  # not JSON, or nested too deep to parse
@@ -442,6 +445,12 @@ class _Handler(BaseHTTPRequestHandler):
             usage = {"choices": [], "usage": _usage(c)} | timings
             self._event(self._head(c, "chat.completion.chunk") | usage)
         self._event("[DONE]")
+
+    def _same_origin(self) -> bool:
+        # a browser's request from a page of this server, the app's, or one of no browser, which
+        # sends no Origin: another site's page may not make it generate or load models
+        origin = self.headers.get("Origin")
+        return origin is None or urllib.parse.urlsplit(origin).netloc == self.headers.get("Host")
 
     def _hung_up(self) -> bool:
         # whether the client closed the connection: it reads as ready, with nothing to read

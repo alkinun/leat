@@ -399,6 +399,19 @@ def test_bad_request(client, kwargs, error):
         client.chat.completions.create(**request)
 
 
+def test_other_sites_pages_are_refused(server):
+    # a page of another site may not make the server generate or load models; the app may
+    url = f"http://127.0.0.1:{server.server_port}"
+    body = json.dumps({"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1}).encode()
+    for path, data in (("/v1/chat/completions", body), ("/v1/models/load", b'{"model": "tiny"}')):
+        request = urllib.request.Request(url + path, data, {"Origin": "https://evil.example"})
+        with pytest.raises(urllib.error.HTTPError, match="403"):
+            urllib.request.urlopen(request)
+    request = urllib.request.Request(url + "/v1/chat/completions", body, {"Origin": url})
+    with urllib.request.urlopen(request) as response:
+        assert response.status == 200
+
+
 def test_unknown_route(client, server):
     with pytest.raises(openai.NotFoundError):
         client.completions.create(model="tiny", prompt="hi")
