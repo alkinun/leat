@@ -10,7 +10,7 @@ from leat import kernels, ops
 from leat.kernels.cutoff import BINS, RANGE
 from leat.kernels.matvec import MATVEC_TOKENS
 from leat.quant import BLOCK, GGMLType, QTensor
-from tests.helpers import glu, random_blocks
+from tests.helpers import cuts, glu, random_blocks
 
 # the warp-level kernels run on NVIDIA's GPUs and AMD's RDNA, tinygrad's emulated one too; those on
 # tensor cores on NVIDIA's alone
@@ -740,14 +740,14 @@ def test_cutoff(rows, n):
     rng = np.random.default_rng(n)
     x = (rng.standard_normal((rows, n)) * 2.5).astype(np.float32)
     x[:, : n // 100] += 9  # a head of likely tokens
-    top_k = Tensor([[20.0], [0.0], [5.0], [1.0]][:rows])
-    top_p = Tensor([[0.95], [0.9], [1.0], [0.5]][:rows])
+    top_k, top_p = np.array([20, 0, 5, 1][:rows]), np.array([0.95, 0.9, 1.0, 0.5][:rows])
+    options = (Tensor(o.reshape(-1, 1).astype(np.float32)) for o in (top_k, top_p))
     assert kernels.supports_cutoff(Tensor(x))
-    got = np.hstack([t.numpy() for t in kernels.cutoff(Tensor(x), top_k, top_p)])
-    expected = np.hstack([t.numpy() for t in ops._cutoff(Tensor(x), top_k, top_p)])
+    got = np.hstack([t.numpy() for t in kernels.cutoff(Tensor(x), *options)])
+    expected = np.array([cuts(*row) for row in zip(x, top_k, top_p, strict=True)])
     step = RANGE / BINS
-    expected[:, 1] = np.where(top_k.numpy()[:, 0] > 0, expected[:, 1], expected[:, 0] - RANGE)
-    above = np.where(top_k.numpy() > 0, 1e-4, step)
+    expected[:, 1] = np.where(top_k > 0, expected[:, 1], expected[:, 0] - RANGE)
+    above = np.where(top_k > 0, 1e-4, step).reshape(-1, 1)
     assert ((got <= expected + above) & (got >= expected - 1.5 * step)).all(), got - expected
 
 
