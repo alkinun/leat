@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>leat</title>
 <link rel="icon" href="data:,">
+<link rel="stylesheet" href="vendor/temml/Temml-Latin-Modern.css">
 <style>
   :root {
     color-scheme: light dark;
@@ -109,6 +110,8 @@
   .message :is(th, td) { padding: 6px 12px; border: 1px solid var(--line); }
   .message th { background: var(--side); }
   .message th:not([align]) { text-align: left; }
+  .math math { font-size: 1.15em; } /* Latin Modern's x-height, to the text's */
+  div.math { margin: 12px 0; overflow-x: auto; overflow-y: hidden; }
   .message a { color: var(--accent); text-underline-offset: 2px; }
   .message hr { margin: 24px 0; border: none; border-top: 1px solid var(--line); }
   .message :is(div, blockquote, li) > :last-child { margin-bottom: 0; }

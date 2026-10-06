@@ -1,6 +1,9 @@
 // Markdown as models write it. parse() reads text to a tree in JsonML, a string or
 // [tag, attributes?, ...children], of the elements a reply can hold and no others: none of the
-// HTML a model writes reaches the page. markdown() shows the tree in an element.
+// HTML a model writes reaches the page. markdown() shows the tree in an element, its math as
+// MathML by Temml, which leat/vendor/temml holds.
+
+import temml from "./vendor/temml/temml.mjs";
 
 const shown = new WeakMap(); // each element's blocks, as JSON
 
@@ -28,13 +31,27 @@ function render(nodes) {
   return nodes.map((node) => {
     if (typeof node === "string") return node;
     const [tag, ...children] = node;
-    const e = document.createElement(tag);
     const attributes = children[0]?.constructor === Object ? children.shift() : {};
+    if (tag === "math") return tex(children[0] ?? "", attributes.display === "block");
+    const e = document.createElement(tag);
     if (tag === "a") Object.assign(attributes, { target: "_blank", rel: "noopener noreferrer" });
     for (const [name, value] of Object.entries(attributes)) e.setAttribute(name, value);
     e.append(...render(children));
     return e;
   });
+}
+
+// TeX as MathML, or what Temml cannot read, half streamed say, as code
+function tex(source, display) {
+  const e = document.createElement(display ? "div" : "span");
+  e.className = "math";
+  try {
+    temml.render(source, e, { displayMode: display, throwOnError: true });
+    return e;
+  } catch {
+    const code = ["code", ...(display ? [{ class: "language-tex" }] : []), source];
+    return render([display ? ["pre", code] : code])[0];
+  }
 }
 
 function blocks(lines) {
@@ -47,6 +64,7 @@ function blocks(lines) {
 }
 
 const FENCE = /^( {0,3})(`{3,}|~{3,})\s*([^\s`]*)/;
+const MATH = /^ {0,3}(\$\$|\\\[)/;
 const HEADING = /^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$/;
 const RULE = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
 const QUOTE = /^ {0,3}> ?/;
@@ -60,7 +78,8 @@ const TABLE = {
 // each block but the paragraph: a test of whether a line, before the next, starts one, and what
 // reads it to out from there, returning the line after it
 const BLOCKS = [
-  [FENCE, code], [HEADING, heading], [RULE, rule], [QUOTE, quote], [ITEM, list], [TABLE, table],
+  [FENCE, code], [MATH, displayMath], [HEADING, heading], [RULE, rule], [QUOTE, quote],
+  [ITEM, list], [TABLE, table],
 ];
 
 // what reads the block that starts at line i, if one but a paragraph does
@@ -79,6 +98,17 @@ function code(lines, i, out) {
   const attributes = language ? [{ class: `language-${language}` }] : [];
   out.push(["pre", ["code", ...attributes, ...highlight(body.join("\n"), language)]]);
   return i + 1;
+}
+
+// $$ math $$ or \[ math \], displayed, on a line or over lines to its close or, streaming, the end
+function displayMath(lines, i, out) {
+  const [opening, open] = MATH.exec(lines[i]);
+  const text = lines.slice(i).join("\n").slice(opening.length), end = text.indexOf(CLOSE[open]);
+  out.push(["math", { display: "block" }, (end < 0 ? text : text.slice(0, end)).trim()]);
+  if (end < 0) return lines.length;
+  const rest = text.slice(end + 2).split("\n", 1)[0]; // what follows the close on its line
+  if (rest.trim()) out.push(["p", ...inline(rest.trim())]);
+  return i + text.slice(0, end).split("\n").length;
 }
 
 function heading(lines, i, out) {
@@ -185,13 +215,38 @@ function span(text, i) {
 }
 
 const SPANS = {
-  "\\": escape, "`": codeSpan, "*": emphasis, _: emphasis, "~": emphasis,
+  "\\": escape, "`": codeSpan, $: math, "*": emphasis, _: emphasis, "~": emphasis,
   "[": link, "!": link, "<": autolink, h: url,
 };
 
-function escape(text, i) {
-  return PUNCTUATION.test(text[i + 1] ?? "") ? [text[i + 1], i + 2] : null;
+// where the escape, code span or math at j ends, none of which another span reaches into, or -1
+function atom(text, j) {
+  return { "\\": escape, "`": codeSpan, $: math }[text[j]]?.(text, j)?.[1] ?? -1;
 }
+
+// \* as *, and \(math\) and \[math\]
+function escape(text, i) {
+  const next = text[i + 1] ?? "";
+  return (/[([]/.test(next) && math(text, i)) || (PUNCTUATION.test(next) ? [next, i + 2] : null);
+}
+
+// $math$ and \(math\), and $$math$$ and \[math\] displayed. A lone $ opens after no letter or
+// digit and before a non-space, and the next closes it after a non-space and before no digit, or
+// none does: $5 to $10, and US$5, stay text.
+function math(text, i) {
+  const open = text.startsWith("$$", i) ? "$$" : text.slice(i, text[i] === "$" ? i + 1 : i + 2);
+  const close = CLOSE[open], from = i + open.length, lone = open === "$";
+  if (lone && (/\s/.test(text[from] ?? " ") || WORD.test(text[i - 1] ?? ""))) return null;
+  for (let end = text.indexOf(close, from + 1); end >= 0; end = text.indexOf(close, end + 1)) {
+    if (lone && text[end - 1] === "\\") continue; // \$, a dollar
+    if (lone && (/\s/.test(text[end - 1]) || /\d/.test(text[end + 1] ?? ""))) return null;
+    const display = lone || open === "\\(" ? [] : [{ display: "block" }];
+    return [["math", ...display, text.slice(from, end).trim()], end + close.length];
+  }
+  return null;
+}
+
+const CLOSE = { $: "$", $$: "$$", "\\(": "\\)", "\\[": "\\]" }; // each math's, by its opening
 
 // `code`, between runs of as many backticks, its one space each side dropped if both have one
 function codeSpan(text, i) {
@@ -225,10 +280,9 @@ function emphasis(text, i) {
 function closer(text, j, c, n) {
   const from = j;
   while (j < text.length) {
-    if (text[j] === "\\") {
-      j += 2;
-    } else if (text[j] === "`") {
-      j = codeSpan(text, j)[1];
+    const end = atom(text, j);
+    if (end >= 0) {
+      j = end;
     } else if (text[j] !== c) {
       j++;
     } else {
@@ -253,13 +307,12 @@ function link(text, i) {
   return [["a", { href }, ...inline(text.slice(open + 1, close))], end];
 }
 
-// where the ] that closes the [ at i is, past the code spans and escapes within
+// where the ] that closes the [ at i is, past the escapes, code spans and math within
 function bracket(text, i) {
   for (let j = i, depth = 0; j < text.length; ) {
-    if (text[j] === "\\") {
-      j += 2;
-    } else if (text[j] === "`") {
-      j = codeSpan(text, j)[1];
+    const end = atom(text, j);
+    if (end >= 0) {
+      j = end;
     } else {
       depth += { "[": 1, "]": -1 }[text[j]] ?? 0;
       if (depth === 0) return j;
