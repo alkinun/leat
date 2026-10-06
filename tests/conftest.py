@@ -72,6 +72,15 @@ def tiny_model(tiny) -> tuple[Path, dict]:
 
 
 @pytest.fixture(scope="session")
+def tiny_assistant(tmp_path_factory) -> tuple[Path, dict]:
+    # a random Gemma 4 assistant, which drafts for tiny("gemma4"), and its weights
+    from tests.helpers import write_tiny_assistant
+
+    path = tmp_path_factory.mktemp("assistant") / "assistant.gguf"
+    return path, write_tiny_assistant(path)
+
+
+@pytest.fixture(scope="session")
 def model_path() -> Path:
     return Path(os.environ["LEAT_MODEL"]).expanduser()
 

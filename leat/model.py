@@ -260,7 +260,7 @@ class Transformer:
         tables: dict[Rope, tuple[Tensor, Tensor]] = {}
         for rope in config.ropes:
             if rope.dims and rope not in tables:
-                tables[rope] = _rope_table(rope, max_context, _factors(rope, weights, max_context))
+                tables[rope] = rope_table(rope, max_context, _factors(rope, weights, max_context))
         self.rope = [tables.get(rope) for rope in config.ropes]
         # whole tiles of positions, which the attention kernels need; the rest stay unused
         positions = -(-max_context // CACHE_TILE) * CACHE_TILE
@@ -477,7 +477,7 @@ def _unfuse(layer: dict[str, QTensor], c: Config, i: int) -> None:
         layer["ffn_norm"] = layer.pop("post_attention_norm")
 
 
-def _rope_table(rope: Rope, length: int, factors: Tensor | None) -> tuple[Tensor, Tensor]:
+def rope_table(rope: Rope, length: int, factors: Tensor | None) -> tuple[Tensor, Tensor]:
     # cos and sin (length, dims / 2) of angle = pos * theta^(-2i/d) / factor_i in f32, the order
     # llama.cpp's rope kernels use; scaled, and with YaRN's ramp from the scaled angle to the
     # unscaled one, as ggml's rope_yarn

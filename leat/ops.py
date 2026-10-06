@@ -174,7 +174,7 @@ def rms_norm(x: Tensor, weight: Tensor | None, eps: float) -> Tensor:
     return x if weight is None else x * weight
 
 
-def _rope(x: Tensor, cos: Tensor, sin: Tensor, halves: bool) -> Tensor:
+def rotary(x: Tensor, cos: Tensor, sin: Tensor, halves: bool) -> Tensor:
     # rotates the first R dimensions: adjacent pairs, or with halves dimension i with i + R/2; the
     # others stay. x: (B, H, T, D); cos, sin: (T, R/2)
     rotated = 2 * cos.shape[-1]
@@ -242,7 +242,7 @@ def _rotate(
     q, k = q.transpose(1, 2), k.transpose(1, 2)
     if rope is not None:
         cos, sin = (table[start_pos : start_pos + T] for table in rope[0])
-        q, k = (_rope(t, cos, sin, halves) for t in (q, k))
+        q, k = (rotary(t, cos, sin, halves) for t in (q, k))
     new = Tensor.stack(k, v.transpose(1, 2)).cast(cache.dtype)
     cache[:, slot : slot + 1, :, start_pos : start_pos + T].assign(new)
     return q, cache

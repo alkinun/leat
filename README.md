@@ -77,6 +77,8 @@ Concurrent requests: completions run together, one in each of `--slots` slots of
 
 Prefix caching: a conversation continues in its slot, and a prompt that shares a prefix with any slot, such as a system prompt, starts from a copy of it. Qwen3.5's recurrent state holds all a slot ran, so there a prompt shares a slot's tokens only when it shares all of them, or all those before the state the slot kept 16 tokens before its last prompt's end: where a chat's next turn, which renders the last turn anew, and an agent's next step go on.
 
+Speculative decoding: given a drafter with `--draft`, a sequence decoding alone, without `presence_penalty`, has it guess 3 tokens ahead, and runs them with its last token in one step, which reads the weights once for all four. It keeps the guesses up to the first the model would not have generated, and the token it generated there: as each draw depends only on the seed and the position, the reply is the one plain decoding gives, but where the kernels for several tokens round a near tie the other way. Drafters: Gemma 4's assistant, as `mtp-gemma-4-26B-A4B-it.gguf`, for Gemma 4 26B A4B, whose attention reads the model's own keys and values.
+
 Models: `leat serve` takes GGUF files and directories of them, and holds one model at a time, which answers every request whatever model it names. The first file loads at start. `POST /v1/models/load` with `{"model": id}`, an id that `/v1/models` lists, loads another once the completions before it have finished, the last one freed first.
 
 Chat app: a single page with no dependencies. It loads and switches models, keeps separate chats in the browser's local storage, and streams replies, their reasoning folded away, until done or stopped, each noted with its tokens, their rate after the first, and the time to the first, any wait for a slot included; one system prompt and sampling, by default as Qwen3.6 recommends for general tasks, apply to every chat.
@@ -117,6 +119,8 @@ Several sequences decoding at once, in tokens per second in all: `leat bench -s 
 | Gemma 3 12B it | 88.9 | 97.3 | 166.7 | 185.7 | 237.4 | 312.8 |
 | Gemma 4 26B A4B it | 157.9 | 190.1 | 273.3 | 310.3 | 363.0 | 443.4 |
 | gpt-oss 20B | 213.3 | 228.3 | 333.4 | 335.6 | 438.0 | 437.5 |
+
+Speculative decoding of Gemma 4 26B A4B with its assistant, over four chat prompts of 200 tokens: 233.5 tok/s greedy against 184.9 without, 1.26x, about 3.1 tokens a step; 228.5 against 185.8 at temperature 1. The model runs a step's four tokens in 10.2 ms against 5.4 for one, its experts' kernels taking 3.4 times as long, as each token takes experts of its own; drafting takes 2.4 ms more.
 
 Llama 3.2 3B decodes 1195 tok/s in all for 8 sequences, 149 each. A mixture of experts gains less from a batch, whose tokens read experts of their own.
 

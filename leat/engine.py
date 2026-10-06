@@ -10,6 +10,7 @@ from pathlib import Path
 
 from tinygrad import Tensor, TinyJit, UOp, dtypes
 
+from leat.draft import Gemma4Assistant
 from leat.gguf import GGUF
 from leat.kernels import MATVEC_TOKENS
 from leat.model import Config, Transformer
@@ -30,6 +31,8 @@ KEEP_BACK = FEW_TOKENS
 # sequences a decode step runs at most in one graph, more in turn: as many tokens as the
 # matrix-vector kernels take, which on AMD are the only kernels for several
 BATCH = MATVEC_TOKENS
+# tokens a drafter guesses ahead of a sequence decoding alone, which the target checks at once
+DRAFT_TOKENS = 3
 
 
 @dataclass(eq=False)
@@ -71,6 +74,12 @@ class Engine:
     differently from those for one, so a batched sequence may take another token where two are
     close.
 
+    With a drafter, a sequence decoding alone, without presence_penalty, decodes speculatively:
+    the drafter guesses its next DRAFT_TOKENS tokens, and the target runs them with its last in
+    one step, sampling after each as it would have, and keeps them up to the first it would not
+    have generated, and the token it generated there. As a draw depends only on the seed and the
+    position, the sequence generates the tokens it would without, faster where the guesses hold.
+
     A prompt is prefilled only past the longest prefix any slot shares with it. A prompt that
     extends a slot's tokens continues in that slot, so multi-turn chat costs only the latest turn.
     Any other prompt takes a free slot, empty or else the least recently used, and first copies
@@ -81,8 +90,9 @@ class Engine:
     """
 
     def __init__(
-        self, path: str | Path, max_context: int = 4096, prefill_chunk: int = 512, slots: int = 1
-    ):
+        self, path: str | Path, max_context: int = 4096, prefill_chunk: int = 512, slots: int = 1,
+        draft: str | Path | None = None,
+    ):  # fmt: skip
         if slots < 1:
             raise ValueError(f"slots must be at least 1, got {slots}")
         # decode steps of powers of 2 sequences, and of `slots` or BATCH: others are padded with
@@ -100,6 +110,7 @@ class Engine:
         cache_slots = slots + bool(self._padded)
         weights = gguf.load(names=filter(self.config.uses, gguf.tensors))
         self.model = Transformer(self.config, weights, max_context, cache_slots)
+        self.drafter = None if draft is None else Gemma4Assistant(draft, self.model)
         # the tokens each slot's sequence has generated, for presence_penalty
         vocab = int(self.model.output.shape[0])
         self._seen = Tensor.zeros(cache_slots, vocab, dtype=dtypes.bool).contiguous().realize()
@@ -117,6 +128,16 @@ class Engine:
         self._chunk, self._few_chunk = graph(self._step), graph(self._step)
         self._decode = {n: graph(functools.partial(self._step, decode=True)) for n in self._batches}
         self._copy = graph(self.model.copy)
+        if self.drafter is not None:
+            # each slot's normed hidden state that gave its last token, from which drafts go on;
+            # the rows of a speculative step's tokens, of which one becomes it
+            self._hidden = Tensor.zeros(cache_slots, 1, self.config.dim).contiguous().realize()
+            self._rows = Tensor.zeros(DRAFT_TOKENS + 1, 1, self.config.dim).contiguous().realize()
+            self._speculate = graph(self._speculative_step)
+            self._take = graph(self._take_row)
+            self._row = UOp.variable("row", 0, DRAFT_TOKENS)
+            # past a prompt's first token, which the drafter's attention needs to know
+            self._draft_pos = UOp.variable("draft_pos", 1, max_context - 1)
         self._recurrent = any(self.config.recurrent)
         self._keep, self._restore = graph(self.model.keep), graph(self.model.restore)
         self._kept: list[list[int]] = [[] for _ in range(slots)]  # tokens before each kept state
@@ -179,6 +200,8 @@ class Engine:
         decoding = [s for s in self.active if s.tokens]
         out = []
         prefilling = next((s for s in self.active if not s.tokens), None)
+        if not prefilling and len(decoding) == 1 and self._speculates(decoding[0]):
+            return self._speculative(decoding[0])
         size = min(self.prefill_chunk, SHARED_CHUNK) if decoding else self.prefill_chunk
         if prefilling and (token := self._prefill(prefilling, size)) is not None:
             out.append((prefilling, token))
@@ -200,13 +223,17 @@ class Engine:
         """Compiles the graphs generation replays, which takes seconds in a fresh process, so that
         the first prompt runs at full speed. Leaves no prefix cached."""
         # a prefill of more than FEW_TOKENS tokens and a decode step, then a prefill of few; the
-        # first longer by the KEEP_BACK tokens after the state a recurrent model keeps
+        # first longer by the KEEP_BACK tokens after the state a recurrent model keeps, and with a
+        # drafter by a speculative step
         longer = FEW_TOKENS + 1 + (KEEP_BACK if self._recurrent else 0)
-        for prompt, n in (([0] * min(longer, self.max_context - 1), 2), ([0, 0], 1)):
+        first = 2 + (self.drafter is not None)
+        for prompt, n in (([0] * min(longer, self.max_context - 1), first), ([0, 0], 1)):
             self.reset()
             for _ in self.generate(prompt, n, ignore_eog=True):
                 pass
-        for n in self._batches[1:]:  # decode steps of several, each at a slot's first position
+        # decode steps of several, each at a slot's first position, and of one where speculative
+        # steps take its place
+        for n in self._batches[0 if self.drafter else 1 :]:
             options = Tensor([[0.0] * 5] * n), Tensor([0] * n, dtype=dtypes.uint32)
             rows = [
                 x for i in range(n) for x in (self._slot_vars[i].bind(i), self._pos_vars[i].bind(0))
@@ -332,6 +359,57 @@ class Engine:
             self._cached[s.slot].append(s.tokens[-1])
         return out.numpy().ravel()[:k].tolist()
 
+    def _speculates(self, sequence: Sequence) -> bool:
+        # whether a sequence decoding alone decodes speculatively: with a drafter, without
+        # presence_penalty, which tokens drafted would change, with room for the drafts in the
+        # cache, and with more than one token to go
+        room = len(self._cached[sequence.slot]) + DRAFT_TOKENS < self.max_context
+        more = sequence.max_tokens - len(sequence.tokens) > 1
+        plain = sequence.sampling.presence_penalty == 0
+        return self.drafter is not None and plain and room and more
+
+    def _speculative(self, sequence: Sequence) -> list[tuple[Sequence, int]]:
+        # a speculative step of a sequence decoding alone: the drafts it keeps, those the target
+        # generated too, each until the first it would not have, and the token the target
+        # generated after them, each appended and checked as step() does
+        slot, last = sequence.slot, sequence.tokens[-1]
+        rows = self._slot_vars[0].bind(slot), self._draft_pos.bind(len(self._cached[slot]))
+        out = self._speculate(_ids([last], 1), *sequence.options, *rows).numpy().tolist()
+        drafted, sampled = out[:DRAFT_TOKENS], out[DRAFT_TOKENS:]
+        pairs = enumerate(zip(drafted, sampled[:DRAFT_TOKENS], strict=True))
+        kept = next((i for i, (d, t) in pairs if d != t), DRAFT_TOKENS)
+        generated = []
+        for ran, token in zip([last, *drafted[:kept]], sampled[: kept + 1], strict=True):
+            self._cached[slot].append(ran)
+            sequence.tokens.append(token)
+            generated.append((sequence, token))
+            self._check(sequence)
+            if sequence.done:
+                break
+        # the row that gave the last token is the slot's hidden state, for the next drafts
+        self._take(self._row.bind(len(generated) - 1), self._slot_vars[0].bind(slot))
+        self._last = {}  # the decode steps' outputs are no longer the sequences' last tokens
+        return generated
+
+    def _speculative_step(
+        self, token: Tensor, options: Tensor, seed: Tensor, slot: UOp, pos: UOp
+    ) -> Tensor:
+        # the drafter's DRAFT_TOKENS tokens after `token`, at pos of `slot`, then the target's run
+        # of `token` and them, keeping its hidden rows, and its draws after each: the drafts and
+        # the draws, (2 * DRAFT_TOKENS + 1,)
+        assert self.drafter is not None
+        drafts = self.drafter.draft(token, self._hidden[slot : slot + 1], slot, pos, DRAFT_TOKENS)
+        hidden = self.model.run(token.cat(drafts, dim=1), [Span(slot, pos, DRAFT_TOKENS + 1)])
+        self._rows.assign(hidden.reshape(self._rows.shape)).realize()
+        logits = self.model.logits(self._rows.reshape(DRAFT_TOKENS + 1, -1))
+        positions = Tensor.stack(*(Tensor(pos + 1 + i) for i in range(DRAFT_TOKENS + 1)))
+        drawn = sample(logits, options, seed, positions).cast(dtypes.int32)
+        return drafts.reshape(-1).cast(dtypes.int32).cat(drawn.reshape(-1)).realize()
+
+    def _take_row(self, row: UOp, slot: UOp) -> None:
+        # a speculative step's hidden row `row` as the slot's
+        self._hidden[slot : slot + 1].assign(self._rows[row : row + 1]).realize()
+
     def _check(self, sequence: Sequence) -> None:
         # ends a sequence at end of generation, at max_tokens, or with the cache full
         token, held = sequence.tokens[-1], len(self._cached[sequence.slot])
@@ -351,13 +429,23 @@ class Engine:
         seen = self._generated(tokens, slots, decode)
         if len(pairs) == 1:
             (slot, start), length = pairs[0], tokens.shape[1]
-            hidden = self.model.run(tokens, [Span(slot, start, length)])
+            hidden = self._held(self.model.run(tokens, [Span(slot, start, length)])[:, -1:], slots)
             logits = self.model.logits(hidden[:, -1, :])
             return sample(logits, options, seed, start + length, seen).realize()
         hidden = self.model.run(tokens, [Span(slot, start) for slot, start in pairs], live)
-        logits = self.model.logits(hidden).reshape(len(pairs), -1)
+        logits = self.model.logits(self._held(hidden, slots)).reshape(len(pairs), -1)
         positions = Tensor.stack(*(Tensor(start + 1) for _, start in pairs))
         return sample(logits, options, seed, positions, seen).realize()
+
+    def _held(self, hidden: Tensor, slots: list[UOp]) -> Tensor:
+        # with a drafter, each row of hidden (1, n, dim) as its slot's hidden state, which gave
+        # its last token
+        if self.drafter is None:
+            return hidden
+        hidden = hidden.contiguous().realize()
+        Tensor.realize(*(self._hidden[s : s + 1].assign(hidden[:, i : i + 1].reshape(1, 1, -1))
+                         for i, s in enumerate(slots)))  # fmt: skip
+        return hidden
 
     def _generated(self, tokens: Tensor, slots: list[UOp], decode: bool) -> Tensor:
         # the tokens each row's sequence has generated, for presence_penalty: a decode step runs

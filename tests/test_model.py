@@ -8,7 +8,7 @@ from tinygrad import Tensor, UOp, dtypes
 from leat import bench
 from leat.engine import FEW_TOKENS, KEEP_BACK, Engine
 from leat.gguf import GGUF
-from leat.model import CACHE_TILE, Config, Transformer, _rope_table, _stack
+from leat.model import CACHE_TILE, Config, Transformer, _stack, rope_table
 from leat.quant import GGMLType, QTensor
 from leat.sampler import GREEDY, Sampling
 from tests.helpers import (
@@ -148,7 +148,7 @@ YARN, YARN_SCALE = {"rope.scaling.type": "yarn", "rope.scaling.factor": 4.0}, 1 
 def test_rope_scale(scaling, scale):
     # RoPE's cos and sin times YaRN's 1 + 0.1 ln(factor) and rope.scaling.attn_factor, or with a
     # log multiplier, as llama.cpp, mscale(factor, 1) / mscale(factor, multiplier) instead
-    cos, sin = _rope_table(config("llama", scaling).ropes[0], 8, None)
+    cos, sin = rope_table(config("llama", scaling).ropes[0], 8, None)
     np.testing.assert_allclose(np.hypot(cos.numpy(), sin.numpy()), scale, rtol=1e-6)
 
 
@@ -329,19 +329,23 @@ def test_copy_takes_recurrent_state(tiny):
 
 
 @pytest.mark.parametrize(
-    "arch, slots, batches", [("llama", 5, [1, 2, 4, 5]), ("qwen35moe", 2, [1, 2])]
+    "arch, slots, batches",
+    [("llama", 5, [1, 2, 4, 5]), ("qwen35moe", 2, [1, 2]), ("gemma4", 2, [1, 2])],
 )
-def test_warm_up(tiny, monkeypatch, arch, slots, batches):
+def test_warm_up(tiny, tiny_assistant, monkeypatch, arch, slots, batches):
     # compiles every graph, the copy's and every batch's too, and keeping and restoring recurrent
-    # state's, and leaves nothing cached that a generation could see. Few tokens are 4 here: the
-    # reference Gated DeltaNet's graphs grow with their tokens.
+    # state's, and a drafter's speculative step's, and leaves nothing cached that a generation
+    # could see. Few tokens are 4 here: the reference Gated DeltaNet's graphs grow with their
+    # tokens.
     monkeypatch.setattr("leat.engine.FEW_TOKENS", 4)
     monkeypatch.setattr("leat.engine.KEEP_BACK", 4)
     path, _ = tiny(arch)
-    engine = Engine(path, max_context=CONTEXT, prefill_chunk=8, slots=slots)
+    draft = tiny_assistant[0] if arch == "gemma4" else None
+    engine = Engine(path, max_context=CONTEXT, prefill_chunk=8, slots=slots, draft=draft)
     engine.warm_up()
     graphs = [engine._chunk, engine._few_chunk, *engine._decode.values(), engine._copy]
     graphs += [engine._keep, engine._restore] if arch == "qwen35moe" else []
+    graphs += [engine._speculate, engine._take] if draft else []
     assert list(engine._decode) == batches
     captured = [jit.captured for jit in graphs]
     assert all(captured) and engine.cached_prefix(PROMPT) == 0

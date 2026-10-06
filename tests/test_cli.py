@@ -56,6 +56,12 @@ def test_bench(tiny_model, capsys, prompt, sequences):
     assert result["sequences"] == sequences
 
 
+def test_bench_draft(tiny, tiny_assistant, capsys):
+    result = run_json(capsys, "bench", tiny("gemma4")[0], "-p", 8, "-n", 6, "-r", 1, "--draft",
+                      tiny_assistant[0])  # fmt: skip
+    assert result["decode"] > 0
+
+
 @pytest.mark.usefixtures("reference_ops")
 @pytest.mark.parametrize("mode", [[], ["--decode"]])
 def test_perplexity(tiny_model, tmp_path, capsys, mode):
@@ -181,6 +187,8 @@ def test_serve_directories(tiny_model, tmp_path, monkeypatch, capsys):
     (empty := tmp_path / "empty").mkdir()
     with pytest.raises(SystemExit, match="no GGUF files"):
         main(["serve", str(empty)])
+    with pytest.raises(SystemExit, match="drafts for one model"):
+        main(["serve", str(models), str(tiny_model[0]), "--draft", str(tiny_model[0])])
 
 
 def test_run_refused_chat(tiny_model, monkeypatch):

@@ -34,6 +34,11 @@ def main(argv: list[str] | None = None) -> None:
     run.add_argument("--min-p", type=float, default=0.0)
     run.add_argument("--presence-penalty", type=float, default=0.0)
     run.add_argument("--system", help="system prompt")
+    run.add_argument(
+        "--draft",
+        type=Path,
+        help="a drafter's GGUF, for speculative decoding: Gemma 4's assistant for Gemma 4",
+    )
 
     serve = commands.add_parser(
         "serve", help="serve a chat app and the OpenAI chat completions API"
@@ -49,6 +54,9 @@ def main(argv: list[str] | None = None) -> None:
         "--slots", type=_positive, default=4,
         help="sequences generating at once, each in a slot of the KV cache that keeps its tokens",
     )  # fmt: skip
+    serve.add_argument(
+        "--draft", type=Path, help="a drafter's GGUF, for speculative decoding, of the one model"
+    )
 
     speed = commands.add_parser("bench", help="measure prefill and decode speed")
     speed.add_argument("model", type=Path, help="GGUF file")
@@ -57,6 +65,11 @@ def main(argv: list[str] | None = None) -> None:
     speed.add_argument("-r", "--reps", type=_positive, default=3)
     speed.add_argument(
         "-s", "--sequences", type=_positive, default=1, help="sequences generating at once"
+    )
+    speed.add_argument(
+        "--draft",
+        type=Path,
+        help="a drafter's GGUF, for speculative decoding: Gemma 4's assistant for Gemma 4",
     )
     speed.add_argument("--json", action="store_true", help="print one JSON object")
 
@@ -91,7 +104,7 @@ def _positive(text: str) -> int:
 
 
 def _run(args: argparse.Namespace) -> None:
-    engine = Engine(args.model, max_context=args.max_context)
+    engine = Engine(args.model, max_context=args.max_context, draft=args.draft)
     chat, tok = ChatTemplate(engine.gguf.metadata, engine.tokenizer), engine.tokenizer
     sampling = Sampling(args.temperature, args.top_k, args.top_p, args.min_p, args.presence_penalty)
     first = [{"role": "system", "content": args.system}] if args.system else []
@@ -158,7 +171,9 @@ def _serve(args: argparse.Namespace) -> None:
     files = [f for p in args.models for f in (sorted(p.glob("*.gguf")) if p.is_dir() else [p])]
     if not files:
         raise SystemExit("no GGUF files: give some, or directories that hold some")
-    options = {"max_context": args.max_context, "slots": args.slots}
+    if args.draft and len(files) > 1:
+        raise SystemExit("--draft drafts for one model: serve that one alone")
+    options = {"max_context": args.max_context, "slots": args.slots, "draft": args.draft}
     with Server(files, args.host, args.port, **options) as server:
         print(f"{files[0].stem} on {Device.DEFAULT}, compiling...", end=" ", flush=True)
         server.load(files[0].stem)
@@ -172,7 +187,9 @@ def _serve(args: argparse.Namespace) -> None:
 
 def _bench(args: argparse.Namespace) -> None:
     context, n = args.prompt + args.generate, args.sequences
-    engine = Engine(args.model, max_context=context, prefill_chunk=args.prompt, slots=n)
+    engine = Engine(
+        args.model, max_context=context, prefill_chunk=args.prompt, slots=n, draft=args.draft
+    )
     result = bench.speed(engine, args.prompt, args.generate, args.reps, n)
     name = engine.gguf.path.stem
     if args.json:

@@ -326,16 +326,27 @@ def cuts(scores, top_k, top_p):
 
 
 def _reference_gemma4(w: dict[str, np.ndarray], tokens: list[int]) -> np.ndarray:
-    T, positions = len(tokens), np.arange(len(tokens))
+    logits = _gemma4_hidden(w, tokens)[0] @ w["token_embd.weight"].T
+    return np.tanh(logits / G_CAP) * G_CAP
+
+
+def _gemma4_rope(dim: int, sliding: bool, positions: np.ndarray, factors: np.ndarray):
+    # cos and sin of a layer's rotations of dimension j with j + dim / 2, the full layer's
+    # frequencies divided by rope_freqs' factors
+    freqs = (1000.0 if sliding else 10000.0) ** (-np.arange(0, dim, 2) / dim)
+    angles = positions[:, None, None] * (freqs if sliding else freqs / factors)
+    return np.cos(angles), np.sin(angles)
+
+
+def _gemma4_hidden(w: dict[str, np.ndarray], tokens: list[int]):
+    # the normed hidden states (T, D) and each layer's keys and values, as in the cache
+    T, positions, cache = len(tokens), np.arange(len(tokens)), []
     x = w["token_embd.weight"][tokens].astype(np.float64) * np.sqrt(D)
     for i, (dim, kv_heads, sliding) in enumerate(
         zip(G_DIMS, G_KV_HEADS, (True, False), strict=True)
     ):
         lw = _layer(w, i)
-        # rotations of dimension j with j + dim / 2, the full layer's frequencies scaled
-        freqs = (1000.0 if sliding else 10000.0) ** (-np.arange(0, dim, 2) / dim)
-        angles = positions[:, None, None] * (freqs if sliding else freqs / w["rope_freqs.weight"])
-        cos, sin = np.cos(angles), np.sin(angles)
+        cos, sin = _gemma4_rope(dim, sliding, positions, w["rope_freqs.weight"])
 
         h = norm(x, lw["attn_norm"])
         q = (h @ lw["attn_q"].T).reshape(T, HEADS, dim)
@@ -346,6 +357,7 @@ def _reference_gemma4(w: dict[str, np.ndarray], tokens: list[int]) -> np.ndarray
         )
         back = positions[:, None] - positions
         mask = np.where((back < 0) | (sliding & (back >= G_WINDOW)), -np.inf, 0)
+        cache.append((k, v))
         out = attention(q, k, v, mask, 1.0) @ lw["attn_output"].T
         x = x + norm(out, lw["post_attention_norm"])
 
@@ -356,8 +368,79 @@ def _reference_gemma4(w: dict[str, np.ndarray], tokens: list[int]) -> np.ndarray
             mixed = experts(norm(x, lw["pre_ffw_norm_2"]), scores, expert)
             out = norm(out, lw["post_ffw_norm_1"]) + norm(mixed, lw["post_ffw_norm_2"])
         x = (x + norm(out, lw["post_ffw_norm"])) * lw["layer_output_scale"]
-    logits = norm(x, w["output_norm.weight"]) @ w["token_embd.weight"].T
-    return np.tanh(logits / G_CAP) * G_CAP
+    return norm(x, w["output_norm.weight"]), cache
+
+
+# Gemma 4's assistant for the tiny Gemma 4: as wide as half the target, a layer of a window over
+# the target's first layer's keys and values and one over all of its second's
+A_D, A_HIDDEN = 128, 256
+
+
+def write_tiny_assistant(path: Path) -> dict[str, np.ndarray]:
+    w, weights, add = _writer(path, "gemma4-assistant")
+    a = "gemma4-assistant."
+    for key, value in [("block_count", 2), ("embedding_length", A_D),
+                       ("embedding_length_out", D), ("feed_forward_length", A_HIDDEN),
+                       ("attention.head_count", HEADS), ("attention.key_length", G_DIMS[1]),
+                       ("attention.key_length_swa", G_DIMS[0]),
+                       ("attention.value_length", G_DIMS[1]),
+                       ("attention.value_length_swa", G_DIMS[0]),
+                       ("attention.sliding_window", G_WINDOW), ("nextn_predict_layers", 2),
+                       ("attention.shared_kv_layers", 2)]:  # fmt: skip
+        w.add_uint32(a + key, value)
+    w.add_array(a + "attention.head_count_kv", list(G_KV_HEADS))
+    w.add_array(a + "attention.sliding_window_pattern", [True, False])
+    w.add_float32(a + "rope.freq_base", 10000.0)
+    w.add_float32(a + "rope.freq_base_swa", 1000.0)
+    add("token_embd.weight", (V, A_D), GGMLType.Q8_0, 1e-3)
+    add("output_norm.weight", (A_D,))
+    add("nextn.pre_projection.weight", (A_D, 2 * D), GGMLType.Q8_0, 1e-3)
+    add("nextn.post_projection.weight", (D, A_D), GGMLType.Q8_0, 1e-3)
+    weights["rope_freqs.weight"] = np.array([1.0] * 8 + [1e30] * 24, dtype=np.float32)
+    w.add_tensor("rope_freqs.weight", weights["rope_freqs.weight"])
+    for i, dim in enumerate(G_DIMS):
+        b = f"blk.{i}."
+        add(b + "attn_q.weight", (HEADS * dim, A_D), GGMLType.Q8_0, 1e-3)
+        add(b + "attn_output.weight", (A_D, HEADS * dim), GGMLType.F32, 0.05)
+        add(b + "attn_q_norm.weight", (dim,))
+        for name in ("attn_norm", "post_attention_norm", "ffn_norm", "post_ffw_norm"):
+            add(b + name + ".weight", (A_D,))
+        add(b + "layer_output_scale.weight", (1,))
+        add(b + "ffn_gate.weight", (A_HIDDEN, A_D), GGMLType.Q8_0, 1e-3)
+        add(b + "ffn_up.weight", (A_HIDDEN, A_D), GGMLType.Q8_0, 1e-3)
+        add(b + "ffn_down.weight", (A_D, A_HIDDEN), GGMLType.Q8_0, 1e-3)
+    _finish(w)
+    return weights
+
+
+def reference_drafts(
+    target: dict[str, np.ndarray], assistant: dict[str, np.ndarray], tokens: list[int],
+    count: int,
+) -> list[int]:  # fmt: skip
+    # the assistant's `count` greedy drafts after `tokens`, the last at a position the target has
+    # not run: each from the token before it and the hidden state the step before gave, all at
+    # that position, attending over the target's keys and values before it
+    hidden, cache = _gemma4_hidden(target, tokens[:-1])
+    pos, token, h, drafts = len(tokens) - 1, tokens[-1], hidden[-1], []
+    for _ in range(count):
+        e = target["token_embd.weight"][token].astype(np.float64) * np.sqrt(D)
+        x = np.concatenate([e, h]) @ assistant["nextn.pre_projection.weight"].T
+        for i, (dim, sliding) in enumerate(zip(G_DIMS, (True, False), strict=True)):
+            lw, (k, v) = _layer(assistant, i), cache[i]
+            cos, sin = _gemma4_rope(dim, sliding, np.array([pos]), assistant["rope_freqs.weight"])
+            q = (norm(x, lw["attn_norm"]) @ lw["attn_q"].T).reshape(1, HEADS, dim)
+            q = rotate_halves(norm(q, lw["attn_q_norm"]), cos, sin)
+            back = pos - np.arange(pos)
+            mask = np.where(sliding & (back >= G_WINDOW), -np.inf, 0)[None]
+            out = attention(q, k, v, mask, 1.0)[0] @ lw["attn_output"].T
+            x = x + norm(out, lw["post_attention_norm"])
+            out = mlp(norm(x, lw["ffn_norm"]), lw["ffn_gate"], lw["ffn_up"], lw["ffn_down"], "gelu")
+            x = (x + norm(out, lw["post_ffw_norm"])) * lw["layer_output_scale"]
+        x = norm(x, assistant["output_norm.weight"])
+        token = int((x @ assistant["token_embd.weight"].T).argmax())
+        h = x @ assistant["nextn.post_projection.weight"].T
+        drafts.append(token)
+    return drafts
 
 
 def rotate_halves(z, cos, sin):
