@@ -94,7 +94,8 @@ def _run(args: argparse.Namespace) -> None:
     engine = Engine(args.model, max_context=args.max_context)
     chat, tok = ChatTemplate(engine.gguf.metadata, engine.tokenizer), engine.tokenizer
     sampling = Sampling(args.temperature, args.top_k, args.top_p, args.min_p, args.presence_penalty)
-    messages = [{"role": "system", "content": args.system}] if args.system else []
+    first = [{"role": "system", "content": args.system}] if args.system else []
+    messages = list(first)
     print(f"{engine.gguf.path.stem} on {Device.DEFAULT}, compiling...", end="", flush=True)
     engine.warm_up()
     print(" ready. Ctrl-D quits.")
@@ -104,14 +105,14 @@ def _run(args: argparse.Namespace) -> None:
         except (EOFError, KeyboardInterrupt):
             print()
             return
-        try:
-            rendered = chat.render(messages)
-        except jinja2.TemplateError as e:  # such as a system prompt the template does not take
-            raise SystemExit(f"the model's chat template refuses this chat: {e}") from None
-        prompt, thinking = chat.tokens(rendered), chat.opens_thinking(rendered)
-        if len(prompt) >= engine.max_context:
+        prompt, thinking = _prompt(chat, messages)
+        if len(prompt) >= engine.max_context and len(messages) > len(first) + 1:
             print(f"[the conversation is {len(prompt)} tokens, over --max-context; starting over]")
-            messages = messages[:1] if args.system else []
+            messages = [*first, messages[-1]]  # from the message just written
+            prompt, thinking = _prompt(chat, messages)
+        if len(prompt) >= engine.max_context:
+            print(f"[the message makes {len(prompt)} tokens, over --max-context]")
+            messages.pop()
             continue
         reply, step, start = [], tok.stream(), time.perf_counter()
         text, shown = "", ("", "")  # the reply so far, and its reasoning and text printed
@@ -132,6 +133,15 @@ def _run(args: argparse.Namespace) -> None:
         messages.append({"role": "assistant", "content": parts.content})
 
 
+def _prompt(chat: ChatTemplate, messages: list[dict]) -> tuple[list[int], bool]:
+    # the chat's prompt, and whether it opens a block of reasoning
+    try:
+        rendered = chat.render(messages)
+    except jinja2.TemplateError as e:  # such as a system prompt the template does not take
+        raise SystemExit(f"the model's chat template refuses this chat: {e}") from None
+    return chat.tokens(rendered), chat.opens_thinking(rendered)
+
+
 def _show(parts, shown: tuple[str, str]) -> tuple[str, str]:
     # prints what is new of a reply's reasoning, dimmed, and of its text
     reasoning, content = shown
@@ -146,12 +156,15 @@ def _show(parts, shown: tuple[str, str]) -> tuple[str, str]:
 
 def _serve(args: argparse.Namespace) -> None:
     files = [f for p in args.models for f in (sorted(p.glob("*.gguf")) if p.is_dir() else [p])]
+    if not files:
+        raise SystemExit("no GGUF files: give some, or directories that hold some")
     options = {"max_context": args.max_context, "slots": args.slots}
     with Server(files, args.host, args.port, **options) as server:
-        if first := next((p for p in args.models if not p.is_dir()), None):
-            print(f"{first.stem} on {Device.DEFAULT}, compiling...", end=" ", flush=True)
-            server.load(first.stem)
-        url = f"http://{args.host}:{server.server_port}"
+        print(f"{files[0].stem} on {Device.DEFAULT}, compiling...", end=" ", flush=True)
+        server.load(files[0].stem)
+        # an address to browse to: this machine's, where the server takes every one
+        host = "127.0.0.1" if args.host in ("0.0.0.0", "::", "") else args.host
+        url = f"http://{host}:{server.server_port}"
         print(f"chat at {url}, the API at {url}/v1. Ctrl-C quits.", flush=True)
         with contextlib.suppress(KeyboardInterrupt):
             server.serve_forever()

@@ -127,6 +127,62 @@ def test_run(tiny_model, monkeypatch, capsys):
     assert chats[1][1]["content"] in out and out.count("tok/s]") == 2
 
 
+def test_run_past_the_context(tiny_model, monkeypatch, capsys):
+    # past --max-context, the chat starts over from the message just written, and a message too
+    # long alone is dropped, each said so
+    # a template of every message's text, a token a character: two of 32 and 33 do not fit 64
+    replies, chats = iter(["a" * 32, "a" * 33, "b" * 80]), []
+
+    def fake_input(prompt):
+        if (reply := next(replies, None)) is None:
+            raise EOFError
+        return reply
+
+    def rendered(self, messages, **kwargs):
+        chats.append(list(messages))
+        return "".join(m["content"] for m in messages)
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    monkeypatch.setattr("leat.cli.ChatTemplate.render", rendered)
+    main(["run", str(tiny_model[0]), "--max-context", "64"])
+    out = capsys.readouterr().out
+    assert "starting over" in out and "the message makes" in out
+    assert [{"role": "user", "content": "a" * 33}] in chats
+
+
+def test_serve_directories(tiny_model, tmp_path, monkeypatch, capsys):
+    # of directories alone, the first file found loads at start; a server on every address is
+    # browsed at this machine's
+    (models := tmp_path / "models").mkdir()
+    (models / "tiny.gguf").symlink_to(tiny_model[0])
+    loaded = []
+
+    class Fake:
+        server_port = 8080
+
+        def __init__(self, files, host, port, **options):
+            self.files = files
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def load(self, name):
+            loaded.append(name)
+
+        def serve_forever(self):
+            pass
+
+    monkeypatch.setattr("leat.cli.Server", Fake)
+    main(["serve", str(models), "--host", "0.0.0.0"])
+    assert loaded == ["tiny"] and "chat at http://127.0.0.1:8080" in capsys.readouterr().out
+    (empty := tmp_path / "empty").mkdir()
+    with pytest.raises(SystemExit, match="no GGUF files"):
+        main(["serve", str(empty)])
+
+
 def test_run_refused_chat(tiny_model, monkeypatch):
     # a chat the model's template refuses, as Mistral 7B v0.3's does a system prompt, ends the run
     # with the template's reason rather than a traceback
