@@ -86,7 +86,9 @@ def _cut_kernel(out: UOp, counts: UOp, tops: UOp, options: UOp) -> UOp:
     part_tops = [tops[row, p].load() for p in range(parts)]
     top = tree(UOp.maximum, part_tops)
     last = _grid(top)
-    shifts = [(last - _grid(t)).cast(dtypes.int32) for t in part_tops]
+    # at most BINS, past which a part adds nothing: a part of no scores, as a short row's last,
+    # has a top of -inf, whose shift of +inf no int holds
+    shifts = [(last - _grid(t)).minimum(BINS).cast(dtypes.int32) for t in part_tops]
     merged = UOp.alloc((BINS,), dtypes.float32, addrspace=AddrSpace.LOCAL)
     sums = []
     for i in range(BINS // threads):
