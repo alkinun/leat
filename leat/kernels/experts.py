@@ -127,10 +127,14 @@ def scores(x: Tensor, norm: tuple[Tensor, float], router: QTensor) -> Tensor:
 @functools.cache
 def _route_kernel(ids: UOp, weights: UOp, scores: UOp, tokens: int | UOp, used: int) -> UOp:
     # a warp per token: `used` rounds of argmax over the experts' scores, the first index on ties,
-    # each taking its winner out of the next; then the softmax of the winners' scores
+    # each taking its winner out of the next; then the softmax of the winners' scores. Scores of
+    # -inf or NaN count as the least finite one, below a winner taken out, which so is never
+    # taken again.
     token, lane = UOp.range(tokens, 0, AxisType.GLOBAL), lane_range()
     ats = [(lane + WARP * j).cast(dtypes.int32) for j in range(int(scores.shape[1]) // WARP)]
+    least = UOp.const(-3.4028234663852886e38, dtypes.float32)  # float32's least finite value
     values = [scores[token, at].load() for at in ats]
+    values = [(v > least).where(v, least) for v in values]
     best: list[tuple[UOp, UOp]] = []
     for _ in range(used):
         top, index = UOp.const(-math.inf, dtypes.float32), UOp.const(0, dtypes.int32)

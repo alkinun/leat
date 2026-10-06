@@ -240,6 +240,18 @@ def test_route(tokens):
     np.testing.assert_allclose(weights.reshape(n, 8), p / p.sum(-1, keepdims=True), rtol=1e-6)
 
 
+def test_route_distinct():
+    # distinct experts, though a token scores fewer than it takes: the rest, of -inf or NaN, with
+    # no weight
+    scores = np.full((2, 128), -np.inf, dtype=np.float32)
+    scores[:, [5, 70]] = [1.0, 2.0]
+    scores[1, 9] = np.nan
+    ids, weights = (t.numpy().reshape(2, 4) for t in kernels.route(Tensor(scores), 4))
+    assert [len(set(row)) for row in ids] == [4, 4] and (ids[:, :2] == [70, 5]).all()
+    p = np.exp([0.0, -1.0, -np.inf, -np.inf])
+    np.testing.assert_allclose(weights, [p / p.sum()] * 2, rtol=1e-6)
+
+
 def random_experts(
     ggml_type: GGMLType, experts: int, rows: int, cols: int, rng: np.random.Generator
 ) -> tuple[QTensor, np.ndarray]:
