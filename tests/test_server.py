@@ -1,5 +1,6 @@
 import contextlib
 import json
+import socket
 import statistics
 import threading
 import time
@@ -430,6 +431,23 @@ def test_hang_up_frees_the_slot(client, engine):
     choices = [chunk.choices[0] for chunk in other if chunk.choices]
     assert choices[-1].finish_reason == "length"
     assert not engine.active
+
+
+def test_hang_up_before_the_reply_frees_the_slot(server, engine, monkeypatch):
+    # a client of a whole reply that hangs up while it waits, which no write would find, ends its
+    # sequence too, steps of 50 ms long before its 40 tokens
+    step, steps = engine.step, []
+    monkeypatch.setattr(engine, "step", lambda: steps.append(time.sleep(0.05)) or step())
+    request = {"model": "tiny", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 40}
+    body = json.dumps(request).encode()
+    head = f"POST /v1/chat/completions HTTP/1.1\r\nContent-Length: {len(body)}\r\n\r\n"
+    with socket.create_connection(("127.0.0.1", server.server_port)) as connection:
+        connection.sendall(head.encode() + body)
+        while not engine.active:
+            time.sleep(0.01)
+    while engine.active:
+        time.sleep(0.01)
+    assert len(steps) < 20
 
 
 def test_engine_error(client, engine, monkeypatch):

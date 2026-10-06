@@ -12,6 +12,8 @@ import gc
 import itertools
 import json
 import queue
+import select
+import socket
 import threading
 import time
 import uuid
@@ -43,6 +45,8 @@ _TYPES = {
     ".css": "text/css; charset=utf-8",
     ".woff2": "font/woff2",
 }
+# seconds between a handler's checks that its client is still there, while it waits for text
+_HANG_UP_CHECK = 0.25
 
 
 def _integer(v: Any) -> bool:
@@ -127,10 +131,21 @@ class _Completion:
     cancelled: threading.Event = field(default_factory=threading.Event)
     finish: _Finish = field(init=False)  # once pieces() is exhausted
 
-    def pieces(self) -> Iterator[str]:
-        """The reply's text as the worker produces it; then `finish` says how it ended."""
-        while isinstance(item := self.out.get(), str):
-            yield item
+    def pieces(self, hung_up: Callable[[], bool] = lambda: False) -> Iterator[str]:
+        """The reply's text as the worker produces it; then `finish` says how it ended. Raises
+        ConnectionAbortedError once `hung_up()`, checked at each piece and while none comes, as
+        for a reply that sends nothing before it ends, which would never find its client gone."""
+        while True:
+            try:
+                item: str | _Finish | Exception | None = self.out.get(timeout=_HANG_UP_CHECK)
+            except queue.Empty:
+                item = None
+            if hung_up():
+                raise ConnectionAbortedError("the client hung up")
+            if isinstance(item, str):
+                yield item
+            elif item is not None:
+                break
         if isinstance(item, Exception):
             raise RuntimeError(f"generation failed: {item!r}") from item
         self.finish = item
@@ -359,7 +374,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _reply(self, c: _Completion) -> None:
         try:
-            reply = split_reply("".join(c.pieces()), c.form, c.thinking, done=True)
+            reply = split_reply("".join(c.pieces(self._hung_up)), c.form, c.thinking, done=True)
         except RuntimeError as e:
             return self._error(500, str(e))
         message: dict[str, Any] = {"role": "assistant", "content": reply.content}
@@ -384,7 +399,7 @@ class _Handler(BaseHTTPRequestHandler):
         # done, the end that may have begun a marker then its own
         text, reasoned, sent, reply = "", 0, 0, Reply()
         try:
-            for piece in itertools.chain(c.pieces(), [None]):
+            for piece in itertools.chain(c.pieces(self._hung_up), [None]):
                 text += piece or ""
                 reply = split_reply(text, c.form, c.thinking, done=piece is None)
                 if len(reply.reasoning) > reasoned:
@@ -413,6 +428,14 @@ class _Handler(BaseHTTPRequestHandler):
             usage = {"choices": [], "usage": _usage(c)} | timings
             self._event(self._head(c, "chat.completion.chunk") | usage)
         self._event("[DONE]")
+
+    def _hung_up(self) -> bool:
+        # whether the client closed the connection: it reads as ready, with nothing to read
+        try:
+            ready, _, _ = select.select([self.connection], [], [], 0)
+            return bool(ready) and not self.connection.recv(1, socket.MSG_PEEK)
+        except OSError:
+            return True
 
     def _model(self, name: str) -> dict[str, Any]:
         s = self.server
