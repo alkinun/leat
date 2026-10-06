@@ -153,6 +153,9 @@ CASES = [
     ("xhttps://x.io https:// https://. http", [["p", "xhttps://x.io https:// https://. http"]]),
     # escapes, of ASCII punctuation only
     ("\\*a\\* \\` \\\\ \\a", [["p", "*a* ` \\ \\a"]]),
+    # runs that open spans none closes, as C's pointers, in time linear in them, not exponential
+    ("int *a, " * 59 + "int *a", [["p", "int *a, " * 59 + "int *a"]]),
+    ("a _b **c " * 39 + "a _b **c", [["p", "a _b **c " * 39 + "a _b **c"]]),
 ]  # fmt: skip
 
 
@@ -166,7 +169,7 @@ def parsed() -> dict[str, list]:
     """
     texts = [text for text, _ in CASES]
     run = subprocess.run([NODE, "--input-type=module", "-e", script], input=json.dumps(texts),
-                         capture_output=True, text=True, check=True)  # fmt: skip
+                         capture_output=True, text=True, check=True, timeout=60)  # fmt: skip
     return dict(zip(texts, json.loads(run.stdout), strict=True))
 
 

@@ -24,6 +24,7 @@ export function markdown(element, text) {
 }
 
 export function parse(text) {
+  closers.clear();
   return blocks(text.split("\n"));
 }
 
@@ -276,8 +277,19 @@ function emphasis(text, i) {
   return null;
 }
 
-// where the run of n c's that closes the span from j starts, past the spans within it
+// where the run of n c's that closes the span from j starts, past the spans within it: searched
+// once for each text, j, c and n, as the spans that never close would each search the rest of
+// the text again for each before them
 function closer(text, j, c, n) {
+  const memo = closers.get(text) ?? closers.set(text, new Map()).get(text);
+  const key = `${c}${n}:${j}`;
+  if (!memo.has(key)) memo.set(key, searchCloser(text, j, c, n));
+  return memo.get(key);
+}
+
+const closers = new Map(); // closer()'s answers by text, of the text parse() last took
+
+function searchCloser(text, j, c, n) {
   const from = j;
   while (j < text.length) {
     const end = atom(text, j);
