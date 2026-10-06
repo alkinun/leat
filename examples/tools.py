@@ -8,10 +8,13 @@ Searches go to a SearXNG on this machine:
         -v $PWD/examples/searxng.yml:/etc/searxng/settings.yml:ro searxng/searxng
     python examples/tools.py
 
-Then the chat app's settings take this server, http://this-machine:8081, as their tools server.
-The pages it reads may be any the machine reaches, its own network's too.
+Then the chat app's settings take this server, http://127.0.0.1:8081, as their tools server. The
+pages it reads may be any the machine reaches, its own network's too, so it answers no other
+page in a browser than the chat app, of leat serve on this machine by default: with leat serving
+another machine, `--host 0.0.0.0 --origin http://this-machine:8080`.
 """
 
+import argparse
 import contextlib
 import json
 import re
@@ -83,12 +86,18 @@ def _get(url: str) -> str:
 
 
 class _Handler(BaseHTTPRequestHandler):
+    origins: frozenset[str] = frozenset()  # the chat app's, whose pages alone may call the tools
+
     def do_GET(self) -> None:
+        if not self._allowed():
+            return self.send_error(403)
         if self.path != "/tools":
             return self.send_error(404)
         self._json(TOOLS)
 
     def do_POST(self) -> None:
+        if not self._allowed():
+            return self.send_error(403)
         if self.path != "/call":
             return self.send_error(404)
         call = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
@@ -101,17 +110,32 @@ class _Handler(BaseHTTPRequestHandler):
             content = f"error: {e}"
         self._json({"content": content})
 
+    def _allowed(self) -> bool:
+        # a browser's request from the chat app, or one of no browser, which sends no Origin: any
+        # other page could read the network through fetch_page, or make it fetch
+        origin = self.headers.get("Origin")
+        return origin is None or origin in self.origins
+
     def _json(self, body) -> None:
         data = json.dumps(body).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")  # the chat app, served by leat
+        if origin := self.headers.get("Origin"):  # the chat app, served by leat, reads it
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
 
 
 if __name__ == "__main__":
-    print("tools at http://0.0.0.0:8081. Ctrl-C quits.")
+    parser = argparse.ArgumentParser(description="Web search and page reading for leat's app")
+    parser.add_argument("--host", default="127.0.0.1", help="0.0.0.0 for other machines too")
+    parser.add_argument("--port", type=int, default=8081)
+    parser.add_argument("--origin", action="append", help="the chat app's, as http://host:8080; "
+                        "by default leat serve's on this machine")  # fmt: skip
+    args = parser.parse_args()
+    _Handler.origins = frozenset(args.origin or ("http://127.0.0.1:8080", "http://localhost:8080"))
+    print(f"tools at http://{args.host}:{args.port}, for {', '.join(sorted(_Handler.origins))}")
     with contextlib.suppress(KeyboardInterrupt):
-        ThreadingHTTPServer(("0.0.0.0", 8081), _Handler).serve_forever()
+        ThreadingHTTPServer((args.host, args.port), _Handler).serve_forever()
