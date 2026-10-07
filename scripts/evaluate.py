@@ -4,9 +4,9 @@ of its own. Prints a Markdown table of each case's passes and mean time.
 
     uv run python scripts/evaluate.py [--engine http://127.0.0.1:8080] [-n 3] [--think] [-k name]
 
-The agent runs in this process, with leat agent's tools, against leat serve at --engine and the
-SearXNG at --search; the states are temporary, and the user's own untouched. A prompt's or a tool's
-change is measured here before it is kept.
+The agent runs in this process, with leat agent's tools, against leat serve at --engine, the SearXNG
+at --search, and the sandbox's environment at --sandbox; the states are temporary, and the user's
+own untouched. A prompt's or a tool's change is measured here before it is kept.
 """
 
 import argparse
@@ -25,18 +25,21 @@ sys.path.insert(0, str(ROOT))
 from leat.agent.agent import Agent  # noqa: E402
 from leat.agent.client import Client  # noqa: E402
 from leat.agent.store import Store  # noqa: E402
-from leat.agent.tools import weather, web  # noqa: E402
+from leat.agent.tools import files, weather, web  # noqa: E402
+from leat.agent.workspace import Workspace  # noqa: E402
 
 TIMEOUT = 300  # seconds a turn may take
 
 
 @dataclass(frozen=True)
 class Outcome:
-    """What came of a case's message: the tools it called, the answer, the memories after."""
+    """What came of a case's message: the tools it called, the answer, the memories and the
+    workspace's files after."""
 
     tools: list[str]
     answer: str
     memories: list[str]
+    files: list[str]
     seconds: float
 
 
@@ -61,6 +64,11 @@ def remembers(pattern: str) -> Check:
     return lambda o: None if found(o) else f"does not remember /{pattern}/"
 
 
+def makes(pattern: str) -> Check:
+    made = lambda o: any(re.search(pattern, name) for name in o.files)  # noqa: E731
+    return lambda o: None if made(o) else f"made no file /{pattern}/"
+
+
 def forgot(pattern: str) -> Check:
     return lambda o: f"still remembers /{pattern}/" if remembers(pattern)(o) is None else None
 
@@ -72,9 +80,10 @@ class Case:
     checks: list[Check]
     memories: list[str] = field(default_factory=list)  # remembered before it
     before: list[str] = field(default_factory=list)  # messages of earlier conversations, each one's
+    files: dict[str, str] = field(default_factory=dict)  # the workspace's, by name, attached to it
 
 
-NONE = ("search", "fetch", "weather", "remember", "forget", "recall")  # every tool
+NONE = ("search", "fetch", "weather", "remember", "forget", "recall", "read", "run")
 CASES = [
     Case("chat", "Write a haiku about autumn.", [uncalled(*NONE)]),
     Case("arithmetic", "What is 17 * 23?", [says(r"391"), uncalled(*NONE)]),
@@ -97,6 +106,14 @@ CASES = [
     Case("recall", "What did I ask you about tulips the other day?",
          [called("recall"), says("plant")],
          before=["When should I plant tulip bulbs? One sentence."]),
+    Case("attachment", "What time does it start, and what should I bring?",
+         [called("read"), says("7"), says("salad|dessert")],
+         files={"invitation.txt": "You're invited to Mia's 30th! Saturday 18 October, 7 pm, at "
+                "22 Oak Road. Please bring a salad or a dessert."}),
+    Case("document", "Make a Word document with a packing list for a weekend camping trip.",
+         [called("run"), makes(r"\.docx$")]),
+    Case("spreadsheet", "Make an Excel budget: rent 900, food 350 and transport 80 a month, with "
+         "yearly totals.", [called("run"), makes(r"\.xlsx$")]),
 ]  # fmt: skip
 
 
@@ -104,6 +121,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--engine", default="http://127.0.0.1:8080", help="leat serve's address")
     parser.add_argument("--search", default="http://127.0.0.1:8888", help="a SearXNG's address")
+    parser.add_argument(
+        "--sandbox", type=Path, default=Path.home() / ".local/share/leat/sandbox",
+        help="the sandbox's environment, as leat/agent/sandbox.txt makes it",
+    )  # fmt: skip
     parser.add_argument("-n", "--runs", type=int, default=3, help="runs of each case")
     parser.add_argument("--think", action="store_true", help="have the model think first")
     parser.add_argument("-k", help="the cases whose names hold this alone")
@@ -131,19 +152,25 @@ def main() -> None:
 def _run(case: Case, args: argparse.Namespace) -> Outcome:
     # the case, in an agent of a state of its own
     with tempfile.TemporaryDirectory() as data:
-        tools = [*web.tools(args.search), *weather.tools()]
-        agent = Agent(Store(Path(data) / "leat.db"), Client(args.engine), tools)
+        environment = args.sandbox if args.sandbox.exists() else None
+        workspace = Workspace(Path(data) / "workspace", environment)
+        tools = [*web.tools(args.search), *weather.tools(), *files.tools(workspace)]
+        agent = Agent(Store(Path(data) / "leat.db"), Client(args.engine), tools, workspace)
         for memory in case.memories:
             agent.remember(memory)
         for message in case.before:
             _wait(agent, agent.send(None, message, args.think))
+        for name, text in case.files.items():
+            workspace.path(name).write_text(text)
         start = time.monotonic()
-        messages = _wait(agent, agent.send(None, case.message, args.think))
+        id = agent.send(None, case.message, args.think, list(case.files))
+        messages = _wait(agent, id)
         seconds = time.monotonic() - start
         tools_called = [m["name"] for m in messages if m["role"] == "tool"]
         answer = messages[-1]["content"] if messages and messages[-1]["role"] == "assistant" else ""
         memories = [m["text"] for m in agent.memories()]
-        return Outcome(tools_called, answer or "", memories, seconds)
+        names = [f["name"] for f in workspace.files()]
+        return Outcome(tools_called, answer or "", memories, names, seconds)
 
 
 def _wait(agent: Agent, id: str) -> list[dict]:
