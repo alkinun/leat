@@ -13,6 +13,7 @@ import datetime
 import threading
 import time
 import traceback
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from leat.agent import context
@@ -69,28 +70,39 @@ class Background:
     def _work(self) -> None:
         # runs the tasks due, names the conversations not named, as those whose first turns
         # ended, and reviews the idle ones, one at a time, then waits for a wake, the next task or
-        # the next look. A task due that waits, for its conversation or the engine, waits for the
-        # next look, as does an engine that is away; a bug's error is said, not the thread's end.
+        # the next look. Each piece of work that fails is tried again at the next look, the others
+        # done meanwhile: a task due that waits, for its conversation or the engine, and any while
+        # the engine is away. A bug's error is said, not the thread's end.
         while True:
             self._woken.clear()
-            due: list[dict[str, Any]] = []
+            soonest = float("inf")
             try:
-                for task in (due := self.agent.store.due(time.time())):
-                    run(self.agent, task)
+                due = self.agent.store.due(time.time())
+                for task in due:
+                    _attempt(run, self.agent, task)
                 for id in self.agent.store.unnamed():
                     if not self.agent.running(id):
-                        name(self.agent, id)
+                        _attempt(name, self.agent, id)
                 for id in self.agent.store.idle(time.time() - self.idle):
                     if not self.agent.running(id):
-                        review(self.agent, id)
-            except EngineError:
-                pass
+                        _attempt(review, self.agent, id)
+                # the next task's time, of all but those due at this look that wait, as they were
+                tasks = [t["next"] for t in self.agent.store.tasks() if t not in due]
+                soonest = min(tasks, default=soonest)
             except Exception:
                 traceback.print_exc()
-            # the next task's time, of all but those due at this look that wait, as they were
-            tasks = [t["next"] for t in self.agent.store.tasks() if t not in due]
-            soonest = min(tasks, default=float("inf"))
             self._woken.wait(max(0, min(CHECK, soonest - time.time())))
+
+
+def _attempt(work: Callable[..., None], *args: Any) -> None:
+    # does a piece of the work, which, if it fails, is tried at the next look: one the engine
+    # failed quietly, as it may be away, and one a bug failed saying so
+    try:
+        work(*args)
+    except EngineError:
+        pass
+    except Exception:
+        traceback.print_exc()
 
 
 def run(agent: "Agent", task: dict[str, Any]) -> None:
@@ -141,7 +153,9 @@ def review(agent: "Agent", id: str) -> None:
         system = REVIEW.format(
             date=f"{today:%A}, {today.day} {today:%B %Y}", memories=memory.listing(agent.memories())
         )
-        said = context.transcript([m for m in new if m.get("content")])[-READ:]
+        # the latest of it, as much as half the model's context holds
+        read = READ if (limit := agent.limit()) is None else min(READ, limit * context.CHARS // 2)
+        said = context.transcript([m for m in new if m.get("content")])[-read:]
         _work_on(
             agent, id, [{"role": "system", "content": system}, {"role": "user", "content": said}]
         )

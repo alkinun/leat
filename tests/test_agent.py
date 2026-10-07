@@ -424,6 +424,38 @@ def test_review(agent, engine, events):
     assert agent.store.reviewed(id) == 3 and agent.store.idle(time.time() + 1) == []
     background.review(agent, id)  # nothing new: no request
     assert len(engine.requests) == 3
+    # of a long one, the latest, as much as half the model's context holds
+    engine.replies.put([{"content": "OK."}])
+    agent.send(id, "y" * 3000)
+    until(events, ended)
+    engine.context = 1000
+    engine.replies.put([{"content": "Done."}])
+    background.review(agent, id)
+    assert engine.requests[-1]["messages"][1]["content"] == "y" * 1484 + "\n\nAssistant: OK."
+
+
+def test_background_failures(agent, engine, events, monkeypatch):
+    # a piece of the background's work that fails leaves the others done
+    ids = []
+    for text in ("One", "Two"):
+        engine.replies.put([{"content": "Hi."}])
+        ids.append(agent.send(None, text))
+        until(events, ended)
+        agent.store.name(ids[-1], text)
+    reviewed = []
+
+    def review(agent, id):
+        if id == ids[0]:
+            raise RuntimeError("a bug")
+        reviewed.append(id)
+
+    monkeypatch.setattr(background, "review", review)
+    agent.background = background.Background(agent, idle=0)
+    agent.background.start()
+    deadline = time.time() + 5
+    while not reviewed and time.time() < deadline:
+        time.sleep(0.05)
+    assert reviewed == [ids[1]]
 
 
 def test_background(agent, engine, events):
