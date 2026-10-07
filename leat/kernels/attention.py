@@ -107,19 +107,23 @@ def _attention_partial_kernel(
     # loop, indices of opaque copies of the coordinates: see common.opaque.
     ranges = (lane, wave, block, head, token)
     lane, wave, block, head, token = (opaque(u) for u in ranges)
+    # a block past its row's chunks, which ran no rounds, holds the registers' first values: where
+    # tinygrad works out that a block runs one round at most, as in a window, it writes those
+    # inside the loop
+    ran = block < _chunks(pick(token, lengths), window)
+    sums = [ran.where(total[h].load(), 0.0) for h in range(group)]
+    tops = [ran.where(mx[h].load(), -1e30) for h in range(group)]
     shared = UOp.alloc((waves, group * dim), dtypes.half, addrspace=AddrSpace.LOCAL)
     stat = UOp.alloc((waves, group, 2), dtypes.float32, addrspace=AddrSpace.LOCAL)
     stores = [
         shared[wave, (h * per_lane + i) * WARP + lane].store(
-            (acc[h, i].load() / total[h].load().maximum(1)).cast(dtypes.half)
+            (ran.where(acc[h, i].load(), 0.0) / sums[h].maximum(1)).cast(dtypes.half)
         )
         for h in range(group)
         for i in range(per_lane)
     ]
     stores += [
-        stat[wave, h, i].store(x)
-        for h in range(group)
-        for i, x in enumerate((mx[h].load(), total[h].load()))
+        stat[wave, h, i].store(x) for h in range(group) for i, x in enumerate((tops[h], sums[h]))
     ]
     shared, stat = shared.after(*stores), stat.after(*stores)
     thread, results, first = wave * WARP + lane, [], token * heads + head * group

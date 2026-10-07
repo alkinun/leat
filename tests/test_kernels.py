@@ -528,11 +528,14 @@ def test_attention_groups(heads, kv_heads, length, symbolic):
 
 
 # rows of a decode step: each a token in a slot of its own, or two in one, at lengths that take
-# from one chunk to more chunks than blocks, Gemma 4's window and sinks too
+# from one chunk to more chunks than blocks, Gemma 4's window and sinks too; and rows that each
+# take one round of chunks, whose blocks past the shorter one's chunks take none
 @pytest.mark.parametrize("window, sinks", [(0, False), (1024, True)])
 @pytest.mark.parametrize("symbolic", [False, True])
-def test_attention_rows(window, sinks, symbolic):
-    rows = [(0, 1), (2, 70), (1, 4000), (2, 3000)]
+@pytest.mark.parametrize(
+    "rows", [[(0, 1), (2, 70), (1, 4000), (2, 3000)], [(0, 2048), (2, 68)]], ids=["long", "short"]
+)
+def test_attention_rows(window, sinks, symbolic, rows):
     rng = np.random.default_rng(len(rows) + window)
     cache = rng.standard_normal((2, SLOTS, 8, 4096, 128)).astype(np.float16)
     q = rng.standard_normal((1, 32, len(rows), 128)).astype(np.float32) * 0.3
