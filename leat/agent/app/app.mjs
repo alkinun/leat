@@ -39,7 +39,7 @@ $("remember").onsubmit = async (event) => {
   const text = $("memorable").value.trim();
   if (!text) return;
   try {
-    await post("/api/memories", { text });
+    await post("/api/memories", { text, category: $("category").value });
     $("memorable").value = "";
   } catch (error) {
     status(error.message, true);
@@ -256,13 +256,25 @@ function turnTo(name, push = true) {
   document.title = TITLES[name];
 }
 
+// the memories by category, each its own list, and how full their room is
+const CATEGORIES = { about: "About you", preferences: "Preferences", people: "People",
+  work: "Work", plans: "Plans" };
+const ROOM = 3000; // characters, as the agent bounds them
 function renderMemories() {
-  $("memories").replaceChildren(...memories.toReversed().map((m) => {
-    const item = element("li"), remover = element("button", "", "×");
-    remover.title = "Forget";
-    remover.onclick = () => fetch(`/api/memories/${m.id}`, { method: "DELETE" });
-    item.append(element("span", "", m.text), remover);
-    return item;
+  const used = memories.reduce((n, m) => n + m.text.length, 0);
+  $("room").textContent = memories.length ? `It is ${Math.round((100 * used) / ROOM)}% full.` : "";
+  $("memories").replaceChildren(...Object.entries(CATEGORIES).flatMap(([category, name]) => {
+    const of = memories.filter((m) => m.category === category);
+    if (!of.length) return [];
+    const list = element("ul");
+    list.append(...of.map((m) => {
+      const item = element("li"), remover = element("button", "", "×");
+      remover.title = "Forget";
+      remover.onclick = () => fetch(`/api/memories/${m.id}`, { method: "DELETE" });
+      item.append(element("span", "", m.text), remover);
+      return item;
+    }));
+    return [element("h2", "", name), list];
   }));
 }
 
@@ -522,7 +534,8 @@ const LINES = {
   fetch: (a, i) => [`Reading ${host(a.url)}…`, `Read ${i.title || host(i.url ?? a.url)}`,
     `Couldn't read ${host(a.url)}`],
   recall: (a) => [`Recalling “${a.query}”…`, `Recalled “${a.query}”`, `Couldn't recall “${a.query}”`],
-  remember: (a, i) => ["Remembering…", `Remembered: ${i.memory?.text}`, "Couldn't remember"],
+  remember: (a, i) => ["Remembering…", `${i.replaced ? "Changed" : "Remembered"}: ${i.memory?.text}`,
+    "Couldn't remember"],
   forget: (a, i) => ["Forgetting…", `Forgot: ${i.memory?.text}`, "Couldn't forget"],
   weather: (a, i) => [`Checking the weather in ${a.place}…`, `Checked the weather in ${i.place}`,
     `Couldn't check the weather in ${a.place}`],

@@ -1,6 +1,8 @@
 """The tools the model calls. Each takes a few arguments, and answers with text for the model to
 read and info for people to see of it, such as the pages it read."""
 
+import contextlib
+import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -30,6 +32,17 @@ class Tool:
         """The tool as OpenAI's API declares it."""
         function = {"name": self.name, "description": self.description}
         return {"type": "function", "function": function | {"parameters": self.parameters}}
+
+
+def arguments(raw: Any) -> dict[str, Any]:
+    """A call's arguments as an object, of the JSON text leat serve gives them as. Raises
+    ValueError if they are not one."""
+    if isinstance(raw, str):
+        with contextlib.suppress(ValueError):
+            raw = json.loads(raw)
+    if not isinstance(raw, dict):
+        raise ValueError(f"the arguments must be a JSON object, not {raw!r}")
+    return raw
 
 
 def strings(**arguments: str) -> dict[str, Any]:

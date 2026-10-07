@@ -90,7 +90,12 @@ body:is(.memory, .files) :is(#log, #composer, #greeting) { display: none; }
   padding: 10px 20px; border-radius: var(--round-large); background: var(--accent); color: #fff;
 }
 .page ul { margin: 0; padding: 0; list-style: none; }
-.page ul:empty::before { content: "Nothing yet."; color: var(--muted); }
+#workspace:empty::before, #memories:empty::before { content: "Nothing yet."; color: var(--muted); }
+.page h2 { margin: 28px 0 4px; font-size: 14px; color: var(--muted); font-weight: 600; }
+.page form select {
+  padding: 0 12px; border: 1px solid var(--line); border-radius: var(--round-large);
+  background: var(--card); font-weight: 400;
+}
 .page li {
   display: flex; align-items: center; gap: 12px; padding: 12px 4px;
   border-bottom: 1px solid var(--line);

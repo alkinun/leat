@@ -22,8 +22,9 @@ from typing import Any
 
 from leat.agent import context
 from leat.agent.client import Client, Completion, EngineError
+from leat.agent.review import Background
 from leat.agent.store import Store
-from leat.agent.tools import Context, Result, Tool, files, memory
+from leat.agent.tools import Context, Result, Tool, arguments, files, memory
 from leat.agent.workspace import Workspace
 
 # sampling as Qwen3.6 recommends for general tasks, thinking first, then not
@@ -39,12 +40,13 @@ is {date}.
 When a question needs facts you may not know, or that may have changed since you learned them, \
 call search, then fetch the most promising pages before you answer. Link the pages you used.
 
-When the user tells you something about themselves worth knowing in later conversations, such as \
-their name, work, family, plans or tastes, first call remember, once for each fact, written of \
-"the user", as "The user's cat is called Pamuk.", then reply. Never say you noted or will remember \
-something unless you called remember. When they ask you to forget something, call forget; to \
-change a memory, forget it and remember the new one. To find what you talked about in earlier \
-conversations, call recall.
+When the user tells you something about themselves worth knowing in later conversations, first \
+call remember, then reply: who they are, the people in their life, their work and plans, how they \
+like things done; each fact a memory of its own, written of "the user", as "The user's cat is \
+called Pamuk." Not what they asked about, what a search finds again, or a task's details. When a \
+memory changes, remember the new one in its place; when they ask you to forget something, forget \
+it. Never say you noted something unless you called remember. To find what you talked about in \
+earlier conversations that your memory below does not hold, call recall.
 {workspace}
 What you remember of the user, each by its number:
 {memories}"""
@@ -107,8 +109,26 @@ class Agent:
         self.store, self.engine, self.workspace, self.events = store, engine, workspace, Events()
         self.tools = {tool.name: tool for tool in [*memory.tools(self), *(tools or [])]}
         self._files: list[dict[str, Any]] | None = None  # the files the apps were last told of
+        self.background: Background | None = None  # once started
         self._turns: dict[str, _Turn] = {}  # the running ones, by their conversation's id
         self._lock = threading.Lock()
+
+    def start(self) -> None:
+        """Starts the agent's work in the background: naming conversations, and reviewing them
+        for memories once idle, as review.Background does."""
+        self.background = Background(self)
+        self.background.start()
+
+    def running(self, id: str) -> bool:
+        """Whether a turn runs in a conversation."""
+        with self._lock:
+            return id in self._turns
+
+    def rename(self, id: str, title: str) -> None:
+        """Names a conversation, as the model did, telling the apps."""
+        with self._lock:
+            self.store.name(id, title)
+            self._publish_summary(id)
 
     def conversations(self) -> list[dict[str, Any]]:
         """Every conversation, without its messages, the latest updated first."""
@@ -176,10 +196,28 @@ class Agent:
         """What the agent remembers of the user, the oldest first."""
         return self.store.memories()
 
-    def remember(self, text: str) -> dict[str, Any]:
-        """Remembers something of the user, in the conversations begun from now on."""
+    def remember(
+        self, text: str, category: str = "about", replaces: int | None = None
+    ) -> dict[str, Any]:
+        """Remembers a fact of the user, in the conversations begun from now on, in place of the
+        memory `replaces` if given. Raises ValueError if it may not be one, or if it does not fit
+        the memory's room, NotFound if there is no memory to replace."""
+        text = memory.checked(text, category)
         with self._lock:
-            m = self.store.add_memory(text)
+            others = [m for m in self.store.memories() if m["id"] != replaces]
+            if same := [m for m in others if m["text"].lower() == text.lower()]:
+                raise ValueError(f"that is remembered already, as [{same[0]['id']}]")
+            if (used := sum(len(m["text"]) for m in others)) + len(text) > memory.ROOM:
+                raise ValueError(
+                    f"the memory is full, {used} of its {memory.ROOM} characters: forget or "
+                    "change the least useful memories first, or make one of two"
+                )
+            if replaces is None:
+                m = self.store.add_memory(text, category)
+            elif (changed := self.store.replace_memory(replaces, text, category)) is None:
+                raise NotFound(f"there is no memory {replaces}")
+            else:
+                m = changed
             self.events.publish(self.memories_event())
         return m
 
@@ -371,7 +409,7 @@ class _Turn:
             "max_tokens": tokens, "temperature": 0.3,
             "chat_template_kwargs": {"enable_thinking": False},
         }  # fmt: skip
-        return self.agent.engine.reply(body).strip() or (before or "")
+        return self.agent.engine.reply(body)["content"].strip() or (before or "")
 
     def _call(self, calls: list[dict[str, Any]]) -> None:
         # runs the calls at once, each on a thread, and keeps their answers once all have answered,
@@ -402,13 +440,11 @@ class _Turn:
 
     def _answer(self, message: dict[str, Any], index: int, answered: queue.SimpleQueue) -> None:
         # runs a call's tool, and puts its answer in its message, unless the turn stopped first
-        a, arguments = self.agent, message["info"]["arguments"]
+        a = self.agent
         try:
             if (tool := a.tools.get(message["name"])) is None:
                 raise ValueError(f"there is no tool {message['name']!r}")
-            if not isinstance(arguments, dict):
-                raise ValueError(f"the arguments must be a JSON object, not {arguments!r}")
-            result = tool.run(Context(self.id), **arguments)
+            result = tool.run(Context(self.id), **arguments(message["info"]["arguments"]))
         except Exception as e:  # for the model, which may try again
             result = Result(f"error: {e}", {"error": str(e)})
         with a._lock:
@@ -446,6 +482,8 @@ class _Turn:
             if a._turns.get(self.id) is self:
                 del a._turns[self.id]
                 a._publish_summary(self.id)
+        if a.background is not None:
+            a.background.ended.put(self.id)
 
     def _take_back(self, error: str) -> None:
         # removes the turn's messages, from `start`, and the conversation it began; tells the apps
@@ -475,7 +513,7 @@ def _system(memories: list[dict[str, Any]], workspace: bool) -> dict[str, Any]:
     # workspace's tools if `workspace`
     today = datetime.date.today()
     date = f"{today:%A}, {today.day} {today:%B %Y}"
-    remembered = "\n".join(f"[{m['id']}] {m['text']}" for m in memories) or "Nothing yet."
+    remembered = memory.listing(memories)
     skills = "\n".join(f"- {path}: {about}" for path, about in files.skills())
     space = WORKSPACE.format(skills=skills) if workspace else ""
     content = SYSTEM.format(date=date, memories=remembered, workspace=space)

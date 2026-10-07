@@ -146,6 +146,7 @@ def _agent(args: argparse.Namespace) -> None:
     workspace = Workspace(args.data / "workspace", environment if environment.exists() else None)
     tools = [*web.tools(args.search), *weather.tools(), *files.tools(workspace)]
     agent = Agent(Store(args.data / "leat.db"), Client(args.engine), tools, workspace)
+    agent.start()
     with AgentServer(agent, args.host, args.port) as server:
         print(f"leat agent at {_url(args.host, server.server_port)}, its models of {args.engine}. "
               "Ctrl-C quits.", flush=True)  # fmt: skip

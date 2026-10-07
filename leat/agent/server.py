@@ -101,9 +101,10 @@ class _Handler(BaseHTTPRequestHandler):
                 agent.stop(match[1])
                 self._json(200, {})
             elif path == "/api/memories":
-                if not isinstance(text := body.get("text"), str) or not text.strip():
+                if not isinstance(text := body.get("text"), str):
                     raise ValueError("a memory needs text")
-                self._json(200, agent.remember(text.strip()))
+                category = body.get("category", "about")
+                self._json(200, agent.remember(text, category if isinstance(category, str) else ""))
             elif path == "/api/models/load":
                 if not isinstance(model := body.get("model"), str):
                     raise ValueError("a load needs a model's id")

@@ -22,6 +22,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from leat.agent import review  # noqa: E402
 from leat.agent.agent import Agent  # noqa: E402
 from leat.agent.client import Client  # noqa: E402
 from leat.agent.store import Store  # noqa: E402
@@ -69,6 +70,10 @@ def makes(pattern: str) -> Check:
     return lambda o: None if made(o) else f"made no file /{pattern}/"
 
 
+def remembers_nothing(o: Outcome) -> str | None:
+    return f"remembers {o.memories}" if o.memories else None
+
+
 def forgot(pattern: str) -> Check:
     return lambda o: f"still remembers /{pattern}/" if remembers(pattern)(o) is None else None
 
@@ -81,6 +86,7 @@ class Case:
     memories: list[str] = field(default_factory=list)  # remembered before it
     before: list[str] = field(default_factory=list)  # messages of earlier conversations, each one's
     files: dict[str, str] = field(default_factory=dict)  # the workspace's, by name, attached to it
+    reviewed: bool = False  # reviewed for memories after, as the agent does once it is idle
 
 
 NONE = ("search", "fetch", "weather", "remember", "forget", "recall", "read", "run")
@@ -114,6 +120,12 @@ CASES = [
          [called("run"), makes(r"\.docx$")]),
     Case("spreadsheet", "Make an Excel budget: rent 900, food 350 and transport 80 a month, with "
          "yearly totals.", [called("run"), makes(r"\.xlsx$")]),
+    Case("noticed", "I'm planning my daughter Ada's 7th birthday party for next Saturday. Suggest "
+         "5 party games.", [remembers("Ada")], reviewed=True),
+    Case("no junk", "What's 2^2^2^2?", [remembers_nothing], reviewed=True),
+    Case("cleans up", "Thanks, that's all for today.", [forgot(r"2\^2"), remembers("Izmir")],
+         memories=["The user asked about the value of 2^2^2^2.", "The user lives in Izmir."],
+         reviewed=True),
 ]  # fmt: skip
 
 
@@ -157,7 +169,7 @@ def _run(case: Case, args: argparse.Namespace) -> Outcome:
         tools = [*web.tools(args.search), *weather.tools(), *files.tools(workspace)]
         agent = Agent(Store(Path(data) / "leat.db"), Client(args.engine), tools, workspace)
         for memory in case.memories:
-            agent.remember(memory)
+            agent.remember(memory, "about")
         for message in case.before:
             _wait(agent, agent.send(None, message, args.think))
         for name, text in case.files.items():
@@ -165,6 +177,8 @@ def _run(case: Case, args: argparse.Namespace) -> Outcome:
         start = time.monotonic()
         id = agent.send(None, case.message, args.think, list(case.files))
         messages = _wait(agent, id)
+        if case.reviewed and messages:
+            review.review(agent, id)
         seconds = time.monotonic() - start
         tools_called = [m["name"] for m in messages if m["role"] == "tool"]
         answer = messages[-1]["content"] if messages and messages[-1]["role"] == "assistant" else ""

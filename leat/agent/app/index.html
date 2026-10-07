@@ -36,12 +36,18 @@
   <div id="log"></div>
   <section id="memory" class="page">
     <h1>Memory</h1>
-    <p>What Leat remembers about you. Every new chat knows it; delete what it should forget.</p>
+    <p>What Leat remembers about you. Every new chat knows it; delete what it should forget.
+      <span id="room"></span></p>
     <form id="remember">
       <input id="memorable" placeholder="Something to remember" autocomplete="off">
+      <select id="category">
+        <option value="about">About me</option><option value="preferences">Preferences</option>
+        <option value="people">People</option><option value="work">Work</option>
+        <option value="plans">Plans</option>
+      </select>
       <button>Add</button>
     </form>
-    <ul id="memories"></ul>
+    <div id="memories"></div>
   </section>
   <section id="files" class="page">
     <h1>Files</h1>

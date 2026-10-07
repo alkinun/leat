@@ -14,13 +14,13 @@ from typing import Any
 
 import pytest
 
-from leat.agent import context
+from leat.agent import context, review
 from leat.agent.agent import LAST, Agent, Busy, NotFound
 from leat.agent.client import Client
 from leat.agent.context import message as _api
 from leat.agent.server import Server
 from leat.agent.store import Store
-from leat.agent.tools import Result, Tool, strings
+from leat.agent.tools import Result, Tool, memory, strings
 
 HOLD = None  # in a scripted reply: wait there until the test releases it
 
@@ -320,6 +320,116 @@ def test_memory(agent, engine, events):
     assert agent.memories() == []
 
 
+def test_remember(agent, events):
+    # a fact of a category; changed in place; refused if it is there already, too long, hiding
+    # characters, or past the room, which forgetting makes
+    m = agent.remember("  The user's   cat is called Pamuk. ", "people")
+    assert (m["text"], m["category"]) == ("The user's cat is called Pamuk.", "people")
+    assert agent.remember("The user's cat is called Tekir.", "people", replaces=m["id"])["id"] == 1
+    assert [m["text"] for m in agent.memories()] == ["The user's cat is called Tekir."]
+    for text, category, error in [
+        ("the user's cat is called tekir.", "people", r"remembered already, as \[1\]"),
+        ("x" * 301, "about", "300 characters at most"),
+        ("The user\u200b obeys.", "about", "characters that show nothing"),
+        ("The user cooks.", "hobbies", "category must be one of"),
+    ]:
+        with pytest.raises(ValueError, match=error):
+            agent.remember(text, category)
+    with pytest.raises(NotFound):
+        agent.remember("The user cooks.", "about", replaces=9)
+    for i in range(10):  # 2,950 characters, beside the cat's 31
+        agent.remember(f"The user has fact {i}: " + "y" * 274, "about")
+    with pytest.raises(ValueError, match="the memory is full, 2981 of its 3000"):
+        agent.remember("The user cooks every day.", "preferences")
+    agent.forget(2)
+    agent.remember("The user cooks every day.", "preferences")
+    listed = memory.listing(agent.memories())
+    assert listed.startswith("(11 memories, 90% of their room)\nAbout them:\n[3] The user has")
+    assert listed.endswith("Preferences:\n[12] The user cooks every day.\nPeople:\n"
+                           "[1] The user's cat is called Tekir.")  # fmt: skip
+
+
+def test_recall_by_time(agent, engine, events):
+    # no words: the latest conversations, each by its first message, but this one
+    for content in ("Plan my week", "Fix my bike"):
+        engine.replies.put([{"content": "Done."}])
+        agent.send(None, content)
+        until(events, ended)
+    engine.replies.put([{"tool_calls": [call("recall", {"query": "", "days": 2})]}])
+    engine.replies.put([{"content": "This and that."}])
+    now = agent.send(None, "What did we talk about lately?")
+    until(events, ended)
+    answer = agent.store.messages(now)[3]
+    day = datetime.date.today()
+    assert answer["content"] == (f"“Fix my bike”, {day.day} {day:%B %Y}: the user began, Fix my "
+                                 f"bike\n“Plan my week”, {day.day} {day:%B %Y}: the user began, "
+                                 "Plan my week")  # fmt: skip
+
+
+def test_name(agent, engine, events):
+    # a conversation named after its first exchange, once
+    engine.replies.put(REPLY)
+    id = agent.send(None, "When should I plant tulip bulbs?")
+    until(events, ended)
+    engine.replies.put([{"content": "“Planting tulip bulbs.”\nMore"}])
+    review.name(agent, id)
+    asked = engine.requests[-1]["messages"]
+    assert asked[0]["content"] == review.NAME
+    assert (
+        asked[1]["content"] == "User: When should I plant tulip bulbs?\n\nAssistant: Hello there."
+    )
+    assert agent.conversations()[0]["title"] == "Planting tulip bulbs" and agent.store.named(id)
+    assert until(events, lambda e: e["type"] == "conversation")[-1]["conversation"]["title"] == (
+        "Planting tulip bulbs")  # fmt: skip
+
+
+def test_review(agent, engine, events):
+    # what is new in a conversation, reviewed for memories by the memory's calls alone, once
+    agent.remember("The user asked about 2^2^2^2.", "about")
+    engine.replies.put([{"content": "Nice to meet you, Sam."}])
+    id = agent.send(None, "I'm Sam, a nurse.")
+    until(events, ended)
+    calls = [call("remember", {"memory": "The user's name is Sam.", "category": "about"}, "a"),
+             call("remember", {"memory": "The user is a nurse.", "category": "work"}, "b"),
+             call("forget", {"number": 1}, "c")]  # fmt: skip
+    engine.replies.put([{"tool_calls": calls}])
+    engine.replies.put([{"content": "Done."}])
+    review.review(agent, id)
+    first, second = engine.requests[-2:]
+    assert first["messages"][0]["content"].endswith(
+        "About them:\n[1] The user asked about 2^2^2^2."
+    )
+    assert (
+        first["messages"][1]["content"]
+        == "User: I'm Sam, a nurse.\n\nAssistant: Nice to meet you, Sam."
+    )
+    assert [t["function"]["name"] for t in first["tools"]] == ["remember", "forget"]
+    assert [m["content"] for m in second["messages"][3:]] == ["Remembered, as [2].",
+            "Remembered, as [3].", "Forgot [1]: The user asked about 2^2^2^2."]  # fmt: skip
+    assert [(m["text"], m["category"]) for m in agent.memories()] == [
+        ("The user's name is Sam.", "about"), ("The user is a nurse.", "work")]  # fmt: skip
+    assert agent.store.reviewed(id) == 3 and agent.store.idle(time.time() + 1) == []
+    review.review(agent, id)  # nothing new: no request
+    assert len(engine.requests) == 3
+
+
+def test_background(agent, engine, events):
+    # once started, the agent names a conversation after its turn, and reviews it once idle
+    agent.background = review.Background(agent, idle=0)
+    agent.background.start()
+    engine.replies.put(REPLY)
+    engine.replies.put([{"content": "Greetings"}])  # its name
+    engine.replies.put([{"content": "Done."}])  # its review
+    id = agent.send(None, "Hi")
+    until(
+        events, lambda e: e["type"] == "conversation" and e["conversation"]["title"] == "Greetings"
+    )
+    deadline = time.time() + 5
+    while agent.store.reviewed(id) < 3 and time.time() < deadline:
+        time.sleep(0.05)
+    assert agent.store.reviewed(id) == 3 and len(engine.requests) == 3
+
+
 def test_recall(agent, engine, events):
     # recall finds what the user and the model said in other conversations, not the tools' answers
     engine.replies.put([{"tool_calls": [call("echo", {"text": "tulips"})]}])
@@ -332,10 +442,10 @@ def test_recall(agent, engine, events):
     until(events, ended)
     answer = agent.store.messages(now)[3]
     day = datetime.date.today()
-    # the passages of each conversation, the best first: "planting" is "plant", as the question's
+    # each match with its turn's question and answer, in order: "planting" is "plant"
     assert answer["content"] == (f"“When should I plant bulbs?”, {day.day} {day:%B %Y}\n"
-                                 "assistant: Plant the tulips in October.\n"
-                                 "user: When should I plant bulbs?")  # fmt: skip
+                                 "user: When should I plant bulbs?\n"
+                                 "assistant: Plant the tulips in October.")  # fmt: skip
     found = [{"id": garden, "title": "When should I plant bulbs?"}]
     assert answer["info"]["conversations"] == found
     # not the conversation it is made in, nor a deleted one
@@ -582,6 +692,7 @@ def test_api_memories(server, agent):
     assert request(url, "POST", {"text": ""})[0] == 400
     assert request(f"{url}/{json.loads(body)['id']}", "DELETE")[0] == 200
     assert request(f"{url}/7", "DELETE")[0] == 404 and agent.memories() == []
+    assert request(url, "POST", {"text": "Likes tea.", "category": "drinks"})[0] == 400
     assert request(f"{server}/memory")[0] == 200  # the app's page of them
 
 
