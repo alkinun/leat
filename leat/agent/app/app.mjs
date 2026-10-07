@@ -147,7 +147,7 @@ function handle(event) {
       break;
     case "models":
       models = event.models;
-      loading = null;
+      loading = models.find((m) => m.status === "loading")?.id ?? null;
       unreachable = event.error ?? null;
       if (unreachable) status(unreachable, true);
       renderModels();

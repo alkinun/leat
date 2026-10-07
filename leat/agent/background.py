@@ -68,15 +68,17 @@ class Background:
         self._woken.set()
 
     def _work(self) -> None:
-        # runs the tasks due, names the conversations not named, as those whose first turns
-        # ended, and reviews the idle ones, one at a time, then waits for a wake, the next task or
-        # the next look. Each piece of work that fails is tried again at the next look, the others
-        # done meanwhile: a task due that waits, for its conversation or the engine, and any while
-        # the engine is away. A bug's error is said, not the thread's end.
+        # tells the apps of the engine's models if they changed, as it came up, runs the tasks due,
+        # names the conversations not named, as those whose first turns ended, and reviews the
+        # idle ones, one at a time, then waits for a wake, the next task or the next look. Each
+        # piece of work that fails is tried again at the next look, the others done meanwhile: a
+        # task due that waits, for its conversation or the engine, and any while the engine is
+        # away. A bug's error is said, not the thread's end.
         while True:
             self._woken.clear()
             soonest = float("inf")
             try:
+                self.agent.models_changed()
                 due = self.agent.store.due(time.time())
                 for task in due:
                     _attempt(run, self.agent, task)

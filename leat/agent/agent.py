@@ -116,6 +116,7 @@ class Agent:
         own = [*memory.tools(self), *scheduling.tools(self)]
         self.tools = {tool.name: tool for tool in [*own, *(tools or [])]}
         self._files: list[dict[str, Any]] | None = None  # the files the apps were last told of
+        self._models: Event | None = None  # the engine's models, as the apps were last told
         self.background: Background | None = None  # once started
         self._turns: dict[str, _Turn] = {}  # the running ones, by their conversation's id
         self._lock = threading.Lock()
@@ -306,7 +307,16 @@ class Agent:
         try:
             self.engine.load(model)
         finally:
-            self.events.publish(self.models_event())
+            self.models_changed(always=True)
+
+    def models_changed(self, always: bool = False) -> None:
+        """Tells the apps of the engine's models, if they changed since they were last told, as
+        they do when the engine comes up or goes away; or `always`."""
+        event = self.models_event()
+        with self._lock:
+            if always or event != self._models:
+                self._models = event
+                self.events.publish(event)
 
     def models_event(self) -> Event:
         """The engine's models, as an event, or why there are none."""

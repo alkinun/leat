@@ -47,6 +47,11 @@ class Completion:
             self._sock.shutdown(socket.SHUT_RDWR)
 
 
+# seconds the engine may take to list its models: one that takes longer is as good as away, whereas
+# a completion, which may wait for others, or a load, may take any time
+LIST = 10
+
+
 class Client:
     """leat serve at `url`, as http://127.0.0.1:8080."""
 
@@ -58,7 +63,7 @@ class Client:
 
     def models(self) -> list[dict[str, Any]]:
         """The models it has, each with its status: "loaded", "loading" or "unloaded"."""
-        return self._json("GET", "/v1/models").get("data", [])
+        return self._json("GET", "/v1/models", timeout=LIST).get("data", [])
 
     def load(self, model: str) -> None:
         """Loads a model in place of the loaded one; returns once it is ready."""
@@ -78,8 +83,14 @@ class Client:
                 reply["tool_calls"] = [{k: c[k] for k in ("id", "type", "function")} for c in calls]
         return reply
 
-    def _json(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
-        sock, response = self._open(method, path, body)
+    def _json(
+        self,
+        method: str,
+        path: str,
+        body: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        sock, response = self._open(method, path, body, timeout)
         try:
             return json.loads(response.read())
         except (OSError, ValueError) as e:
@@ -88,12 +99,13 @@ class Client:
             _close(sock, response)
 
     def _open(
-        self, method: str, path: str, body: dict[str, Any] | None = None
-    ) -> tuple[socket.socket, http.client.HTTPResponse]:
+        self, method: str, path: str, body: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ) -> tuple[socket.socket, http.client.HTTPResponse]:  # fmt: skip
         # a request's socket and its response, a success's: any other raises EngineError. The
         # response keeps the socket once the connection lets it go, as it does when the engine
         # closes it after the response: leat serve's streams do.
-        connection = http.client.HTTPConnection(self._host, self._port)
+        connection = http.client.HTTPConnection(self._host, self._port, timeout=timeout)
         try:
             data = None if body is None else json.dumps(body).encode()
             connection.request(method, path, data, {"Content-Type": "application/json"})

@@ -3,6 +3,7 @@ import datetime
 import http.client
 import json
 import queue
+import socket
 import sqlite3
 import threading
 import time
@@ -796,6 +797,23 @@ def test_models(agent, engine, events):
     assert engine.loads == ["other"]
     assert [e["type"] for e in until(events, lambda e: e["type"] == "models")] == [
         "loading", "models"]  # fmt: skip
+    # the apps are told of the models as they change, as when the engine loads one or comes up
+    agent.models_changed()
+    assert events.empty()  # as they were told
+    engine.status = "loading"
+    agent.models_changed()
+    assert events.get(timeout=1)["models"] == [{"id": "fake", "status": "loading"}]
+
+
+def test_engine_stuck(tmp_path, monkeypatch):
+    # an engine that takes the request but never answers is as good as away, once LIST has passed
+    monkeypatch.setattr("leat.agent.client.LIST", 0.2)
+    with socket.create_server(("127.0.0.1", 0)) as stuck:
+        client = Client(f"http://127.0.0.1:{stuck.getsockname()[1]}")
+        start = time.monotonic()
+        with pytest.raises(EngineError, match="timed out"):
+            client.models()
+        assert time.monotonic() - start < 2
 
 
 @pytest.fixture
