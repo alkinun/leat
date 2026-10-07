@@ -21,10 +21,11 @@ from collections.abc import Iterator
 from typing import Any
 
 from leat.agent import context
+from leat.agent.background import Background
 from leat.agent.client import Client, Completion, EngineError
-from leat.agent.review import Background
 from leat.agent.store import Store
 from leat.agent.tools import Context, Result, Tool, arguments, files, memory
+from leat.agent.tools import tasks as scheduling
 from leat.agent.workspace import Workspace
 
 # sampling as Qwen3.6 recommends for general tasks, thinking first, then not
@@ -49,6 +50,9 @@ called Pamuk." Not what they asked about, what a search finds again, or a task's
 memory changes, remember the new one in its place; when they ask you to forget something, forget \
 it. Never say you noted something unless you called remember. To find what you talked about in \
 earlier conversations that your memory below does not hold, call recall.
+
+When the user wants something done later, once or again and again, as a reminder or a morning's \
+briefing, call schedule.
 {workspace}
 What you remember of the user, each by its number:
 {memories}"""
@@ -109,7 +113,8 @@ class Agent:
         workspace: Workspace | None = None,
     ):  # fmt: skip
         self.store, self.engine, self.workspace, self.events = store, engine, workspace, Events()
-        self.tools = {tool.name: tool for tool in [*memory.tools(self), *(tools or [])]}
+        own = [*memory.tools(self), *scheduling.tools(self)]
+        self.tools = {tool.name: tool for tool in [*own, *(tools or [])]}
         self._files: list[dict[str, Any]] | None = None  # the files the apps were last told of
         self.background: Background | None = None  # once started
         self._turns: dict[str, _Turn] = {}  # the running ones, by their conversation's id
@@ -117,7 +122,7 @@ class Agent:
 
     def start(self) -> None:
         """Starts the agent's work in the background: naming conversations, and reviewing them
-        for memories once idle, as review.Background does."""
+        for memories once idle, and running the tasks due, as background.Background does."""
         self.background = Background(self)
         self.background.start()
 
@@ -149,13 +154,15 @@ class Agent:
             return self._summary(c) | {"messages": messages, "summarized": summarized}
 
     def send(
-        self, id: str | None, content: str, think: bool = False, attached: list[str] | None = None
-    ) -> str:
+        self, id: str | None, content: str, think: bool = False, attached: list[str] | None = None,
+        task: int | None = None,
+    ) -> str:  # fmt: skip
         """Starts a turn of the user's message, in a new conversation without an id; returns the
         conversation's id. The model thinks before it replies if `think`, which takes longer, and
-        reads of the files `attached`, in the workspace. Raises NotFound if there is no such
-        conversation or file, Busy if a turn runs in the conversation."""
-        info: dict[str, Any] = {"think": think}
+        reads of the files `attached`, in the workspace. A message of a scheduled task names it.
+        Raises NotFound if there is no such conversation or file, Busy if a turn runs in the
+        conversation."""
+        info: dict[str, Any] = {"think": think} | ({"task": task} if task else {})
         if attached:
             space = self.workspace
             if space is None or not all(space.path(name).is_file() for name in attached):
@@ -174,7 +181,7 @@ class Agent:
                     raise Busy("a reply is already running")
                 start = len(self.store.messages(id))
                 self.store.append(id, message)
-            turn = self._turns[id] = _Turn(self, id, start, content, think)
+            turn = self._turns[id] = _Turn(self, id, start, content, think, task)
             self._publish_summary(id)
             self._publish_message(id, start, message)
         threading.Thread(target=turn.run, name=f"turn {id}", daemon=True).start()
@@ -241,6 +248,42 @@ class Agent:
     def files_event(self) -> Event:
         return {"type": "files", "files": self.workspace.files() if self.workspace else []}
 
+    def schedule(
+        self, prompt: str, at: datetime.datetime, repeat: str, conversation: str | None = None
+    ) -> dict[str, Any]:
+        """Schedules a task, first at a time of the box's clock, then as often as `repeat` says,
+        in a conversation. Raises ValueError if it may not be one, as at a time passed."""
+        now = datetime.datetime.now()
+        at = scheduling.first(at, repeat, now)
+        prompt = scheduling.checked(prompt, at, repeat, now)
+        with self._lock:
+            if len(self.store.tasks()) >= scheduling.MOST:
+                raise ValueError(f"{scheduling.MOST} tasks are scheduled, the most: cancel one")
+            task = self.store.add_task(prompt, repeat, at.timestamp(), conversation)
+            self.events.publish(self.tasks_event())
+        return task | {"schedule": scheduling.describe(task)}
+
+    def unschedule(self, id: int) -> dict[str, Any]:
+        """Cancels a task, and returns it. Raises NotFound if there is no such task."""
+        with self._lock:
+            if (task := self.store.delete_task(id)) is None:
+                raise NotFound(f"there is no task {id}")
+            self.events.publish(self.tasks_event())
+        return task
+
+    def tasks(self) -> list[dict[str, Any]]:
+        """The tasks, the next due first, each with its times in words."""
+        return [t | {"schedule": scheduling.describe(t)} for t in self.store.tasks()]
+
+    def ran(self, id: int, due: float | None, conversation: str) -> None:
+        """Sets when a task that ran runs next, in the conversation it ran in; or ends it."""
+        with self._lock:
+            self.store.advance(id, due, conversation)
+            self.events.publish(self.tasks_event())
+
+    def tasks_event(self) -> Event:
+        return {"type": "tasks", "tasks": self.tasks()}
+
     def memories_event(self) -> Event:
         return {"type": "memories", "memories": self.store.memories()}
 
@@ -284,8 +327,11 @@ class Agent:
 class _Turn:
     """A turn running in a conversation, of the user's message at `start`."""
 
-    def __init__(self, agent: Agent, id: str, start: int, content: str, think: bool):
+    def __init__(
+        self, agent: Agent, id: str, start: int, content: str, think: bool, task: int | None
+    ):  # fmt: skip
         self.agent, self.id, self.start, self.content, self.think = agent, id, start, content, think
+        self.task = task  # the scheduled task the message is of, if any
         self.kept = start + 1  # the conversation's messages kept
         self.live: list[dict[str, Any]] = []  # those after, to keep: a reply, or its calls running
         self.stopped = threading.Event()
@@ -492,6 +538,9 @@ class _Turn:
             if a._turns.get(self.id) is self:
                 del a._turns[self.id]
                 a._publish_summary(self.id)
+                if self.task:  # a scheduled task done, for the apps to say
+                    done = {"type": "done", "conversation": self.id, "task": self.content}
+                    a.events.publish(done)
         if a.background is not None:
             a.background.ended.put(self.id)
 

@@ -22,7 +22,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from leat.agent import review  # noqa: E402
+from leat.agent import background  # noqa: E402
 from leat.agent.agent import Agent  # noqa: E402
 from leat.agent.client import Client  # noqa: E402
 from leat.agent.store import Store  # noqa: E402
@@ -41,6 +41,7 @@ class Outcome:
     answer: str
     memories: list[str]
     files: list[str]
+    tasks: list[str]  # each its prompt and how often it repeats, as "Call Ada (once)"
     seconds: float
 
 
@@ -74,6 +75,11 @@ def remembers_nothing(o: Outcome) -> str | None:
     return f"remembers {o.memories}" if o.memories else None
 
 
+def schedules(pattern: str) -> Check:
+    found = lambda o: any(re.search(pattern, t, re.I) for t in o.tasks)  # noqa: E731
+    return lambda o: None if found(o) else f"scheduled no task /{pattern}/ but {o.tasks}"
+
+
 def forgot(pattern: str) -> Check:
     return lambda o: f"still remembers /{pattern}/" if remembers(pattern)(o) is None else None
 
@@ -89,7 +95,7 @@ class Case:
     reviewed: bool = False  # reviewed for memories after, as the agent does once it is idle
 
 
-NONE = ("search", "fetch", "weather", "remember", "forget", "recall", "read", "run")
+NONE = ("search", "fetch", "weather", "remember", "forget", "recall", "read", "run", "schedule")
 CASES = [
     Case("chat", "Write a haiku about autumn.", [uncalled(*NONE)]),
     Case("arithmetic", "What is 17 * 23?", [says(r"391"), uncalled(*NONE)]),
@@ -120,6 +126,10 @@ CASES = [
          [called("run"), makes(r"\.docx$")]),
     Case("spreadsheet", "Make an Excel budget: rent 900, food 350 and transport 80 a month, with "
          "yearly totals.", [called("run"), makes(r"\.xlsx$")]),
+    Case("reminder", "Remind me in 2 hours to take out the trash.",
+         [called("schedule"), schedules(r"trash.*\(once\)")]),
+    Case("briefing", "Every weekday at 7:30, give me the weather in London.",
+         [called("schedule"), schedules(r"weather.*London.*\(weekdays\)")]),
     Case("noticed", "I'm planning my daughter Ada's 7th birthday party for next Saturday. Suggest "
          "5 party games.", [remembers("Ada")], reviewed=True),
     Case("no junk", "What's 2^2^2^2?", [remembers_nothing], reviewed=True),
@@ -178,13 +188,14 @@ def _run(case: Case, args: argparse.Namespace) -> Outcome:
         id = agent.send(None, case.message, args.think, list(case.files))
         messages = _wait(agent, id)
         if case.reviewed and messages:
-            review.review(agent, id)
+            background.review(agent, id)
         seconds = time.monotonic() - start
         tools_called = [m["name"] for m in messages if m["role"] == "tool"]
         answer = messages[-1]["content"] if messages and messages[-1]["role"] == "assistant" else ""
         memories = [m["text"] for m in agent.memories()]
         names = [f["name"] for f in workspace.files()]
-        return Outcome(tools_called, answer or "", memories, names, seconds)
+        tasks = [f"{t['prompt']} ({t['repeat']})" for t in agent.tasks()]
+        return Outcome(tools_called, answer or "", memories, names, tasks, seconds)
 
 
 def _wait(agent: Agent, id: str) -> list[dict]:

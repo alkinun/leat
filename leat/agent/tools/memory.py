@@ -8,7 +8,7 @@ import re
 import time
 from typing import TYPE_CHECKING, Any
 
-from leat.agent.tools import Context, Result, Tool
+from leat.agent.tools import Context, Result, Tool, schema
 
 if TYPE_CHECKING:
     from leat.agent.agent import Agent
@@ -33,7 +33,7 @@ def tools(agent: "Agent") -> list[Tool]:
         Tool(
             "remember",
             "Remember a fact about the user, in the conversations after this one; or change one",
-            _schema(
+            schema(
                 memory=("string", "the fact, in a short sentence, as 'The user's daughter is 7.'"),
                 category=("string", "what it is of", list(CATEGORIES)),
                 replaces=("integer", "the number of the memory it changes, if it does"),
@@ -45,14 +45,14 @@ def tools(agent: "Agent") -> list[Tool]:
         Tool(
             "forget",
             "Forget one of the memories",
-            _schema(number=("integer", "the memory's number")),
+            schema(number=("integer", "the memory's number")),
             lambda context, number: forget(agent, number),
         ),
         Tool(
             "recall",
             "Find what was said in earlier conversations with the user, by words, or the latest "
             "conversations by time",
-            _schema(
+            schema(
                 query=("string", "words to look for; '' for the latest conversations"),
                 days=("integer", f"how many days back to look; for the latest, {RECENT}"),
             ),
@@ -137,17 +137,6 @@ def listing(memories: list[dict[str, Any]]) -> str:
         if of := [m for m in memories if m["category"] == category]:
             lines += [f"{name}:", *(f"[{m['id']}] {m['text']}" for m in of)]
     return "\n".join(lines) if memories else "Nothing yet."
-
-
-def _schema(**parameters: tuple) -> dict[str, Any]:
-    # the schema of arguments, each a type and a description, and its values if they are few; the
-    # first is required, the rest not
-    properties = {}
-    for name, (kind, description, *values) in parameters.items():
-        properties[name] = {"type": kind, "description": description}
-        if values:
-            properties[name]["enum"] = values[0]
-    return {"type": "object", "properties": properties, "required": list(parameters)[:1]}
 
 
 def _clip(text: str, n: int) -> str:

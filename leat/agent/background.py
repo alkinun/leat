@@ -1,5 +1,6 @@
-"""The agent's work in the background: naming each conversation after its first turn, and, once a
-conversation is idle, reviewing what is new in it for memories.
+"""The agent's work in the background: running the scheduled tasks as each is due, naming each
+conversation after its first turn, and, once a conversation is idle, reviewing what is new in it for
+memories.
 
 The review is ChatGPT's "dreaming" and Hermes Agent's background review, which both have as
 models do not save every memory they should as they talk: small ones say they noted a fact and call
@@ -18,12 +19,13 @@ from typing import TYPE_CHECKING, Any
 from leat.agent import context
 from leat.agent.client import EngineError
 from leat.agent.tools import Context, arguments, memory
+from leat.agent.tools import tasks as scheduling
 
 if TYPE_CHECKING:
     from leat.agent.agent import Agent
 
 IDLE = 120  # seconds after its last message a conversation is reviewed
-CHECK = 30  # seconds between looks for idle conversations
+CHECK = 30  # seconds between looks for idle conversations, and tasks due, at most
 ROUNDS = 4  # replies a review takes at most
 READ = 24000  # characters of what was said that a review reads at most, the latest
 NAME = (
@@ -61,14 +63,18 @@ class Background:
         threading.Thread(target=self._work, name="leat background", daemon=True).start()
 
     def _work(self) -> None:
-        # names the conversations whose turns end, and reviews the idle ones, one at a time; an
-        # engine that is away is tried again later, and a bug's error said, not the thread's end
+        # runs the tasks due, names the conversations whose turns end, and reviews the idle ones,
+        # one at a time, waiting for a turn's end or the next task; an engine that is away is tried
+        # again later, and a bug's error said, not the thread's end
         while True:
+            soonest = min((t["next"] for t in self.agent.store.tasks()), default=float("inf"))
             try:
-                ended = self.ended.get(timeout=CHECK)
+                ended = self.ended.get(timeout=max(0.1, min(CHECK, soonest - time.time())))
             except queue.Empty:
                 ended = None
             try:
+                for task in self.agent.store.due(time.time()):
+                    run(self.agent, task)
                 if ended is not None and not self.agent.store.named(ended):
                     name(self.agent, ended)
                 for id in self.agent.store.idle(time.time() - self.idle):
@@ -78,6 +84,26 @@ class Background:
                 pass
             except Exception:
                 traceback.print_exc()
+
+
+def run(agent: "Agent", task: dict[str, Any]) -> None:
+    """Sends a task that is due, in its conversation, or a new one if it is gone, and sets when it
+    runs next: after now, so that one missed while the box was off runs once. A task whose
+    conversation is busy waits for the next look."""
+    from leat.agent.agent import Busy  # which imports this module
+
+    conversation = task["conversation"]
+    if conversation is not None and agent.store.conversation(conversation) is None:
+        conversation = None
+    try:
+        sent = agent.send(conversation, task["prompt"], task=task["id"])
+    except Busy:
+        return
+    now, day = datetime.datetime.now(), datetime.datetime.fromtimestamp(task["first"]).day
+    due: datetime.datetime | None = datetime.datetime.fromtimestamp(task["next"])
+    while due is not None and due <= now:
+        due = scheduling.following(due, task["repeat"], day)
+    agent.ran(task["id"], due.timestamp() if due else None, sent)
 
 
 def name(agent: "Agent", id: str) -> None:

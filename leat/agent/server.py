@@ -23,7 +23,7 @@ from leat.agent.client import EngineError
 
 APP = Path(__file__).parent / "app"
 # the app's files, each served at its path in app/, and their types; the app's pages, /c/<id> one
-# conversation's and /memory, are index.html
+# conversation's, /memory, /files and /tasks, are index.html
 _FILES = (
     "index.html",
     "style.css",
@@ -49,6 +49,7 @@ _SHOWN = {"image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf
 # to download it and of /api/files/<name> to upload or delete it
 _CONVERSATION = re.compile(r"/api/conversations/([0-9a-f]{12})(/messages|/stop)?")
 _MEMORY = re.compile(r"/api/memories/([0-9]+)")
+_TASK = re.compile(r"/api/tasks/([0-9]+)")
 _FILE = re.compile(r"/(?:api/)?files/(.+)")
 
 
@@ -69,7 +70,7 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._trusted():
             return self._error(403, "this server answers its own network's requests alone")
         path = urllib.parse.urlsplit(self.path).path
-        if path in ("/", "/memory", "/files") or path.startswith("/c/"):
+        if path in ("/", "/memory", "/files", "/tasks") or path.startswith("/c/"):
             path = "/index.html"
         if path[1:] in _FILES:
             file = APP / path[1:]
@@ -130,6 +131,8 @@ class _Handler(BaseHTTPRequestHandler):
                 agent.delete(match[1])
             elif match := _MEMORY.fullmatch(path):
                 agent.forget(int(match[1]))
+            elif match := _TASK.fullmatch(path):
+                agent.unschedule(int(match[1]))
             elif path.startswith("/api/files/") and agent.workspace is not None:
                 agent.workspace.delete(urllib.parse.unquote(path.removeprefix("/api/files/")))
                 agent.files_changed()
@@ -187,6 +190,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._event({"type": "conversations", "conversations": agent.conversations()})
             self._event(agent.memories_event())
             self._event(agent.files_event())
+            self._event(agent.tasks_event())
             self._event(agent.models_event())
             while True:
                 try:

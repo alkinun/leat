@@ -48,6 +48,17 @@ def arguments(raw: Any) -> dict[str, Any]:
     return raw
 
 
+def schema(**parameters: tuple) -> dict[str, Any]:
+    """The schema of arguments, each given by name as its type, its description, and its values if
+    they are few; the first is required, the rest not."""
+    properties = {}
+    for name, (kind, description, *values) in parameters.items():
+        properties[name] = {"type": kind, "description": description}
+        if values:
+            properties[name]["enum"] = values[0]
+    return {"type": "object", "properties": properties, "required": list(parameters)[:1]}
+
+
 def strings(**arguments: str) -> dict[str, Any]:
     """The schema of arguments that are strings, each required, given by name and description."""
     properties = {name: {"type": "string", "description": d} for name, d in arguments.items()}

@@ -49,9 +49,11 @@ State = dict[str, Any]  # "cleared": tools' answers before this message's index 
 
 def message(m: dict[str, Any]) -> dict[str, Any]:
     """A message as the model reads it: without what only people see, nor an empty reasoning, but
-    with the files the user attached named. The reasoning is sent back, which templates such as
-    Qwen3.5's show the steps of an agent's turn."""
+    with the files the user attached named, and a scheduled task's said to be one. The reasoning
+    is sent back, which templates such as Qwen3.5's show the steps of an agent's turn."""
     api = {k: v for k, v in m.items() if k != "info" and (v or k != "reasoning_content")}
+    if task := m.get("info", {}).get("task"):
+        api["content"] = f"(Your scheduled task [{task}] is due now: {api['content']})"
     if attached := m.get("info", {}).get("files"):
         api["content"] += f"\n\n(Attached, in the workspace: {', '.join(attached)})"
     return api

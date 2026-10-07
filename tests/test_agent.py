@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from leat.agent import context, review
+from leat.agent import background, context
 from leat.agent.agent import LAST, Agent, Busy, NotFound
 from leat.agent.client import Client
 from leat.agent.context import message as _api
@@ -233,7 +233,7 @@ def test_tools(agent, engine, events):
     }  # fmt: skip
     assert reply["content"] == "It said hi."
     first, second = engine.requests
-    names = ["remember", "forget", "recall", "echo"]
+    names = ["remember", "forget", "recall", "schedule", "unschedule", "tasks", "echo"]
     assert [tool["function"]["name"] for tool in first["tools"]] == names
     assert second["messages"][-1] == _api(answer)
 
@@ -376,9 +376,9 @@ def test_name(agent, engine, events):
     id = agent.send(None, "When should I plant tulip bulbs?")
     until(events, ended)
     engine.replies.put([{"content": "“Planting tulip bulbs.”\nMore"}])
-    review.name(agent, id)
+    background.name(agent, id)
     asked = engine.requests[-1]["messages"]
-    assert asked[0]["content"] == review.NAME
+    assert asked[0]["content"] == background.NAME
     assert (
         asked[1]["content"] == "User: When should I plant tulip bulbs?\n\nAssistant: Hello there."
     )
@@ -398,7 +398,7 @@ def test_review(agent, engine, events):
              call("forget", {"number": 1}, "c")]  # fmt: skip
     engine.replies.put([{"tool_calls": calls}])
     engine.replies.put([{"content": "Done."}])
-    review.review(agent, id)
+    background.review(agent, id)
     first, second = engine.requests[-2:]
     assert first["messages"][0]["content"].endswith(
         "About them:\n[1] The user asked about 2^2^2^2."
@@ -413,13 +413,13 @@ def test_review(agent, engine, events):
     assert [(m["text"], m["category"]) for m in agent.memories()] == [
         ("The user's name is Sam.", "about"), ("The user is a nurse.", "work")]  # fmt: skip
     assert agent.store.reviewed(id) == 3 and agent.store.idle(time.time() + 1) == []
-    review.review(agent, id)  # nothing new: no request
+    background.review(agent, id)  # nothing new: no request
     assert len(engine.requests) == 3
 
 
 def test_background(agent, engine, events):
     # once started, the agent names a conversation after its turn, and reviews it once idle
-    agent.background = review.Background(agent, idle=0)
+    agent.background = background.Background(agent, idle=0)
     agent.background.start()
     engine.replies.put(REPLY)
     engine.replies.put([{"content": "Greetings"}])  # its name
@@ -556,6 +556,65 @@ def test_citations(agent, engine, events):
         id = agent.send(id, f"Read {' and '.join(urls)}")
         until(events, ended)
     assert [m["info"]["n"] for m in agent.store.messages(id) if m["role"] == "tool"] == [1, 2, 2, 3]
+
+
+def test_schedule(agent, engine, events):
+    # a task set in a conversation, by the model's call; past times refused, saying now's
+    engine.replies.put([{"tool_calls": [call("schedule", {"task": "Remind the user to call Ada",
+                                                          "at": "in 2 hours"})]}])  # fmt: skip
+    engine.replies.put([{"content": "I will."}])
+    id = agent.send(None, "Remind me in 2 hours to call Ada")
+    until(events, ended)
+    (task,) = agent.tasks()
+    assert (task["prompt"], task["repeat"], task["conversation"]) == (
+        "Remind the user to call Ada", "once", id)  # fmt: skip
+    assert task["next"] == pytest.approx(time.time() + 7200, abs=5)
+    assert agent.store.messages(id)[3]["content"] == f"Scheduled, as task [1]: {task['schedule']}."
+    with pytest.raises(ValueError, match="that time has passed: it is"):
+        agent.schedule("Too late", datetime.datetime.now(), "once", id)
+    assert agent.unschedule(1)["prompt"] == "Remind the user to call Ada" and agent.tasks() == []
+    with pytest.raises(NotFound):
+        agent.unschedule(1)
+
+
+def test_task_runs(agent, engine, events):
+    # a task due is sent in its conversation, said to be one, and runs next a day after its time,
+    # once however long it was missed; a task done for good goes
+    engine.replies.put(REPLY)
+    id = agent.send(None, "Hi")
+    until(events, ended)
+    yesterday = datetime.datetime.now().replace(second=0, microsecond=0) - datetime.timedelta(
+        days=1, minutes=1)  # fmt: skip
+    daily = agent.store.add_task("Give the weather", "daily", yesterday.timestamp(), id)
+    engine.replies.put([{"content": "Sunny."}])
+    background.run(agent, daily)
+    done = until(events, lambda e: e["type"] == "done")[-1]
+    assert done == {"type": "done", "conversation": id, "task": "Give the weather"}
+    asked = engine.requests[-1]["messages"][-1]
+    assert asked == {
+        "role": "user",
+        "content": "(Your scheduled task [1] is due now: Give the weather)",
+    }
+    (task,) = agent.tasks()
+    assert task["next"] == (yesterday + datetime.timedelta(days=2)).timestamp()
+    # one whose conversation is gone runs in a new one; one that runs once is then gone
+    once = agent.store.add_task("Say hello", "once", yesterday.timestamp(), "000000000000")
+    engine.replies.put([{"content": "Hello."}])
+    background.run(agent, once)
+    other = until(events, lambda e: e["type"] == "done")[-1]["conversation"]
+    assert other != id and [t["id"] for t in agent.tasks()] == [1]
+
+
+def test_task_waits(agent, engine, events):
+    # a task due in a conversation whose turn runs waits for the next look
+    engine.replies.put([{"content": "Hel"}, HOLD])
+    id = agent.send(None, "Hi")
+    until(events, lambda e: e["type"] == "delta")
+    task = agent.store.add_task("Say hello", "once", time.time() - 1, id)
+    background.run(agent, task)
+    assert agent.store.due(time.time()) == [task]
+    engine.released.set()
+    until(events, ended)
 
 
 def test_live_reply(agent, engine, events):
@@ -717,6 +776,14 @@ def test_api_memories(server, agent):
     assert request(f"{server}/memory")[0] == 200  # the app's page of them
 
 
+def test_api_tasks(server, agent):
+    in_an_hour = datetime.datetime.now() + datetime.timedelta(hours=1)
+    task = agent.schedule("Remind the user to stretch", in_an_hour, "daily")
+    assert request(f"{server}/api/tasks/{task['id']}", "DELETE")[0] == 200
+    assert request(f"{server}/api/tasks/{task['id']}", "DELETE")[0] == 404
+    assert request(f"{server}/tasks")[0] == 200  # the app's page of them
+
+
 def test_trust(server, engine):
     # a request naming the box by an address or a local name, and a write from its own page
     engine.replies.put(REPLY)
@@ -744,6 +811,7 @@ def test_events(server, agent, engine):
     assert event() == {"type": "conversations", "conversations": []}
     assert event() == {"type": "memories", "memories": []}
     assert event() == {"type": "files", "files": []}
+    assert event() == {"type": "tasks", "tasks": []}
     assert event()["type"] == "models"
     engine.replies.put(REPLY)
     id = agent.send(None, "Hi")

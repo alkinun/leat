@@ -15,6 +15,9 @@
     <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>New chat
   </button>
   <div id="conversations"></div>
+  <button id="timed" class="place">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Tasks
+  </button>
   <button id="filed" class="place">
     <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>Files
   </button>
@@ -49,6 +52,12 @@
     </form>
     <div id="memories"></div>
   </section>
+  <section id="tasks" class="page">
+    <h1>Tasks</h1>
+    <p>What Leat does later, once or again and again: ask it to remind you of something, or to
+      brief you every morning. <span id="notifying"></span></p>
+    <ul id="scheduled"></ul>
+  </section>
   <section id="files" class="page">
     <h1>Files</h1>
     <p>Your files, which Leat reads and makes. Attach them to a message, or drop them here.</p>
@@ -74,5 +83,6 @@
     </div>
   </div>
 </main>
+<button id="toast" hidden></button>
 </body>
 </html>

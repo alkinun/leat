@@ -11,6 +11,9 @@ named by the model once.
 
 A conversation's context is the state of what its prompt keeps of it, as leat.agent.context fits it
 to the model's.
+
+A task is a prompt the agent runs at its next time, in a conversation, first at its first, whose
+wall clock its repeats keep; one done for good is deleted.
 """
 
 import json
@@ -72,6 +75,17 @@ _MIGRATIONS = [
     INSERT INTO numbered SELECT id, text, created, category FROM memories;
     DROP TABLE memories;
     ALTER TABLE numbered RENAME TO memories;
+    """,
+    """
+    CREATE TABLE tasks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      prompt TEXT NOT NULL,
+      repeat TEXT NOT NULL,
+      first REAL NOT NULL,
+      next REAL NOT NULL,
+      conversation TEXT,
+      created REAL NOT NULL
+    );
     """,
 ]
 _SEARCHED = ("user", "assistant")  # the roles of the messages search finds
@@ -228,6 +242,39 @@ class Store:
     def delete_memory(self, id: int) -> dict[str, Any] | None:
         """Deletes a memory, and returns it, if it is there."""
         rows = self._query("DELETE FROM memories WHERE id = ? RETURNING *", id)
+        return dict(rows[0]) if rows else None
+
+    def tasks(self) -> list[dict[str, Any]]:
+        """The tasks, the next due first."""
+        return [dict(row) for row in self._query("SELECT * FROM tasks ORDER BY next")]
+
+    def task(self, id: int) -> dict[str, Any] | None:
+        rows = self._query("SELECT * FROM tasks WHERE id = ?", id)
+        return dict(rows[0]) if rows else None
+
+    def add_task(self, prompt: str, repeat: str, first: float, conversation: str | None) -> dict:
+        sql = "INSERT INTO tasks (prompt, repeat, first, next, conversation, created) VALUES"
+        with self._lock:
+            values = (prompt, repeat, first, first, conversation, time.time())
+            cursor = self._db.execute(f"{sql} (?, ?, ?, ?, ?, ?)", values)
+        return self.task(cursor.lastrowid or 0) or {}
+
+    def due(self, now: float) -> list[dict[str, Any]]:
+        """The tasks due by a time, the earliest first."""
+        rows = self._query("SELECT * FROM tasks WHERE next <= ? ORDER BY next", now)
+        return [dict(row) for row in rows]
+
+    def advance(self, id: int, due: float | None, conversation: str) -> None:
+        """Sets when a task runs next, and where, or deletes it if it is done for good."""
+        with self._lock:
+            if due is None:
+                self._db.execute("DELETE FROM tasks WHERE id = ?", (id,))
+            else:
+                sql = "UPDATE tasks SET next = ?, conversation = ? WHERE id = ?"
+                self._db.execute(sql, (due, conversation, id))
+
+    def delete_task(self, id: int) -> dict[str, Any] | None:
+        rows = self._query("DELETE FROM tasks WHERE id = ? RETURNING *", id)
         return dict(rows[0]) if rows else None
 
     def _insert(self, id: str, start: int, messages: list[dict[str, Any]]) -> None:

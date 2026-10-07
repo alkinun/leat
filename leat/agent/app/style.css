@@ -42,7 +42,9 @@ body.menu nav { display: none; } /* on a narrow screen, the menu shows it instea
 #conversations { flex: 1; overflow-y: auto; margin-top: 12px; }
 /* the pages beside the conversations, at the sidebar's foot */
 .place { display: flex; gap: 10px; align-items: center; padding: 8px 10px; border-radius: var(--round); }
-.place:hover, body.memory #remembered, body.files #filed { background: var(--bubble); }
+.place:hover, body.memory #remembered, body.files #filed, body.tasks #timed {
+  background: var(--bubble);
+}
 .conversation {
   display: flex; align-items: center; gap: 8px; padding: 6px 4px 6px 10px;
   border-radius: var(--round); cursor: pointer;
@@ -56,6 +58,13 @@ body.menu nav { display: none; } /* on a narrow screen, the menu shows it instea
   background: var(--accent); animation: pulse 1.2s ease-in-out infinite alternate;
 }
 .conversation.running:hover::after { display: none; }
+/* one whose turn ended while another was shown */
+.conversation.unread::after {
+  content: ""; flex: none; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%;
+  background: var(--accent);
+}
+.conversation.unread span { font-weight: 600; }
+.conversation.unread:hover::after { display: none; }
 @keyframes pulse { from { opacity: 1; } to { opacity: 0.25; } }
 
 main { position: relative; flex: 1; display: flex; flex-direction: column; min-width: 0; }
@@ -77,8 +86,8 @@ main.empty #greeting { display: block; margin-bottom: 28px; }
 
 /* a page, as the memory's, in place of a conversation */
 .page { display: none; flex: 1; overflow-y: auto; padding: 16px max(24px, calc(50% - 368px)); }
-body.memory #memory, body.files #files { display: block; }
-body:is(.memory, .files) :is(#log, #composer, #greeting) { display: none; }
+body.memory #memory, body.files #files, body.tasks #tasks { display: block; }
+body:is(.memory, .files, .tasks) :is(#log, #composer, #greeting) { display: none; }
 .page h1 { margin: 24px 0 8px; font: 400 30px/1.3 ui-serif, Georgia, serif; }
 .page > p { margin: 0 0 24px; color: var(--muted); }
 .page form { display: flex; gap: 8px; margin-bottom: 16px; }
@@ -105,6 +114,23 @@ body:is(.memory, .files) :is(#log, #composer, #greeting) { display: none; }
 .page li a:hover { text-decoration: underline; }
 .page .meta { color: var(--muted); font-size: 13px; white-space: nowrap; }
 .page li button { padding: 0 8px; color: var(--muted); font-size: 18px; }
+#scheduled li > div { display: flex; flex-direction: column; gap: 2px; }
+#scheduled:empty::before { content: "Nothing yet."; color: var(--muted); }
+#scheduled a { width: fit-content; font-size: 13px; color: var(--accent); }
+#notifying button {
+  margin-top: 8px; padding: 6px 14px; border: 1px solid var(--line); border-radius: var(--round);
+  background: var(--card); font-size: 14px;
+}
+/* a scheduled task's message, marked */
+.user.scheduled { background: color-mix(in srgb, var(--accent) 12%, var(--bubble)); }
+.user.scheduled > div:first-of-type { display: flex; gap: 8px; align-items: center; }
+.user.scheduled svg { width: 16px; height: 16px; flex: none; color: var(--accent); }
+/* the notice of a task done, which opens its conversation */
+#toast {
+  position: fixed; bottom: 96px; left: 50%; transform: translateX(-50%); z-index: 2;
+  max-width: min(480px, 90vw); padding: 10px 18px; border-radius: var(--round-large);
+  background: var(--text); color: var(--page); font-size: 14px; box-shadow: 0 4px 20px rgb(0 0 0 / 0.2);
+}
 .page li:not(:hover) button { visibility: hidden; }
 
 .message { margin-bottom: 28px; white-space: pre-wrap; overflow-wrap: anywhere; }

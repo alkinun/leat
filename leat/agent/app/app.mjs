@@ -9,14 +9,17 @@ let shown = null; // the conversation shown, with its messages; null for a new o
 let memories = []; // what the agent remembers of the user, the oldest first
 let files = []; // the workspace's, the latest changed first: {name, size, modified}
 let attached = []; // the files the next message attaches: {name, uploading}
+let tasks = []; // the scheduled, the next due first: {id, prompt, schedule, conversation}
+// the conversations whose turns ended while another was shown, as this device saw them
+const unread = new Set(JSON.parse(localStorage.getItem("leat.unread") ?? "[]"));
 let models = [], loading = null, unreachable = null; // the engine's, a model it loads, or why not
 let lost = false; // the events' connection, until it is back
 let think = localStorage.getItem("leat.think") === "true"; // as the user last chose
 let views = []; // the shown messages' elements, by their indexes
 const opened = new Map(); // whether each turn's work is open, as the user left it
 // the pages beside the conversations, each a section of its own name, and their titles
-const PAGES = ["memory", "files"];
-const TITLES = { memory: "Memory", files: "Files" };
+const PAGES = ["memory", "files", "tasks"];
+const TITLES = { memory: "Memory", files: "Files", tasks: "Tasks" };
 
 $("new").onclick = () => {
   open(null);
@@ -25,6 +28,7 @@ $("new").onclick = () => {
 $("menu").onclick = () => document.body.classList.toggle("menu");
 $("remembered").onclick = () => turnTo("memory");
 $("filed").onclick = () => turnTo("files");
+$("timed").onclick = () => turnTo("tasks");
 $("attach").onclick = () => pick(attach);
 $("upload").onclick = () => pick(upload);
 window.ondragover = (event) => event.preventDefault();
@@ -125,6 +129,13 @@ function handle(event) {
       files = event.files;
       renderFiles();
       return;
+    case "tasks":
+      tasks = event.tasks;
+      renderTasks();
+      return;
+    case "done": // a scheduled task's turn, ended
+      notify(event.task, event.conversation);
+      return;
     case "loading":
       loading = event.model;
       break;
@@ -140,8 +151,13 @@ function handle(event) {
   controls();
 }
 
-// a conversation's summary, new or changed
+// a conversation's summary, new or changed: one whose turn ended unseen, unread
 function update(c) {
+  const before = conversations.find((other) => other.id === c.id);
+  if (before?.running && !c.running && shown?.id !== c.id) {
+    unread.add(c.id);
+    localStorage.setItem("leat.unread", JSON.stringify([...unread]));
+  }
   conversations = [c, ...conversations.filter((other) => other.id !== c.id)];
   conversations.sort((a, b) => b.updated - a.updated);
   if (shown?.id !== c.id) return;
@@ -173,6 +189,7 @@ function grow({ index, key, at, text }) {
 // shows a conversation, or a new one, at its own address
 async function open(id, push = true) {
   if (push) history.pushState(null, "", id ? `/c/${id}` : "/");
+  if (unread.delete(id)) localStorage.setItem("leat.unread", JSON.stringify([...unread]));
   document.body.classList.remove("menu", ...PAGES);
   shown = id ? { id, title: "", messages: null, running: false } : null; // until it comes
   render();
@@ -278,6 +295,42 @@ function renderMemories() {
   }));
 }
 
+function renderTasks() {
+  $("scheduled").replaceChildren(...tasks.map((t) => {
+    const item = element("li"), about = element("div"), remover = element("button", "", "×");
+    remover.title = "Cancel";
+    remover.onclick = () => fetch(`/api/tasks/${t.id}`, { method: "DELETE" });
+    about.append(element("span", "", t.prompt), element("span", "meta", t.schedule));
+    if (t.conversation) about.append(conversationLink({ id: t.conversation, title: "Its chat" }));
+    item.append(about, remover);
+    return item;
+  }));
+  const secure = window.isSecureContext && "Notification" in window;
+  $("notifying").replaceChildren();
+  if (secure && Notification.permission === "default") {
+    const ask = element("button", "", "Notify me when one is done");
+    ask.onclick = async () => (await Notification.requestPermission(), renderTasks());
+    $("notifying").append(ask);
+  }
+}
+
+// says a scheduled task is done, in the page, and the system's notification if allowed and the
+// page is out of sight; either opens its conversation
+function notify(task, id) {
+  const toast = $("toast");
+  toast.textContent = `Done: ${task}`;
+  toast.hidden = false;
+  toast.onclick = () => {
+    toast.hidden = true;
+    open(id);
+  };
+  clearTimeout(notify.timer);
+  notify.timer = setTimeout(() => (toast.hidden = true), 8000);
+  if (document.hidden && window.Notification?.permission === "granted") {
+    new Notification("Leat", { body: task }).onclick = () => (window.focus(), open(id));
+  }
+}
+
 function renderFiles() {
   $("workspace").replaceChildren(...files.map((f) => {
     const item = element("li"), remover = element("button", "", "×");
@@ -359,6 +412,7 @@ function renderList() {
     const item = element("div", "conversation");
     item.classList.toggle("shown", c.id === shown?.id);
     item.classList.toggle("running", c.running);
+    item.classList.toggle("unread", unread.has(c.id) && !c.running);
     const remover = element("button", "", "×");
     remover.title = "Delete";
     remover.onclick = (event) => {
@@ -441,10 +495,14 @@ const DID = {
   remember: ["remembered something", (n) => `remembered ${n} things`],
   forget: ["forgot something", (n) => `forgot ${n} things`],
   weather: ["checked the weather", () => "checked the weather"],
+  schedule: ["scheduled a task", (n) => `scheduled ${n} tasks`],
+  unschedule: ["cancelled a task", (n) => `cancelled ${n} tasks`],
+  tasks: ["looked at the tasks", () => "looked at the tasks"],
 };
 
-// what a turn's calls did, in a few words, in the order it began them
-function summary(calls) {
+// what a turn's calls did, in a few words, in the order it began them; those that failed not
+function summary(all) {
+  const calls = all.filter((m) => !m.info?.error);
   const parts = [...new Set(calls.map((m) => m.name))].map((name) => {
     const n = calls.filter((m) => m.name === name).length;
     const [one, many] = DID[name] ?? [`used ${name}`, () => `used ${name}`];
@@ -497,7 +555,10 @@ function message(m) {
     const thinks = !m.content && answer && shown?.running && shown.messages.at(-1) === m;
     summary.textContent = thinks ? "Thinking…" : "Thinking";
     markdown(reasoning, m.reasoning_content ?? "");
-    if (m.role === "user") text.textContent = m.content;
+    if (m.role === "user" && m.info?.task) { // a scheduled task's, marked so
+      item.classList.add("scheduled");
+      text.replaceChildren(icon("schedule"), element("span", "", m.content));
+    } else if (m.role === "user") text.textContent = m.content;
     else markdown(text, m.content ?? "");
     item.querySelectorAll(":not(.code) > pre").forEach(codeBar); // the blocks new since
     cite(item);
@@ -543,6 +604,10 @@ const LINES = {
   read: (a) => [`Reading ${named(a.path)}…`, `Read ${named(a.path)}`, `Couldn't read ${named(a.path)}`],
   write: (a) => [`Writing ${a.path}…`, `Wrote ${a.path}`, `Couldn't write ${a.path}`],
   edit: (a) => [`Editing ${a.path}…`, `Edited ${a.path}`, `Couldn't edit ${a.path}`],
+  schedule: (a, i) => ["Scheduling…", `Scheduled: ${i.task?.prompt} · ${i.task?.schedule}`,
+    "Couldn't schedule"],
+  unschedule: (a, i) => ["Cancelling…", `Cancelled: ${i.task?.prompt}`, "Couldn't cancel"],
+  tasks: () => ["Looking at the tasks…", "Looked at the tasks", "Couldn't look at the tasks"],
   run: (a, i) => ["Running code…", i.status === 0 ? "Ran code"
     : i.status === null ? "Ran code, out of time" : "Ran code, which failed", "Couldn't run code"],
 };
@@ -703,6 +768,9 @@ const ICONS = {
   write: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
   edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
   run: '<path d="m4 17 6-6-6-6"/><path d="M12 19h8"/>',
+  schedule: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  unschedule: '<circle cx="12" cy="12" r="9"/><path d="m9 9 6 6m0-6-6 6"/>',
+  tasks: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
   weather: '<path d="M17.5 19H9a7 7 0 1 1 6.7-9h1.8a4.5 4.5 0 1 1 0 9z"/>',
   forget: '<path d="M6 3h12v18l-6-4-6 4z"/><path d="m10 8 4 4m0-4-4 4"/>',
   tool: '<circle cx="12" cy="12" r="3"/>',
