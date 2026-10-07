@@ -1,6 +1,7 @@
 """The agent's work in the background: running the scheduled tasks as each is due, naming each
-conversation after its first turn, and, once a conversation is idle, reviewing what is new in it for
-memories.
+conversation after its first turn, once a conversation is idle, reviewing what is new in it for
+memories, and telling the apps when the engine comes up or goes away, as it does when the box
+starts.
 
 The review is ChatGPT's "dreaming" and Hermes Agent's background review, which both have as
 models do not save every memory they should as they talk: small ones say they noted a fact and call
