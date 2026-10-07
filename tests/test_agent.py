@@ -383,9 +383,17 @@ def test_name(agent, engine, events):
     assert (
         asked[1]["content"] == "User: When should I plant tulip bulbs?\n\nAssistant: Hello there."
     )
-    assert agent.conversations()[0]["title"] == "Planting tulip bulbs" and agent.store.named(id)
+    assert agent.conversations()[0]["title"] == "Planting tulip bulbs"
+    assert agent.store.unnamed() == []
     assert until(events, lambda e: e["type"] == "conversation")[-1]["conversation"]["title"] == (
         "Planting tulip bulbs")  # fmt: skip
+    # one the model gives no name keeps its own, and is not named again
+    engine.replies.put(REPLY)
+    other = agent.send(None, "Hi")
+    until(events, ended)
+    engine.replies.put([{"content": "  "}])
+    background.name(agent, other)
+    assert agent.conversation(other)["title"] == "Hi" and agent.store.unnamed() == []
 
 
 def test_review(agent, engine, events):
@@ -419,9 +427,19 @@ def test_review(agent, engine, events):
 
 
 def test_background(agent, engine, events):
-    # once started, the agent names a conversation after its turn, and reviews it once idle
+    # once started, the agent names a conversation after its turn, and reviews it once idle; one
+    # whose naming failed, as the engine was away, is named at the next look
+    engine.replies.put(REPLY)
+    unnamed = agent.send(None, "Hello")
+    until(events, ended)
+    agent.store.mark_reviewed(unnamed, 3)
+    engine.replies.put([{"content": "Hello again"}])  # its name, at the first look
     agent.background = background.Background(agent, idle=0)
     agent.background.start()
+    until(
+        events,
+        lambda e: e["type"] == "conversation" and e["conversation"]["title"] == "Hello again",
+    )
     engine.replies.put(REPLY)
     engine.replies.put([{"content": "Greetings"}])  # its name
     engine.replies.put([{"content": "Done."}])  # its review
@@ -432,7 +450,7 @@ def test_background(agent, engine, events):
     deadline = time.time() + 5
     while agent.store.reviewed(id) < 3 and time.time() < deadline:
         time.sleep(0.05)
-    assert agent.store.reviewed(id) == 3 and len(engine.requests) == 3
+    assert agent.store.reviewed(id) == 3 and len(engine.requests) == 5
 
 
 def test_recall(agent, engine, events):

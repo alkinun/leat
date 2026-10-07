@@ -215,9 +215,10 @@ class Store:
         with self._lock:
             self._db.execute("UPDATE conversations SET reviewed = ? WHERE id = ?", (n, id))
 
-    def named(self, id: str) -> bool:
-        rows = self._query("SELECT named FROM conversations WHERE id = ?", id)
-        return bool(rows and rows[0]["named"])
+    def unnamed(self) -> list[str]:
+        """The conversations the model has not named, the latest updated first."""
+        rows = self._query("SELECT id FROM conversations WHERE NOT named ORDER BY updated DESC")
+        return [row["id"] for row in rows]
 
     def name(self, id: str, title: str) -> None:
         """Names a conversation, as the model did."""

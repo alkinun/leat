@@ -10,7 +10,6 @@ the rules of what to remember.
 """
 
 import datetime
-import queue
 import threading
 import time
 import traceback
@@ -57,34 +56,30 @@ class Background:
 
     def __init__(self, agent: "Agent", idle: float = IDLE):
         self.agent, self.idle = agent, idle
-        # the conversations whose turns ended, and None for a wake, as the tasks changed
-        self._woken: queue.SimpleQueue[str | None] = queue.SimpleQueue()
+        self._woken = threading.Event()
 
     def start(self) -> None:
         threading.Thread(target=self._work, name="leat background", daemon=True).start()
 
-    def ended(self, id: str) -> None:
-        """Says a conversation's turn ended: it is named, if it is not, and tasks waiting for it
-        run."""
-        self._woken.put(id)
-
     def wake(self) -> None:
-        """Says the tasks changed, so that one due sooner than the next look is run in time."""
-        self._woken.put(None)
+        """Has the work done now, not at the next look: as a turn ends, after which its
+        conversation is named and the tasks waiting for it run, or as the tasks change."""
+        self._woken.set()
 
     def _work(self) -> None:
-        # runs the tasks due, names the conversations whose turns end, and reviews the idle ones,
-        # one at a time, then waits for a turn's end, the next task or the next look; a task due
-        # that waits, for its conversation or the engine, waits for the next look, as does an
-        # engine that is away; a bug's error is said, not the thread's end
-        ended: str | None = None
+        # runs the tasks due, names the conversations not named, as those whose first turns
+        # ended, and reviews the idle ones, one at a time, then waits for a wake, the next task or
+        # the next look. A task due that waits, for its conversation or the engine, waits for the
+        # next look, as does an engine that is away; a bug's error is said, not the thread's end.
         while True:
+            self._woken.clear()
             due: list[dict[str, Any]] = []
             try:
                 for task in (due := self.agent.store.due(time.time())):
                     run(self.agent, task)
-                if ended is not None and not self.agent.store.named(ended):
-                    name(self.agent, ended)
+                for id in self.agent.store.unnamed():
+                    if not self.agent.running(id):
+                        name(self.agent, id)
                 for id in self.agent.store.idle(time.time() - self.idle):
                     if not self.agent.running(id):
                         review(self.agent, id)
@@ -95,10 +90,7 @@ class Background:
             # the next task's time, of all but those due at this look that wait, as they were
             tasks = [t["next"] for t in self.agent.store.tasks() if t not in due]
             soonest = min(tasks, default=float("inf"))
-            try:
-                ended = self._woken.get(timeout=max(0, min(CHECK, soonest - time.time())))
-            except queue.Empty:
-                ended = None
+            self._woken.wait(max(0, min(CHECK, soonest - time.time())))
 
 
 def run(agent: "Agent", task: dict[str, Any]) -> None:
@@ -125,17 +117,19 @@ def run(agent: "Agent", task: dict[str, Any]) -> None:
 
 
 def name(agent: "Agent", id: str) -> None:
-    """Names a conversation after its first exchange, as the model does."""
-    if not (messages := agent.store.messages(id)):  # deleted
+    """Names a conversation after its first exchange, as the model does; one the model gives no
+    name keeps its own, its first message's start."""
+    if (c := agent.store.conversation(id)) is None:  # deleted
         return
+    messages = agent.store.messages(id)
     said = context.transcript([m for m in messages[1:] if m["role"] != "tool"][:2])[:2000]
     body = {
         "messages": [{"role": "system", "content": NAME}, {"role": "user", "content": said}],
         "max_tokens": 24, "temperature": 0.3, "chat_template_kwargs": {"enable_thinking": False},
     }  # fmt: skip
     lines = agent.engine.reply(body)["content"].strip().splitlines()
-    if title := (lines[0].strip(" \"'“”.") if lines else ""):
-        agent.rename(id, title[:80])
+    title = lines[0].strip(" \"'“”.") if lines else ""
+    agent.rename(id, title[:80] or c["title"])
 
 
 def review(agent: "Agent", id: str) -> None:

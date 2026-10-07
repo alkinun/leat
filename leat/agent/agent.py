@@ -548,7 +548,7 @@ class _Turn:
                     done = {"type": "done", "conversation": self.id, "task": self.content}
                     a.events.publish(done)
         if a.background is not None:
-            a.background.ended(self.id)
+            a.background.wake()
 
     def _take_back(self, error: str) -> None:
         # removes the turn's messages, from `start`, and the conversation it began, and puts the
