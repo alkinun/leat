@@ -95,7 +95,7 @@ class _Handler(BaseHTTPRequestHandler):
             return self._error(403, "requests from other sites' pages are refused")
         path, agent = urllib.parse.urlsplit(self.path).path, self.server.agent
         try:
-            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+            body = json.loads(self.rfile.read(self._length()))
             if not isinstance(body, dict):
                 raise ValueError("the body must be a JSON object")
             match = _CONVERSATION.fullmatch(path)
@@ -167,7 +167,11 @@ class _Handler(BaseHTTPRequestHandler):
         path, agent = urllib.parse.urlsplit(self.path).path, self.server.agent
         if not path.startswith("/api/files/") or agent.workspace is None:
             return self._error(404, f"there is no PUT {path}")
-        if (size := int(self.headers.get("Content-Length") or 0)) > UPLOAD:
+        try:
+            size = self._length()
+        except ValueError as e:
+            return self._error(400, str(e))
+        if size > UPLOAD:
             return self._error(413, f"a file may be {UPLOAD >> 20} MB at most")
         name = agent.workspace.free(urllib.parse.unquote(path.removeprefix("/api/files/")))
         agent.workspace.path(name).write_bytes(self.rfile.read(size))
@@ -226,6 +230,12 @@ class _Handler(BaseHTTPRequestHandler):
             return False
         origin = self.headers.get("Origin")
         return not write or origin is None or urllib.parse.urlsplit(origin).netloc == host
+
+    def _length(self) -> int:
+        # the body's length, as its header says. Raises ValueError if it says none there can be.
+        if (n := int(self.headers.get("Content-Length") or 0)) < 0:
+            raise ValueError("a body's length cannot be negative")
+        return n
 
     def _event(self, event: dict[str, Any]) -> None:
         self.wfile.write(f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode())

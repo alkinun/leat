@@ -220,6 +220,11 @@ def test_api_files(server, workspace, monkeypatch):
         assert call(f"{server}{path}")[0] == 404
     assert call(f"{server}/api/files/My%20notes.txt", "DELETE")[0] == 200
     assert call(f"{server}/api/files/My%20notes.txt", "DELETE")[0] == 404
+    for length in ("-1", "many"):  # a length there cannot be
+        bad = urllib.request.Request(f"{server}/api/files/x.txt", b"x", method="PUT")
+        bad.add_unredirected_header("Content-Length", length)
+        with pytest.raises(urllib.error.HTTPError, match="400"):
+            urllib.request.urlopen(bad)
     monkeypatch.setattr("leat.agent.server.UPLOAD", 4)
     assert call(f"{server}/api/files/big.bin", "PUT", b"12345")[0] == 413
     assert call(f"{server}/files")[0] == 200  # the app's page of them
