@@ -122,8 +122,9 @@ class Agent:
         self._lock = threading.Lock()
 
     def start(self) -> None:
-        """Starts the agent's work in the background: naming conversations, and reviewing them
-        for memories once idle, and running the tasks due, as background.Background does."""
+        """Starts the agent's work in the background: running the tasks due, naming
+        conversations, reviewing them for memories once idle, and telling the apps when the
+        engine comes up or goes away, as background.Background does."""
         self.background = Background(self)
         self.background.start()
 
