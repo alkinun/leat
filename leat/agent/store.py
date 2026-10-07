@@ -60,6 +60,19 @@ _MIGRATIONS = [
     ALTER TABLE conversations ADD COLUMN reviewed INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE conversations ADD COLUMN named INTEGER NOT NULL DEFAULT 0;
     """,
+    # a memory's number is never another's, as a conversation's prompt names the memories of when
+    # it began: one forgotten there must not be one remembered since
+    """
+    CREATE TABLE numbered (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      text TEXT NOT NULL,
+      created REAL NOT NULL,
+      category TEXT NOT NULL DEFAULT 'about'
+    );
+    INSERT INTO numbered SELECT id, text, created, category FROM memories;
+    DROP TABLE memories;
+    ALTER TABLE numbered RENAME TO memories;
+    """,
 ]
 _SEARCHED = ("user", "assistant")  # the roles of the messages search finds
 _SUMMARY = "id, title, created, updated"  # a conversation's columns as the apps list it

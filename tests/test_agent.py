@@ -343,9 +343,13 @@ def test_remember(agent, events):
         agent.remember("The user cooks every day.", "preferences")
     agent.forget(2)
     agent.remember("The user cooks every day.", "preferences")
+    agent.forget(12)  # the latest: its number not given again
+    assert agent.remember("The user cooks every day.", "preferences")["id"] == 13
+    agent.forget(13)
+    agent.remember("The user cooks every day.", "preferences")
     listed = memory.listing(agent.memories())
     assert listed.startswith("(11 memories, 90% of their room)\nAbout them:\n[3] The user has")
-    assert listed.endswith("Preferences:\n[12] The user cooks every day.\nPeople:\n"
+    assert listed.endswith("Preferences:\n[14] The user cooks every day.\nPeople:\n"
                            "[1] The user's cat is called Tekir.")  # fmt: skip
 
 
