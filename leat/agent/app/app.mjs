@@ -781,7 +781,9 @@ function conversationLink({ id, title }) {
   return a;
 }
 
+// a link to a page of the web; of an address of another kind, as javascript:, its text alone
 function link(url, text) {
+  if (!/^https?:\/\//i.test(url ?? "")) return element("span", "", text);
   const a = element("a", "", text);
   Object.assign(a, { href: url, target: "_blank", rel: "noopener noreferrer" });
   return a;
