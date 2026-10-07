@@ -452,8 +452,8 @@ class _Handler(BaseHTTPRequestHandler):
         self._event("[DONE]")
 
     def _same_origin(self) -> bool:
-        # a browser's request from a page of this server, or one of no browser, which sends no
-        # Origin: another site's page may not make it generate or load models
+        # a request of no browser, which sends no Origin, or of a page of this address: another
+        # site's page may not make it generate or load models
         origin = self.headers.get("Origin")
         return origin is None or urllib.parse.urlsplit(origin).netloc == self.headers.get("Host")
 
