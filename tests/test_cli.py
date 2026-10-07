@@ -134,7 +134,7 @@ def test_run(tiny_model, monkeypatch, capsys):
         return render(self, messages, **kwargs)
 
     monkeypatch.setattr("builtins.input", fake_input)
-    monkeypatch.setattr("leat.cli.ChatTemplate.render", rendered)
+    monkeypatch.setattr("leat.chat.ChatTemplate.render", rendered)
     sampling = ["--temperature", "0.5", "--top-k", "5", "--top-p", "0.9", "--min-p", "0.05",
                 "--presence-penalty", "0.5"]  # fmt: skip
     main(["run", str(tiny_model[0]), "--max-context", "64", *sampling])
@@ -159,7 +159,7 @@ def test_run_past_the_context(tiny_model, monkeypatch, capsys):
         return "".join(m["content"] for m in messages)
 
     monkeypatch.setattr("builtins.input", fake_input)
-    monkeypatch.setattr("leat.cli.ChatTemplate.render", rendered)
+    monkeypatch.setattr("leat.chat.ChatTemplate.render", rendered)
     main(["run", str(tiny_model[0]), "--max-context", "64"])
     out = capsys.readouterr().out
     assert "starting over" in out and "the message makes" in out
@@ -191,7 +191,7 @@ def test_serve_directories(tiny_model, tmp_path, monkeypatch, capsys):
         def serve_forever(self):
             pass
 
-    monkeypatch.setattr("leat.cli.Server", Fake)
+    monkeypatch.setattr("leat.server.Server", Fake)
     main(["serve", str(models), "--host", "0.0.0.0"])
     assert loaded == ["tiny"] and "the API at http://127.0.0.1:8080/v1" in capsys.readouterr().out
     (empty := tmp_path / "empty").mkdir()
@@ -233,7 +233,7 @@ def test_run_refused_chat(tiny_model, monkeypatch):
     def refuse(self, messages, **kwargs):
         raise jinja2.TemplateError("Only user and assistant roles are supported!")
 
-    monkeypatch.setattr("leat.cli.ChatTemplate.render", refuse)
+    monkeypatch.setattr("leat.chat.ChatTemplate.render", refuse)
     monkeypatch.setattr("builtins.input", lambda prompt: "hello")
     with pytest.raises(SystemExit, match="refuses this chat: Only user and assistant"):
         main(["run", str(tiny_model[0]), "--max-context", "64", "--system", "Be brief."])

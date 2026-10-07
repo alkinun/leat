@@ -31,7 +31,8 @@ for chunk in client.chat.completions.create(model="llama", messages=messages, st
 From Python:
 
 ```python
-from leat import ChatTemplate, Engine
+from leat.chat import ChatTemplate
+from leat.engine import Engine
 
 engine = Engine("Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf", max_context=4096)
 chat = ChatTemplate(engine.gguf.metadata, engine.tokenizer)

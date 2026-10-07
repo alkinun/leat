@@ -1,4 +1,8 @@
-"""Command line: `leat agent`, `leat run`, `leat serve`, `leat bench` and `leat perplexity`."""
+"""Command line: `leat agent`, `leat run`, `leat serve`, `leat bench` and `leat perplexity`.
+
+The engine's commands import it as they run, so that leat agent, which reaches the engine over HTTP
+alone, never loads it, nor tinygrad.
+"""
 
 import argparse
 import contextlib
@@ -7,11 +11,8 @@ import os
 import time
 from dataclasses import asdict
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import jinja2
-from tinygrad import Device
-
-from leat import bench
 from leat.agent.agent import Agent
 from leat.agent.channels.telegram import Telegram
 from leat.agent.client import Client
@@ -19,12 +20,9 @@ from leat.agent.server import Server as AgentServer
 from leat.agent.store import Store
 from leat.agent.tools import files, weather, web
 from leat.agent.workspace import Workspace
-from leat.chat import ChatTemplate, split_reply
-from leat.engine import Engine
-from leat.gguf import GGUF
-from leat.model import Config
-from leat.sampler import Sampling
-from leat.server import Server
+
+if TYPE_CHECKING:
+    from leat.chat import ChatTemplate
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -163,6 +161,12 @@ def _url(host: str, port: int) -> str:
 
 
 def _run(args: argparse.Namespace) -> None:
+    from tinygrad import Device
+
+    from leat.chat import ChatTemplate, split_reply
+    from leat.engine import Engine
+    from leat.sampler import Sampling
+
     engine = Engine(args.model, max_context=args.max_context, draft=args.draft)
     chat, tok = ChatTemplate(engine.gguf.metadata, engine.tokenizer), engine.tokenizer
     sampling = Sampling(args.temperature, args.top_k, args.top_p, args.min_p, args.presence_penalty)
@@ -205,8 +209,10 @@ def _run(args: argparse.Namespace) -> None:
         messages.append({"role": "assistant", "content": parts.content})
 
 
-def _prompt(chat: ChatTemplate, messages: list[dict]) -> tuple[list[int], bool]:
+def _prompt(chat: "ChatTemplate", messages: list[dict]) -> tuple[list[int], bool]:
     # the chat's prompt, and whether it opens a block of reasoning
+    import jinja2
+
     try:
         rendered = chat.render(messages)
     except jinja2.TemplateError as e:  # such as a system prompt the template does not take
@@ -227,21 +233,32 @@ def _show(parts, shown: tuple[str, str]) -> tuple[str, str]:
 
 
 def _serve(args: argparse.Namespace) -> None:
-    files = [f for p in args.models for f in (sorted(p.glob("*.gguf")) if p.is_dir() else [p])]
-    if not files:
+    from tinygrad import Device
+
+    from leat.server import Server
+
+    models = [f for p in args.models for f in (sorted(p.glob("*.gguf")) if p.is_dir() else [p])]
+    if not models:
         raise SystemExit("no GGUF files: give some, or directories that hold some")
-    if args.draft and len(files) > 1:
+    if args.draft and len(models) > 1:
         raise SystemExit("--draft drafts for one model: serve that one alone")
     options = {"max_context": args.max_context, "slots": args.slots, "draft": args.draft}
-    with Server(files, args.host, args.port, **options) as server:
-        print(f"{files[0].stem} on {Device.DEFAULT}, compiling...", end=" ", flush=True)
-        server.load(files[0].stem)
+    with Server(models, args.host, args.port, **options) as server:
+        print(f"{models[0].stem} on {Device.DEFAULT}, compiling...", end=" ", flush=True)
+        server.load(models[0].stem)
         print(f"the API at {_url(args.host, server.server_port)}/v1. Ctrl-C quits.", flush=True)
         with contextlib.suppress(KeyboardInterrupt):
             server.serve_forever()
 
 
 def _bench(args: argparse.Namespace) -> None:
+    from tinygrad import Device
+
+    from leat import bench
+    from leat.engine import Engine
+    from leat.gguf import GGUF
+    from leat.model import Config
+
     n = args.sequences
     context = (bench.CHAT_CONTEXT if args.chat else args.prompt) + args.generate
     if args.chat:  # as long as the model's context allows
@@ -273,6 +290,9 @@ def _bench(args: argparse.Namespace) -> None:
 
 
 def _perplexity(args: argparse.Namespace) -> None:
+    from leat import bench
+    from leat.engine import Engine
+
     ctx = bench.base_chunk(args.kl_base) if args.kl_base else args.ctx
     engine = Engine(args.model, max_context=ctx)
     if args.kl_base:
