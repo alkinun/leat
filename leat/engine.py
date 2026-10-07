@@ -511,6 +511,10 @@ class graph[T]:
     def captured(self) -> Any:
         return self.jit.captured
 
+    @property
+    def cnt(self) -> int:  # the calls so far, the first counting as two
+        return self.jit.cnt
+
 
 def _ids(tokens: list[int], size: int) -> Tensor:
     # (1, size) token ids, padded: from bytes, as tinygrad converts a list value by value
