@@ -134,8 +134,9 @@ d = docx.Document(); d.add_heading("Plan", 0); d.add_paragraph("Buy milk."); d.s
 wb = openpyxl.Workbook(); wb.active.append(["Rent", 900, "=B1*12"]); wb.save("budget.xlsx")
 """,
     )
-    assert files.read(workspace, "plan.docx").content == "Plan\nBuy milk.\n"
-    assert files.read(workspace, "budget.xlsx").content == "[sheet Sheet]\nRent\t900\t=B1*12\n"
+    assert files.read(workspace, "plan.docx").content == "# Plan\n\nBuy milk.\n\n"
+    assert files.read(workspace, "budget.xlsx").content == (
+        "## Sheet\n\n\n| Rent | 900 | =B1*12 |\n| --- | --- | --- |\n\n")  # fmt: skip
     with pytest.raises(ValueError, match="could not be read"):
         files.write(workspace, "broken.pdf", "not a PDF")
         files.read(workspace, "broken.pdf")
