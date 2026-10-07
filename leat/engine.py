@@ -7,7 +7,7 @@ import random
 from collections.abc import Callable, Generator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from tinygrad import Tensor, TinyJit, UOp, dtypes
 
@@ -421,17 +421,16 @@ class Engine:
             drafted, sampled = row[:drafts], row[drafts:]
             pairs = enumerate(zip(drafted, sampled[:drafts], strict=True))
             kept = next((j for j, (d, t) in pairs if d != t), drafts)
-            ran = [sequence.tokens[-1], *drafted[:kept]]
-            count = 0
+            ran, before = [sequence.tokens[-1], *drafted[:kept]], len(sequence.tokens)
             for token, after in zip(ran, sampled[: kept + 1], strict=True):
                 self._cached[sequence.slot].append(token)
                 sequence.tokens.append(after)
                 generated.append((sequence, after))
-                count += 1
                 self._check(sequence)
                 if sequence.done:
                     break
-            settled += [self._kept_vars[i].bind(count - 1), slots[i]]
+            last = len(sequence.tokens) - before - 1  # the row of the last token generated
+            settled += [self._kept_vars[i].bind(last), slots[i]]
         # the row that gave each sequence's last token is its slot's hidden state, for the next
         # drafts, and the recurrent states after it its states
         self._settle[n](*settled)
@@ -447,9 +446,9 @@ class Engine:
         n = int(tokens.shape[1])
         drafts = _drafts(n)
         ran = drafts + 1
-        options = [t for t in args[: 2 * n] if isinstance(t, Tensor)]
-        slots: list[int | UOp] = [u for u in args[2 * n : 3 * n] if isinstance(u, UOp)]
-        starts: list[int | UOp] = [u for u in args[3 * n :] if isinstance(u, UOp)]
+        options = cast(list[Tensor], list(args[: 2 * n]))
+        slots = cast(list[int | UOp], list(args[2 * n : 3 * n]))
+        starts = cast(list[int | UOp], list(args[3 * n :]))
         last = Tensor.cat(*(self._hidden[slot : slot + 1] for slot in slots)).reshape(1, n, -1)
         drafted = self.drafter.draft(tokens, last, slots, starts, drafts)
         run = tokens.reshape(n, 1).cat(drafted, dim=1).reshape(1, n * ran)
