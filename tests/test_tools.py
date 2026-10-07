@@ -1,5 +1,6 @@
 import json
 import os
+import socket
 import threading
 import urllib.parse
 from collections.abc import Iterator
@@ -52,7 +53,7 @@ class _Site(BaseHTTPRequestHandler):
             self.send_header("Location", "http://10.0.0.1/")
             return self.end_headers()
         kinds = {"/page": "text/html", "/article": "text/html", "/long": "text/html",
-                 "/text": "text/plain"}  # fmt: skip
+                 "/text": "text/plain", "/odd": "text/plain; charset=klingon"}  # fmt: skip
         body = {"/page": PAGE, "/article": ARTICLE, "/long": LONG}.get(path, "Plain text.")
         self._send(kinds.get(path, "application/pdf"), body)
 
@@ -75,9 +76,14 @@ def site() -> Iterator[str]:
 
 def allow(monkeypatch, site: str) -> None:
     # lets fetch read the site served here, as it would one on the web
-    port, public = urllib.parse.urlsplit(site).port, web._public
-    monkeypatch.setattr(web, "_public", lambda url: None if urllib.parse.urlsplit(url).port == port
-                        else public(url))  # fmt: skip
+    port, connect = urllib.parse.urlsplit(site).port, web._connect
+
+    def allowed(address: tuple[str, int], *options: Any) -> socket.socket:
+        if address[1] == port:
+            return socket.create_connection(address, *options)
+        return connect(address, *options)
+
+    monkeypatch.setattr(web, "_connect", allowed)
 
 
 def numbering() -> Context:
@@ -109,6 +115,7 @@ def test_fetch(site, monkeypatch):
     assert result.content == f"[1] A page\n{site}/page\n\nHello\nworld, and more\nAn item"
     assert result.info == {"url": f"{site}/page", "title": "A page", "n": 1}
     assert web.fetch(f"{site}/text").content == f"{site}/text\n\nPlain text."
+    assert web.fetch(f"{site}/odd").content.endswith("Plain text.")  # as UTF-8
     with pytest.raises(ValueError, match="not a page of text but application/pdf"):
         web.fetch(f"{site}/pdf")
 
@@ -127,6 +134,10 @@ def test_fetch_the_web_alone(site, monkeypatch):
     allow(monkeypatch, site)
     with pytest.raises(ValueError, match="10.0.0.1 is on this network"):
         web.fetch(f"{site}/away")
+    # a name of an address on this network, refused before any connection is made to it
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: [(0, 0, 0, "", ("10.0.0.2", 80))])
+    with pytest.raises(ValueError, match="rebinding.example is on this network"):
+        web.fetch("http://rebinding.example/")
 
 
 class _OpenMeteo(BaseHTTPRequestHandler):

@@ -123,8 +123,9 @@ def tools(workspace: Workspace) -> list[Tool]:
     ]
 
 
-def read(workspace: Workspace, path: str, start: int = 0) -> Result:
+def read(workspace: Workspace, path: str, start: int | str = 0) -> Result:
     file = _skill(path) if path.startswith("skills/") else workspace.path(path)
+    start = max(0, int(start))
     if file.is_dir():
         names = sorted(f"{p.name}/" if p.is_dir() else p.name for p in file.iterdir())
         listed = "\n".join(name for name in names if not name.startswith("."))
@@ -155,7 +156,7 @@ def read(workspace: Workspace, path: str, start: int = 0) -> Result:
 def write(workspace: Workspace, path: str, content: str) -> Result:
     file = workspace.path(path)
     file.parent.mkdir(parents=True, exist_ok=True)
-    file.write_text(content)
+    file.write_text(content, encoding="utf-8")
     return Result(f"Wrote {path}, {len(content)} characters.", {"files": [_name(workspace, file)]})
 
 
@@ -163,11 +164,11 @@ def edit(workspace: Workspace, path: str, old: str, new: str) -> Result:
     file = workspace.path(path)
     if not file.is_file():
         raise FileNotFoundError(f"there is no file {path}")
-    text = file.read_text()
+    text = file.read_text(encoding="utf-8")
     if (n := text.count(old)) != 1:
         found = "is not in" if n == 0 else f"is in {n} places of"
         raise ValueError(f"the passage {found} {path}: give it as it is, enough of it to be one")
-    file.write_text(text.replace(old, new))
+    file.write_text(text.replace(old, new), encoding="utf-8")
     return Result(f"Edited {path}.", {"files": [_name(workspace, file)]})
 
 
@@ -190,7 +191,7 @@ def skills() -> list[tuple[str, str]]:
     """Each skill's path, to read, and what it is for, from its SKILL.md's front matter."""
     found = []
     for file in sorted(SKILLS.glob("*/SKILL.md")):
-        lines = file.read_text().split("---")[1].strip().splitlines()
+        lines = file.read_text(encoding="utf-8").split("---")[1].strip().splitlines()
         about = dict(line.split(":", 1) for line in lines if ":" in line)
         found.append((f"skills/{file.parent.name}/SKILL.md", about["description"].strip()))
     return found

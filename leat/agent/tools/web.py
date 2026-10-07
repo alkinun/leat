@@ -2,6 +2,8 @@
 
 Pages are the web's alone: an address on the box's own network, a router's or another machine's,
 is refused, at every redirect too, so that a page cannot lead the model to read the home's devices.
+The addresses checked are those connected to, so that a site's DNS cannot answer the check with
+one and the connection with another.
 
 A page is read as Hermes Agent reads one: its content alone, as markdown, which trafilatura finds in
 the sandbox, where a page made to attack a parser attacks nothing else, or of its text without its
@@ -10,13 +12,16 @@ workspace to read on. Each source is numbered, across the conversation, for the 
 """
 
 import hashlib
+import http.client
 import ipaddress
 import json
 import re
 import socket
+import ssl
 import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
+from typing import Any
 
 from leat.agent.tools import Context, Result, Tool, strings
 from leat.agent.workspace import Workspace
@@ -95,14 +100,16 @@ def search(searxng: str, query: str, context: Context | None = None) -> Result:
 def fetch(url: str, workspace: Workspace | None = None, context: Context | None = None) -> Result:
     if urllib.parse.urlsplit(url).scheme not in ("http", "https"):
         raise ValueError(f"not a web page's address: {url}")
-    _public(url)
     request = urllib.request.Request(url, headers={"User-Agent": _AGENT})
     with _OPENER.open(request, timeout=TIMEOUT) as response:
         kind, final = response.headers.get_content_type(), response.url
         if not kind.startswith("text/") and kind not in TEXTS:
             raise ValueError(f"not a page of text but {kind}")
-        charset = response.headers.get_content_charset() or "utf-8"
-        text = response.read(READ).decode(charset, "replace")
+        data, charset = response.read(READ), response.headers.get_content_charset() or "utf-8"
+    try:
+        text = data.decode(charset, "replace")
+    except LookupError:  # a charset of no name Python knows
+        text = data.decode("utf-8", "replace")
     title = ""
     if "html" in kind:
         title, text = _readable(text, final, workspace)
@@ -151,31 +158,57 @@ def _save(workspace: Workspace, url: str, text: str, suffix: str = ".md") -> str
     folder = workspace.path(SAVED)
     folder.mkdir(exist_ok=True)
     name = f"{SAVED}/{hashlib.sha256(url.encode()).hexdigest()[:16]}{suffix}"
-    workspace.path(name).write_text(text)
+    workspace.path(name).write_text(text, encoding="utf-8")
     for old in sorted(folder.iterdir(), key=lambda p: p.stat().st_mtime)[:-KEPT]:
         old.unlink(missing_ok=True)
     return name
 
 
-def _public(url: str) -> None:
-    # raises ValueError if the URL's host is on this network rather than the web
-    host = urllib.parse.urlsplit(url).hostname or ""
+def _connect(address: tuple[str, int], *options: Any) -> socket.socket:
+    # a connection to a host of the web's, at one of its addresses, as socket.create_connection
+    # makes one; raises ValueError if any is on this network
+    host, port = address
     try:
-        addresses = {str(a[4][0]) for a in socket.getaddrinfo(host, None)}
+        found = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except OSError as e:
         raise ValueError(f"{host} was not found: {e}") from e
+    addresses = list(dict.fromkeys(str(a[4][0]) for a in found))
     if any(not ipaddress.ip_address(a.split("%")[0]).is_global for a in addresses):
         raise ValueError(f"{host} is on this network, not the web")
+    for i, a in enumerate(addresses):  # as IPv6's, where the box has no route to it
+        try:
+            return socket.create_connection((a, port), *options)
+        except OSError:
+            if i == len(addresses) - 1:
+                raise
+    raise ValueError(f"{host} has no address")
 
 
-class _Redirects(urllib.request.HTTPRedirectHandler):
-    # follows a redirect only to the web
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        _public(newurl)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+class _HTTP(http.client.HTTPConnection):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._create_connection = _connect
 
 
-_OPENER = urllib.request.build_opener(_Redirects)
+class _HTTPS(http.client.HTTPSConnection):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._create_connection = _connect
+
+
+class _WebHTTP(urllib.request.HTTPHandler):
+    # opens connections to the web alone, the first and every redirect's
+    def http_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
+        return self.do_open(_HTTP, req)
+
+
+class _WebHTTPS(urllib.request.HTTPSHandler):
+    def https_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
+        return self.do_open(_HTTPS, req, context=_TLS)
+
+
+_TLS = ssl.create_default_context()
+_OPENER = urllib.request.build_opener(_WebHTTP, _WebHTTPS)
 
 
 class _Text(HTMLParser):

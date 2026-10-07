@@ -52,11 +52,14 @@ class Workspace:
         return path
 
     def files(self) -> list[dict[str, Any]]:
-        """Every file, by its name in the workspace, the latest changed first; hidden ones not."""
+        """Every file, by its name in the workspace, the latest changed first; hidden ones not, nor
+        links out of it, as the sandbox's code may make to any path."""
         found = []
         for path in self.root.rglob("*"):
             name = path.relative_to(self.root).as_posix()
-            if path.is_file() and not any(part.startswith(".") for part in name.split("/")):
+            if any(part.startswith(".") for part in name.split("/")):
+                continue
+            if path.is_file() and path.resolve().is_relative_to(self.root):
                 stat = path.stat()
                 found.append({"name": name, "size": stat.st_size, "modified": stat.st_mtime})
         return sorted(found, key=lambda f: f["modified"], reverse=True)

@@ -49,12 +49,14 @@ def test_paths(workspace, tmp_path):
         workspace.path("out/leat.db")
 
 
-def test_files(workspace):
+def test_files(workspace, tmp_path):
     (workspace.root / "notes").mkdir()
     (workspace.root / "notes" / "a.txt").write_text("a")
     (workspace.root / ".hidden").write_text("b")
     (workspace.root / "b.txt").write_text("bb")
     os.utime(workspace.root / "notes" / "a.txt", (0, 0))
+    (tmp_path / "key").write_text("secret")
+    (workspace.root / "key").symlink_to(tmp_path / "key")  # out of it
     assert [(f["name"], f["size"]) for f in workspace.files()] == [("b.txt", 2), ("notes/a.txt", 1)]
     # a name for an upload: at the top, free, and of no path
     assert workspace.free("b.txt") == "b (2).txt" and workspace.free("../../x.pdf") == "x.pdf"
