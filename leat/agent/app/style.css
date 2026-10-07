@@ -120,9 +120,16 @@ div.math { margin: 12px 0; overflow-x: auto; overflow-y: hidden; }
 .tool a { color: var(--text); text-decoration: none; }
 .tool a:hover { text-decoration: underline; }
 .tool .host { margin-left: 8px; font-size: 12px; }
-/* a step of the reply's that called tools, close to the work it began; the answer after it */
+/* a step of the reply's that called tools, close to the work it began */
 .message.step { margin-bottom: 6px; }
-.message.tool + .message.assistant:not(.step) { margin-top: 18px; }
+/* a turn's work, folded into a line that says what it does, then what it did */
+.work { margin: -12px 0 20px; }
+.work > summary { width: fit-content; }
+.work.running > summary { animation: pulse 1.2s ease-in-out infinite alternate; }
+.work[open] > summary { margin-bottom: 10px; }
+.work > .message {
+  margin: 0 0 0 5px; padding: 0 0 8px 16px; border-left: 2px solid var(--line);
+}
 /* the pages a reply read */
 .sources { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; white-space: normal; }
 .sources:empty { display: none; }

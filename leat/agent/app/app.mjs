@@ -9,6 +9,8 @@ let shown = null; // the conversation shown, with its messages; null for a new o
 let models = [], loading = null, unreachable = null; // the engine's, a model it loads, or why not
 let lost = false; // the events' connection, until it is back
 let think = localStorage.getItem("leat.think") === "true"; // as the user last chose
+let views = []; // the shown messages' elements, by their indexes
+const opened = new Map(); // whether each turn's work is open, as the user left it
 
 $("new").onclick = () => {
   open(null);
@@ -96,7 +98,7 @@ function update(c) {
   if (shown?.id !== c.id) return;
   const ended = shown.running && !c.running;
   Object.assign(shown, { title: c.title, running: c.running });
-  if (ended) $("log").lastChild?.update?.(); // its reply no longer thinking
+  if (ended && shown.messages?.length) refresh(shown.messages.length - 1); // done working
 }
 
 // whether a conversation is the one shown, its messages here
@@ -108,8 +110,7 @@ function showing(id) {
 function put(index, m) {
   if (index > shown.messages.length) return open(shown.id, false); // one was missed
   shown.messages[index] = m;
-  const log = $("log"), element = message(m);
-  follow(() => (log.children[index] ? log.children[index].replaceWith(element) : log.append(element)));
+  follow(() => refresh(index));
 }
 
 // more of a message's text: its reasoning or content from `at`
@@ -117,7 +118,7 @@ function grow({ index, key, at, text }) {
   const m = shown.messages[index];
   if (!m || (m[key] ?? "").length < at) return open(shown.id, false); // some was missed
   m[key] = (m[key] ?? "").slice(0, at) + text;
-  follow(() => $("log").children[index].update());
+  follow(() => views[index].update());
 }
 
 // shows a conversation, or a new one, at its own address
@@ -233,9 +234,69 @@ function renderModels() {
 }
 
 function renderLog() {
-  $("log").replaceChildren(...(shown?.messages ?? []).map(message));
+  views = [];
+  $("log").replaceChildren(...turns().map((indexes) => fill(element("div", "turn"), indexes)));
   $("log").scrollTop = $("log").scrollHeight;
 }
+
+// the shown conversation's turns, each the indexes of a user's message and those that came of it;
+// the system's message, before them, a turn of its own
+function turns() {
+  const all = [];
+  (shown?.messages ?? []).forEach((m, i) => {
+    if (m.role === "user" || !all.length) all.push([]);
+    all.at(-1).push(i);
+  });
+  return all;
+}
+
+// shows a message's turn again, or as a new one
+function refresh(index) {
+  const indexes = turns().find((t) => t.includes(index));
+  const old = [...$("log").children].find((turn) => turn.start === indexes[0]);
+  const turn = fill(old ?? element("div", "turn"), indexes);
+  if (!old) $("log").append(turn);
+}
+
+// shows a turn in its element: the user's message, the work that came of it folded into a line,
+// and the answer
+function fill(turn, [start, ...rest]) {
+  const view = (i) => (views[i] = message(shown.messages[i]));
+  const last = shown.messages[rest.at(-1)], answered = last?.role === "assistant" && !last.tool_calls;
+  const work = answered ? rest.slice(0, -1) : rest;
+  turn.start = start;
+  turn.replaceChildren(view(start));
+  if (work.length) turn.append(fold(start, work));
+  if (answered) turn.append(view(rest.at(-1)));
+  return turn;
+}
+
+// a turn's work, its steps and calls, folded into a line: what it does as it runs, then what it did
+function fold(start, indexes) {
+  const box = element("details", "work"), key = `${shown.id} ${start}`;
+  const running = shown.running && turns().at(-1)[0] === start; // the turn running
+  const calls = indexes.map((i) => shown.messages[i]).filter((m) => m.role === "tool");
+  box.open = opened.get(key) ?? false;
+  box.ontoggle = () => opened.set(key, box.open);
+  box.classList.toggle("running", running);
+  const said = running ? (calls.length ? line(calls.at(-1)) : "Working…") : summary(calls);
+  box.append(element("summary", "", said), ...indexes.map((i) => (views[i] = message(shown.messages[i]))));
+  return box;
+}
+
+// what a turn's calls did, in a few words
+function summary(calls) {
+  const count = (name) => calls.filter((m) => m.name === name).length;
+  const searches = count("search"), pages = count("fetch"), parts = [];
+  if (searches) parts.push(`searched the web${searches > 1 ? ` ${searches} times` : ""}`);
+  if (pages) parts.push(pages > 1 ? `read ${pages} pages` : "read a page");
+  for (const name of new Set(calls.map((m) => m.name))) {
+    if (name !== "search" && name !== "fetch") parts.push(`used ${name}`);
+  }
+  const said = parts.join(", ") || "worked";
+  return said[0].toUpperCase() + said.slice(1);
+}
+
 
 // shows the controls as the state has them, the input as tall as its text
 function controls() {
@@ -296,26 +357,31 @@ function work(m) {
   const summary = element("summary"), found = element("div");
   item.append(summary, found);
   item.update = () => {
-    const { arguments: args, results, url, title, error, stopped } = m.info ?? {};
-    const running = !m.content, query = args?.query, address = url ?? args?.url ?? "";
-    let line = `${m.name}`, done = [];
-    if (m.name === "search") {
-      line = running ? `Searching for “${query}”…` : error ? `Couldn't search for “${query}”`
-        : `Searched for “${query}”`;
-      done = (results ?? []).map((r) => link(r.url, r.title));
-    } else if (m.name === "fetch") {
-      line = running ? `Reading ${host(address)}…` : error ? `Couldn't read ${host(address)}`
-        : `Read ${title || host(address)}`;
-      if (!error) done = [link(address, title || address)];
-    }
-    if (stopped) line += " · stopped";
-    item.classList.toggle("running", running);
-    summary.replaceChildren(icon(m.name), element("span", "", line));
+    const { arguments: args, results, url, title, error } = m.info ?? {};
+    let done = [];
+    if (m.name === "search") done = (results ?? []).map((r) => link(r.url, r.title));
+    if (m.name === "fetch" && !error) done = [link(url, title || url)];
+    item.classList.toggle("running", !m.content);
+    summary.replaceChildren(icon(m.name), element("span", "", line(m)));
     if (error || !done.length) done = [element("p", "", error ?? m.content)];
     found.replaceChildren(...(done.length > 1 ? [listed(done)] : done));
   };
   item.update();
   return item;
+}
+
+// a tool's call, in a line: what it is doing, or what it did
+function line(m) {
+  const { arguments: args, url, title, error, stopped } = m.info ?? {};
+  const running = !m.content, query = args?.query, site = host(url ?? args?.url ?? "");
+  let said = m.name;
+  if (m.name === "search") {
+    said = running ? `Searching for “${query}”…` : error ? `Couldn't search for “${query}”`
+      : `Searched for “${query}”`;
+  } else if (m.name === "fetch") {
+    said = running ? `Reading ${site}…` : error ? `Couldn't read ${site}` : `Read ${title || site}`;
+  }
+  return stopped ? `${said} · stopped` : said;
 }
 
 // the pages a reply's turn read before it, its sources
