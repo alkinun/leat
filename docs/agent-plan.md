@@ -277,7 +277,48 @@ Alongside, the box track: first boot and setup, `leat.local` on the network, HTT
 network (a phone's microphone, notifications and home-screen install all need it), updates, and
 later remote access.
 
-## 12. What goes, what stays
+## 12. As the proven agents do it
+
+What ChatGPT, Claude, Hermes Agent and OpenClaw do in October 2026, and what leat agent takes of it,
+after a real conversation filled the 3090's 16k context with a search's pages and the replies after
+it were cut off, empty.
+
+**The context.** Hermes counts the tokens the provider reports, and past 50% of the context first
+clears old tool outputs over 200 characters ("[Old tool output cleared to save context space]"), then
+has a model summarize the middle of the conversation into a structured summary (goal, preferences,
+progress, decisions, files, next steps), keeping the system prompt and the recent tail whole, and
+re-summarizes with the last summary when it fills again. OpenClaw has the model save its memories
+just before. leat agent: the engine reports its context; the agent clears, then summarizes, at a
+share of it, saving memories first; a reply cut off by the context is redone after, or said to be.
+
+**Memory.** Three layers, which all of them have in some form:
+- *Facts the user can see*: ChatGPT's saved memories, Claude's categorized entries (since July
+  2026, updated live during a conversation), Hermes' bounded USER.md and MEMORY.md (some 1,300
+  tokens, so that the model consolidates). Hermes' rules of what to save: preferences, facts about
+  the user and their world, corrections; and what not: the trivial ("User asked about Python"),
+  what a search finds again, raw data, the session's ephemera. It scans each entry for injected
+  instructions and invisible characters before the system prompt carries it. leat agent: facts in
+  categories, a bounded room, replace as well as add and remove, those rules, that scan.
+- *A background pass*: ChatGPT's "dreaming" re-reads past conversations and rewrites the memory,
+  freshness first ("going to Singapore in July" becomes "went"); Hermes reviews each turn in the
+  background, as small models "often claim saves without executing them", as Qwen3.6 did here.
+  leat agent: once a conversation is idle, the model reviews what is new in it, with the memory
+  tools alone, and names the conversation.
+- *Past conversations, searched*: Claude's conversation search and recent chats, Hermes'
+  session_search over FTS5, which returns the messages themselves. leat agent: recall, by words
+  and by time, giving the messages around each match.
+
+**Search.** Hermes converts a page to markdown and gives it whole up to a budget (15,000
+characters), or its start with the full text saved, to read on; Claude has code filter results
+before they reach the context; all cite their sources inline, numbered, the app linking them.
+leat agent: pages extracted to markdown, their boilerplate gone, in the sandbox; a budget, the
+rest saved to read on; sources numbered across a turn, cited as [1], linked in the app.
+
+**Files.** Documents are read as markdown that keeps their headings and tables, and made by
+skills, as Claude's; Hermes reads files by ranges. leat agent: PDF, Word, Excel and PowerPoint
+converted to markdown in the sandbox, read by ranges.
+
+## 13. What goes, what stays
 
 Goes: the chat app's logic in `leat/app.html` (chats in the browser's storage, the tool loop in the
 page, the tools-server setting), and `examples/tools.py`, whose search becomes the agent's `search`.
@@ -285,7 +326,7 @@ page, the tools-server setting), and `examples/tools.py`, whose search becomes t
 Stays: the design; `leat/markdown.mjs` and its tests; Temml; `examples/searxng.yml`; the OpenAI
 message format; the origin checks.
 
-## 13. Decided
+## 14. Decided
 
 1. Our own agent, not Hermes, not on pi.
 2. The agent is `leat/agent/`, run as `leat agent`: one package, one CLI.
