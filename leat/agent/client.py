@@ -68,6 +68,11 @@ class Client:
         """A chat completion of `body`, streamed."""
         return Completion(*self._open("POST", "/v1/chat/completions", body | {"stream": True}))
 
+    def reply(self, body: dict[str, Any]) -> str:
+        """The text of a chat completion's reply to `body`, whole."""
+        chunks = (chunk["choices"][0]["delta"] for chunk in self.complete(body) if chunk["choices"])
+        return "".join(delta.get("content") or "" for delta in chunks)
+
     def _json(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         sock, response = self._open(method, path, body)
         try:

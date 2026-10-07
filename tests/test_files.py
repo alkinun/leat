@@ -12,8 +12,9 @@ from pathlib import Path
 
 import pytest
 
-from leat.agent.agent import Agent, NotFound, _api
+from leat.agent.agent import Agent, NotFound
 from leat.agent.client import Client
+from leat.agent.context import message as _api
 from leat.agent.server import Server
 from leat.agent.store import Store
 from leat.agent.tools import files

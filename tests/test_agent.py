@@ -14,8 +14,10 @@ from typing import Any
 
 import pytest
 
-from leat.agent.agent import Agent, Busy, NotFound, _api
+from leat.agent import context
+from leat.agent.agent import LAST, Agent, Busy, NotFound
 from leat.agent.client import Client
+from leat.agent.context import message as _api
 from leat.agent.server import Server
 from leat.agent.store import Store
 from leat.agent.tools import Result, Tool, strings
@@ -34,6 +36,7 @@ class FakeEngine(ThreadingHTTPServer):
         self.replies: queue.SimpleQueue[list[dict[str, Any] | None] | str] = queue.SimpleQueue()
         self.released = threading.Event()
         self.loads: list[str] = []
+        self.context: int | None = None  # the model's, said only if set
         super().__init__(("127.0.0.1", 0), _FakeHandler)
 
     @property
@@ -48,7 +51,10 @@ class _FakeHandler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self) -> None:
-        self._json(200, {"object": "list", "data": [{"id": "fake", "status": "loaded"}]})
+        model = {"id": "fake", "status": "loaded"}
+        if self.server.context:
+            model["max_context"] = self.server.context
+        self._json(200, {"object": "list", "data": [model]})
 
     def do_POST(self) -> None:
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
@@ -62,14 +68,20 @@ class _FakeHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
+        finish = "stop"  # unless a delta says otherwise, as {"finish_reason": "length"}
         with contextlib.suppress(OSError):  # a client that stopped the reply
             for delta in reply:
                 if delta is HOLD:
                     self.server.released.wait(timeout=5)
-                    continue
-                self._chunk({"choices": [{"index": 0, "delta": delta}]})
-            timings = {"predicted_n": 5, "predicted_ms": 100.0, "cache_n": 3, "prompt_n": 7}
-            self._chunk({"choices": [{"index": 0, "delta": {}}], "timings": timings})
+                elif "finish_reason" in delta:
+                    finish = delta["finish_reason"]
+                else:
+                    self._chunk({"choices": [{"index": 0, "delta": delta}]})
+            # the prompt's tokens, three characters each, none cached
+            read = len(json.dumps(body["messages"])) // 3
+            timings = {"predicted_n": 5, "predicted_ms": 100.0, "cache_n": 0, "prompt_n": read}
+            choice = {"index": 0, "delta": {}, "finish_reason": finish}
+            self._chunk({"choices": [choice], "timings": timings})
             self.wfile.write(b"data: [DONE]\n\n")
 
     def _chunk(self, chunk: dict[str, Any]) -> None:
@@ -151,7 +163,8 @@ def test_turn(agent, engine, events):
     assert (reply["reasoning_content"], reply["content"]) == ("Hmm.", "Hello there.")
     info = reply["info"]
     assert info["model"] == "fake" and info["tokens"] == 5 and info["rate"] == pytest.approx(40.0)
-    assert info["first"] >= 0 and (info["cached"], info["read"]) == (3, 7)
+    read = len(json.dumps(engine.requests[0]["messages"])) // 3
+    assert info["first"] >= 0 and (info["cached"], info["read"]) == (0, read)
     assert seen[-2] == {"type": "message", "conversation": id, "index": 2, "message": reply}
     # the model read the system prompt and the message, not thinking, sampled as Qwen3.6
     # recommends then
@@ -279,6 +292,7 @@ def test_rounds(agent, engine, events, monkeypatch):
     agent.send(None, "Hi")
     until(events, ended)
     assert ["tools" in request for request in engine.requests] == [True, True, False]
+    assert engine.requests[-1]["messages"][-1] == {"role": "user", "content": LAST}
 
 
 def test_memory(agent, engine, events):
@@ -347,6 +361,70 @@ def test_migration(tmp_path):
     store = Store(tmp_path / "leat.db")
     assert [(f["role"], f["text"]) for f in store.search("tulip")] == [("user", "Tulips?")]
     assert store.memories() == [] and Store(tmp_path / "leat.db").conversations()[0]["id"]
+
+
+def test_clearing(agent, engine, events):
+    # past COMPACT of the context, a tool's long answer before the latest messages is cleared
+    engine.context = 3000
+    page = "x" * 6000  # some 2,000 tokens
+    agent.tools["page"] = Tool("page", "A long page", strings(), lambda c: Result(page))
+    engine.replies.put([{"tool_calls": [call("page", {})]}])
+    engine.replies.put([{"content": "Read it."}])
+    id = agent.send(None, "Read the page")
+    until(events, ended)
+    assert engine.requests[1]["messages"][-1]["content"] == page  # read whole while it is new
+    engine.replies.put([{"content": "Sure."}])
+    agent.send(id, "Thanks!")
+    until(events, ended)
+    cleared = [m for m in engine.requests[2]["messages"] if m["role"] == "tool"]
+    assert cleared[0]["content"] == context.CLEARED
+    assert agent.store.messages(id)[3]["content"] == page  # kept whole, for the app
+    assert agent.store.context(id)["cleared"] == 4 and "summary" not in agent.store.context(id)
+
+
+def test_summary(agent, engine, events):
+    # what clearing cannot make small enough, the model summarizes, and the prompt goes on from it
+    engine.context = 3000
+    engine.replies.put([{"content": "Noted."}])
+    id = agent.send(None, "a" * 3000)
+    until(events, ended)
+    engine.replies.put([{"content": "Goal: the user writes long."}])  # the summary
+    engine.replies.put([{"content": "Noted again."}])
+    with agent.events.watch() as seen:
+        agent.send(id, "b" * 3000)
+        compacted = until(seen, lambda e: e["type"] == "compacted")[-1]
+        until(seen, ended)
+    summarizing, reply = engine.requests[1:]
+    assert summarizing["messages"][0]["content"] == context.SUMMARIZE
+    assert "User: " + "a" * 3000 in summarizing["messages"][1]["content"]
+    system, last = reply["messages"]
+    assert system["content"].endswith("go on from the summary:\n\nGoal: the user writes long.")
+    assert last == {"role": "user", "content": "b" * 3000}
+    assert compacted["summarized"] == 3 == agent.conversation(id)["summarized"]
+
+
+def test_cut_off(agent, engine, events):
+    # a reply the context cuts off is redone in its place, once the prompt is smaller
+    engine.context = 3000
+    agent.tools["page"] = Tool("page", "A long page", strings(), lambda c: Result("x" * 2400))
+    engine.replies.put([{"tool_calls": [call("page", {})]}])
+    engine.replies.put([{"content": "Read it."}])
+    id = agent.send(None, "Read the page")
+    until(events, ended)
+    engine.replies.put([{"content": "Th"}, {"finish_reason": "length"}])
+    engine.replies.put([{"content": "There."}])
+    agent.send(id, "And?")
+    until(events, ended)
+    *_, reply = agent.store.messages(id)
+    assert reply["content"] == "There." and "cut" not in reply["info"]
+    assert engine.requests[-1]["messages"][3]["content"] == context.CLEARED
+    # one cut off again after that is said to be cut off
+    engine.replies.put([{"content": "Th"}, {"finish_reason": "length"}])
+    engine.replies.put([{"content": "Goal: the page."}])  # the summary that makes it smaller
+    engine.replies.put([{"content": "Th"}, {"finish_reason": "length"}])
+    agent.send(id, "And then?")
+    until(events, ended)
+    assert agent.store.messages(id)[-1]["info"]["cut"] is True
 
 
 def test_live_reply(agent, engine, events):

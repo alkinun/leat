@@ -403,7 +403,7 @@ class _Handler(BaseHTTPRequestHandler):
         if reply.reasoning:
             message["reasoning_content"] = reply.reasoning
         reason = c.finish.reason
-        content, calls = _calls(reply, c.tools)
+        content, calls = _calls(reply, c.tools, c.finish.reason)
         if calls:
             message |= {"content": content or None, "tool_calls": _tool_calls(calls)}
             reason = "tool_calls"
@@ -434,7 +434,7 @@ class _Handler(BaseHTTPRequestHandler):
         except RuntimeError as e:
             return self._event({"error": {"message": str(e), "type": "server_error"}})
         reason = c.finish.reason
-        content, calls = _calls(reply, c.tools)
+        content, calls = _calls(reply, c.tools, c.finish.reason)
         if len(content) > sent:
             self._chunk(c, {"content": content[sent:]})
         if calls:
@@ -466,10 +466,14 @@ class _Handler(BaseHTTPRequestHandler):
             return True
 
     def _model(self, name: str) -> dict[str, Any]:
+        # as OpenAI lists it, with its status, and its context once loaded, which clients such as
+        # leat agent fit their prompts to
         s = self.server
-        loaded = s.loaded is not None and s.loaded.name == name
+        loaded = s.loaded if s.loaded is not None and s.loaded.name == name else None
         status = "loaded" if loaded else "loading" if s.loading == name else "unloaded"
         model = {"id": name, "object": "model", "created": s.created, "owned_by": "leat"}
+        if loaded:
+            model["max_context"] = loaded.engine.max_context
         return model | {"status": status}
 
     def _head(self, c: _Completion, kind: str) -> dict[str, Any]:
@@ -544,13 +548,20 @@ def _completion(body: Any, server: Server) -> _Completion:
     )
 
 
-def _calls(reply: Reply, tools: list[dict[str, Any]] | None) -> tuple[str, list[dict[str, Any]]]:
+def _calls(
+    reply: Reply, tools: list[dict[str, Any]] | None, reason: str = "stop"
+) -> tuple[str, list[dict[str, Any]]]:
     # a reply's text and its calls to the tools: those of the harmony format whose arguments are
-    # JSON objects and name a tool, or those of the text
+    # JSON objects and name a tool, or those of the text. A call the context cut off, of a reply
+    # that ended for its length, is no text: the text ends where it began, but for a reply all of
+    # JSON, as Llama 3's calls are, which may be text whole.
     if not tools:
         return reply.content, []
     if not reply.calls:
-        return parse_tool_calls(reply.content, tools)
+        content, calls = parse_tool_calls(reply.content, tools)
+        if reason == "length" and not calls and not content.lstrip().startswith("{"):
+            content = content[: tool_call_start(content)]
+        return content, calls
     names, calls = {tool.get("function", {}).get("name") for tool in tools}, []
     for call in reply.calls:
         with contextlib.suppress(ValueError):

@@ -20,6 +20,7 @@ import time
 from collections.abc import Iterator
 from typing import Any
 
+from leat.agent import context
 from leat.agent.client import Client, Completion, EngineError
 from leat.agent.store import Store
 from leat.agent.tools import Context, Result, Tool, files, memory
@@ -52,11 +53,12 @@ WORKSPACE = """
 The user's files are in a workspace, where you read, write and edit them, and run Python among \
 them in a sandbox without the network; the files they attach are named in their message. To make \
 a document, first read the skill for its kind, then make it with run, and name its file in your \
-answer. The skills:
+answer, without a link: the app shows the user the files you make. The skills:
 {skills}
 """
 TITLE = 60  # characters of a conversation's title at most: its first message's start
-ROUNDS = 12  # replies a turn takes at most; the last may call no tools, and answers
+ROUNDS = 25  # replies a turn takes at most; the last may call no tools, and answers, told so
+LAST = "(You have made all the tool calls this message allows: answer now, from what you found.)"
 
 Event = dict[str, Any]
 
@@ -121,7 +123,8 @@ class Agent:
             messages = self.store.messages(id)
             if turn := self._turns.get(id):
                 messages += copy.deepcopy(turn.live)
-            return self._summary(c) | {"messages": messages}
+            summarized = self.store.context(id).get("summarized")
+            return self._summary(c) | {"messages": messages, "summarized": summarized}
 
     def send(
         self, id: str | None, content: str, think: bool = False, attached: list[str] | None = None
@@ -205,6 +208,11 @@ class Agent:
         """The engine's models, as it lists them. Raises EngineError."""
         return self.engine.models()
 
+    def limit(self) -> int | None:
+        """The loaded model's context, in tokens, if the engine says. Raises EngineError."""
+        loaded = [m for m in self.models() if m.get("status") == "loaded"]
+        return loaded[0].get("max_context") if loaded else None
+
     def load(self, model: str) -> None:
         """Loads a model in the engine, telling every app as it starts and once it is done."""
         self.events.publish({"type": "loading", "model": model})
@@ -242,6 +250,8 @@ class _Turn:
         self.live: list[dict[str, Any]] = []  # those after, to keep: a reply, or its calls running
         self.stopped = threading.Event()
         self.completion: Completion | None = None
+        self.limit: int | None = None  # the model's context, once the turn asks
+        self.redone = False  # a reply the context cut off, after the prompt was made smaller
 
     def stop(self) -> None:
         self.stopped.set()
@@ -250,8 +260,9 @@ class _Turn:
 
     def run(self) -> None:
         try:
+            self.limit = self.agent.limit()
             for n in range(ROUNDS):
-                calls = self._reply(tools=n < ROUNDS - 1)
+                calls = self._reply(last=n == ROUNDS - 1)
                 if not calls or self.stopped.is_set():
                     break
                 self._call(calls)
@@ -267,25 +278,36 @@ class _Turn:
             self._take_back(f"the turn failed: {e!r}")
             raise
 
-    def _reply(self, tools: bool) -> list[dict[str, Any]]:
+    def _reply(self, last: bool = False) -> list[dict[str, Any]]:
         # streams a reply of the model's into the conversation and keeps it; returns the calls it
-        # makes of the agent's tools, if offered them
+        # makes of the agent's tools, offered them but for the turn's `last` reply. The prompt is
+        # made smaller first if it outgrows its share of the context, and again, the reply redone,
+        # if the context cuts the reply off.
         a = self.agent
-        messages = a.store.messages(self.id)
+        messages, state = a.store.messages(self.id), a.store.context(self.id)
+        declared = [] if last else [tool.declaration() for tool in a.tools.values()]
+        extra = len(json.dumps(declared))
+        if self.limit and context.estimate(messages, state, extra) > context.COMPACT * self.limit:
+            state = self._compact(messages, state, extra)
         reply: dict[str, Any] = {"role": "assistant", "content": "", "reasoning_content": ""}
-        reply["info"] = info = {}
+        info: dict[str, Any] = {}
+        reply["info"] = info
         (index,) = self._show(reply)
-        body = {"messages": [_api(m) for m in messages], **SAMPLING[self.think]}
+        read = context.prompt(messages, state)
+        body: dict[str, Any] = {"messages": read, **SAMPLING[self.think]}
         # as Qwen3's templates take it, and others ignore
         body["chat_template_kwargs"] = {"enable_thinking": self.think}
-        if tools and a.tools:
-            body["tools"] = [tool.declaration() for tool in a.tools.values()]
-        started = time.monotonic()
+        if declared:
+            body["tools"] = declared
+        elif last and a.tools:
+            read.append({"role": "user", "content": LAST})
+        started, finish = time.monotonic(), None
         self.completion = a.engine.complete(body)
         if self.stopped.is_set():  # before the completion was there to close
             self.completion.close()
         for chunk in self.completion:
-            delta = chunk["choices"][0]["delta"] if chunk.get("choices") else {}
+            choice = chunk["choices"][0] if chunk.get("choices") else {}
+            delta, finish = choice.get("delta") or {}, choice.get("finish_reason") or finish
             with a._lock:
                 info["model"] = chunk.get("model")
                 for key in ("reasoning_content", "content"):
@@ -299,11 +321,57 @@ class _Turn:
                     reply["tool_calls"] = [{k: call[k] for k in keys} for call in calls]
                 if timings := chunk.get("timings"):
                     info |= _speed(timings)
+        if finish == "length" and self.limit and not self.redone:
+            smaller = self._compact(messages, state, extra, force=True)
+            if smaller is not state:  # made smaller: the reply is redone in its place
+                self.redone = True
+                with a._lock:
+                    self.live.remove(reply)
+                return self._reply(last)
         with a._lock:
             if self.stopped.is_set():
                 info["stopped"] = True
+            if finish == "length":
+                info["cut"] = True
+        if info.get("read") is not None:  # the engine's count, of which the next is estimated
+            used = (info["cached"] or 0) + info["read"] + info["tokens"]
+            a.store.set_context(self.id, state | {"used": used, "at": index + 1})
         self._keep()
         return reply.get("tool_calls", [])
+
+    def _compact(
+        self, messages: list[dict[str, Any]], state: context.State, extra: int, force: bool = False
+    ) -> context.State:
+        # makes the prompt smaller, as context.compact can, telling the apps where any summary
+        # ends; returns the state, the same if it is no smaller
+        assert self.limit is not None
+        smaller = context.compact(messages, state, self.limit, extra, self._summarize, force)
+        keys = ("cleared", "summarized")
+        if [smaller.get(k) for k in keys] == [state.get(k) for k in keys]:
+            return state
+        a = self.agent
+        with a._lock:
+            a.store.set_context(self.id, smaller)
+            if (summarized := smaller.get("summarized")) != state.get("summarized"):
+                event = {"type": "compacted", "conversation": self.id, "summarized": summarized}
+                a.events.publish(event)
+        return smaller
+
+    def _summarize(self, before: str | None, messages: list[dict[str, Any]], tokens: int) -> str:
+        # a summary of messages in `tokens` at most, with that of those before them, by the model,
+        # whose context the summary and its prompt must fit; of messages too many, the latest
+        assert self.limit is not None
+        text, so_far = context.transcript(messages), f"The summary so far:\n{before}\n\n"
+        room = (self.limit - tokens) * context.CHARS
+        room -= len(context.SUMMARIZE) + len(so_far if before else "") + 200
+        user = (so_far + "What came after:\n\n" if before else "") + text[-room:]
+        body = {
+            "messages": [{"role": "system", "content": context.SUMMARIZE},
+                         {"role": "user", "content": user}],
+            "max_tokens": tokens, "temperature": 0.3,
+            "chat_template_kwargs": {"enable_thinking": False},
+        }  # fmt: skip
+        return self.agent.engine.reply(body).strip() or (before or "")
 
     def _call(self, calls: list[dict[str, Any]]) -> None:
         # runs the calls at once, each on a thread, and keeps their answers once all have answered,
@@ -418,16 +486,6 @@ def _title(content: str) -> str:
     # the first line of the first message, cut at a word
     line = content.strip().split("\n")[0]
     return line if len(line) <= TITLE else line[:TITLE].rsplit(" ", 1)[0] + "…"
-
-
-def _api(message: dict[str, Any]) -> dict[str, Any]:
-    # a message as the model reads it: without what only people see, nor an empty reasoning, but
-    # with the files the user attached named. The reasoning is sent back, which templates such as
-    # Qwen3.5's show the steps of an agent's turn.
-    api = {k: v for k, v in message.items() if k != "info" and (v or k != "reasoning_content")}
-    if attached := message.get("info", {}).get("files"):
-        api["content"] += f"\n\n(Attached, in the workspace: {', '.join(attached)})"
-    return api
 
 
 def _speed(timings: dict[str, Any]) -> dict[str, Any]:

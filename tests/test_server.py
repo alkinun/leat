@@ -13,10 +13,10 @@ from pathlib import Path
 import openai
 import pytest
 
-from leat.chat import ChatTemplate
+from leat.chat import ChatTemplate, Reply
 from leat.engine import Engine
 from leat.sampler import Sampling
-from leat.server import Server, _completion, _Writer
+from leat.server import Server, _calls, _completion, _Writer
 from tests.helpers import CONTEXT, Oracle, chat_template
 
 WEATHER = {
@@ -91,7 +91,8 @@ def complete(client: openai.OpenAI, content: str, **kwargs) -> tuple[str, str]:
 
 
 def test_models(client):
-    assert [(model.id, model.status) for model in client.models.list()] == [("tiny", "loaded")]
+    (model,) = client.models.list()
+    assert (model.id, model.status, model.max_context) == ("tiny", "loaded", CONTEXT)
 
 
 def test_load(tiny_model, tmp_path):
@@ -573,3 +574,10 @@ def test_shared_system_prompt(served, model_path):
         cold.append(first_token(system(name), "What is rule 3?"))
         warm.append(first_token(system(name), "And rule 7?"))
     assert statistics.median(cold) > 10 * statistics.median(warm)
+
+
+def test_cut_off_call():
+    # a call the context cut off is no text: the reply's text ends where it began
+    reply = Reply(content="Here it is.\n<tool_call>\n<function=weather>\n<parameter=city>\nPar")
+    assert _calls(reply, [WEATHER], "length") == ("Here it is.", [])
+    assert _calls(reply, [WEATHER], "stop")[0] == reply.content

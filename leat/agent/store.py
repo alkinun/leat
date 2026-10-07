@@ -6,6 +6,9 @@ appended, but for a turn taken back whole, so that each step's prompt extends th
 user and the model said is indexed for full-text search, the tools' answers not.
 
 A memory is a short sentence about the user, which every conversation begun after it knows.
+
+A conversation's context is the state of what its prompt keeps of it, as leat.agent.context fits it
+to the model's.
 """
 
 import json
@@ -47,8 +50,12 @@ _MIGRATIONS = [
       SELECT message ->> '$.content', conversation, position, message ->> '$.role' FROM messages
       WHERE message ->> '$.role' IN ('user', 'assistant') AND message ->> '$.content' != '';
     """,
+    """
+    ALTER TABLE conversations ADD COLUMN context TEXT NOT NULL DEFAULT '{}';
+    """,
 ]
 _SEARCHED = ("user", "assistant")  # the roles of the messages search finds
+_SUMMARY = "id, title, created, updated"  # a conversation's columns, but its context
 
 
 class Store:
@@ -69,11 +76,11 @@ class Store:
 
     def conversations(self) -> list[dict[str, Any]]:
         """Every conversation, without its messages, the latest updated first."""
-        rows = self._query("SELECT * FROM conversations ORDER BY updated DESC")
+        rows = self._query(f"SELECT {_SUMMARY} FROM conversations ORDER BY updated DESC")
         return [dict(row) for row in rows]
 
     def conversation(self, id: str) -> dict[str, Any] | None:
-        rows = self._query("SELECT * FROM conversations WHERE id = ?", id)
+        rows = self._query(f"SELECT {_SUMMARY} FROM conversations WHERE id = ?", id)
         return dict(rows[0]) if rows else None
 
     def create(self, title: str, messages: list[dict[str, Any]]) -> dict[str, Any]:
@@ -81,9 +88,19 @@ class Store:
         id, now = uuid.uuid4().hex[:12], time.time()
         with self._lock, self._db:
             self._db.execute("BEGIN")
-            self._db.execute("INSERT INTO conversations VALUES (?, ?, ?, ?)", (id, title, now, now))
+            sql = "INSERT INTO conversations (id, title, created, updated) VALUES (?, ?, ?, ?)"
+            self._db.execute(sql, (id, title, now, now))
             self._insert(id, 0, messages)
         return {"id": id, "title": title, "created": now, "updated": now}
+
+    def context(self, id: str) -> dict[str, Any]:
+        rows = self._query("SELECT context FROM conversations WHERE id = ?", id)
+        return json.loads(rows[0]["context"]) if rows else {}
+
+    def set_context(self, id: str, context: dict[str, Any]) -> None:
+        with self._lock:
+            sql = "UPDATE conversations SET context = ? WHERE id = ?"
+            self._db.execute(sql, (json.dumps(context, ensure_ascii=False), id))
 
     def messages(self, id: str) -> list[dict[str, Any]]:
         rows = self._query(

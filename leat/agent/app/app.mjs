@@ -101,6 +101,12 @@ function handle(event) {
     case "delta":
       if (showing(event.conversation)) grow(event);
       return;
+    case "compacted": // earlier messages summarized, to make room
+      if (showing(event.conversation)) {
+        shown.summarized = event.summarized;
+        renderLog();
+      }
+      return;
     case "error": // the turn taken back, its message to send again
       if (showing(event.conversation)) {
         shown.messages.length = event.start;
@@ -391,6 +397,7 @@ function fill(turn, [start, ...rest]) {
   const last = shown.messages[rest.at(-1)], answered = last?.role === "assistant" && !last.tool_calls;
   const work = answered ? rest.slice(0, -1) : rest;
   turn.start = start;
+  turn.classList.toggle("summarized", [start, ...rest].includes(shown.summarized));
   turn.replaceChildren(view(start));
   if (work.length) turn.append(fold(start, work));
   if (answered) turn.append(view(rest.at(-1)));
@@ -665,12 +672,13 @@ function icon(name) {
 }
 
 // what a reply's info tells people: its model, its tokens, how fast they came, and whether it
-// was stopped
-function describe({ model, tokens, rate, first, stopped }) {
+// was stopped, or cut off
+function describe({ model, tokens, rate, first, stopped, cut }) {
   let speed = tokens ? `${tokens} ${tokens === 1 ? "token" : "tokens"}` : "";
   if (rate) speed += `, ${rate.toFixed(1)} tok/s`;
   if (speed && first !== undefined) speed += `, the first after ${first.toFixed(1)} s`;
-  return [model, speed, stopped && "stopped"].filter(Boolean).join(" · ");
+  const out = cut && "cut off: the conversation is out of room";
+  return [model, speed, stopped && "stopped", out].filter(Boolean).join(" · ");
 }
 
 // sets a code block below a bar of its language and a button that copies it

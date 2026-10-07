@@ -103,6 +103,12 @@ body:is(.memory, .files) :is(#log, #composer, #greeting) { display: none; }
 .page li:not(:hover) button { visibility: hidden; }
 
 .message { margin-bottom: 28px; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* where the messages the model reads begin again, those before summarized */
+.turn.summarized::before {
+  content: "Earlier messages were summarized to make room"; display: block; margin: 0 0 28px;
+  padding-top: 8px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px;
+  text-align: center;
+}
 .user {
   width: fit-content; max-width: 80%; margin-left: auto; padding: 10px 16px;
   border-radius: var(--round-large); background: var(--bubble);
