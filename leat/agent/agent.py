@@ -334,6 +334,7 @@ class _Turn:
     ):  # fmt: skip
         self.agent, self.id, self.start, self.content, self.think = agent, id, start, content, think
         self.task = task  # the scheduled task the message is of, if any
+        self.state = agent.store.context(id)  # the prompt's, as it was, to take the turn back to
         self.kept = start + 1  # the conversation's messages kept
         self.live: list[dict[str, Any]] = []  # those after, to keep: a reply, or its calls running
         self.stopped = threading.Event()
@@ -547,8 +548,8 @@ class _Turn:
             a.background.ended.put(self.id)
 
     def _take_back(self, error: str) -> None:
-        # removes the turn's messages, from `start`, and the conversation it began; tells the apps
-        # why, and what the user wrote, to send again
+        # removes the turn's messages, from `start`, and the conversation it began, and puts the
+        # prompt's state back as it was; tells the apps why, and what the user wrote, to send again
         a = self.agent
         with a._lock:
             if a._turns.get(self.id) is not self:
@@ -561,7 +562,12 @@ class _Turn:
                 a.store.delete(self.id)
                 a.events.publish({"type": "deleted", "id": self.id})
             else:
+                summarized = a.store.context(self.id).get("summarized")
                 a.store.truncate(self.id, self.start)
+                a.store.set_context(self.id, self.state)
+                if (before := self.state.get("summarized")) != summarized:
+                    event = {"type": "compacted", "conversation": self.id, "summarized": before}
+                    a.events.publish(event)
                 a._publish_summary(self.id)
 
 

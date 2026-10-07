@@ -683,6 +683,20 @@ def test_failure(agent, engine, events):
     assert len(agent.store.messages(id)) == 3 and not agent.conversation(id)["running"]
 
 
+def test_failure_after_summary(agent, engine, events):
+    # a turn taken back leaves the prompt's state as it was before it, its summary gone too
+    engine.context = 3000
+    engine.replies.put([{"content": "Noted."}])
+    id = agent.send(None, "a" * 3000)
+    until(events, ended)
+    before = agent.store.context(id)
+    engine.replies.put([{"content": "Goal: the user writes long."}])  # the summary
+    engine.replies.put("the engine broke")
+    agent.send(id, "b" * 3000)
+    until(events, ended)
+    assert agent.store.context(id) == before and agent.conversation(id)["summarized"] is None
+
+
 def test_unreachable(tmp_path, engine):
     # an engine that is not there fails the turn, saying so
     engine.shutdown()
