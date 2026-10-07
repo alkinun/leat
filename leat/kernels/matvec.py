@@ -45,6 +45,7 @@ def _group(xq: UOp, g: UOp) -> list[UOp]:
 def rows_kernel(
     out: UOp, units: int, name: str, dots: list[Callable[[UOp, UOp], UOp]],
     combine: Callable[..., UOp | list[UOp]], rows: int | UOp, per_warp: int = 1,
+    order: Callable[[UOp], UOp] | None = None,
 ) -> UOp:  # fmt: skip
     # one block of one warp per `per_warp` output rows, of `rows`: lanes take the rows'
     # `units` in turn, the warp sums each dot product, and out[row] = combine(row, *sums); where
@@ -53,10 +54,12 @@ def rows_kernel(
     # turns run in a loop; where a last turn has fewer units than lanes, the others repeat the
     # last unit, whose loads hit in cache, and drop its share, as rows past the last repeat it.
     # Grouping rows into wider blocks, a warp each, measured slower on the 3090, by up to a
-    # quarter for Q6_K.
+    # quarter for Q6_K. Given `order`, the warp that would take row r takes row order(r).
     warp = UOp.range(-(-rows // per_warp), 0, AxisType.GLOBAL)
     ragged = isinstance(rows, int) and rows % per_warp != 0
     owned = [warp * per_warp + r for r in range(per_warp)] if per_warp > 1 else [warp]
+    if order is not None:
+        owned = [order(r) for r in owned]
     clamped = [r.minimum(rows - 1) for r in owned] if ragged else owned
     lane = lane_range()
     zero = UOp.const(0.0, dtypes.float32)

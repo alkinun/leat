@@ -35,6 +35,11 @@ from leat.kernels.quantize import quantize_q8
 from leat.quant import GGMLType, QTensor
 
 TILE = 8  # tokens and experts per warp scoring many tokens
+# rows of each chosen expert that the few-token kernels' warps take for every pair in turn, so
+# that tokens sharing an expert read it at about the same time: for Qwen3.6 35B A3B on the 3090,
+# speculative steps of 4 tokens decoded 7.8% faster than with each pair's rows taken in one run,
+# 4 sequences 2% faster, and blocks of 4 to 32 rows alike
+TOGETHER = 16
 
 
 @functools.cache
@@ -228,7 +233,9 @@ def _experts_swiglu_kernel(
 
     dots = [expert(gate, 0), expert(up, rows if fused else 0)]
     name = f"experts_glu_{kind}_{ggml_type.name.lower()}"
-    return rows_kernel(out, cols // 64, name, dots, combine, pairs * rows)
+    return rows_kernel(
+        out, cols // 64, name, dots, combine, pairs * rows, order=_together(pairs, rows)
+    )
 
 
 @functools.cache
@@ -259,7 +266,23 @@ def _experts_down_kernel(
         return total + extra[-1][row].load() if residual else total
 
     name = f"experts_down_{ggml_type.name.lower()}"
-    return rows_kernel(out, used * units, name, [mixed], combine, tokens * rows)
+    order = _together(tokens, rows)
+    return rows_kernel(out, used * units, name, [mixed], combine, tokens * rows, order=order)
+
+
+def _together(groups: int | UOp, rows: int) -> Callable[[UOp], UOp] | None:
+    # the row each warp takes of `groups` groups of `rows` rows each, the first TOGETHER rows of
+    # every group, then the next TOGETHER: where several groups read rows of the same expert, as
+    # tokens that share one, their warps read each row at about the same time, the later ones from
+    # cache rather than memory. None where TOGETHER does not divide the rows.
+    if rows % TOGETHER:
+        return None
+
+    def row(warp: UOp) -> UOp:
+        turn, at = warp // (groups * TOGETHER), warp % (groups * TOGETHER)
+        return at // TOGETHER * rows + turn * TOGETHER + at % TOGETHER
+
+    return row
 
 
 def supports_mixture(x: Tensor, gate: QTensor, up: QTensor | None, down: QTensor) -> bool:

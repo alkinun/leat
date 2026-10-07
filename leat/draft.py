@@ -64,9 +64,9 @@ class Gemma4Assistant:
     projected, and gives the next token and a hidden state as the target's, from which the next
     step drafts another at the same position, as llama.cpp's."""
 
-    # for Gemma 4 26B A4B on the 3090, 2 sequences decoded at 0.99 times the speed of plain steps,
-    # and 3 at 0.95
-    sequences = 1
+    # for Gemma 4 26B A4B on the 3090, 2 sequences decoded at 1.11 times the speed of plain steps,
+    # and 3 at 1.04
+    sequences = 3
 
     def __init__(self, gguf: GGUF, target: Transformer):
         arch, c = gguf.metadata["general.architecture"], target.config
@@ -157,8 +157,8 @@ class Qwen35Mtp:
     the next step drafts another at the next position, as llama.cpp's. The keys and values of
     every position the target runs come from its tokens and its hidden states."""
 
-    # for Qwen3.6 35B A3B on the 3090, 2 sequences decoded at 1.14 times the speed of plain
-    # steps, and 3 at 1.11
+    # for Qwen3.6 35B A3B on the 3090, 2 sequences decoded at 1.25 times the speed of plain
+    # steps, and 3 at 1.16
     sequences = 3
 
     def __init__(self, gguf: GGUF, target: Transformer):
