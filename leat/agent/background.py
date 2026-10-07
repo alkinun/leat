@@ -180,8 +180,9 @@ def _work_on(agent: "Agent", id: str, conversation: list[dict[str, Any]]) -> Non
         for call in calls:
             f = call["function"]
             try:
-                result = tools[f["name"]].run(Context(id), **arguments(f["arguments"]))
-                answer = result.content
+                if (tool := tools.get(f["name"])) is None:
+                    raise ValueError(f"there is no tool {f['name']!r}")
+                answer = tool.run(Context(id), **arguments(f["arguments"])).content
             except Exception as e:  # for the model, which may try again
                 answer = f"error: {e}"
             conversation.append({"role": "tool", "tool_call_id": call["id"], "content": answer})
