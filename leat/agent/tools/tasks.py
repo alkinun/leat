@@ -99,8 +99,9 @@ def checked(prompt: str, at: datetime.datetime, repeat: str, now: datetime.datet
 def first(at: datetime.datetime, repeat: str, now: datetime.datetime) -> datetime.datetime:
     """When a task first runs: at its time, or, of one that repeats, at the first of its times
     after now, as "every morning at 8" set in the evening begins tomorrow."""
+    day = at.day  # of the month, which a monthly one keeps to past shorter months
     while repeat in REPEATS and repeat != "once" and at <= now:
-        at = following(at, repeat, at.day) or at
+        at = following(at, repeat, day) or at
     return at
 
 
