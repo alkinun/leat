@@ -263,6 +263,8 @@ class Agent:
                 raise ValueError(f"{scheduling.MOST} tasks are scheduled, the most: cancel one")
             task = self.store.add_task(prompt, repeat, at.timestamp(), conversation)
             self.events.publish(self.tasks_event())
+        if self.background is not None:
+            self.background.wake()
         return task | {"schedule": scheduling.describe(task)}
 
     def unschedule(self, id: int) -> dict[str, Any]:
@@ -545,7 +547,7 @@ class _Turn:
                     done = {"type": "done", "conversation": self.id, "task": self.content}
                     a.events.publish(done)
         if a.background is not None:
-            a.background.ended.put(self.id)
+            a.background.ended(self.id)
 
     def _take_back(self, error: str) -> None:
         # removes the turn's messages, from `start`, and the conversation it began, and puts the

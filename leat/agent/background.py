@@ -57,23 +57,31 @@ class Background:
 
     def __init__(self, agent: "Agent", idle: float = IDLE):
         self.agent, self.idle = agent, idle
-        self.ended: queue.SimpleQueue[str] = queue.SimpleQueue()  # conversations whose turn ended
+        # the conversations whose turns ended, and None for a wake, as the tasks changed
+        self._woken: queue.SimpleQueue[str | None] = queue.SimpleQueue()
 
     def start(self) -> None:
         threading.Thread(target=self._work, name="leat background", daemon=True).start()
 
+    def ended(self, id: str) -> None:
+        """Says a conversation's turn ended: it is named, if it is not, and tasks waiting for it
+        run."""
+        self._woken.put(id)
+
+    def wake(self) -> None:
+        """Says the tasks changed, so that one due sooner than the next look is run in time."""
+        self._woken.put(None)
+
     def _work(self) -> None:
         # runs the tasks due, names the conversations whose turns end, and reviews the idle ones,
-        # one at a time, waiting for a turn's end or the next task; an engine that is away is tried
-        # again later, and a bug's error said, not the thread's end
+        # one at a time, then waits for a turn's end, the next task or the next look; a task due
+        # that waits, for its conversation or the engine, waits for the next look, as does an
+        # engine that is away; a bug's error is said, not the thread's end
+        ended: str | None = None
         while True:
-            soonest = min((t["next"] for t in self.agent.store.tasks()), default=float("inf"))
+            due: list[dict[str, Any]] = []
             try:
-                ended = self.ended.get(timeout=max(0.1, min(CHECK, soonest - time.time())))
-            except queue.Empty:
-                ended = None
-            try:
-                for task in self.agent.store.due(time.time()):
+                for task in (due := self.agent.store.due(time.time())):
                     run(self.agent, task)
                 if ended is not None and not self.agent.store.named(ended):
                     name(self.agent, ended)
@@ -84,14 +92,24 @@ class Background:
                 pass
             except Exception:
                 traceback.print_exc()
+            # the next task's time, of all but those due at this look that wait, as they were
+            tasks = [t["next"] for t in self.agent.store.tasks() if t not in due]
+            soonest = min(tasks, default=float("inf"))
+            try:
+                ended = self._woken.get(timeout=max(0, min(CHECK, soonest - time.time())))
+            except queue.Empty:
+                ended = None
 
 
 def run(agent: "Agent", task: dict[str, Any]) -> None:
     """Sends a task that is due, in its conversation, or a new one if it is gone, and sets when it
     runs next: after now, so that one missed while the box was off runs once. A task whose
-    conversation is busy waits for the next look."""
+    conversation is busy waits for the next look; one the engine has no model to run, as the box
+    starts, raises EngineError, and waits too."""
     from leat.agent.agent import Busy  # which imports this module
 
+    if not any(m.get("status") == "loaded" for m in agent.models()):
+        raise EngineError("no model is loaded")
     conversation = task["conversation"]
     if conversation is not None and agent.store.conversation(conversation) is None:
         conversation = None
@@ -108,7 +126,8 @@ def run(agent: "Agent", task: dict[str, Any]) -> None:
 
 def name(agent: "Agent", id: str) -> None:
     """Names a conversation after its first exchange, as the model does."""
-    messages = agent.store.messages(id)
+    if not (messages := agent.store.messages(id)):  # deleted
+        return
     said = context.transcript([m for m in messages[1:] if m["role"] != "tool"][:2])[:2000]
     body = {
         "messages": [{"role": "system", "content": NAME}, {"role": "user", "content": said}],

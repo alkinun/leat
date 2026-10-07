@@ -16,7 +16,7 @@ import pytest
 
 from leat.agent import background, context
 from leat.agent.agent import LAST, Agent, Busy, NotFound
-from leat.agent.client import Client
+from leat.agent.client import Client, EngineError
 from leat.agent.context import message as _api
 from leat.agent.server import Server
 from leat.agent.store import Store
@@ -37,6 +37,7 @@ class FakeEngine(ThreadingHTTPServer):
         self.released = threading.Event()
         self.loads: list[str] = []
         self.context: int | None = None  # the model's, said only if set
+        self.status = "loaded"  # the model's
         super().__init__(("127.0.0.1", 0), _FakeHandler)
 
     @property
@@ -51,7 +52,7 @@ class _FakeHandler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self) -> None:
-        model = {"id": "fake", "status": "loaded"}
+        model = {"id": "fake", "status": self.server.status}
         if self.server.context:
             model["max_context"] = self.server.context
         self._json(200, {"object": "list", "data": [model]})
@@ -605,16 +606,45 @@ def test_task_runs(agent, engine, events):
     assert other != id and [t["id"] for t in agent.tasks()] == [1]
 
 
-def test_task_waits(agent, engine, events):
-    # a task due in a conversation whose turn runs waits for the next look
+def test_task_waits(agent, engine, events, monkeypatch):
+    # a task due in a conversation whose turn runs waits, without looking again and again, for the
+    # turn's end
     engine.replies.put([{"content": "Hel"}, HOLD])
     id = agent.send(None, "Hi")
     until(events, lambda e: e["type"] == "delta")
+    agent.store.name(id, "Greetings")  # not named by the next replies
     task = agent.store.add_task("Say hello", "once", time.time() - 1, id)
-    background.run(agent, task)
-    assert agent.store.due(time.time()) == [task]
+    looks = []
+    due = agent.store.due
+    monkeypatch.setattr(agent.store, "due", lambda now: looks.append(now) or due(now))
+    agent.background = background.Background(agent, idle=60)
+    agent.background.start()
+    time.sleep(0.3)
+    assert len(looks) == 1 and agent.store.due(time.time()) == [task]
+    engine.replies.put([{"content": "Hello."}])
     engine.released.set()
-    until(events, ended)
+    assert until(events, lambda e: e["type"] == "done")[-1]["task"] == "Say hello"
+    assert agent.tasks() == []
+
+
+def test_task_without_model(agent, engine, events):
+    # a task due while the engine has no model, as the box starts, waits for one
+    engine.status = "unloaded"
+    task = agent.store.add_task("Say hello", "once", time.time() - 1, None)
+    with pytest.raises(EngineError, match="no model is loaded"):
+        background.run(agent, task)
+    assert agent.store.due(time.time()) == [task] and agent.conversations() == []
+
+
+def test_task_on_time(agent, engine, events):
+    # a task set for sooner than the next look runs on time
+    agent.background = background.Background(agent, idle=60)
+    agent.background.start()
+    time.sleep(0.1)  # waiting for the next look
+    engine.replies.put([{"content": "Hello."}])
+    agent.schedule("Say hello", datetime.datetime.now() + datetime.timedelta(seconds=0.3), "once")
+    done = until(events, lambda e: e["type"] == "done")[-1]
+    assert done["task"] == "Say hello"
 
 
 def test_live_reply(agent, engine, events):
