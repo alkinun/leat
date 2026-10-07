@@ -84,12 +84,9 @@ class Client:
         return reply
 
     def _json(
-        self,
-        method: str,
-        path: str,
-        body: dict[str, Any] | None = None,
+        self, method: str, path: str, body: dict[str, Any] | None = None,
         timeout: float | None = None,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any]:  # fmt: skip
         sock, response = self._open(method, path, body, timeout)
         try:
             return json.loads(response.read())
