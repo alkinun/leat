@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from leat.agent.tools import web
+from leat.agent.tools import weather, web
 
 PAGE = (
     "<html><head><title>A page</title><style>p {}</style></head><body><nav>Menu</nav>"
@@ -101,3 +101,55 @@ def test_fetch_the_web_alone(site, monkeypatch):
     allow(monkeypatch, site)
     with pytest.raises(ValueError, match="10.0.0.1 is on this network"):
         web.fetch(f"{site}/away")
+
+
+class _OpenMeteo(BaseHTTPRequestHandler):
+    # Open-Meteo's geocoding and forecast, of Paris, in France and in Texas
+    def log_message(self, *args: Any) -> None:
+        pass
+
+    def do_GET(self) -> None:
+        path, _, query = self.path.partition("?")
+        if path == "/search":
+            paris = {"name": "Paris", "admin1": "Île-de-France", "country": "France"}
+            texas = {"name": "Paris", "admin1": "Texas", "country": "United States"}
+            found = [paris | {"latitude": 48.9, "longitude": 2.3}, texas | {"latitude": 33.7,
+                     "longitude": -95.6}] if "Paris" in query else []  # fmt: skip
+            body: dict[str, Any] = {"results": found} if found else {}
+        else:
+            hot = "latitude=33.7" in query  # Texas
+            body = {
+                "current": {"time": "2026-10-07T14:00", "temperature_2m": 30 if hot else 20.4,
+                            "apparent_temperature": 21, "relative_humidity_2m": 60,
+                            "weather_code": 2, "wind_speed_10m": 9.6},
+                "daily": {"time": ["2026-10-07"], "weather_code": [61], "temperature_2m_max": [22],
+                          "temperature_2m_min": [12], "precipitation_probability_max": [80],
+                          "precipitation_sum": [4.2], "wind_speed_10m_max": [20]},
+            }  # fmt: skip
+        data = json.dumps(body).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+def test_weather(monkeypatch):
+    with ThreadingHTTPServer(("127.0.0.1", 0), _OpenMeteo) as server:
+        threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True).start()
+        url = f"http://127.0.0.1:{server.server_port}"
+        monkeypatch.setattr(weather, "GEOCODING", f"{url}/search")
+        monkeypatch.setattr(weather, "FORECAST", f"{url}/forecast")
+        result = weather.weather("Paris")
+        assert result.info == {"place": "Paris, Île-de-France, France"}
+        assert result.content == (
+            "Paris, Île-de-France, France, at 2026-10-07 14:00 local time: partly cloudy, "
+            "20 °C (69 °F), feeling 21 °C (70 °F), humidity 60%, wind 10 km/h.\n"
+            "Wednesday 7 October: light rain, 12 °C (54 °F) to 22 °C (72 °F), 80% chance of "
+            "rain (4.2 mm), wind up to 20 km/h."
+        )
+        # a country or region after a comma chooses among places of a name
+        assert weather.weather("Paris, Texas").info == {"place": "Paris, Texas, United States"}
+        assert "30 °C" in weather.weather("Paris, Texas").content
+        with pytest.raises(ValueError, match="there is no place called 'Atlantis'"):
+            weather.weather("Atlantis")
+        server.shutdown()

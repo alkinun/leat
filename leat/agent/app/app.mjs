@@ -328,7 +328,7 @@ function fold(start, indexes) {
 }
 
 // what a turn's calls did, in a few words; the tools it names
-const SAID = ["recall", "search", "fetch", "remember", "forget"];
+const SAID = ["recall", "search", "fetch", "remember", "forget", "weather"];
 function summary(calls) {
   const count = (name) => calls.filter((m) => m.name === name).length;
   const searches = count("search"), pages = count("fetch"), remembered = count("remember");
@@ -338,6 +338,7 @@ function summary(calls) {
   if (pages) parts.push(pages > 1 ? `read ${pages} pages` : "read a page");
   if (remembered) parts.push(remembered > 1 ? `remembered ${remembered} things` : "remembered something");
   if (count("forget")) parts.push("forgot something");
+  if (count("weather")) parts.push("checked the weather");
   for (const name of new Set(calls.map((m) => m.name))) {
     if (!SAID.includes(name)) parts.push(`used ${name}`);
   }
@@ -438,6 +439,9 @@ function line(m) {
       : `Remembered: ${m.info.memory.text}`;
   } else if (m.name === "forget") {
     said = running ? "Forgetting…" : error ? "Couldn't forget" : `Forgot: ${m.info.memory.text}`;
+  } else if (m.name === "weather") {
+    said = running ? `Checking the weather in ${args?.place}…`
+      : error ? `Couldn't check the weather in ${args?.place}` : `Checked the weather in ${m.info.place}`;
   }
   return stopped ? `${said} · stopped` : said;
 }
@@ -502,6 +506,7 @@ const ICONS = {
   fetch: '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/>',
   recall: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/>',
   remember: '<path d="M6 3h12v18l-6-4-6 4z"/>',
+  weather: '<path d="M17.5 19H9a7 7 0 1 1 6.7-9h1.8a4.5 4.5 0 1 1 0 9z"/>',
   forget: '<path d="M6 3h12v18l-6-4-6 4z"/><path d="m10 8 4 4m0-4-4 4"/>',
   tool: '<circle cx="12" cy="12" r="3"/>',
 };

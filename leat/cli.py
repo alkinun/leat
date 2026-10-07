@@ -16,7 +16,7 @@ from leat.agent.agent import Agent
 from leat.agent.client import Client
 from leat.agent.server import Server as AgentServer
 from leat.agent.store import Store
-from leat.agent.tools import web
+from leat.agent.tools import weather, web
 from leat.chat import ChatTemplate, split_reply
 from leat.engine import Engine
 from leat.gguf import GGUF
@@ -139,7 +139,8 @@ def _positive(text: str) -> int:
 
 def _agent(args: argparse.Namespace) -> None:
     args.data.mkdir(parents=True, exist_ok=True)
-    agent = Agent(Store(args.data / "leat.db"), Client(args.engine), web.tools(args.search))
+    tools = [*web.tools(args.search), *weather.tools()]
+    agent = Agent(Store(args.data / "leat.db"), Client(args.engine), tools)
     with AgentServer(agent, args.host, args.port) as server:
         print(f"leat agent at {_url(args.host, server.server_port)}, its models of {args.engine}. "
               "Ctrl-C quits.", flush=True)  # fmt: skip
