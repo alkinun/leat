@@ -7,8 +7,8 @@ from tinygrad import Tensor, UOp, dtypes
 
 from leat import bench
 from leat.engine import FEW_TOKENS, KEEP_BACK, Engine, graph
-from leat.kernels import VARIABLES
 from leat.gguf import GGUF
+from leat.kernels import VARIABLES
 from leat.model import CACHE_TILE, Config, Transformer, _stack, rope_table
 from leat.quant import GGMLType, QTensor
 from leat.sampler import GREEDY, Sampling
