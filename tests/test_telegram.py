@@ -17,9 +17,9 @@ from leat.agent.channels.telegram import Telegram, TelegramError, to_html
 from leat.agent.client import Client
 from leat.agent.store import Store
 from leat.agent.workspace import Workspace
-from tests.test_agent import FakeEngine
+from tests.test_agent import HOLD, FakeEngine, until
 
-TOKEN = "123:ok"
+TOKEN, OTHER = "123:ok", "789:ok"  # two bots' tokens
 ME, STRANGER = (
     {"id": 7, "first_name": "Alkın", "username": "alkinun"},
     {"id": 9, "first_name": "Eve"},
@@ -36,6 +36,7 @@ class FakeBots(ThreadingHTTPServer):
         self.calls: queue.SimpleQueue[tuple[str, Any]] = queue.SimpleQueue()
         self.count = 0
         self.polls = 0  # getUpdates answered
+        self.offsets: list[tuple[str, int]] = []  # each getUpdates's token and offset
         super().__init__(("127.0.0.1", 0), _Bots)
 
     def update(self, sender: dict, **message: Any) -> None:
@@ -73,13 +74,14 @@ class _Bots(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         _, bot, method = self.path.split("/")
         data = self.rfile.read(int(self.headers["Content-Length"]))
-        if bot != f"bot{TOKEN}":
+        if bot.removeprefix("bot") not in (TOKEN, OTHER):
             return self._answer({"ok": False, "description": "Unauthorized"}, 401)
         body = json.loads(data) if self.headers["Content-Type"] == "application/json" else data
         if method != "getUpdates":
             self.server.calls.put((method, body))
         results = {"getMe": {"username": "leat_bot"}, "getFile": {"file_path": "docs/1.pdf"}}
         if method == "getUpdates":
+            self.server.offsets.append((bot.removeprefix("bot"), body["offset"]))
             updates = []
             with contextlib.suppress(queue.Empty):
                 updates.append(self.server.updates.get(timeout=0.2))
@@ -131,6 +133,14 @@ def test_connect(bot, bots):
     assert [c["command"] for c in bots.next("setMyCommands")["commands"]] == ["new", "stop"]
     bot.disconnect()
     assert bot.state()["bot"] is None and "token" not in bot.agent.store.setting(telegram.KEY)
+    # another bot's updates are read from its first, whatever the last's were numbered
+    bot.connect(TOKEN)
+    bots.update(STRANGER, text="Hi")
+    bots.next("sendMessage")
+    bots.drain()
+    bot.connect(OTHER)
+    bots.drain()
+    assert bots.offsets[-1] == (OTHER, 0)
 
 
 def test_people(bot, bots, engine):
@@ -161,6 +171,25 @@ def test_people(bot, bots, engine):
     assert bot.agent.store.messages(conversation["id"])[1]["info"]["via"] == "telegram"
     bot.refuse(9)
     assert bot.state()["allowed"] == []
+
+
+def test_deleted(bot, bots, engine):
+    # a conversation deleted in the app while it answers a chat: the chat waits no more
+    bot.connect(TOKEN)
+    bot.agent.store.set_setting(telegram.KEY, bot.agent.store.setting(telegram.KEY) | {
+        "allowed": {"7": {"id": 7, "name": "Alkın (@alkinun)"}}})  # fmt: skip
+    engine.replies.put([{"content": "Hel"}, HOLD])
+    with bot.agent.events.watch() as events:
+        bots.update(ME, text="Hi")
+        until(events, lambda e: e["type"] == "delta")
+    bot.agent.delete(bot.agent.conversations()[0]["id"])
+    deadline = time.time() + 5
+    while bot.started and time.time() < deadline:
+        time.sleep(0.01)
+    assert bot.started == {}
+    # a file too big for a bot to take is said to be
+    bots.update(ME, document={"file_id": "f", "file_name": "big.iso", "file_size": 30 << 20})
+    assert bots.next("sendMessage")["text"].startswith("That file is too big")
 
 
 def test_chat(bot, bots, engine):

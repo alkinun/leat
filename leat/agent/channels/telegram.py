@@ -52,7 +52,6 @@ class Telegram:
     def __init__(self, agent: Agent, api: str = API):
         self.agent, self.api = agent, api
         self.started: dict[str, int] = {}  # the conversations whose turns a chat began, its id
-        self._offset = 0  # of the next update to read
         self._wake = threading.Event()  # set when the token changes
         self._lock = threading.Lock()
 
@@ -110,22 +109,26 @@ class Telegram:
 
     def _poll(self) -> None:
         # reads the messages people send, each handled in turn; waits for a token if there is
-        # none, and a while after Telegram failed
+        # none, and a while after Telegram failed. Each bot numbers its updates: the next to read
+        # is of the token's.
+        polled, offset = None, 0
         while True:
-            if not self._settings().get("token"):
+            if not (token := self._settings().get("token")):
                 self._wake.wait(POLL)
                 self._wake.clear()
                 continue
+            if token != polled:
+                polled, offset = token, 0
             try:
                 updates = self._call(
-                    "getUpdates", offset=self._offset, timeout=POLL, allowed_updates=["message"]
+                    "getUpdates", token, offset=offset, timeout=POLL, allowed_updates=["message"]
                 )
             except TelegramError:
                 self._wake.wait(5)
                 self._wake.clear()
                 continue
             for update in updates:
-                self._offset = update["update_id"] + 1
+                offset = update["update_id"] + 1
                 try:
                     self._handle(update.get("message") or {})
                 except Exception:  # a bug's: said, and the next message read
@@ -150,7 +153,12 @@ class Telegram:
         conversation = settings.get("chats", {}).get(str(chat))
         if text.split(" ")[0].split("@")[0] in ("/start", "/new", "/stop"):
             return self._command(text.split(" ")[0].split("@")[0], chat, conversation)
-        attached = self._files(message)
+        sent = message.get("document") or (message.get("photo") or [None])[-1]
+        if sent is not None and sent.get("file_size", 0) > FILES:
+            return self._send(
+                chat, f"That file is too big: Telegram lets me take {FILES >> 20} MB at most."
+            )
+        attached = self._files(sent) if sent is not None else []
         if not text and not attached:
             return self._send(chat, "I read text and files, but not that yet.")
         if conversation is not None and self.agent.store.conversation(conversation) is None:
@@ -176,11 +184,9 @@ class Telegram:
         elif command == "/start":
             self._send(chat, WELCOME)
 
-    def _files(self, message: dict[str, Any]) -> list[str]:
-        # the files a message holds, a document or a photo, its largest, put in the workspace
-        workspace = self.agent.workspace
-        sent = message.get("document") or (message.get("photo") or [None])[-1]
-        if workspace is None or sent is None or sent.get("file_size", 0) > FILES:
+    def _files(self, sent: dict[str, Any]) -> list[str]:
+        # a file sent, a document or a photo's largest size, put in the workspace
+        if (workspace := self.agent.workspace) is None:
             return []
         path = self._call("getFile", file_id=sent["file_id"])["file_path"]
         token = self._settings()["token"]
@@ -237,6 +243,9 @@ class Telegram:
                 chat = self.started.pop(id, None)
             if chat is not None:
                 self._send(chat, f"Sorry, that failed: {event['error']}")
+        elif kind == "deleted":  # in the app, as its turn ran: nothing to wait for
+            with self._lock:
+                self.started.pop(event["id"], None)
 
     def _reply(self, id: str, chat: int) -> None:
         # the last turn's answer, then the files it made
