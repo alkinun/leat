@@ -555,7 +555,7 @@ function summary(all) {
   const calls = all.filter((m) => !m.info?.error);
   const parts = [...new Set(calls.map((m) => m.name))].map((name) => {
     const n = calls.filter((m) => m.name === name).length;
-    const [one, many] = DID[name] ?? [`used ${name}`, () => `used ${name}`];
+    const [one, many] = own(DID, name) ?? [`used ${name}`, () => `used ${name}`];
     return n > 1 ? many(n) : one;
   });
   const said = parts.join(", ") || "worked";
@@ -665,7 +665,7 @@ const LINES = {
 
 function line(m) {
   const { arguments: args, error, stopped } = m.info ?? {};
-  const lines = LINES[m.name] ?? (() => [`${m.name}…`, m.name, `${m.name} failed`]);
+  const lines = own(LINES, m.name) ?? (() => [`${m.name}…`, m.name, `${m.name} failed`]);
   const [running, done, failed] = lines(typeof args === "object" ? args : {}, m.info ?? {});
   const said = !m.content ? running : error ? failed : done;
   return stopped ? `${said} · stopped` : said;
@@ -831,7 +831,7 @@ const ICONS = {
 function icon(name) {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", "0 0 24 24");
-  svg.innerHTML = ICONS[name] ?? ICONS.tool;
+  svg.innerHTML = own(ICONS, name) ?? ICONS.tool;
   return svg;
 }
 
@@ -875,6 +875,12 @@ function follow(change) {
   const log = $("log"), end = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
   change();
   if (end) log.scrollTop = log.scrollHeight;
+}
+
+// a table's entry of a name, as a tool's the model gave; none of what every object has, as
+// "constructor"
+function own(table, name) {
+  return Object.hasOwn(table, name) ? table[name] : undefined;
 }
 
 function element(tag, className, text) {
