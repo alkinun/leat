@@ -457,7 +457,8 @@ class _Turn:
         text, so_far = context.transcript(messages), f"The summary so far:\n{before}\n\n"
         room = (self.limit - tokens) * context.CHARS
         room -= len(context.SUMMARIZE) + len(so_far if before else "") + 200
-        user = (so_far + "What came after:\n\n" if before else "") + text[-room:]
+        latest = text[max(0, len(text) - room) :]
+        user = (so_far + "What came after:\n\n" if before else "") + latest
         body = {
             "messages": [{"role": "system", "content": context.SUMMARIZE},
                          {"role": "user", "content": user}],
