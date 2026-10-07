@@ -13,7 +13,7 @@ uv sync
 DEV=NV uv run leat run Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf
 ```
 
-As a server, for a chat app in the browser at http://127.0.0.1:8080 and for any OpenAI client:
+As a server, for any OpenAI client:
 
 ```bash
 DEV=NV uv run leat serve Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf
@@ -37,6 +37,13 @@ engine = Engine("Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf", max_context=4096)
 chat = ChatTemplate(engine.gguf.metadata, engine.tokenizer)
 prompt = chat.encode([{"role": "user", "content": "Why is the sky blue?"}])
 print(engine.tokenizer.decode(list(engine.generate(prompt, max_tokens=256))))
+```
+
+leat agent, the assistant, runs beside the server, whose models it uses, and serves its app at http://127.0.0.1:8000. [docs/agent-plan.md](docs/agent-plan.md) says what it is to become.
+
+```bash
+DEV=NV uv run leat serve Qwen_Qwen3.6-35B-A3B-Q4_K_M.gguf --max-context 32768
+uv run leat agent
 ```
 
 `leat bench` measures speed, of random prompts as llama-bench does or with `--chat` of replies to chat prompts, which a drafter guesses as it would in use, and `leat perplexity` measures quality, either on a text file or against logits saved by llama.cpp's `llama-perplexity --kl-divergence-base`. [scripts/validate.py](scripts/validate.py) checks a machine end to end in one command: the GPU tests, speed against llama.cpp on the same files, speculative decoding, and the server, into a Markdown report.
@@ -71,7 +78,7 @@ Storage types, and the kernels that take them on the GPU; the reference ops take
 
 Devices: any tinygrad backend runs the reference ops. NVIDIA GPUs (`DEV=NV` or `CUDA`) run every kernel; AMD's RDNA 3 and 4 GPUs (`DEV=AMD`), as Strix Halo's, run the warp-level ones: matrix-vector products, norms, quantization, RoPE, decode attention, the mixtures' routing and their few-token path, Gated DeltaNet's convolution and recurrence, and sampling: every kernel of a decode step, batched or not. RDNA 3's also run the tensor-core ones, int8 matrix products and FlashAttention, on WMMA; prompts on RDNA 4 take the reference ops for now, but for Gated DeltaNet's.
 
-Server: `/v1/chat/completions`, whole or streamed, `/v1/models` and `/v1/models/load`, and a chat app at `/`; a POST from another site's page in a browser is refused. Replies split into `reasoning_content`, as Qwen3's `<think>` blocks, Gemma 4's thought channel and gpt-oss's analysis channel, text, and tool calls in Llama 3's, Qwen's, Qwen3.5's, Gemma 4's and gpt-oss's syntax. Requests take stop strings, seeds and `chat_template_kwargs` such as `{"enable_thinking": false}`. Sampling, on the device, is greedy or by temperature, with `top_k`, `top_p` and `min_p`, which the kernels cut within a hundredth of a nat, and `presence_penalty` on the tokens a reply has generated; requests for other penalties, `logprobs` or several choices are refused. Each reply ends with `timings`, as llama.cpp's server sends them: the prompt's tokens past those cached and the reply's, each timed, from when the completion gets a slot, and their rates.
+Server: `/v1/chat/completions`, whole or streamed, `/v1/models` and `/v1/models/load`; a POST from another site's page in a browser is refused. Replies split into `reasoning_content`, as Qwen3's `<think>` blocks, Gemma 4's thought channel and gpt-oss's analysis channel, text, and tool calls in Llama 3's, Qwen's, Qwen3.5's, Gemma 4's and gpt-oss's syntax. Requests take stop strings, seeds and `chat_template_kwargs` such as `{"enable_thinking": false}`. Sampling, on the device, is greedy or by temperature, with `top_k`, `top_p` and `min_p`, which the kernels cut within a hundredth of a nat, and `presence_penalty` on the tokens a reply has generated; requests for other penalties, `logprobs` or several choices are refused. Each reply ends with `timings`, as llama.cpp's server sends them: the prompt's tokens past those cached and the reply's, each timed, from when the completion gets a slot, and their rates.
 
 Concurrent requests: completions run together, one in each of `--slots` slots of the KV cache, 4 by default; more wait their turn. Each step prefills a chunk of one prompt, of 256 tokens at most while others decode, then decodes a token of every running completion in one batch, of up to 8, whose matrices read each weight once for all of them. A client that hangs up frees its slot at the next step. A slot past the others holds the padding of batches of 3, 5, 6 or 7, which run in the graphs of 4 and 8.
 
@@ -81,9 +88,7 @@ Speculative decoding: given a drafter with `--draft`, sequences decoding without
 
 Models: `leat serve` takes GGUF files and directories of them, and holds one model at a time, which answers every request whatever model it names. The first file loads at start. `POST /v1/models/load` with `{"model": id}`, an id that `/v1/models` lists, loads another once the completions before it have finished, the last one freed first.
 
-Chat app: a single page with no dependencies. It loads and switches models, keeps separate chats in the browser's local storage, and streams replies, their reasoning folded away, until done or stopped, each noted with its tokens, their rate after the first, and the time to the first, any wait for a slot included; one system prompt and sampling, by default as Qwen3.6 recommends for general tasks, apply to every chat.
-
-Tools: given a tools server in its settings, the chat app offers the model its tools and runs the calls it makes there, up to 8 replies a turn. [examples/tools.py](examples/tools.py) is one, of web search through a SearXNG on the machine and page reading; search results and pages take context, so serve with `--max-context 16384` or more.
+Agent: `leat agent` keeps conversations in one SQLite file, `~/.local/share/leat/leat.db` by default, and runs their turns itself, not in the browser: a reply goes on when its page closes, and every page open on the app sees it stream and can stop it; a turn that fails is taken back, its message returned to send again. The app is a page with no dependencies, its Markdown and math rendered by `leat/agent/app/markdown.mjs`. The agent answers its own machine and network alone: a request must name it by an address or a `.local` name, which a site's page cannot by DNS rebinding, and a write must come from its own page.
 
 ## Measurements
 

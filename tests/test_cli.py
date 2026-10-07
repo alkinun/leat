@@ -193,12 +193,38 @@ def test_serve_directories(tiny_model, tmp_path, monkeypatch, capsys):
 
     monkeypatch.setattr("leat.cli.Server", Fake)
     main(["serve", str(models), "--host", "0.0.0.0"])
-    assert loaded == ["tiny"] and "chat at http://127.0.0.1:8080" in capsys.readouterr().out
+    assert loaded == ["tiny"] and "the API at http://127.0.0.1:8080/v1" in capsys.readouterr().out
     (empty := tmp_path / "empty").mkdir()
     with pytest.raises(SystemExit, match="no GGUF files"):
         main(["serve", str(empty)])
     with pytest.raises(SystemExit, match="drafts for one model"):
         main(["serve", str(models), str(tiny_model[0]), "--draft", str(tiny_model[0])])
+
+
+def test_agent(tmp_path, monkeypatch, capsys):
+    # leat agent keeps its state in --data, made if it is not there, and serves the app
+    agents = []
+
+    class Fake:
+        server_port = 8000
+
+        def __init__(self, agent, host, port):
+            agents.append(agent)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def serve_forever(self):
+            pass
+
+    monkeypatch.setattr("leat.cli.AgentServer", Fake)
+    main(["agent", "--data", str(tmp_path / "leat"), "--engine", "http://127.0.0.1:9999"])
+    assert (tmp_path / "leat" / "leat.db").exists()
+    assert agents[0].engine.url == "http://127.0.0.1:9999"
+    assert "leat agent at http://127.0.0.1:8000" in capsys.readouterr().out
 
 
 def test_run_refused_chat(tiny_model, monkeypatch):

@@ -1,7 +1,7 @@
 // Markdown as models write it. parse() reads text to a tree in JsonML, a string or
 // [tag, attributes?, ...children], of the elements a reply can hold and no others: none of the
 // HTML a model writes reaches the page. markdown() shows the tree in an element, its math as
-// MathML by Temml, which leat/vendor/temml holds.
+// MathML by Temml, which vendor/temml holds.
 
 import temml from "./vendor/temml/temml.mjs";
 

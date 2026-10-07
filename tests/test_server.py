@@ -130,19 +130,10 @@ def test_completion_waits_for_a_load(tiny_model, monkeypatch):
         loading.join()
 
 
-def test_app(server):
-    url = f"http://127.0.0.1:{server.server_port}"
-    with urllib.request.urlopen(f"{url}/") as response:
-        assert response.headers["Content-Type"] == "text/html; charset=utf-8"
-        assert b"<title>leat</title>" in response.read()
-    with urllib.request.urlopen(f"{url}/markdown.mjs") as response:
-        assert response.headers["Content-Type"] == "text/javascript; charset=utf-8"
-        assert b"export function markdown(" in response.read()
-    with urllib.request.urlopen(f"{url}/vendor/temml/Temml.woff2") as response:
-        assert response.headers["Content-Type"] == "font/woff2"
-    for path in ("/server.py", "/vendor/temml/LICENSE", "/../pyproject.toml"):
-        with pytest.raises(urllib.error.HTTPError, match="404"):
-            urllib.request.urlopen(f"{url}{path}")
+def test_api_alone(server):
+    # the API and nothing else: the app is leat agent's
+    with pytest.raises(urllib.error.HTTPError, match="404"):
+        urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/")
 
 
 def check_timings(timings: dict, usage) -> None:
@@ -445,9 +436,8 @@ def test_unknown_route(client, server):
         urllib.request.urlopen(f"{url}/v1/nothing")
     with pytest.raises(urllib.error.HTTPError, match="400"):  # not JSON
         urllib.request.urlopen(urllib.request.Request(f"{url}/v1/chat/completions", b"{"))
-    for path in ("/v1/models?x=1", "/?v=2"):  # paths with a query are the paths
-        with urllib.request.urlopen(url + path) as response:
-            assert response.status == 200
+    with urllib.request.urlopen(f"{url}/v1/models?x=1") as response:  # the path, its query aside
+        assert response.status == 200
 
 
 def test_concurrent_requests(client, server, engine, expected, monkeypatch):

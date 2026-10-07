@@ -1,8 +1,9 @@
-"""Command line: `leat run`, `leat serve`, `leat bench` and `leat perplexity`."""
+"""Command line: `leat agent`, `leat run`, `leat serve`, `leat bench` and `leat perplexity`."""
 
 import argparse
 import contextlib
 import json
+import os
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -11,6 +12,10 @@ import jinja2
 from tinygrad import Device
 
 from leat import bench
+from leat.agent.agent import Agent
+from leat.agent.client import Client
+from leat.agent.server import Server as AgentServer
+from leat.agent.store import Store
 from leat.chat import ChatTemplate, split_reply
 from leat.engine import Engine
 from leat.gguf import GGUF
@@ -24,6 +29,16 @@ def main(argv: list[str] | None = None) -> None:
         prog="leat", description="A minimal, fast LLM inference engine."
     )
     commands = parser.add_subparsers(dest="command", required=True)
+
+    agent = commands.add_parser(
+        "agent", help="run leat agent, the assistant, and serve its app; models come of leat serve"
+    )
+    agent.add_argument("--engine", default="http://127.0.0.1:8080", help="leat serve's address")
+    agent.add_argument("--host", default="127.0.0.1", help="0.0.0.0 for the home network too")
+    agent.add_argument("--port", type=int, default=8000)
+    agent.add_argument(
+        "--data", type=Path, default=_data(), help="where its conversations are kept"
+    )
 
     run = commands.add_parser("run", help="chat with a model in the terminal")
     run.add_argument("model", type=Path, help="GGUF file")
@@ -43,9 +58,7 @@ def main(argv: list[str] | None = None) -> None:
         "for Qwen3.5's MTP layer the model's own",
     )
 
-    serve = commands.add_parser(
-        "serve", help="serve a chat app and the OpenAI chat completions API"
-    )
+    serve = commands.add_parser("serve", help="serve the OpenAI chat completions API")
     serve.add_argument(
         "models", type=Path, nargs="+",
         help="GGUF files, or directories of them; the first file loads at start, others on request",
@@ -102,7 +115,15 @@ def main(argv: list[str] | None = None) -> None:
     quality.add_argument("--json", action="store_true", help="print one JSON object")
 
     args = parser.parse_args(argv)
-    {"run": _run, "serve": _serve, "bench": _bench, "perplexity": _perplexity}[args.command](args)
+    handlers = {
+        "agent": _agent, "run": _run, "serve": _serve, "bench": _bench, "perplexity": _perplexity
+    }  # fmt: skip
+    handlers[args.command](args)
+
+
+def _data() -> Path:
+    # the agent's state, where XDG keeps applications' data
+    return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "leat"
 
 
 def _positive(text: str) -> int:
@@ -110,6 +131,21 @@ def _positive(text: str) -> int:
     if (n := int(text)) < 1:
         raise argparse.ArgumentTypeError(f"must be at least 1, got {n}")
     return n
+
+
+def _agent(args: argparse.Namespace) -> None:
+    args.data.mkdir(parents=True, exist_ok=True)
+    agent = Agent(Store(args.data / "leat.db"), Client(args.engine))
+    with AgentServer(agent, args.host, args.port) as server:
+        print(f"leat agent at {_url(args.host, server.server_port)}, its models of {args.engine}. "
+              "Ctrl-C quits.", flush=True)  # fmt: skip
+        with contextlib.suppress(KeyboardInterrupt):
+            server.serve_forever()
+
+
+def _url(host: str, port: int) -> str:
+    # an address to browse to: this machine's, where the server takes every one
+    return f"http://{'127.0.0.1' if host in ('0.0.0.0', '::', '') else host}:{port}"
 
 
 def _run(args: argparse.Namespace) -> None:
@@ -186,10 +222,7 @@ def _serve(args: argparse.Namespace) -> None:
     with Server(files, args.host, args.port, **options) as server:
         print(f"{files[0].stem} on {Device.DEFAULT}, compiling...", end=" ", flush=True)
         server.load(files[0].stem)
-        # an address to browse to: this machine's, where the server takes every one
-        host = "127.0.0.1" if args.host in ("0.0.0.0", "::", "") else args.host
-        url = f"http://{host}:{server.server_port}"
-        print(f"chat at {url}, the API at {url}/v1. Ctrl-C quits.", flush=True)
+        print(f"the API at {_url(args.host, server.server_port)}/v1. Ctrl-C quits.", flush=True)
         with contextlib.suppress(KeyboardInterrupt):
             server.serve_forever()
 

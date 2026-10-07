@@ -1,4 +1,4 @@
-"""The chat app's Markdown as leat/markdown.mjs parses it, run by Node: every case in one run."""
+"""The app's Markdown as markdown.mjs parses it, run by Node: every case in one run."""
 
 import json
 import shutil
@@ -9,7 +9,7 @@ import pytest
 
 NODE = shutil.which("node")
 pytestmark = pytest.mark.skipif(NODE is None, reason="needs Node.js")
-MODULE = (Path(__file__).parents[1] / "leat" / "markdown.mjs").as_uri()
+MODULE = (Path(__file__).parents[1] / "leat" / "agent" / "app" / "markdown.mjs").as_uri()
 
 
 def token(kind: str, text: str) -> list:

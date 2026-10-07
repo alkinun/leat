@@ -1,5 +1,5 @@
-"""OpenAI-compatible HTTP server: chat completions, whole or streamed, the model list, loading a
-model, and a chat app at the root.
+"""OpenAI-compatible HTTP server: chat completions, whole or streamed, the model list, and loading
+a model.
 
 Handler threads parse requests, render prompts and write responses. One worker thread owns the
 engine: it runs completions together, one per slot, a token of each per batched step, and loads a
@@ -31,21 +31,6 @@ from leat.engine import Engine, Sequence
 from leat.sampler import Sampling
 from leat.tokenizer import Tokenizer
 
-# the chat app's files, each served at its path in leat/ and the app at /, and their types
-_APP = (
-    "app.html",
-    "markdown.mjs",
-    "vendor/temml/temml.mjs",
-    "vendor/temml/Temml-Latin-Modern.css",
-    "vendor/temml/Temml.woff2",
-    "vendor/temml/latinmodernmath.woff2",
-)
-_TYPES = {
-    ".html": "text/html; charset=utf-8",
-    ".mjs": "text/javascript; charset=utf-8",
-    ".css": "text/css; charset=utf-8",
-    ".woff2": "font/woff2",
-}
 # seconds between a handler's checks that its client is still there, while it waits for text
 _HANG_UP_CHECK = 0.25
 
@@ -366,9 +351,6 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         self.path = urllib.parse.urlsplit(self.path).path  # without a query, ?v=2 say
-        if (name := "app.html" if self.path == "/" else self.path[1:]) in _APP:
-            file = Path(__file__).parent / name
-            return self._send(200, _TYPES[file.suffix], file.read_bytes())
         if self.path != "/v1/models":
             return self._error(404, f"there is no GET {self.path}")
         self._json(200, {"object": "list", "data": [self._model(m) for m in self.server.models]})
@@ -470,8 +452,8 @@ class _Handler(BaseHTTPRequestHandler):
         self._event("[DONE]")
 
     def _same_origin(self) -> bool:
-        # a browser's request from a page of this server, the app's, or one of no browser, which
-        # sends no Origin: another site's page may not make it generate or load models
+        # a browser's request from a page of this server, or one of no browser, which sends no
+        # Origin: another site's page may not make it generate or load models
         origin = self.headers.get("Origin")
         return origin is None or urllib.parse.urlsplit(origin).netloc == self.headers.get("Host")
 
@@ -505,11 +487,9 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(f"data: {text}\n\n".encode())
 
     def _json(self, status: int, body: dict[str, Any]) -> None:
-        self._send(status, "application/json", json.dumps(body).encode())
-
-    def _send(self, status: int, kind: str, data: bytes) -> None:
+        data = json.dumps(body).encode()
         self.send_response(status)
-        self.send_header("Content-Type", kind)
+        self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
