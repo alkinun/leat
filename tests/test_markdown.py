@@ -139,6 +139,12 @@ CASES = [
     ('[a](<https://x.io/a b> "title")', [["p", ["a", {"href": "https://x.io/a b"}, "a"]]]),
     ("[a](https://w.org/A_(b)) c", [["p", ["a", {"href": "https://w.org/A_(b)"}, "a"], " c"]]),
     ("[[1]](mailto:a@x.io)", [["p", ["a", {"href": "mailto:a@x.io"}, "[1]"]]]),
+    # citations, of a source's number, which the app links; no link's text cites
+    ("Paris [1][2], and [12].",
+     [["p", "Paris ", ["sup", {"class": "cite"}, "1"], ["sup", {"class": "cite"}, "2"], ", and ",
+       ["sup", {"class": "cite"}, "12"], "."]]),
+    ("[1234], [a], [1, 2] and [1](javascript:x)",
+     [["p", "[1234], [a], [1, 2] and ", ["sup", {"class": "cite"}, "1"], "(javascript:x)"]]),
     ("[`]`](https://x.io)", [["p", ["a", {"href": "https://x.io"}, ["code", "]"]]]]),
     ("![a cat](https://x.io/cat.png)", [["p", ["a", {"href": "https://x.io/cat.png"}, "a cat"]]]),
     ("[a](javascript:alert(1)) [b](data:text/html,x) [c](/path) [d](HTTPS://X.IO)",

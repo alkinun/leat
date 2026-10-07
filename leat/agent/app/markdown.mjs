@@ -323,7 +323,8 @@ function search(text, s, c, memo) {
 }
 
 // [text](url "title"), and ![alt](url) as a link to the image: a link to anything but the web or
-// mail stays text, so that none runs script
+// mail stays text, so that none runs script. [1], no link, cites the source of that number, which
+// the app links.
 function link(text, i) {
   const open = text[i] === "!" ? i + 1 : i;
   if (text[open] !== "[") return null;
@@ -331,9 +332,23 @@ function link(text, i) {
   if (close < 0) return null;
   const destination = DESTINATION.exec(text.slice(close + 1));
   const href = destination?.[1] ?? destination?.[2];
-  if (!SAFE.test(href ?? "")) return null;
+  if (!SAFE.test(href ?? "")) {
+    const n = text.slice(open + 1, close);
+    return open === i && /^\d{1,3}$/.test(n) ? [["sup", { class: "cite" }, n], close + 1] : null;
+  }
   const end = close + 1 + destination[0].length;
-  return [["a", { href }, ...inline(text.slice(open + 1, close))], end];
+  return [["a", { href }, ...uncited(inline(text.slice(open + 1, close)))], end];
+}
+
+// a link's text, which cites nothing: each [n] in it text again
+function uncited(nodes) {
+  const out = [];
+  for (const node of nodes) {
+    const text = node[0] === "sup" ? `[${node[2]}]` : node;
+    if (typeof text === "string" && typeof out.at(-1) === "string") out[out.length - 1] += text;
+    else out.push(text);
+  }
+  return out;
 }
 
 // where the ] that closes the [ at i is, past the escapes, code spans and math within, or -1:

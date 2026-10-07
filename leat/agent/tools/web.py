@@ -2,19 +2,42 @@
 
 Pages are the web's alone: an address on the box's own network, a router's or another machine's,
 is refused, at every redirect too, so that a page cannot lead the model to read the home's devices.
+
+A page is read as Hermes Agent reads one: its content alone, as markdown, which trafilatura finds in
+the sandbox, where a page made to attack a parser attacks nothing else, or of its text without its
+menus, without the sandbox's environment; whole up to a budget, or its start, the rest saved in the
+workspace to read on. Each source is numbered, across the conversation, for the model to cite.
 """
 
+import hashlib
 import ipaddress
 import json
+import re
 import socket
 import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
 
-from leat.agent.tools import Result, Tool, strings
+from leat.agent.tools import Context, Result, Tool, strings
+from leat.agent.workspace import Workspace
 
 RESULTS = 6  # search results the model reads
-PAGE = 8000  # characters of a page it reads at most, some 2,000 tokens
+PAGE = 8000  # characters of a page it reads at once, some 2,000 tokens
+SAVED = ".web"  # the workspace's folder of the pages read, to read on
+KEPT = 200  # pages it keeps, the latest
+# finds a page's content as markdown, of its HTML at sys.argv[1], of the address sys.argv[2]: run
+# in the sandbox, with trafilatura
+_EXTRACT = """
+import json, sys
+import trafilatura
+html = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+text = trafilatura.extract(
+    html, url=sys.argv[2], output_format="markdown", include_links=True, include_tables=True,
+    include_formatting=True, favor_recall=True,
+)
+meta = trafilatura.extract_metadata(html)
+print(json.dumps({"title": (meta and meta.title) or "", "text": text or ""}))
+"""
 READ = 2 << 20  # bytes of a response read at most: a page's first characters are within them
 TIMEOUT = 15  # seconds a request may take
 # the types of what fetch reads: the web's text, and its pages' kinds beside text/*
@@ -30,25 +53,26 @@ BLOCKS = {
 _AGENT = "Mozilla/5.0 (compatible; leat)"
 
 
-def tools(searxng: str) -> list[Tool]:
-    """search, through the SearXNG at `searxng`, and fetch."""
+def tools(searxng: str, workspace: Workspace | None = None) -> list[Tool]:
+    """search, through the SearXNG at `searxng`, and fetch, which reads pages in the sandbox of
+    `workspace`, and saves them there, if given."""
     return [
         Tool(
             "search",
-            "Search the web: the top results' titles, links and snippets",
+            "Search the web: the top results' titles, links and snippets, each numbered",
             strings(query="what to search for"),
-            lambda context, query: search(searxng, query),
+            lambda context, query: search(searxng, query, context),
         ),
         Tool(
             "fetch",
-            "Read a web page as text",
+            "Read a web page, its content as markdown, numbered",
             strings(url="the page's address, as a search result's"),
-            lambda context, url: fetch(url),
+            lambda context, url: fetch(url, workspace, context),
         ),
     ]
 
 
-def search(searxng: str, query: str) -> Result:
+def search(searxng: str, query: str, context: Context | None = None) -> Result:
     url = f"{searxng}/search?" + urllib.parse.urlencode(
         {"q": query, "format": "json", "language": LANGUAGE}
     )
@@ -57,15 +81,18 @@ def search(searxng: str, query: str) -> Result:
             results = json.loads(response.read(READ))["results"][:RESULTS]
     except OSError as e:
         raise RuntimeError(f"search is not available: {e}") from e
+    cite = context.cite if context else lambda url, title: 0
     found = [{"title": r.get("title") or r["url"], "url": r["url"]} for r in results]
+    for f in found:
+        f["n"] = cite(f["url"], f["title"])
     content = "\n\n".join(
-        f"{i}. {f['title']}\n{f['url']}\n{r.get('content') or ''}".strip()
-        for i, (f, r) in enumerate(zip(found, results, strict=True), 1)
-    )
+        f"{f'[{n}] ' if (n := f['n']) else ''}{f['title']}\n{f['url']}\n{r.get('content') or ''}"
+        .strip() for f, r in zip(found, results, strict=True)
+    )  # fmt: skip
     return Result(content or "No results.", {"query": query, "results": found})
 
 
-def fetch(url: str) -> Result:
+def fetch(url: str, workspace: Workspace | None = None, context: Context | None = None) -> Result:
     if urllib.parse.urlsplit(url).scheme not in ("http", "https"):
         raise ValueError(f"not a web page's address: {url}")
     _public(url)
@@ -78,12 +105,56 @@ def fetch(url: str) -> Result:
         text = response.read(READ).decode(charset, "replace")
     title = ""
     if "html" in kind:
-        page = _Text()
-        page.feed(text)
-        page.close()
-        title, text = " ".join(page.title.split()), page.text()
-    text = text.strip()[:PAGE] or "The page has no text."
-    return Result(f"{title}\n{final}\n\n{text}".strip(), {"url": final, "title": title})
+        title, text = _readable(text, final, workspace)
+    text = _absolute(text.strip(), final) or "The page has no text."
+    n = context.cite(final, title) if context else 0
+    if (rest := len(text) - PAGE) > 0:
+        saved = _save(workspace, final, text) if workspace is not None else None
+        more = f": read {saved} from start={PAGE} for them" if saved else ""
+        text = f"{text[:PAGE]}\n\n(The page goes on, {rest} characters more{more}.)"
+    head = f"[{n}] {title}" if n else title
+    info = {"url": final, "title": title, "n": n}
+    return Result(f"{head}\n{final}\n\n{text}".strip(), info)
+
+
+def _readable(html: str, url: str, workspace: Workspace | None) -> tuple[str, str]:
+    # a page's title and content: as trafilatura finds them in the sandbox, if it can, or its text
+    # without its menus
+    if workspace is not None and workspace.environment is not None:
+        raw = _save(workspace, url, html, ".html")
+        try:
+            ran = workspace.run(_EXTRACT, f"/workspace/{raw}", url, timeout=30)
+            found = json.loads(ran.output.strip().splitlines()[-1]) if ran.status == 0 else {}
+            if found.get("text"):
+                return " ".join(found["title"].split()), found["text"]
+        except (ValueError, IndexError, RuntimeError):
+            pass
+        finally:
+            workspace.path(raw).unlink(missing_ok=True)
+    page = _Text()
+    page.feed(html)
+    page.close()
+    return " ".join(page.title.split()), page.text()
+
+
+def _absolute(text: str, base: str) -> str:
+    # markdown's links, of the page at `base`, to the whole addresses
+    def whole(link: re.Match) -> str:
+        return f"]({urllib.parse.urljoin(base, link[1])}"
+
+    return re.sub(r"\]\((?!https?:|mailto:|#)([^)\s]+)", whole, text)
+
+
+def _save(workspace: Workspace, url: str, text: str, suffix: str = ".md") -> str:
+    # saves a page's text in the workspace's SAVED folder, the oldest beyond KEPT deleted; returns
+    # its name there
+    folder = workspace.path(SAVED)
+    folder.mkdir(exist_ok=True)
+    name = f"{SAVED}/{hashlib.sha256(url.encode()).hexdigest()[:16]}{suffix}"
+    workspace.path(name).write_text(text)
+    for old in sorted(folder.iterdir(), key=lambda p: p.stat().st_mtime)[:-KEPT]:
+        old.unlink(missing_ok=True)
+    return name
 
 
 def _public(url: str) -> None:

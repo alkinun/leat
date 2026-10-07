@@ -185,6 +185,13 @@ div.math { margin: 12px 0; overflow-x: auto; overflow-y: hidden; }
 }
 .message a.card:hover { background: var(--side); }
 .card svg { width: 16px; height: 16px; flex: none; color: var(--accent); }
+/* a citation, [1], linked to its source */
+sup.cite { margin: 0 1px; color: var(--muted); font-size: 11px; line-height: 0; }
+.message sup.cite a {
+  padding: 1px 5px; border-radius: 6px; background: var(--bubble); color: var(--muted);
+  text-decoration: none;
+}
+.message sup.cite a:hover { background: var(--line); color: var(--text); }
 /* the pages a reply read */
 .sources { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; white-space: normal; }
 .sources:empty { display: none; }

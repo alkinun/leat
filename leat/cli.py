@@ -144,7 +144,7 @@ def _agent(args: argparse.Namespace) -> None:
     args.data.mkdir(parents=True, exist_ok=True)
     environment = args.data / "sandbox"
     workspace = Workspace(args.data / "workspace", environment if environment.exists() else None)
-    tools = [*web.tools(args.search), *weather.tools(), *files.tools(workspace)]
+    tools = [*web.tools(args.search, workspace), *weather.tools(), *files.tools(workspace)]
     agent = Agent(Store(args.data / "leat.db"), Client(args.engine), tools, workspace)
     agent.start()
     with AgentServer(agent, args.host, args.port) as server:

@@ -500,6 +500,7 @@ function message(m) {
     if (m.role === "user") text.textContent = m.content;
     else markdown(text, m.content ?? "");
     item.querySelectorAll(":not(.code) > pre").forEach(codeBar); // the blocks new since
+    cite(item);
     if (answer) pages.replaceChildren(...sources(m).map(source));
     const names = m.role === "user" ? (m.info?.files ?? []) : answer ? made(m) : [];
     cards.replaceChildren(...names.map(card));
@@ -608,18 +609,47 @@ function bytes(n) {
   return n < 1000 ? `${n} B` : n < 1e6 ? `${Math.round(n / 1e3)} KB` : `${(n / 1e6).toFixed(1)} MB`;
 }
 
-// the pages a reply's turn read before it, its sources
+// the sources the conversation's tools numbered, by their numbers
+function numbered() {
+  const all = new Map();
+  for (const m of shown?.messages ?? []) {
+    const info = m.role === "tool" ? (m.info ?? {}) : {};
+    for (const s of [info, ...(info.results ?? [])]) {
+      if (s.n && s.url && !all.has(s.n)) all.set(s.n, { n: s.n, url: s.url, title: s.title });
+    }
+  }
+  return all;
+}
+
+// links each citation in an element, [1], to its source, those linked before but
+function cite(element) {
+  const all = numbered();
+  for (const sup of element.querySelectorAll("sup.cite:not(.linked)")) {
+    const s = all.get(Number(sup.textContent));
+    if (!s) continue;
+    sup.replaceChildren(Object.assign(link(s.url, sup.textContent), { title: s.title || s.url }));
+    sup.classList.add("linked");
+  }
+}
+
+// a reply's sources: those it cites, in the order it first does, or the pages its turn read
 function sources(m) {
+  const all = numbered(), cited = [];
+  for (const [, n] of (m.content ?? "").matchAll(/\[(\d{1,3})\](?!\()/g)) {
+    const s = all.get(Number(n));
+    if (s && !cited.includes(s)) cited.push(s);
+  }
+  if (cited.length) return cited;
   const messages = shown?.messages ?? [], pages = [];
   for (let i = messages.indexOf(m) - 1; i >= 0 && messages[i].role !== "user"; i--) {
-    const { url, title } = (messages[i].role === "tool" && messages[i].info) || {};
-    if (url && !pages.some((p) => p.url === url)) pages.unshift({ url, title });
+    const { url, title, n } = (messages[i].role === "tool" && messages[i].info) || {};
+    if (url && !pages.some((p) => p.url === url)) pages.unshift({ url, title, n });
   }
   return pages;
 }
 
-function source({ url, title }) {
-  const a = link(url, host(url));
+function source({ url, title, n }) {
+  const a = link(url, n ? `${n} · ${host(url)}` : host(url));
   a.className = "source";
   a.title = title || url;
   return a;

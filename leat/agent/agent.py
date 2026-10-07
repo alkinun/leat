@@ -38,7 +38,9 @@ You are Leat, an assistant that runs on a computer in the user's home: private, 
 is {date}.
 
 When a question needs facts you may not know, or that may have changed since you learned them, \
-call search, then fetch the most promising pages before you answer. Link the pages you used.
+call search, then fetch the few pages most likely to answer, three or so, more only if they fall \
+short. Cite what you use by the numbers the tools give their sources, as [1] or [2][3], after the \
+words they support.
 
 When the user tells you something about themselves worth knowing in later conversations, first \
 call remember, then reply: who they are, the people in their life, their work and plans, how they \
@@ -290,6 +292,7 @@ class _Turn:
         self.completion: Completion | None = None
         self.limit: int | None = None  # the model's context, once the turn asks
         self.redone = False  # a reply the context cut off, after the prompt was made smaller
+        self.sources: dict[str, int] = {}  # the conversation's, by address, numbered for citing
 
     def stop(self) -> None:
         self.stopped.set()
@@ -299,6 +302,7 @@ class _Turn:
     def run(self) -> None:
         try:
             self.limit = self.agent.limit()
+            self.sources = _numbered(self.agent.store.messages(self.id))
             for n in range(ROUNDS):
                 calls = self._reply(last=n == ROUNDS - 1)
                 if not calls or self.stopped.is_set():
@@ -444,7 +448,8 @@ class _Turn:
         try:
             if (tool := a.tools.get(message["name"])) is None:
                 raise ValueError(f"there is no tool {message['name']!r}")
-            result = tool.run(Context(self.id), **arguments(message["info"]["arguments"]))
+            called = arguments(message["info"]["arguments"])
+            result = tool.run(Context(self.id, self._cite), **called)
         except Exception as e:  # for the model, which may try again
             result = Result(f"error: {e}", {"error": str(e)})
         with a._lock:
@@ -453,6 +458,11 @@ class _Turn:
                 message["info"] |= result.info
                 a._publish_message(self.id, index, message)
         answered.put(index)
+
+    def _cite(self, url: str, title: str) -> int:
+        # a source's number in the conversation: its own, if it was read before, or the next
+        with self.agent._lock:
+            return self.sources.setdefault(url, max(self.sources.values(), default=0) + 1)
 
     def _show(self, *messages: dict[str, Any]) -> list[int]:
         # shows messages to come in the conversation, for now; returns where they are
@@ -524,6 +534,17 @@ def _title(content: str) -> str:
     # the first line of the first message, cut at a word
     line = content.strip().split("\n")[0]
     return line if len(line) <= TITLE else line[:TITLE].rsplit(" ", 1)[0] + "…"
+
+
+def _numbered(messages: list[dict[str, Any]]) -> dict[str, int]:
+    # the sources the tools of a conversation's messages numbered, by address
+    numbered: dict[str, int] = {}
+    for m in messages:
+        info = m.get("info", {}) if m["role"] == "tool" else {}
+        for source in [info, *info.get("results", [])]:
+            if source.get("n") and source.get("url"):
+                numbered.setdefault(source["url"], source["n"])
+    return numbered
 
 
 def _speed(timings: dict[str, Any]) -> dict[str, Any]:

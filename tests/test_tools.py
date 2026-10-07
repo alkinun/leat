@@ -1,18 +1,29 @@
 import json
+import os
 import threading
 import urllib.parse
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from leat.agent.tools import weather, web
+from leat.agent.tools import Context, weather, web
+from leat.agent.workspace import Workspace
 
 PAGE = (
     "<html><head><title>A page</title><style>p {}</style></head><body><nav>Menu</nav>"
     "<p>Hello</p>world, <b>and</b> more<ul><li>An item</li></ul><script>x()</script>"
     "<footer>Foot</footer></body></html>"
+)
+ARTICLE = (
+    "<html><head><title>The story - News</title></head><body><nav><a href='/'>Home</a> "
+    "<a href='/a'>About</a> <a href='/b'>Contact</a></nav><main><article><h1>The story</h1><p>"
+    "The council met on Tuesday to decide the fate of the old library, which has stood on the "
+    "square since 1902 and which many in the town still visit every week, to read or to study."
+    "</p><p>The council voted to restore it, from <a href='/spring'>the spring</a>.</p></article>"
+    "</main><footer>Copyright 2026 News Ltd.</footer></body></html>"
 )
 RESULTS = [
     {"title": "One", "url": "https://one.example/", "content": "The first."},
@@ -36,8 +47,9 @@ class _Site(BaseHTTPRequestHandler):
             self.send_response(302)
             self.send_header("Location", "http://10.0.0.1/")
             return self.end_headers()
-        kinds = {"/page": "text/html; charset=utf-8", "/text": "text/plain"}
-        self._send(kinds.get(path, "application/pdf"), PAGE if path == "/page" else "Plain text.")
+        kinds = {"/page": "text/html", "/article": "text/html", "/text": "text/plain"}
+        body = {"/page": PAGE, "/article": ARTICLE}.get(path, "Plain text.")
+        self._send(kinds.get(path, "application/pdf"), body)
 
     def _send(self, kind: str, body: str) -> None:
         data = body.encode()
@@ -63,15 +75,24 @@ def allow(monkeypatch, site: str) -> None:
                         else public(url))  # fmt: skip
 
 
+def numbering() -> Context:
+    # a conversation's numbering of its sources, from 1, as a turn's
+    numbers: dict[str, int] = {}
+    return Context("c", lambda url, title: numbers.setdefault(url, len(numbers) + 1))
+
+
 def test_search(site):
-    result = web.search(site, "strix halo")
+    context = numbering()
+    context.cite("https://two.example/", "")  # read before
+    result = web.search(site, "strix halo", context)
     assert _Site.queries[-1] == {"q": ["strix halo"], "format": ["json"], "language": ["en"]}
     two = "https://two.example/"
-    assert result.content == f"1. One\nhttps://one.example/\nThe first.\n\n2. {two}\n{two}"
+    assert result.content == f"[2] One\nhttps://one.example/\nThe first.\n\n[1] {two}\n{two}"
     assert result.info == {"query": "strix halo", "results": [
-        {"title": "One", "url": "https://one.example/"},
-        {"title": "https://two.example/", "url": "https://two.example/"},
+        {"title": "One", "url": "https://one.example/", "n": 2},
+        {"title": "https://two.example/", "url": "https://two.example/", "n": 1},
     ]}  # fmt: skip
+    assert web.search(site, "strix halo").content.startswith("One\n")  # nothing numbering
     with pytest.raises(RuntimeError, match="search is not available"):
         web.search("http://127.0.0.1:9", "strix halo")
 
@@ -79,9 +100,9 @@ def test_search(site):
 def test_fetch(site, monkeypatch):
     # a page's title and text, without its menus and code, a line to each block
     allow(monkeypatch, site)
-    result = web.fetch(f"{site}/page")
-    assert result.content == f"A page\n{site}/page\n\nHello\nworld, and more\nAn item"
-    assert result.info == {"url": f"{site}/page", "title": "A page"}
+    result = web.fetch(f"{site}/page", context=numbering())
+    assert result.content == f"[1] A page\n{site}/page\n\nHello\nworld, and more\nAn item"
+    assert result.info == {"url": f"{site}/page", "title": "A page", "n": 1}
     assert web.fetch(f"{site}/text").content == f"{site}/text\n\nPlain text."
     with pytest.raises(ValueError, match="not a page of text but application/pdf"):
         web.fetch(f"{site}/pdf")
@@ -153,3 +174,31 @@ def test_weather(monkeypatch):
         with pytest.raises(ValueError, match="there is no place called 'Atlantis'"):
             weather.weather("Atlantis")
         server.shutdown()
+
+
+def test_fetch_long(site, monkeypatch, tmp_path):
+    # a page's start, the rest saved in the workspace to read on; its links whole
+    allow(monkeypatch, site)
+    monkeypatch.setattr(web, "PAGE", 10)
+    workspace = Workspace(tmp_path)
+    content = web.fetch(f"{site}/page", workspace).content
+    saved = content.split("read ")[1].split(" from")[0]
+    assert content.endswith(f"(The page goes on, 19 characters more: read {saved} from start=10 "
+                            "for them.)")  # fmt: skip
+    assert workspace.path(saved).read_text() == "Hello\nworld, and more\nAn item"
+    assert workspace.files() == []  # hidden, of the user's files
+    assert web._absolute("[a](/b) [c](d) [e](https://f/) [g](#h)", "https://x.org/y/z") == (
+        "[a](https://x.org/b) [c](https://x.org/y/d) [e](https://f/) [g](#h)")  # fmt: skip
+
+
+@pytest.mark.skipif(not os.environ.get("LEAT_SANDBOX"), reason="needs LEAT_SANDBOX")
+def test_fetch_readable(site, monkeypatch, tmp_path):
+    # in the sandbox, trafilatura finds a page's content as markdown, without its menus
+    allow(monkeypatch, site)
+    workspace = Workspace(tmp_path, Path(os.environ["LEAT_SANDBOX"]))
+    result = web.fetch(f"{site}/article", workspace)
+    assert result.info["title"] == "The story"  # its site's name gone
+    assert "Home" not in result.content and "Copyright" not in result.content
+    assert "# The story\n\nThe council met on Tuesday" in result.content
+    assert result.content.endswith(f"from [the spring]({site}/spring).")
+    assert [p.name for p in workspace.path(web.SAVED).iterdir()] == []  # the HTML gone

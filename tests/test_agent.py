@@ -537,6 +537,23 @@ def test_cut_off(agent, engine, events):
     assert agent.store.messages(id)[-1]["info"]["cut"] is True
 
 
+def test_citations(agent, engine, events):
+    # sources numbered across the conversation, from 1: one read again keeps its number
+    def read(context, url):
+        n = context.cite(url, "A page")
+        return Result(f"[{n}] A page", {"url": url, "n": n})
+
+    agent.tools["read"] = Tool("read", "Reads a page", strings(url="its address"), read)
+    id = None
+    for urls in (["a", "b"], ["b", "c"]):
+        for i, url in enumerate(urls):
+            engine.replies.put([{"tool_calls": [call("read", {"url": url}, f"{url}{i}")]}])
+        engine.replies.put([{"content": "Read."}])
+        id = agent.send(id, f"Read {' and '.join(urls)}")
+        until(events, ended)
+    assert [m["info"]["n"] for m in agent.store.messages(id) if m["role"] == "tool"] == [1, 2, 2, 3]
+
+
 def test_live_reply(agent, engine, events):
     # while a reply streams, the conversation shows it, and another message must wait for it
     engine.replies.put([{"content": "Hel"}, HOLD, {"content": "lo"}])
