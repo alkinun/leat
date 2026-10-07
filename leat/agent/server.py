@@ -9,6 +9,7 @@ from the app's own page, or from no browser, not from another site's page.
 import contextlib
 import ipaddress
 import json
+import mimetypes
 import queue
 import re
 import socket
@@ -40,9 +41,15 @@ _TYPES = {
     ".woff2": "font/woff2",
 }
 _KEEP_ALIVE = 15  # seconds between comments on a quiet event stream, which find its client gone
-# /api/conversations/<id>, and what to do there; /api/memories/<id>
+UPLOAD = 100 << 20  # bytes of a file uploaded at most
+# the types of the workspace's files a browser shows in the page; it downloads the others, as a page
+# the model wrote might act as the app's own
+_SHOWN = {"image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf", "text/plain"}
+# /api/conversations/<id>, and what to do there; /api/memories/<id>; a file's name, of /files/<name>
+# to download it and of /api/files/<name> to upload or delete it
 _CONVERSATION = re.compile(r"/api/conversations/([0-9a-f]{12})(/messages|/stop)?")
 _MEMORY = re.compile(r"/api/memories/([0-9]+)")
+_FILE = re.compile(r"/(?:api/)?files/(.+)")
 
 
 class Server(ThreadingHTTPServer):
@@ -62,13 +69,15 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._trusted():
             return self._error(403, "this server answers its own network's requests alone")
         path = urllib.parse.urlsplit(self.path).path
-        if path in ("/", "/memory") or path.startswith("/c/"):
+        if path in ("/", "/memory", "/files") or path.startswith("/c/"):
             path = "/index.html"
         if path[1:] in _FILES:
             file = APP / path[1:]
             return self._send(200, _TYPES[file.suffix], file.read_bytes())
         if path == "/api/events":
             return self._events()
+        if path.startswith("/files/") and (match := _FILE.fullmatch(path)):
+            return self._download(urllib.parse.unquote(match[1]))
         if (match := _CONVERSATION.fullmatch(path)) and not match[2]:
             if (conversation := self.server.agent.conversation(match[1])) is None:
                 return self._error(404, f"there is no conversation {match[1]}")
@@ -115,16 +124,56 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._trusted(write=True):
             return self._error(403, "requests from other sites' pages are refused")
         path, agent = urllib.parse.urlsplit(self.path).path, self.server.agent
-        if (match := _CONVERSATION.fullmatch(path)) and not match[2]:
-            agent.delete(match[1])
-        elif match := _MEMORY.fullmatch(path):
-            try:
+        try:
+            if (match := _CONVERSATION.fullmatch(path)) and not match[2]:
+                agent.delete(match[1])
+            elif match := _MEMORY.fullmatch(path):
                 agent.forget(int(match[1]))
-            except NotFound as e:
-                return self._error(404, str(e))
-        else:
-            return self._error(404, f"there is no DELETE {path}")
+            elif path.startswith("/api/files/") and agent.workspace is not None:
+                agent.workspace.delete(urllib.parse.unquote(path.removeprefix("/api/files/")))
+                agent.files_changed()
+            else:
+                return self._error(404, f"there is no DELETE {path}")
+        except (NotFound, FileNotFoundError, ValueError) as e:
+            return self._error(404, str(e))
         self._json(200, {})
+
+    def do_PUT(self) -> None:
+        # a file uploaded to the workspace, by a name of its own: its answer says the one it got
+        if not self._trusted(write=True):
+            return self._error(403, "requests from other sites' pages are refused")
+        path, agent = urllib.parse.urlsplit(self.path).path, self.server.agent
+        if not path.startswith("/api/files/") or agent.workspace is None:
+            return self._error(404, f"there is no PUT {path}")
+        if (size := int(self.headers.get("Content-Length") or 0)) > UPLOAD:
+            return self._error(413, f"a file may be {UPLOAD >> 20} MB at most")
+        name = agent.workspace.free(urllib.parse.unquote(path.removeprefix("/api/files/")))
+        agent.workspace.path(name).write_bytes(self.rfile.read(size))
+        agent.files_changed()
+        self._json(200, {"name": name})
+
+    def _download(self, name: str) -> None:
+        # a file of the workspace's, shown in the page if it is of a kind that cannot act there,
+        # as the content security policy's sandbox has every one
+        workspace = self.server.agent.workspace
+        try:
+            file = workspace.path(name) if workspace else None
+        except ValueError:
+            file = None
+        if file is None or not file.is_file():
+            return self._error(404, f"there is no file {name}")
+        kind = mimetypes.guess_type(file.name)[0] or "application/octet-stream"
+        shown = "inline" if kind in _SHOWN else "attachment"
+        data = file.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", kind)
+        self.send_header("Content-Length", str(len(data)))
+        quoted = urllib.parse.quote(file.name)
+        self.send_header("Content-Disposition", f"{shown}; filename*=UTF-8''{quoted}")
+        self.send_header("Content-Security-Policy", "sandbox")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(data)
 
     def _events(self) -> None:
         # what there is, then every change, until the client goes
@@ -136,6 +185,7 @@ class _Handler(BaseHTTPRequestHandler):
         with agent.events.watch() as events, contextlib.suppress(OSError):
             self._event({"type": "conversations", "conversations": agent.conversations()})
             self._event(agent.memories_event())
+            self._event(agent.files_event())
             self._event(agent.models_event())
             while True:
                 try:
@@ -179,10 +229,13 @@ def _local(host: str) -> bool:
     return host in ("localhost", socket.gethostname().lower()) or host.endswith(".local")
 
 
-def _message(body: dict[str, Any]) -> tuple[str, bool]:
-    # a message's content, and whether the model is to think before it replies
+def _message(body: dict[str, Any]) -> tuple[str, bool, list[str]]:
+    # a message's content, whether the model is to think before it replies, and the files attached
     if not isinstance(content := body.get("content"), str) or not content.strip():
         raise ValueError("a message needs content: some text")
     if not isinstance(think := body.get("think", False), bool):
         raise ValueError("think must be a boolean")
-    return content, think
+    attached = body.get("files", [])
+    if not isinstance(attached, list) or not all(isinstance(name, str) for name in attached):
+        raise ValueError("files must be a list of the workspace's files' names")
+    return content, think, attached

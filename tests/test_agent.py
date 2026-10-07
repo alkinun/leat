@@ -533,6 +533,7 @@ def test_events(server, agent, engine):
 
     assert event() == {"type": "conversations", "conversations": []}
     assert event() == {"type": "memories", "memories": []}
+    assert event() == {"type": "files", "files": []}
     assert event()["type"] == "models"
     engine.replies.put(REPLY)
     id = agent.send(None, "Hi")

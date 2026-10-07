@@ -22,7 +22,8 @@ from typing import Any
 
 from leat.agent.client import Client, Completion, EngineError
 from leat.agent.store import Store
-from leat.agent.tools import Context, Result, Tool, memory
+from leat.agent.tools import Context, Result, Tool, files, memory
+from leat.agent.workspace import Workspace
 
 # sampling as Qwen3.6 recommends for general tasks, thinking first, then not
 SAMPLING = {
@@ -43,9 +44,17 @@ their name, work, family, plans or tastes, first call remember, once for each fa
 something unless you called remember. When they ask you to forget something, call forget; to \
 change a memory, forget it and remember the new one. To find what you talked about in earlier \
 conversations, call recall.
-
+{workspace}
 What you remember of the user, each by its number:
 {memories}"""
+# of the system prompt, when the agent has a workspace
+WORKSPACE = """
+The user's files are in a workspace, where you read, write and edit them, and run Python among \
+them in a sandbox without the network; the files they attach are named in their message. To make \
+a document, first read the skill for its kind, then make it with run, and name its file in your \
+answer. The skills:
+{skills}
+"""
 TITLE = 60  # characters of a conversation's title at most: its first message's start
 ROUNDS = 12  # replies a turn takes at most; the last may call no tools, and answers
 
@@ -87,11 +96,15 @@ class Events:
 
 class Agent:
     """The conversations and memories in `store`, the turns run by the model `engine` serves,
-    which calls the memory's tools and `tools`."""
+    which calls the memory's tools and `tools`; and the user's files, in `workspace`, if any."""
 
-    def __init__(self, store: Store, engine: Client, tools: list[Tool] | None = None):
-        self.store, self.engine, self.events = store, engine, Events()
+    def __init__(
+        self, store: Store, engine: Client, tools: list[Tool] | None = None,
+        workspace: Workspace | None = None,
+    ):  # fmt: skip
+        self.store, self.engine, self.workspace, self.events = store, engine, workspace, Events()
         self.tools = {tool.name: tool for tool in [*memory.tools(self), *(tools or [])]}
+        self._files: list[dict[str, Any]] | None = None  # the files the apps were last told of
         self._turns: dict[str, _Turn] = {}  # the running ones, by their conversation's id
         self._lock = threading.Lock()
 
@@ -110,14 +123,23 @@ class Agent:
                 messages += copy.deepcopy(turn.live)
             return self._summary(c) | {"messages": messages}
 
-    def send(self, id: str | None, content: str, think: bool = False) -> str:
+    def send(
+        self, id: str | None, content: str, think: bool = False, attached: list[str] | None = None
+    ) -> str:
         """Starts a turn of the user's message, in a new conversation without an id; returns the
-        conversation's id. The model thinks before it replies if `think`, which takes longer.
-        Raises NotFound if there is no such conversation, Busy if a turn runs in it."""
-        message = {"role": "user", "content": content, "info": {"think": think}}
+        conversation's id. The model thinks before it replies if `think`, which takes longer, and
+        reads of the files `attached`, in the workspace. Raises NotFound if there is no such
+        conversation or file, Busy if a turn runs in the conversation."""
+        info: dict[str, Any] = {"think": think}
+        if attached:
+            space = self.workspace
+            if space is None or not all(space.path(name).is_file() for name in attached):
+                raise NotFound(f"the workspace has not all of {', '.join(attached)}")
+            info["files"] = attached
+        message = {"role": "user", "content": content, "info": info}
         with self._lock:
             if id is None:
-                system = _system(self.store.memories())
+                system = _system(self.store.memories(), self.workspace is not None)
                 id = self.store.create(_title(content), [system, message])["id"]
                 start = 1
             else:
@@ -165,6 +187,16 @@ class Agent:
                 raise NotFound(f"there is no memory {id}")
             self.events.publish(self.memories_event())
         return m
+
+    def files_changed(self) -> None:
+        """Tells the apps of the workspace's files, if they changed since they were last told."""
+        with self._lock:
+            if self.workspace is not None and (now := self.workspace.files()) != self._files:
+                self._files = now
+                self.events.publish({"type": "files", "files": now})
+
+    def files_event(self) -> Event:
+        return {"type": "files", "files": self.workspace.files() if self.workspace else []}
 
     def memories_event(self) -> Event:
         return {"type": "memories", "memories": self.store.memories()}
@@ -223,6 +255,7 @@ class _Turn:
                 if not calls or self.stopped.is_set():
                     break
                 self._call(calls)
+                self.agent.files_changed()  # as a call may have changed them
                 if self.stopped.is_set():
                     break
             self._end()
@@ -369,12 +402,16 @@ class _Deleted(Exception):
     """The turn's conversation was deleted."""
 
 
-def _system(memories: list[dict[str, Any]]) -> dict[str, Any]:
-    # the system prompt of a conversation begun now, which knows these memories
+def _system(memories: list[dict[str, Any]], workspace: bool) -> dict[str, Any]:
+    # the system prompt of a conversation begun now, which knows these memories, and the
+    # workspace's tools if `workspace`
     today = datetime.date.today()
     date = f"{today:%A}, {today.day} {today:%B %Y}"
     remembered = "\n".join(f"[{m['id']}] {m['text']}" for m in memories) or "Nothing yet."
-    return {"role": "system", "content": SYSTEM.format(date=date, memories=remembered)}
+    skills = "\n".join(f"- {path}: {about}" for path, about in files.skills())
+    space = WORKSPACE.format(skills=skills) if workspace else ""
+    content = SYSTEM.format(date=date, memories=remembered, workspace=space)
+    return {"role": "system", "content": content}
 
 
 def _title(content: str) -> str:
@@ -384,9 +421,13 @@ def _title(content: str) -> str:
 
 
 def _api(message: dict[str, Any]) -> dict[str, Any]:
-    # a message as the model reads it: without what only people see, nor an empty reasoning. The
-    # reasoning is sent back, which templates such as Qwen3.5's show the steps of an agent's turn.
-    return {k: v for k, v in message.items() if k != "info" and (v or k != "reasoning_content")}
+    # a message as the model reads it: without what only people see, nor an empty reasoning, but
+    # with the files the user attached named. The reasoning is sent back, which templates such as
+    # Qwen3.5's show the steps of an agent's turn.
+    api = {k: v for k, v in message.items() if k != "info" and (v or k != "reasoning_content")}
+    if attached := message.get("info", {}).get("files"):
+        api["content"] += f"\n\n(Attached, in the workspace: {', '.join(attached)})"
+    return api
 
 
 def _speed(timings: dict[str, Any]) -> dict[str, Any]:
