@@ -22,7 +22,7 @@ from leat.agent.client import EngineError
 
 APP = Path(__file__).parent / "app"
 # the app's files, each served at its path in app/, and their types; the app's pages, /c/<id> one
-# conversation's, are index.html
+# conversation's and /memory, are index.html
 _FILES = (
     "index.html",
     "style.css",
@@ -40,8 +40,9 @@ _TYPES = {
     ".woff2": "font/woff2",
 }
 _KEEP_ALIVE = 15  # seconds between comments on a quiet event stream, which find its client gone
-# /api/conversations/<id>, and what to do there
+# /api/conversations/<id>, and what to do there; /api/memories/<id>
 _CONVERSATION = re.compile(r"/api/conversations/([0-9a-f]{12})(/messages|/stop)?")
+_MEMORY = re.compile(r"/api/memories/([0-9]+)")
 
 
 class Server(ThreadingHTTPServer):
@@ -61,7 +62,7 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._trusted():
             return self._error(403, "this server answers its own network's requests alone")
         path = urllib.parse.urlsplit(self.path).path
-        if path == "/" or path.startswith("/c/"):
+        if path in ("/", "/memory") or path.startswith("/c/"):
             path = "/index.html"
         if path[1:] in _FILES:
             file = APP / path[1:]
@@ -90,6 +91,10 @@ class _Handler(BaseHTTPRequestHandler):
             elif match and match[2] == "/stop":
                 agent.stop(match[1])
                 self._json(200, {})
+            elif path == "/api/memories":
+                if not isinstance(text := body.get("text"), str) or not text.strip():
+                    raise ValueError("a memory needs text")
+                self._json(200, agent.remember(text.strip()))
             elif path == "/api/models/load":
                 if not isinstance(model := body.get("model"), str):
                     raise ValueError("a load needs a model's id")
@@ -109,10 +114,16 @@ class _Handler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         if not self._trusted(write=True):
             return self._error(403, "requests from other sites' pages are refused")
-        path = urllib.parse.urlsplit(self.path).path
-        if not (match := _CONVERSATION.fullmatch(path)) or match[2]:
+        path, agent = urllib.parse.urlsplit(self.path).path, self.server.agent
+        if (match := _CONVERSATION.fullmatch(path)) and not match[2]:
+            agent.delete(match[1])
+        elif match := _MEMORY.fullmatch(path):
+            try:
+                agent.forget(int(match[1]))
+            except NotFound as e:
+                return self._error(404, str(e))
+        else:
             return self._error(404, f"there is no DELETE {path}")
-        self.server.agent.delete(match[1])
         self._json(200, {})
 
     def _events(self) -> None:
@@ -124,6 +135,7 @@ class _Handler(BaseHTTPRequestHandler):
         agent = self.server.agent
         with agent.events.watch() as events, contextlib.suppress(OSError):
             self._event({"type": "conversations", "conversations": agent.conversations()})
+            self._event(agent.memories_event())
             self._event(agent.models_event())
             while True:
                 try:

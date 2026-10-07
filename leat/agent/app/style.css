@@ -40,6 +40,11 @@ body.menu nav { display: none; } /* on a narrow screen, the menu shows it instea
 }
 #new:hover { background: var(--bubble); }
 #conversations { flex: 1; overflow-y: auto; margin-top: 12px; }
+#remembered {
+  display: flex; gap: 10px; align-items: center; padding: 8px 10px;
+  border-radius: var(--round);
+}
+#remembered:hover, body.memory #remembered { background: var(--bubble); }
 .conversation {
   display: flex; align-items: center; gap: 8px; padding: 6px 4px 6px 10px;
   border-radius: var(--round); cursor: pointer;
@@ -71,6 +76,30 @@ main.empty { justify-content: center; padding-bottom: 12vh; }
 main.empty header { position: absolute; top: 0; }
 main.empty #log { display: none; }
 main.empty #greeting { display: block; margin-bottom: 28px; }
+
+/* the memory's page, in place of a conversation */
+#memory { display: none; flex: 1; overflow-y: auto; padding: 16px max(24px, calc(50% - 368px)); }
+body.memory #memory { display: block; }
+body.memory :is(#log, #composer, #greeting) { display: none; }
+#memory h1 { margin: 24px 0 8px; font: 400 30px/1.3 ui-serif, Georgia, serif; }
+#memory > p { margin: 0 0 24px; color: var(--muted); }
+#remember { display: flex; gap: 8px; margin-bottom: 16px; }
+#remember input {
+  flex: 1; padding: 10px 16px; border: 1px solid var(--line); border-radius: var(--round-large);
+  background: var(--card); font: inherit; color: inherit;
+}
+#remember button {
+  padding: 0 20px; border-radius: var(--round-large); background: var(--accent); color: #fff;
+}
+#memories { margin: 0; padding: 0; list-style: none; }
+#memories:empty::before { content: "Nothing yet."; color: var(--muted); }
+#memories li {
+  display: flex; align-items: center; gap: 12px; padding: 12px 4px;
+  border-bottom: 1px solid var(--line);
+}
+#memories li span { flex: 1; }
+#memories li button { padding: 0 8px; color: var(--muted); font-size: 18px; }
+#memories li:not(:hover) button { visibility: hidden; }
 
 .message { margin-bottom: 28px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .user {
@@ -190,5 +219,6 @@ pre code { padding: 0; background: none; }
     box-shadow: 0 0 40px rgb(0 0 0 / 0.2);
   }
   body.menu nav { display: flex; }
-  #log, #composer, #greeting { padding-left: 12px; padding-right: 12px; }
+  #log, #composer, #greeting, #memory { padding-left: 12px; padding-right: 12px; }
+  #memories li button { visibility: visible !important; }
 }

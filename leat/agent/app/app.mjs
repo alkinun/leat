@@ -6,6 +6,7 @@ import { markdown } from "/markdown.mjs";
 const $ = (id) => document.getElementById(id);
 let conversations = []; // the latest updated first: {id, title, updated, running}
 let shown = null; // the conversation shown, with its messages; null for a new one
+let memories = []; // what the agent remembers of the user, the oldest first
 let models = [], loading = null, unreachable = null; // the engine's, a model it loads, or why not
 let lost = false; // the events' connection, until it is back
 let think = localStorage.getItem("leat.think") === "true"; // as the user last chose
@@ -17,6 +18,18 @@ $("new").onclick = () => {
   $("input").focus();
 };
 $("menu").onclick = () => document.body.classList.toggle("menu");
+$("remembered").onclick = () => remembering();
+$("remember").onsubmit = async (event) => {
+  event.preventDefault();
+  const text = $("memorable").value.trim();
+  if (!text) return;
+  try {
+    await post("/api/memories", { text });
+    $("memorable").value = "";
+  } catch (error) {
+    status(error.message, true);
+  }
+};
 $("think").onclick = () => {
   think = !think;
   localStorage.setItem("leat.think", think);
@@ -32,7 +45,7 @@ $("input").onkeydown = (event) => {
     if (!shown?.running) send();
   }
 };
-window.onpopstate = () => open(page(), false);
+window.onpopstate = route;
 
 const events = new EventSource("/api/events");
 events.onmessage = (event) => handle(JSON.parse(event.data));
@@ -46,7 +59,13 @@ events.onopen = () => {
   status("");
   if (shown) open(shown.id, false); // what changed meanwhile
 };
-open(page(), false);
+route();
+
+// shows what the address names: the memory's page, a conversation, or a new one
+function route() {
+  if (location.pathname === "/memory") remembering(false);
+  else open(page(), false);
+}
 
 function handle(event) {
   switch (event.type) {
@@ -76,6 +95,10 @@ function handle(event) {
         if (!$("input").value) $("input").value = event.content;
       }
       break;
+    case "memories":
+      memories = event.memories;
+      renderMemories();
+      return;
     case "loading":
       loading = event.model;
       break;
@@ -124,7 +147,7 @@ function grow({ index, key, at, text }) {
 // shows a conversation, or a new one, at its own address
 async function open(id, push = true) {
   if (push) history.pushState(null, "", id ? `/c/${id}` : "/");
-  document.body.classList.remove("menu");
+  document.body.classList.remove("menu", "memory");
   shown = id ? { id, title: "", messages: null, running: false } : null; // until it comes
   render();
   if (!id) return;
@@ -192,6 +215,26 @@ async function post(path, body) {
   const response = await fetch(path, { method: "POST", body: JSON.stringify(body) });
   if (!response.ok) throw new Error((await response.json()).error.message);
   return response;
+}
+
+// shows the memory's page
+function remembering(push = true) {
+  if (push) history.pushState(null, "", "/memory");
+  document.body.classList.remove("menu");
+  document.body.classList.add("memory");
+  shown = null;
+  render();
+  document.title = "Memory";
+}
+
+function renderMemories() {
+  $("memories").replaceChildren(...memories.toReversed().map((m) => {
+    const item = element("li"), remover = element("button", "", "×");
+    remover.title = "Forget";
+    remover.onclick = () => fetch(`/api/memories/${m.id}`, { method: "DELETE" });
+    item.append(element("span", "", m.text), remover);
+    return item;
+  }));
 }
 
 // the conversation the address shows, or null for a new one
@@ -284,14 +327,19 @@ function fold(start, indexes) {
   return box;
 }
 
-// what a turn's calls did, in a few words
+// what a turn's calls did, in a few words; the tools it names
+const SAID = ["recall", "search", "fetch", "remember", "forget"];
 function summary(calls) {
   const count = (name) => calls.filter((m) => m.name === name).length;
-  const searches = count("search"), pages = count("fetch"), parts = [];
+  const searches = count("search"), pages = count("fetch"), remembered = count("remember");
+  const parts = [];
+  if (count("recall")) parts.push("recalled earlier chats");
   if (searches) parts.push(`searched the web${searches > 1 ? ` ${searches} times` : ""}`);
   if (pages) parts.push(pages > 1 ? `read ${pages} pages` : "read a page");
+  if (remembered) parts.push(remembered > 1 ? `remembered ${remembered} things` : "remembered something");
+  if (count("forget")) parts.push("forgot something");
   for (const name of new Set(calls.map((m) => m.name))) {
-    if (name !== "search" && name !== "fetch") parts.push(`used ${name}`);
+    if (!SAID.includes(name)) parts.push(`used ${name}`);
   }
   const said = parts.join(", ") || "worked";
   return said[0].toUpperCase() + said.slice(1);
@@ -304,8 +352,9 @@ function controls() {
   input.style.height = "auto";
   input.style.height = `${input.scrollHeight}px`;
   input.style.overflowY = input.scrollHeight > 240 ? "auto" : "hidden"; // its max-height
-  document.title = shown?.title || "leat";
-  $("main").classList.toggle("empty", !shown);
+  const memory = document.body.classList.contains("memory"); // its page shown
+  if (!memory) document.title = shown?.title || "leat";
+  $("main").classList.toggle("empty", !shown && !memory);
   $("greeting").textContent = unreachable ? "The engine is not reachable"
     : loading ? "Loading…" : model ? "How can I help?" : "Choose a model";
   $("think").classList.toggle("on", think);
@@ -361,6 +410,7 @@ function work(m) {
     let done = [];
     if (m.name === "search") done = (results ?? []).map((r) => link(r.url, r.title));
     if (m.name === "fetch" && !error) done = [link(url, title || url)];
+    if (m.name === "recall") done = (m.info?.conversations ?? []).map(conversationLink);
     item.classList.toggle("running", !m.content);
     summary.replaceChildren(icon(m.name), element("span", "", line(m)));
     if (error || !done.length) done = [element("p", "", error ?? m.content)];
@@ -380,6 +430,14 @@ function line(m) {
       : `Searched for “${query}”`;
   } else if (m.name === "fetch") {
     said = running ? `Reading ${site}…` : error ? `Couldn't read ${site}` : `Read ${title || site}`;
+  } else if (m.name === "recall") {
+    said = running ? `Recalling “${query}”…` : error ? `Couldn't recall “${query}”`
+      : `Recalled “${query}”`;
+  } else if (m.name === "remember") {
+    said = running ? "Remembering…" : error ? "Couldn't remember"
+      : `Remembered: ${m.info.memory.text}`;
+  } else if (m.name === "forget") {
+    said = running ? "Forgetting…" : error ? "Couldn't forget" : `Forgot: ${m.info.memory.text}`;
   }
   return stopped ? `${said} · stopped` : said;
 }
@@ -401,6 +459,17 @@ function source({ url, title }) {
   return a;
 }
 
+// a link to an earlier conversation, which opens it here
+function conversationLink({ id, title }) {
+  const a = element("a", "", title);
+  a.href = `/c/${id}`;
+  a.onclick = (event) => {
+    event.preventDefault();
+    open(id);
+  };
+  return a;
+}
+
 function link(url, text) {
   const a = element("a", "", text);
   Object.assign(a, { href: url, target: "_blank", rel: "noopener noreferrer" });
@@ -411,7 +480,8 @@ function listed(items) {
   const list = element("ol");
   list.append(...items.map((item) => {
     const li = element("li");
-    li.append(item, element("span", "host", host(item.href)));
+    li.append(item);
+  if (item.target) li.append(element("span", "host", host(item.href))); // the web's
     return li;
   }));
   return list;
@@ -430,6 +500,9 @@ function host(url) {
 const ICONS = {
   search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
   fetch: '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/>',
+  recall: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/>',
+  remember: '<path d="M6 3h12v18l-6-4-6 4z"/>',
+  forget: '<path d="M6 3h12v18l-6-4-6 4z"/><path d="m10 8 4 4m0-4-4 4"/>',
   tool: '<circle cx="12" cy="12" r="3"/>',
 };
 function icon(name) {

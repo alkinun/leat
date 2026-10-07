@@ -3,6 +3,7 @@ import datetime
 import http.client
 import json
 import queue
+import sqlite3
 import threading
 import time
 import urllib.error
@@ -92,7 +93,7 @@ def engine() -> Iterator[FakeEngine]:
     engine.server_close()
 
 
-def echo(text: str) -> Result:
+def echo(context, text: str) -> Result:
     return Result(f"echo: {text}", {"echoed": text})
 
 
@@ -219,7 +220,8 @@ def test_tools(agent, engine, events):
     }  # fmt: skip
     assert reply["content"] == "It said hi."
     first, second = engine.requests
-    assert [tool["function"]["name"] for tool in first["tools"]] == ["echo"]
+    names = ["remember", "forget", "recall", "echo"]
+    assert [tool["function"]["name"] for tool in first["tools"]] == names
     assert second["messages"][-1] == _api(answer)
 
 
@@ -241,7 +243,7 @@ def test_bad_calls(agent, engine, events):
 def test_calls_at_once(agent, engine, events):
     # a reply's calls run at once: each of these waits for the other
     both = threading.Barrier(2, timeout=5)
-    meet = Tool("meet", "Waits for another", strings(), lambda: Result(str(both.wait())))
+    meet = Tool("meet", "Waits for another", strings(), lambda c: Result(str(both.wait())))
     agent.tools["meet"] = meet
     engine.replies.put([{"tool_calls": [call("meet", {}, "a"), call("meet", {}, "b")]}])
     engine.replies.put([{"content": "Met."}])
@@ -254,7 +256,7 @@ def test_calls_at_once(agent, engine, events):
 def test_stop_in_call(agent, engine, events):
     # a stop while a tool runs answers its call so, and ends the turn
     released = threading.Event()
-    slow = Tool("slow", "Takes its time", strings(), lambda: Result(str(released.wait(5))))
+    slow = Tool("slow", "Takes its time", strings(), lambda c: Result(str(released.wait(5))))
     agent.tools["slow"] = slow
     engine.replies.put([{"tool_calls": [call("slow", {})]}])
     id = agent.send(None, "Hi")
@@ -277,6 +279,74 @@ def test_rounds(agent, engine, events, monkeypatch):
     agent.send(None, "Hi")
     until(events, ended)
     assert ["tools" in request for request in engine.requests] == [True, True, False]
+
+
+def test_memory(agent, engine, events):
+    # what the model remembers, the conversations begun after know, and the apps are told
+    engine.replies.put([{"tool_calls": [call("remember", {"memory": "Their dog is Max."})]}])
+    engine.replies.put([{"content": "Noted."}])
+    first = agent.send(None, "My dog is called Max.")
+    seen = until(events, ended)
+    (remembered,) = [e["memories"] for e in seen if e["type"] == "memories"]
+    assert [(m["id"], m["text"]) for m in remembered] == [(1, "Their dog is Max.")]
+    assert agent.store.messages(first)[3]["content"] == "Remembered, as [1]."
+    assert "Nothing yet." in agent.store.messages(first)[0]["content"]
+    engine.replies.put(REPLY)
+    second = agent.send(None, "Hi")
+    until(events, ended)
+    assert "[1] Their dog is Max." in agent.store.messages(second)[0]["content"]
+    # forgetting it, by its number
+    calls = [call("forget", {"number": 1}), call("forget", {"number": 9}, "call_2")]
+    engine.replies.put([{"tool_calls": calls}])
+    engine.replies.put([{"content": "Forgotten."}])
+    agent.send(second, "Forget my dog.")
+    until(events, ended)
+    answers = [m["content"] for m in agent.store.messages(second)[-3:-1]]
+    assert answers == ["Forgot [1]: Their dog is Max.", "error: there is no memory 9"]
+    assert agent.memories() == []
+
+
+def test_recall(agent, engine, events):
+    # recall finds what the user and the model said in other conversations, not the tools' answers
+    engine.replies.put([{"tool_calls": [call("echo", {"text": "tulips"})]}])
+    engine.replies.put([{"content": "Plant the tulips in October."}])
+    garden = agent.send(None, "When should I plant bulbs?")
+    until(events, ended)
+    engine.replies.put([{"tool_calls": [call("recall", {"query": "tulips planting"})]}])
+    engine.replies.put([{"content": "In October."}])
+    now = agent.send(None, "What did you say about tulips?")
+    until(events, ended)
+    answer = agent.store.messages(now)[3]
+    day = datetime.date.today()
+    # the passages of each conversation, the best first: "planting" is "plant", as the question's
+    assert answer["content"] == (f"“When should I plant bulbs?”, {day.day} {day:%B %Y}\n"
+                                 "assistant: Plant the tulips in October.\n"
+                                 "user: When should I plant bulbs?")  # fmt: skip
+    found = [{"id": garden, "title": "When should I plant bulbs?"}]
+    assert answer["info"]["conversations"] == found
+    # not the conversation it is made in, nor a deleted one
+    agent.delete(garden)
+    assert agent.store.search("tulips", exclude=now) == [] and agent.store.search("") == []
+
+
+def test_migration(tmp_path):
+    # a state of the first version, conversations alone, gains memories and search, which finds
+    # what was said before
+    db = sqlite3.connect(tmp_path / "leat.db")
+    db.executescript("""
+        CREATE TABLE conversations (id TEXT PRIMARY KEY, title TEXT NOT NULL, created REAL NOT NULL,
+                                    updated REAL NOT NULL);
+        CREATE TABLE messages (conversation TEXT NOT NULL REFERENCES conversations (id)
+                               ON DELETE CASCADE, position INTEGER NOT NULL, message TEXT NOT NULL,
+                               PRIMARY KEY (conversation, position));
+        INSERT INTO conversations VALUES ('0123456789ab', 'Bulbs', 0, 0);
+        INSERT INTO messages VALUES ('0123456789ab', 0, '{"role": "system", "content": "tulips"}'),
+                                    ('0123456789ab', 1, '{"role": "user", "content": "Tulips?"}');
+    """)  # fmt: skip
+    db.close()
+    store = Store(tmp_path / "leat.db")
+    assert [(f["role"], f["text"]) for f in store.search("tulip")] == [("user", "Tulips?")]
+    assert store.memories() == [] and Store(tmp_path / "leat.db").conversations()[0]["id"]
 
 
 def test_live_reply(agent, engine, events):
@@ -426,6 +496,17 @@ def test_api_busy(server, engine, events):
     until(events, ended)
 
 
+def test_api_memories(server, agent):
+    url = f"{server}/api/memories"
+    status, body = request(url, "POST", {"text": " Lives in Izmir. "})
+    assert status == 200 and json.loads(body)["text"] == "Lives in Izmir."
+    assert [m["text"] for m in agent.memories()] == ["Lives in Izmir."]
+    assert request(url, "POST", {"text": ""})[0] == 400
+    assert request(f"{url}/{json.loads(body)['id']}", "DELETE")[0] == 200
+    assert request(f"{url}/7", "DELETE")[0] == 404 and agent.memories() == []
+    assert request(f"{server}/memory")[0] == 200  # the app's page of them
+
+
 def test_trust(server, engine):
     # a request naming the box by an address or a local name, and a write from its own page
     engine.replies.put(REPLY)
@@ -451,6 +532,7 @@ def test_events(server, agent, engine):
         return json.loads(line[6:])
 
     assert event() == {"type": "conversations", "conversations": []}
+    assert event() == {"type": "memories", "memories": []}
     assert event()["type"] == "models"
     engine.replies.put(REPLY)
     id = agent.send(None, "Hi")

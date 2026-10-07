@@ -7,6 +7,13 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class Context:
+    """What a call is made in."""
+
+    conversation: str  # the id of the conversation
+
+
+@dataclass(frozen=True)
 class Result:
     content: str  # what the model reads
     info: dict[str, Any] = field(default_factory=dict)  # what people see of it
@@ -17,7 +24,7 @@ class Tool:
     name: str
     description: str
     parameters: dict[str, Any]  # its arguments, as a JSON schema
-    run: Callable[..., Result]  # of the arguments, by name
+    run: Callable[..., Result]  # of the call's Context and the arguments, by name
 
     def declaration(self) -> dict[str, Any]:
         """The tool as OpenAI's API declares it."""

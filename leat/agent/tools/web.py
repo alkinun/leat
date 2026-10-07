@@ -37,13 +37,13 @@ def tools(searxng: str) -> list[Tool]:
             "search",
             "Search the web: the top results' titles, links and snippets",
             strings(query="what to search for"),
-            lambda query: search(searxng, query),
+            lambda context, query: search(searxng, query),
         ),
         Tool(
             "fetch",
             "Read a web page as text",
             strings(url="the page's address, as a search result's"),
-            fetch,
+            lambda context, url: fetch(url),
         ),
     ]
 

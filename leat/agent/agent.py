@@ -22,7 +22,7 @@ from typing import Any
 
 from leat.agent.client import Client, Completion, EngineError
 from leat.agent.store import Store
-from leat.agent.tools import Result, Tool
+from leat.agent.tools import Context, Result, Tool, memory
 
 # sampling as Qwen3.6 recommends for general tasks, thinking first, then not
 SAMPLING = {
@@ -35,7 +35,16 @@ You are Leat, an assistant that runs on a computer in the user's home: private, 
 is {date}.
 
 When a question needs facts you may not know, or that may have changed since you learned them, \
-search the web, then read the most promising pages before you answer. Link the pages you used."""
+call search, then fetch the most promising pages before you answer. Link the pages you used.
+
+When the user tells you something about themselves worth knowing in later conversations, such as \
+their name, work, family, plans or tastes, call remember, once for each fact, written of "the \
+user", as "The user's cat is called Pamuk." Never say you will remember something without calling \
+remember. When they ask you to forget something, call forget; to change a memory, forget it and \
+remember the new one. To find what you talked about in earlier conversations, call recall.
+
+What you remember of the user, each by its number:
+{memories}"""
 TITLE = 60  # characters of a conversation's title at most: its first message's start
 ROUNDS = 12  # replies a turn takes at most; the last may call no tools, and answers
 
@@ -76,12 +85,12 @@ class Events:
 
 
 class Agent:
-    """The conversations in `store`, their turns run by the model `engine` serves, which calls
-    `tools`."""
+    """The conversations and memories in `store`, the turns run by the model `engine` serves,
+    which calls the memory's tools and `tools`."""
 
     def __init__(self, store: Store, engine: Client, tools: list[Tool] | None = None):
         self.store, self.engine, self.events = store, engine, Events()
-        self.tools = {tool.name: tool for tool in tools or []}
+        self.tools = {tool.name: tool for tool in [*memory.tools(self), *(tools or [])]}
         self._turns: dict[str, _Turn] = {}  # the running ones, by their conversation's id
         self._lock = threading.Lock()
 
@@ -107,7 +116,8 @@ class Agent:
         message = {"role": "user", "content": content, "info": {"think": think}}
         with self._lock:
             if id is None:
-                id = self.store.create(_title(content), [_system(), message])["id"]
+                system = _system(self.store.memories())
+                id = self.store.create(_title(content), [system, message])["id"]
                 start = 1
             else:
                 if self.store.conversation(id) is None:
@@ -135,6 +145,28 @@ class Agent:
                 turn.stop()
             self.store.delete(id)
             self.events.publish({"type": "deleted", "id": id})
+
+    def memories(self) -> list[dict[str, Any]]:
+        """What the agent remembers of the user, the oldest first."""
+        return self.store.memories()
+
+    def remember(self, text: str) -> dict[str, Any]:
+        """Remembers something of the user, in the conversations begun from now on."""
+        with self._lock:
+            m = self.store.add_memory(text)
+            self.events.publish(self.memories_event())
+        return m
+
+    def forget(self, id: int) -> dict[str, Any]:
+        """Forgets a memory, and returns it. Raises NotFound if there is no such memory."""
+        with self._lock:
+            if (m := self.store.delete_memory(id)) is None:
+                raise NotFound(f"there is no memory {id}")
+            self.events.publish(self.memories_event())
+        return m
+
+    def memories_event(self) -> Event:
+        return {"type": "memories", "memories": self.store.memories()}
 
     def models(self) -> list[dict[str, Any]]:
         """The engine's models, as it lists them. Raises EngineError."""
@@ -274,7 +306,7 @@ class _Turn:
                 raise ValueError(f"there is no tool {message['name']!r}")
             if not isinstance(arguments, dict):
                 raise ValueError(f"the arguments must be a JSON object, not {arguments!r}")
-            result = tool.run(**arguments)
+            result = tool.run(Context(self.id), **arguments)
         except Exception as e:  # for the model, which may try again
             result = Result(f"error: {e}", {"error": str(e)})
         with a._lock:
@@ -336,10 +368,12 @@ class _Deleted(Exception):
     """The turn's conversation was deleted."""
 
 
-def _system() -> dict[str, Any]:
+def _system(memories: list[dict[str, Any]]) -> dict[str, Any]:
+    # the system prompt of a conversation begun now, which knows these memories
     today = datetime.date.today()
     date = f"{today:%A}, {today.day} {today:%B %Y}"
-    return {"role": "system", "content": SYSTEM.format(date=date)}
+    remembered = "\n".join(f"[{m['id']}] {m['text']}" for m in memories) or "Nothing yet."
+    return {"role": "system", "content": SYSTEM.format(date=date, memories=remembered)}
 
 
 def _title(content: str) -> str:

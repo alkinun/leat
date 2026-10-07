@@ -15,6 +15,9 @@
     <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>New chat
   </button>
   <div id="conversations"></div>
+  <button id="remembered">
+    <svg viewBox="0 0 24 24"><path d="M6 3h12v18l-6-4-6 4z"/></svg>Memory
+  </button>
 </nav>
 <main id="main" class="empty">
   <header>
@@ -28,6 +31,15 @@
   </header>
   <h1 id="greeting"></h1>
   <div id="log"></div>
+  <section id="memory">
+    <h1>Memory</h1>
+    <p>What Leat remembers about you. Every new chat knows it; delete what it should forget.</p>
+    <form id="remember">
+      <input id="memorable" placeholder="Something to remember" autocomplete="off">
+      <button>Add</button>
+    </form>
+    <ul id="memories"></ul>
+  </section>
   <div id="composer">
     <div>
       <textarea id="input" rows="1" placeholder="Message"></textarea>

@@ -132,7 +132,7 @@ the 3090. What the agent needs beyond the OpenAI API, the engine exposes as smal
 | Turn | one job on the box: a user's message, then model replies and tool calls until a reply calls none; it streams events to whoever watches |
 | Tool | a function the model calls: a name, a short description, arguments, and whether it acts outside the box |
 | Skill | a folder with a `SKILL.md` (the agentskills.io format) and any scripts; listed by name in the prompt, read when needed |
-| Memory | what the agent knows about a user: a short profile they can read and edit, and search over past conversations |
+| Memory | what the agent knows about a user: short facts, each a memory they can see and delete, and search over past conversations |
 | Task | a prompt the agent runs later or on a schedule, delivering its answer to a channel |
 | Channel | where a conversation happens: the app, Telegram, … |
 | Character | a persona: a name, instructions, a greeting; the default one is leat |
