@@ -6,6 +6,7 @@ from pathlib import Path
 import gguf
 import numpy as np
 from gguf.quants import dequantize
+from tinygrad import Tensor, UOp, dtypes
 
 from leat.gguf import GGUF
 from leat.quant import BLOCK, GGMLType
@@ -411,6 +412,23 @@ def write_tiny_assistant(path: Path) -> dict[str, np.ndarray]:
         add(b + "ffn_down.weight", (A_D, A_HIDDEN), GGMLType.Q8_0, 1e-3)
     _finish(w)
     return weights
+
+
+class Oracle:
+    """A drafter that drafts the tokens a list holds at the positions after a draft's, as one
+    that guessed them would."""
+
+    def __init__(self, tokens: list[int]):
+        self.tokens = Tensor(tokens + [0] * CONTEXT, dtype=dtypes.int32).realize()
+
+    def draft(self, token: Tensor, hidden: Tensor, slot: UOp, pos: UOp, count: int) -> Tensor:
+        return self.tokens[pos + 1 : pos + 1 + count].reshape(1, count)
+
+    def follow(self, tokens: Tensor, hidden: Tensor, spans: list) -> None:
+        pass
+
+    def copy(self, source: UOp, slot: UOp) -> None:
+        pass
 
 
 def reference_drafts(

@@ -1,9 +1,9 @@
 import pytest
-from tinygrad import Tensor, UOp, dtypes
+from tinygrad import Tensor
 
 from leat.engine import DRAFT_TOKENS, Engine
 from leat.sampler import GREEDY, Sampling
-from tests.helpers import CONTEXT, reference_drafts, reference_mtp_drafts
+from tests.helpers import CONTEXT, Oracle, reference_drafts, reference_mtp_drafts
 
 PROMPT = [5, 77, 120, 3, 299, 42, 8, 150, 61, 200, 9, 33]
 # Gemma 4 with its assistant, and Qwen3.5 with its MTP layer, of recurrent state that a step
@@ -44,23 +44,6 @@ def test_mtp_drafts_match_reference(tiny):
     engine.cancel(sequence)
 
 
-class _Oracle:
-    """Drafts the tokens a list holds at the positions after a draft's, as a drafter that guessed
-    them would."""
-
-    def __init__(self, tokens: list[int]):
-        self.tokens = Tensor(tokens + [0] * CONTEXT, dtype=dtypes.int32).realize()
-
-    def draft(self, token: Tensor, hidden: Tensor, slot: UOp, pos: UOp, count: int) -> Tensor:
-        return self.tokens[pos + 1 : pos + 1 + count].reshape(1, count)
-
-    def follow(self, tokens: Tensor, hidden: Tensor, spans: list) -> None:
-        pass
-
-    def copy(self, source: UOp, slot: UOp) -> None:
-        pass
-
-
 @pytest.mark.usefixtures("reference_ops")
 @pytest.mark.parametrize("arch", ARCHS)
 @pytest.mark.parametrize("sampling", [GREEDY, Sampling(temperature=0.9, top_k=50)])
@@ -75,7 +58,7 @@ def test_speculative_generates_as_plain(tiny, tiny_assistant, arch, sampling, gu
     if guessed == "some":  # every third position wrong
         tokens = [t if i % 3 else (t + 1) % 300 for i, t in enumerate(tokens)]
     if guessed != "none":
-        engine.drafter = _Oracle(tokens)  # type: ignore[assignment]
+        engine.drafter = Oracle(tokens)  # type: ignore[assignment]
     steps = 0
     speculative = engine._speculative
 
@@ -98,14 +81,30 @@ def test_speculative_stops_where_plain_does(tiny, tiny_assistant, arch):
     path, draft = models(tiny, tiny_assistant, arch)
     plain = list(Engine(path, max_context=CONTEXT).generate(PROMPT, 7))
     engine = Engine(path, max_context=CONTEXT, draft=draft)
-    engine.drafter = _Oracle(PROMPT + plain)  # type: ignore[assignment]
+    engine.drafter = Oracle(PROMPT + plain)  # type: ignore[assignment]
     assert list(engine.generate(PROMPT, 7)) == plain
     full = list(Engine(path, max_context=CONTEXT).generate(PROMPT, CONTEXT))
     engine = Engine(path, max_context=CONTEXT, draft=draft)
-    engine.drafter = _Oracle(PROMPT + full)  # type: ignore[assignment]
+    engine.drafter = Oracle(PROMPT + full)  # type: ignore[assignment]
     assert list(engine.generate(PROMPT, CONTEXT)) == full
 
 
 def test_drafter_needs_its_target(tiny_model, tiny_assistant):
     with pytest.raises(ValueError, match="drafts for no llama model"):
         Engine(tiny_model[0], max_context=CONTEXT, draft=tiny_assistant[0])
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("arch", ARCHS)
+@pytest.mark.parametrize("guessed", ["none", "some"])
+def test_speculative_kernels(tiny, tiny_assistant, arch, guessed):
+    # through the kernels, the drafts' step on the matrix-vector kernels for several tokens,
+    # FlashAttention and Gated DeltaNet's saving kernels: the tokens of plain decoding, which
+    # rounds differently only where these tiny models have no near ties
+    path, draft = models(tiny, tiny_assistant, arch)
+    plain = list(Engine(path, max_context=CONTEXT).generate(PROMPT, 16))
+    engine = Engine(path, max_context=CONTEXT, draft=draft)
+    if guessed == "some":
+        tokens = [t if i % 3 else (t + 1) % 300 for i, t in enumerate(PROMPT + plain)]
+        engine.drafter = Oracle(tokens)  # type: ignore[assignment]
+    assert list(engine.generate(PROMPT, 16)) == plain

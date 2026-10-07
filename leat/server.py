@@ -250,12 +250,16 @@ class Server(ThreadingHTTPServer):
                 writer.c.out.put(e)
             running.clear()
             return
-        for sequence, token in stepped:
+        # a speculative step gives a sequence several tokens, the last of which may end it
+        last = {sequence: i for i, (sequence, _) in enumerate(stepped)}
+        for i, (sequence, token) in enumerate(stepped):
+            if sequence not in running:  # a stop string ended it before
+                continue
             writer = running[sequence]
             if writer.take(token):  # end of generation or a stop string
                 engine.cancel(sequence)
                 writer.finish("stop")
-            elif sequence.done:  # max_tokens, or the context full
+            elif sequence.done and i == last[sequence]:  # max_tokens, or the context full
                 writer.finish("length")
             else:
                 continue

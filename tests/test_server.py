@@ -17,7 +17,7 @@ from leat.chat import ChatTemplate
 from leat.engine import Engine
 from leat.sampler import Sampling
 from leat.server import Server, _completion, _Writer
-from tests.helpers import CONTEXT, chat_template
+from tests.helpers import CONTEXT, Oracle, chat_template
 
 WEATHER = {
     "type": "function",
@@ -222,6 +222,26 @@ def test_completion(server):
     # and by default, OpenAI's temperature of 1, up to the context and without empty stops
     asked = _completion({"messages": messages, "stop": ["", "y"], "top_p": None}, server)
     assert (asked.sampling, asked.max_tokens, asked.stop) == (Sampling(1.0), CONTEXT, ["y"])
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_speculative_steps(tiny, tiny_assistant, stream):
+    # a step that gives several tokens ends the reply at max_tokens or a stop string within them
+    path = tiny("gemma4")[0]
+    plain = Engine(path, max_context=CONTEXT, prefill_chunk=8)
+    prompt = plain.tokenizer.encode("go on")
+    tokens = list(plain.generate(prompt, 16))
+    with serving(path, max_context=CONTEXT, prefill_chunk=8, draft=tiny_assistant[0]) as server:
+        server.load("tiny")
+        server.loaded.engine.drafter = Oracle(prompt + tokens)  # every step gives 4 tokens
+        client = connect(server)
+        reply = complete(client, "go on", max_tokens=6, temperature=0, stream=stream)
+        assert reply == (plain.tokenizer.decode(tokens[:6]), "length")
+        full = plain.tokenizer.decode(tokens)
+        cut = len(plain.tokenizer.decode(tokens[:3]))  # within the first speculative step
+        stop = full[cut : cut + 3]
+        reply = complete(client, "go on", max_tokens=16, temperature=0, stop=[stop], stream=stream)
+        assert reply == (full[: full.index(stop)], "stop")
 
 
 def test_end_of_generation(client, engine, monkeypatch):
