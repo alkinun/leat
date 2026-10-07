@@ -391,7 +391,8 @@ function renderFiles() {
     item.append(fileLink(f.name), element("span", "meta", `${bytes(f.size)} · ${when}`), remover);
     return item;
   }));
-  if (shown?.messages) renderLog(); // the cards of the files its answers made
+  // the cards of the files its answers made, where the user reads
+  if (shown?.messages) follow(() => views.forEach((view) => view.update()));
 }
 
 // asks the user for files, and hands them to `take`, each
