@@ -78,8 +78,11 @@ class Workspace:
             raise FileNotFoundError(f"there is no file {name}")
         path.unlink()
 
-    def run(self, code: str, *args: str, timeout: float = TIMEOUT) -> Ran:
-        """Runs Python code in the sandbox, in the workspace, with `args` as its sys.argv[1:]."""
+    def run(
+        self, code: str, *args: str, timeout: float = TIMEOUT, kept: int | None = OUTPUT
+    ) -> Ran:
+        """Runs Python code in the sandbox, in the workspace, with `args` as its sys.argv[1:]; of
+        its output, `kept` characters at most, its start and its end, or all of it of None."""
         if shutil.which("bwrap") is None:
             raise RuntimeError("the sandbox needs bubblewrap, which is not installed")
         python, mounts = "/usr/bin/python3", []
@@ -100,13 +103,13 @@ class Workspace:
                 env={"PATH": os.environ.get("PATH", "/usr/bin")},
             )  # fmt: skip
         except subprocess.TimeoutExpired as e:
-            return Ran(None, _kept((e.output or b"").decode(errors="replace")))
-        return Ran(done.returncode, _kept(done.stdout.decode(errors="replace")))
+            return Ran(None, _kept((e.output or b"").decode(errors="replace"), kept))
+        return Ran(done.returncode, _kept(done.stdout.decode(errors="replace"), kept))
 
 
-def _kept(output: str) -> str:
-    # an output's start and end, if it is longer than OUTPUT
-    if len(output) <= OUTPUT:
+def _kept(output: str, n: int | None) -> str:
+    # an output's start and end, if it is longer than n characters
+    if n is None or len(output) <= n:
         return output
-    half = OUTPUT // 2
-    return f"{output[:half]}\n… ({len(output) - OUTPUT} characters left out) …\n{output[-half:]}"
+    half = n // 2
+    return f"{output[:half]}\n… ({len(output) - n} characters left out) …\n{output[-half:]}"

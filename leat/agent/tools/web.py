@@ -123,7 +123,7 @@ def _readable(html: str, url: str, workspace: Workspace | None) -> tuple[str, st
     if workspace is not None and workspace.environment is not None:
         raw = _save(workspace, url, html, ".html")
         try:
-            ran = workspace.run(_EXTRACT, f"/workspace/{raw}", url, timeout=30)
+            ran = workspace.run(_EXTRACT, f"/workspace/{raw}", url, timeout=30, kept=None)
             found = json.loads(ran.output.strip().splitlines()[-1]) if ran.status == 0 else {}
             if found.get("text"):
                 return " ".join(found["title"].split()), found["text"]

@@ -135,7 +135,8 @@ def read(workspace: Workspace, path: str, start: int = 0) -> Result:
     if suffix in IMAGES:
         raise ValueError(f"{path} is an image, which you cannot see")
     if suffix in DOCUMENTS:
-        ran = workspace.run(_EXTRACT, f"/workspace/{file.relative_to(workspace.root).as_posix()}")
+        name = f"/workspace/{file.relative_to(workspace.root).as_posix()}"
+        ran = workspace.run(_EXTRACT, name, kept=None)  # read on in parts, below
         if ran.status != 0:
             why = (ran.output.strip().splitlines() or ["it stopped"])[-1]
             raise ValueError(f"{path} could not be read: {why}")

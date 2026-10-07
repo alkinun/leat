@@ -137,6 +137,22 @@ wb = openpyxl.Workbook(); wb.active.append(["Rent", 900, "=B1*12"]); wb.save("bu
     assert files.read(workspace, "plan.docx").content == "# Plan\n\nBuy milk.\n\n"
     assert files.read(workspace, "budget.xlsx").content == (
         "## Sheet\n\n\n| Rent | 900 | =B1*12 |\n| --- | --- | --- |\n\n")  # fmt: skip
+    # a long one, in parts, whole
+    files.run(workspace, """
+import docx
+d = docx.Document()
+for i in range(400):
+    d.add_paragraph(f"Line {i}: " + "words " * 10)
+d.save("long.docx")
+""")  # fmt: skip
+    first = files.read(workspace, "long.docx").content
+    assert first.endswith(f"read on from start={files.READ})")
+    whole, read = "", first
+    while "read on from start=" in read:
+        whole += read.rsplit("\n\n(characters", 1)[0]
+        read = files.read(workspace, "long.docx", int(read.rsplit("=", 1)[1][:-1])).content
+    lines = (whole + read).split("\n\n")
+    assert lines[:-1] == [f"Line {i}: {'words ' * 10}" for i in range(400)]
     with pytest.raises(ValueError, match="could not be read"):
         files.write(workspace, "broken.pdf", "not a PDF")
         files.read(workspace, "broken.pdf")

@@ -25,6 +25,10 @@ ARTICLE = (
     "</p><p>The council voted to restore it, from <a href='/spring'>the spring</a>.</p></article>"
     "</main><footer>Copyright 2026 News Ltd.</footer></body></html>"
 )
+# an article longer than the sandbox's output a run keeps
+LONG = ARTICLE.replace("</article>", "".join(
+    f"<p>Paragraph {i}: {'the library stays open late on Thursdays. ' * 25}</p>" for i in range(30)
+) + "<p>The end.</p></article>")  # fmt: skip
 RESULTS = [
     {"title": "One", "url": "https://one.example/", "content": "The first."},
     {"title": "", "url": "https://two.example/"},
@@ -47,8 +51,9 @@ class _Site(BaseHTTPRequestHandler):
             self.send_response(302)
             self.send_header("Location", "http://10.0.0.1/")
             return self.end_headers()
-        kinds = {"/page": "text/html", "/article": "text/html", "/text": "text/plain"}
-        body = {"/page": PAGE, "/article": ARTICLE}.get(path, "Plain text.")
+        kinds = {"/page": "text/html", "/article": "text/html", "/long": "text/html",
+                 "/text": "text/plain"}  # fmt: skip
+        body = {"/page": PAGE, "/article": ARTICLE, "/long": LONG}.get(path, "Plain text.")
         self._send(kinds.get(path, "application/pdf"), body)
 
     def _send(self, kind: str, body: str) -> None:
@@ -202,3 +207,8 @@ def test_fetch_readable(site, monkeypatch, tmp_path):
     assert "# The story\n\nThe council met on Tuesday" in result.content
     assert result.content.endswith(f"from [the spring]({site}/spring).")
     assert [p.name for p in workspace.path(web.SAVED).iterdir()] == []  # the HTML gone
+    # a long one too, whole, its start read and the rest saved
+    content = web.fetch(f"{site}/long", workspace).content
+    assert "# The story" in content and "(The page goes on" in content
+    saved = content.split("read ")[-1].split(" from")[0]
+    assert workspace.path(saved).read_text().endswith("The end.")
