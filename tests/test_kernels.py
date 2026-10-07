@@ -556,6 +556,30 @@ def test_attention_rows(window, sinks, symbolic, rows):
         np.testing.assert_allclose(got[t], expected.reshape(-1), rtol=2e-3, atol=2e-3)
 
 
+# rows of two sequences' consecutive tokens, sized by each one's last row: of the first, in a
+# window of 1024, that of length 2047 takes a chunk more than the last's of 2048
+@pytest.mark.parametrize("window", [0, 1024])
+@pytest.mark.parametrize("symbolic", [False, True])
+def test_attention_spans(window, symbolic):
+    spans = [(0, 2044, 4), (2, 67, 3)]  # slot, start, tokens
+    rows = [(slot, start + i + 1) for slot, start, n in spans for i in range(n)]
+    rng = np.random.default_rng(len(rows) + window)
+    cache = rng.standard_normal((2, SLOTS, 8, 4096, 128)).astype(np.float16)
+    q = rng.standard_normal((1, 32, len(rows), 128)).astype(np.float32) * 0.3
+    slots: list[int | UOp] = [s for s, _ in rows]
+    lengths: list[int | UOp] = [n for _, n in rows]
+    if symbolic:
+        starts = [
+            UOp.variable(f"pos{i}", 0, 4000).bind(start) for i, (_, start, _) in enumerate(spans)
+        ]
+        lengths = [starts[i] + j + 1 for i, (_, _, n) in enumerate(spans) for j in range(n)]
+    q_t, cache_t = Tensor(q).realize(), Tensor(cache).realize()
+    got = kernels.attention(q_t, cache_t, slots, lengths, 0.1, window, ends=[3, 6]).numpy()[0]
+    for t, (s, n) in enumerate(rows):
+        expected = reference_attention(q[0, :, t : t + 1], cache, n - 1, window, 0.1, None, s)
+        np.testing.assert_allclose(got[t], expected.reshape(-1), rtol=2e-3, atol=2e-3)
+
+
 def chunk_len(tokens: int) -> UOp:
     # a bound number of query tokens, as while prefilling; up to 16, bound to 16, they are one tile
     # of queries, whose keys blocks split
@@ -935,22 +959,33 @@ def test_delta_net(tokens, start):
         np.testing.assert_array_equal(got[other], state[other])
 
 
-@pytest.mark.parametrize("tokens", [4, 12])
-def test_delta_net_saved(tokens):
-    # the states after each token, from which a sequence goes back to any of them, as after
-    # running only the tokens up to it
+@pytest.mark.parametrize(("rows", "tokens"), [([(1, 5)], 4), ([(1, 5)], 12), ([(2, 3), (0, 0)], 4)])
+def test_delta_net_saved(rows, tokens):
+    # rows of several tokens, each from its slot's states, and the states after each token, from
+    # which a sequence goes back to any of them, as after running only its tokens up to it, in a
+    # buffer of more rows than the tokens, whose last stays as it was
     rng = np.random.default_rng(29)
-    x, (conv_state, state) = delta_net_inputs(tokens, rng), delta_net_states(rng)
+    count = len(rows) * tokens
+    x, (conv_state, state) = delta_net_inputs(count, rng), delta_net_states(rng)
     states = (Tensor(conv_state).contiguous().realize(), Tensor(state).contiguous().realize())
-    saved = (Tensor.zeros(tokens, DN_WIDTH - 1, DN_CHANNELS).contiguous().realize(),
-             Tensor.zeros(tokens, DN_HEADS, DN_DIMS, DN_DIMS).contiguous().realize())  # fmt: skip
-    run_delta_net(x, [(1, 5)], tokens, states, saved).realize()
+    shapes = ((DN_WIDTH - 1, DN_CHANNELS), (DN_HEADS, DN_DIMS, DN_DIMS))
+    saved = tuple(Tensor.zeros(count + 1, *shape).contiguous().realize() for shape in shapes)
+    out = run_delta_net(x, rows, tokens, states, saved).numpy()[0]
     got_conv, got = saved[0].numpy(), saved[1].numpy()
-    for t in range(tokens):
-        first = {k: v[: t + 1] if v.shape[0] == tokens else v for k, v in x.items()}
-        _, conv_after, after = reference_delta_net(first, conv_state[1], state[1], 1e-6)
-        np.testing.assert_allclose(got_conv[t], conv_after, rtol=1e-6, atol=1e-6)
-        assert_close(got[t], after, 2e-4)
+    for r, (slot, start) in enumerate(rows):
+        kept = start > 0
+        for t in range(tokens):
+            at = r * tokens + t
+            per_token = ("mixed", "z", "alpha", "beta")
+            first = {k: v[r * tokens : at + 1] if k in per_token else v for k, v in x.items()}
+            expected, conv_after, after = reference_delta_net(
+                first, conv_state[slot] * kept, state[slot] * kept, 1e-6
+            )
+            np.testing.assert_allclose(got_conv[at], conv_after, rtol=1e-6, atol=1e-6)
+            assert_close(got[at], after, 2e-4)
+        assert_close(out[r * tokens : (r + 1) * tokens], expected, 2e-4)
+        assert_close(states[1].numpy()[slot], after, 2e-4)
+    assert not got_conv[count].any() and not got[count].any()
 
 
 def test_delta_net_rows():

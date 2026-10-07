@@ -303,8 +303,8 @@ class Transformer:
         """Runs `tokens` (1, T), the spans' in turn, each in its slot and at its positions, and
         returns normed hidden states. Several sequences share the reads of every weight; each
         attends over its own slot alone. Tokens past the first `live`, if given, pad a batch:
-        the mixtures of experts skip them. With `save`, a single span's tokens keep the recurrent
-        states after each of them, from which rewind() goes back."""
+        the mixtures of experts skip them. With `save`, the tokens keep the recurrent states
+        after each of them, the t-th token's at t, from which rewind() goes back."""
         x = ops.embedding(tokens, self.embed)
         if (scale := self.config.embed_scale) != 1:
             x = x * scale
@@ -352,7 +352,7 @@ class Transformer:
 
     def rewind(self, slot: int | UOp, token: int | UOp) -> None:
         """Sets the recurrent states of slot `slot` to those a saving run kept after its token
-        `token`, as if the run had stopped there."""
+        `token`, of the slot's span, as if the span had stopped there."""
         writes = [
             state[slot : slot + 1].assign(after[token : token + 1])
             for states, saved in zip(self.states, self.saved, strict=True) if states and saved

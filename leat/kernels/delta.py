@@ -36,8 +36,8 @@ def _conv_kernel(
     starts: tuple[int | UOp, ...], tokens: int | UOp,
 ) -> UOp:  # fmt: skip
     # A thread per row and channel: the channel's causal convolution over the row's tokens in
-    # turn, then SiLU, its last inputs carried in registers and left in the conv state, and for a
-    # single row, after each token in saved (tokens, width - 1, channels) if given
+    # turn, then SiLU, its last inputs carried in registers and left in the conv state, and
+    # after each token in saved (rows * tokens, width - 1, channels) if given
     channels, width = (int(d) for d in conv.shape)
     history = width - 1
     row = UOp.range(len(slots), 0, AxisType.GLOBAL)
@@ -82,9 +82,8 @@ def _recurrence_kernel(
     # its keys each. For each token, the lanes L2-norm the queries and keys of the head's key
     # head, each taking every 32nd dimension, and share them through shared memory; each then
     # sums its share of its column's products with them, the column's lanes their shares, and
-    # works out the column's update and output and its share of the new column. For a single
-    # row, the state after each token goes to saved (tokens, heads, key dims, value dims) if
-    # given.
+    # works out the column's update and output and its share of the new column. The state
+    # after each token goes to saved (rows * tokens, heads, key dims, value dims) if given.
     _, heads, dims, _ = (int(d) for d in state.shape)
     k_heads = (int(conved.shape[1]) - heads * dims) // (2 * dims)
     keys = dims // (WARP // COLUMNS)  # of a lane's share
@@ -118,7 +117,7 @@ def _recurrence_kernel(
     by_query = _column_sum(_chains([s * x for s, x in zip(old, qs, strict=True)]))
     delta = gain * (conved[at, (2 * k_heads + head) * dims + dim].load() - decayed * by_key)
     new = [decayed * s + x * delta for s, x in zip(old, ks, strict=True)]
-    saves = [saved[0][t, head, share * keys + i, dim].store(x) for i, x in enumerate(new) if saved]
+    saves = [saved[0][at, head, share * keys + i, dim].store(x) for i, x in enumerate(new) if saved]
     update = UOp.group(
         *(cell[0].store(x) for cell, x in zip(cells, new, strict=True)),
         *saves,
@@ -187,8 +186,8 @@ def delta_net(
     saved: tuple[Tensor, Tensor] | None = None,
 ) -> Tensor:  # fmt: skip
     """ops.delta_net() for rows of `tokens` tokens each, row r from position starts[r] of slot
-    slots[r]: one row of a bound number of tokens, or several of one each; of one row, the states
-    after each token into `saved`, if given, as ops.delta_net() has it."""
+    slots[r]: one row of a bound number of tokens, or several of as many known in advance; the
+    states after each token into `saved`, if given, as ops.delta_net() has it."""
     T, count = mixed.shape[1], int(mixed.max_shape[1])
     heads, dims = int(states[1].shape[1]), int(states[1].shape[3])
 
@@ -203,7 +202,6 @@ def delta_net(
             "tokens": n,
         }
 
-    assert saved is None or len(slots) == 1, "states are saved for a single row's tokens"
     conv_saved, state_saved = ((saved[0],), (saved[1],)) if saved else ((), ())
     conved = Tensor.empty(count, int(mixed.shape[-1]), dtype=dtypes.float32, device=mixed.device)
     mixed, args = bound(rows(mixed))

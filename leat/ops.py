@@ -3,6 +3,7 @@
 Ops dispatch to hand-written kernels where one applies; LEAT_KERNELS=ref turns them off.
 """
 
+import itertools
 import math
 import os
 from dataclasses import dataclass
@@ -248,16 +249,17 @@ def _rotate(
     return q, cache
 
 
-Rows = list[int | UOp] | int | UOp  # one per span, or one for a single span's tokens
+Rows = list[int | UOp] | int | UOp  # one per token, or one for a single span's tokens
 
 
 def _rows(spans: list[Span]) -> tuple[Rows, Rows] | None:
-    # the slots and positions of spans of a token each, or the slot and start of a single span,
-    # as the kernels take them; None for several spans of several tokens
+    # the slot and position of each token of several spans, as the kernels take them, or the
+    # slot and start of a single span; None for several spans of lengths not known in advance
     if len(spans) == 1:
         return spans[0].slot, spans[0].start
-    if _tokens(spans):
-        return [s.slot for s in spans], [s.start for s in spans]
+    if all(isinstance(s.length, int) for s in spans):
+        tokens = [(s.slot, s.start + i) for s in spans for i in range(int(s.length))]
+        return [slot for slot, _ in tokens], [pos for _, pos in tokens]
     return None
 
 
@@ -275,9 +277,17 @@ def attention(
     # given, with scores q.k * scale; with a sink per head, if given, a score that takes its
     # share of the softmax and adds no value, as gpt-oss's. Returns (1, T, H * D), the layout the
     # output projection reads.
-    if _fast() and _tokens(spans) and kernels.supports_attention(q, cache):  # a token per span
-        slots, lengths = [s.slot for s in spans], [s.start + 1 for s in spans]
-        return kernels.attention(q, cache, slots, lengths, scale, window, sinks)
+    # a token per row: of a single span of one, or of several spans, each token its own row
+    rows = _rows(spans) if len(spans) > 1 or _tokens(spans) else None
+    if _fast() and rows is not None and kernels.supports_attention(q, cache):
+        slots, positions = (r if isinstance(r, list) else [r] for r in rows)
+        lengths = [pos + 1 for pos in positions]
+        # spans of several tokens: the rows of each one's last
+        several = any(s.length != 1 for s in spans)
+        ends = [n - 1 for n in itertools.accumulate(int(s.length) for s in spans)]
+        return kernels.attention(
+            q, cache, slots, lengths, scale, window, sinks, ends if several else None
+        )
     if len(spans) == 1:
         span = spans[0]
         if _fast() and kernels.supports_flash_attention(q, cache):
@@ -330,15 +340,16 @@ def delta_net(
     # the token's values, gates (1, T, 2 * heads) holding its alphas, then betas; the output,
     # the values the state holds for the token's query, is
     # normed with norm and gated by SiLU of z (1, T, heads * value dims). A span from position 0
-    # starts its sequence, from zero states. A single span of T tokens keeps the states after
-    # each token in `saved`, if given, (T, width - 1, channels) and (T, heads, key dims, value
-    # dims), from which a sequence may go back to any of them. Returns (1, T, heads * value dims).
+    # starts its sequence, from zero states. The states after each token go to `saved`, if
+    # given, (at least T, width - 1, channels) and (at least T, heads, key dims, value dims), the
+    # t-th token's to row t, from which a sequence may go back to any of them. Returns (1, T,
+    # heads * value dims).
     args = (mixed, z, gates, conv, decay, norm, states)
-    assert saved is None or len(spans) == 1, "states are saved for a single span's tokens"
-    rows = _rows(spans)
-    if _fast() and kernels.supports_delta_net(mixed, states[1]) and rows is not None:
-        slots, starts = (r if isinstance(r, list) else [r] for r in rows)
-        tokens = 1 if len(spans) > 1 else mixed.shape[1]
+    lengths = {s.length for s in spans}
+    even = len(lengths) == 1 and all(isinstance(n, int) for n in lengths)
+    if _fast() and kernels.supports_delta_net(mixed, states[1]) and (len(spans) == 1 or even):
+        tokens = mixed.shape[1] if len(spans) == 1 else spans[0].length
+        slots, starts = [s.slot for s in spans], [s.start for s in spans]
         return kernels.delta_net(*args, slots, starts, tokens, saved)
     if len(spans) == 1:
         return _delta_net(mixed, z, gates, conv, decay, norm, states, spans[0], saved)
@@ -346,7 +357,8 @@ def delta_net(
     for span in spans:
         n = int(span.length)
         m, g, a = (t[:, at : at + n] for t in (mixed, z, gates))
-        outs.append(_delta_net(m, g, a, conv, decay, norm, states, span))
+        kept = None if saved is None else (saved[0][at : at + n], saved[1][at : at + n])
+        outs.append(_delta_net(m, g, a, conv, decay, norm, states, span, kept))
         at += n
     return outs[0].cat(*outs[1:], dim=1)
 
@@ -395,7 +407,10 @@ def _delta_net(
               states[1][slot : slot + 1].assign(state)]  # fmt: skip
     if saved is not None:  # after token t, the inputs t + 1 .. t + width - 1 and the state
         windows = [inputs[:, t + 1 : t + width] for t in range(n)]
-        writes += [saved[0].assign(Tensor.cat(*windows)), saved[1].assign(Tensor.cat(*after))]
+        writes += [
+            saved[0][:n].assign(Tensor.cat(*windows)),
+            saved[1][:n].assign(Tensor.cat(*after)),
+        ]
     Tensor.realize(*writes)
     gated = rms_norm(Tensor.stack(*out, dim=1), *norm) * z.reshape(1, n, heads, v_dim).silu()
     return gated.reshape(1, n, heads * v_dim).shrink_to((1, T, heads * v_dim))
