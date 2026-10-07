@@ -206,7 +206,7 @@ def test_chat(bot, bots, engine):
         bots.update(ME, text=text)
         assert bots.next("sendMessage")["text"] == f"Got {text}."
     assert len(bot.agent.conversations()) == 1
-    bots.update(ME, text="/new")
+    bots.update(ME, text="/new@leat_bot\n")
     assert bots.next("sendMessage")["text"] == "A new conversation begins."
     engine.replies.put([{"content": "Read it."}])
     bots.update(ME, caption="Look", document={"file_id": "f", "file_name": "plan.pdf"})

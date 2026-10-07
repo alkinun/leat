@@ -151,7 +151,7 @@ class Telegram:
             return
         text = (message.get("text") or message.get("caption") or "").strip()
         conversation = settings.get("chats", {}).get(str(chat))
-        if (command := text.split(" ")[0].split("@")[0]) in ("/start", "/new", "/stop"):
+        if (command := (text.split() or [""])[0].split("@")[0]) in ("/start", "/new", "/stop"):
             return self._command(command, chat, conversation)
         sent = message.get("document") or (message.get("photo") or [None])[-1]
         if sent is not None and sent.get("file_size", 0) > FILES:
