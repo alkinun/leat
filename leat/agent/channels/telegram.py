@@ -169,7 +169,7 @@ class Telegram:
                                      attached=attached, via="telegram")  # fmt: skip
                 self.started[id] = chat
         except Busy:
-            return self._send(chat, "I'm still on your last message: /stop stops it.")
+            return self._send(chat, "I'm still working on a reply here: /stop stops it.")
         if id != conversation:
             self._change(lambda s: s | {"chats": s.get("chats", {}) | {str(chat): id}})
         self._call("sendChatAction", chat_id=chat, action="typing")
