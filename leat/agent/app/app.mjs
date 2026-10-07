@@ -7,18 +7,33 @@ const $ = (id) => document.getElementById(id);
 let conversations = []; // the latest updated first: {id, title, updated, running}
 let shown = null; // the conversation shown, with its messages; null for a new one
 let memories = []; // what the agent remembers of the user, the oldest first
+let files = []; // the workspace's, the latest changed first: {name, size, modified}
+let attached = []; // the files the next message attaches: {name, uploading}
 let models = [], loading = null, unreachable = null; // the engine's, a model it loads, or why not
 let lost = false; // the events' connection, until it is back
 let think = localStorage.getItem("leat.think") === "true"; // as the user last chose
 let views = []; // the shown messages' elements, by their indexes
 const opened = new Map(); // whether each turn's work is open, as the user left it
+// the pages beside the conversations, each a section of its own name, and their titles
+const PAGES = ["memory", "files"];
+const TITLES = { memory: "Memory", files: "Files" };
 
 $("new").onclick = () => {
   open(null);
   $("input").focus();
 };
 $("menu").onclick = () => document.body.classList.toggle("menu");
-$("remembered").onclick = () => remembering();
+$("remembered").onclick = () => turnTo("memory");
+$("filed").onclick = () => turnTo("files");
+$("attach").onclick = () => pick(attach);
+$("upload").onclick = () => pick(upload);
+window.ondragover = (event) => event.preventDefault();
+window.ondrop = (event) => { // files dropped, attached to the next message, or on their page uploaded
+  event.preventDefault();
+  const dropped = [...event.dataTransfer.files];
+  if (document.body.classList.contains("files")) dropped.forEach(upload);
+  else dropped.forEach(attach);
+};
 $("remember").onsubmit = async (event) => {
   event.preventDefault();
   const text = $("memorable").value.trim();
@@ -61,10 +76,11 @@ events.onopen = () => {
 };
 route();
 
-// shows what the address names: the memory's page, a conversation, or a new one
+// shows what the address names: a page, as the memory's, a conversation, or a new one
 function route() {
-  if (location.pathname === "/memory") remembering(false);
-  else open(page(), false);
+  const name = location.pathname.slice(1);
+  if (PAGES.includes(name)) turnTo(name, false);
+  else open(addressed(), false);
 }
 
 function handle(event) {
@@ -98,6 +114,10 @@ function handle(event) {
     case "memories":
       memories = event.memories;
       renderMemories();
+      return;
+    case "files":
+      files = event.files;
+      renderFiles();
       return;
     case "loading":
       loading = event.model;
@@ -147,7 +167,7 @@ function grow({ index, key, at, text }) {
 // shows a conversation, or a new one, at its own address
 async function open(id, push = true) {
   if (push) history.pushState(null, "", id ? `/c/${id}` : "/");
-  document.body.classList.remove("menu", "memory");
+  document.body.classList.remove("menu", ...PAGES);
   shown = id ? { id, title: "", messages: null, running: false } : null; // until it comes
   render();
   if (!id) return;
@@ -169,13 +189,16 @@ async function open(id, push = true) {
 
 async function send() {
   const content = $("input").value.trim();
-  if (!content || !ready()) return;
+  if (!content || !ready() || attached.some((a) => a.uploading)) return;
   $("input").value = "";
   status("");
   controls();
   try {
     const path = shown ? `/api/conversations/${shown.id}/messages` : "/api/conversations";
-    const { id } = await (await post(path, { content, think })).json();
+    const names = attached.map((a) => a.name);
+    const { id } = await (await post(path, { content, think, files: names })).json();
+    attached = [];
+    renderAttached();
     if (shown?.id !== id) open(id);
   } catch (error) {
     if (!$("input").value) $("input").value = content;
@@ -217,14 +240,14 @@ async function post(path, body) {
   return response;
 }
 
-// shows the memory's page
-function remembering(push = true) {
-  if (push) history.pushState(null, "", "/memory");
-  document.body.classList.remove("menu");
-  document.body.classList.add("memory");
+// shows a page, in place of the conversation
+function turnTo(name, push = true) {
+  if (push) history.pushState(null, "", `/${name}`);
+  document.body.classList.remove("menu", ...PAGES);
+  document.body.classList.add(name);
   shown = null;
   render();
-  document.title = "Memory";
+  document.title = TITLES[name];
 }
 
 function renderMemories() {
@@ -237,8 +260,68 @@ function renderMemories() {
   }));
 }
 
+function renderFiles() {
+  $("workspace").replaceChildren(...files.map((f) => {
+    const item = element("li"), remover = element("button", "", "×");
+    remover.title = "Delete";
+    remover.onclick = () => fetch(`/api/files/${encodeURIComponent(f.name)}`, { method: "DELETE" });
+    const day = { day: "numeric", month: "short" };
+    const when = new Date(f.modified * 1000).toLocaleDateString(undefined, day);
+    item.append(fileLink(f.name), element("span", "meta", `${bytes(f.size)} · ${when}`), remover);
+    return item;
+  }));
+  if (shown?.messages) renderLog(); // the cards of the files its answers made
+}
+
+// asks the user for files, and hands them to `take`, each
+function pick(take) {
+  const picker = element("input");
+  Object.assign(picker, { type: "file", multiple: true });
+  picker.onchange = () => [...picker.files].forEach(take);
+  picker.click();
+}
+
+// uploads a file to the workspace; returns the name it got there, or null if it did not
+async function upload(file) {
+  try {
+    const path = `/api/files/${encodeURIComponent(file.name)}`;
+    const response = await fetch(path, { method: "PUT", body: file });
+    if (!response.ok) throw new Error((await response.json()).error.message);
+    return (await response.json()).name;
+  } catch (error) {
+    status(`${file.name} was not uploaded: ${error.message}`, true);
+    return null;
+  }
+}
+
+// attaches a file to the next message, once it is uploaded
+async function attach(file) {
+  const chip = { name: file.name, uploading: true };
+  attached.push(chip);
+  renderAttached();
+  chip.name = await upload(file);
+  chip.uploading = false;
+  attached = attached.filter((a) => a.name);
+  renderAttached();
+}
+
+function renderAttached() {
+  $("attached").replaceChildren(...attached.map((a) => {
+    const chip = element("span", "chip", a.uploading ? `${a.name}…` : a.name);
+    const remover = element("button", "", "×");
+    remover.title = "Remove";
+    remover.onclick = () => {
+      attached = attached.filter((other) => other !== a);
+      renderAttached();
+    };
+    chip.append(remover);
+    return chip;
+  }));
+  controls();
+}
+
 // the conversation the address shows, or null for a new one
-function page() {
+function addressed() {
   return location.pathname.match(/^\/c\/([0-9a-f]+)$/)?.[1] ?? null;
 }
 
@@ -327,25 +410,30 @@ function fold(start, indexes) {
   return box;
 }
 
-// what a turn's calls did, in a few words; the tools it names
-const SAID = ["recall", "search", "fetch", "remember", "forget", "weather"];
+// what each tool's calls did, in a few words: one call, and n
+const DID = {
+  recall: ["recalled earlier chats", () => "recalled earlier chats"],
+  search: ["searched the web", (n) => `searched the web ${n} times`],
+  fetch: ["read a page", (n) => `read ${n} pages`],
+  read: ["read a file", (n) => `read ${n} files`],
+  run: ["ran code", (n) => `ran code ${n} times`],
+  write: ["wrote a file", (n) => `wrote ${n} files`],
+  edit: ["edited a file", (n) => `edited ${n} files`],
+  remember: ["remembered something", (n) => `remembered ${n} things`],
+  forget: ["forgot something", (n) => `forgot ${n} things`],
+  weather: ["checked the weather", () => "checked the weather"],
+};
+
+// what a turn's calls did, in a few words, in the order it began them
 function summary(calls) {
-  const count = (name) => calls.filter((m) => m.name === name).length;
-  const searches = count("search"), pages = count("fetch"), remembered = count("remember");
-  const parts = [];
-  if (count("recall")) parts.push("recalled earlier chats");
-  if (searches) parts.push(`searched the web${searches > 1 ? ` ${searches} times` : ""}`);
-  if (pages) parts.push(pages > 1 ? `read ${pages} pages` : "read a page");
-  if (remembered) parts.push(remembered > 1 ? `remembered ${remembered} things` : "remembered something");
-  if (count("forget")) parts.push("forgot something");
-  if (count("weather")) parts.push("checked the weather");
-  for (const name of new Set(calls.map((m) => m.name))) {
-    if (!SAID.includes(name)) parts.push(`used ${name}`);
-  }
+  const parts = [...new Set(calls.map((m) => m.name))].map((name) => {
+    const n = calls.filter((m) => m.name === name).length;
+    const [one, many] = DID[name] ?? [`used ${name}`, () => `used ${name}`];
+    return n > 1 ? many(n) : one;
+  });
   const said = parts.join(", ") || "worked";
   return said[0].toUpperCase() + said.slice(1);
 }
-
 
 // shows the controls as the state has them, the input as tall as its text
 function controls() {
@@ -353,15 +441,16 @@ function controls() {
   input.style.height = "auto";
   input.style.height = `${input.scrollHeight}px`;
   input.style.overflowY = input.scrollHeight > 240 ? "auto" : "hidden"; // its max-height
-  const memory = document.body.classList.contains("memory"); // its page shown
-  if (!memory) document.title = shown?.title || "leat";
-  $("main").classList.toggle("empty", !shown && !memory);
+  const paged = PAGES.some((name) => document.body.classList.contains(name));
+  if (!paged) document.title = shown?.title || "leat";
+  $("main").classList.toggle("empty", !shown && !paged);
   $("greeting").textContent = unreachable ? "The engine is not reachable"
     : loading ? "Loading…" : model ? "How can I help?" : "Choose a model";
   $("think").classList.toggle("on", think);
   $("send").classList.toggle("stop", running);
   $("send").title = running ? "Stop" : "Send";
-  $("send").disabled = !running && !(model && input.value.trim());
+  const uploading = attached.some((a) => a.uploading);
+  $("send").disabled = !running && !(model && input.value.trim() && !uploading);
   $("model").value = loading ?? model ?? "";
   $("model").disabled = loading !== null || conversations.some((c) => c.running);
 }
@@ -378,9 +467,9 @@ function message(m) {
   const item = element("div", `message ${m.role}`);
   const thinking = element("details"), reasoning = element("div");
   const text = element("div"), pages = element("div", "sources"), note = element("div", "note");
-  const summary = element("summary", "", "Thinking");
+  const summary = element("summary", "", "Thinking"), cards = element("div", "cards");
   thinking.append(summary, reasoning);
-  item.append(thinking, text, pages, note);
+  item.append(thinking, text, cards, pages, note);
   item.update = () => {
     const answer = m.role === "assistant" && !m.tool_calls; // not a step to the tools it calls
     item.hidden = m.role === "system" || (!answer && !m.content && !m.reasoning_content);
@@ -393,6 +482,8 @@ function message(m) {
     else markdown(text, m.content ?? "");
     item.querySelectorAll(":not(.code) > pre").forEach(codeBar); // the blocks new since
     if (answer) pages.replaceChildren(...sources(m).map(source));
+    const names = m.role === "user" ? (m.info?.files ?? []) : answer ? made(m) : [];
+    cards.replaceChildren(...names.map(card));
     note.textContent = answer ? describe(m.info ?? {}) : "";
     const { cached, read } = m.info ?? {};
     note.title = read === undefined ? "" : `the prompt's tokens: ${cached} cached, ${read} read`;
@@ -407,43 +498,94 @@ function work(m) {
   const summary = element("summary"), found = element("div");
   item.append(summary, found);
   item.update = () => {
-    const { arguments: args, results, url, title, error } = m.info ?? {};
-    let done = [];
-    if (m.name === "search") done = (results ?? []).map((r) => link(r.url, r.title));
-    if (m.name === "fetch" && !error) done = [link(url, title || url)];
-    if (m.name === "recall") done = (m.info?.conversations ?? []).map(conversationLink);
     item.classList.toggle("running", !m.content);
     summary.replaceChildren(icon(m.name), element("span", "", line(m)));
-    if (error || !done.length) done = [element("p", "", error ?? m.content)];
-    found.replaceChildren(...(done.length > 1 ? [listed(done)] : done));
+    found.replaceChildren(...what(m));
+    found.querySelectorAll(":not(.code) > pre:not(.output)").forEach(codeBar);
   };
   item.update();
   return item;
 }
 
-// a tool's call, in a line: what it is doing, or what it did
+// each tool's call in a line, of its arguments and info: what it is doing, what it did, and that
+// it failed
+const LINES = {
+  search: (a) => [`Searching for “${a.query}”…`, `Searched for “${a.query}”`,
+    `Couldn't search for “${a.query}”`],
+  fetch: (a, i) => [`Reading ${host(a.url)}…`, `Read ${i.title || host(i.url ?? a.url)}`,
+    `Couldn't read ${host(a.url)}`],
+  recall: (a) => [`Recalling “${a.query}”…`, `Recalled “${a.query}”`, `Couldn't recall “${a.query}”`],
+  remember: (a, i) => ["Remembering…", `Remembered: ${i.memory?.text}`, "Couldn't remember"],
+  forget: (a, i) => ["Forgetting…", `Forgot: ${i.memory?.text}`, "Couldn't forget"],
+  weather: (a, i) => [`Checking the weather in ${a.place}…`, `Checked the weather in ${i.place}`,
+    `Couldn't check the weather in ${a.place}`],
+  read: (a) => [`Reading ${named(a.path)}…`, `Read ${named(a.path)}`, `Couldn't read ${named(a.path)}`],
+  write: (a) => [`Writing ${a.path}…`, `Wrote ${a.path}`, `Couldn't write ${a.path}`],
+  edit: (a) => [`Editing ${a.path}…`, `Edited ${a.path}`, `Couldn't edit ${a.path}`],
+  run: (a, i) => ["Running code…", i.status === 0 ? "Ran code"
+    : i.status === null ? "Ran code, out of time" : "Ran code, which failed", "Couldn't run code"],
+};
+
 function line(m) {
-  const { arguments: args, url, title, error, stopped } = m.info ?? {};
-  const running = !m.content, query = args?.query, site = host(url ?? args?.url ?? "");
-  let said = m.name;
-  if (m.name === "search") {
-    said = running ? `Searching for “${query}”…` : error ? `Couldn't search for “${query}”`
-      : `Searched for “${query}”`;
-  } else if (m.name === "fetch") {
-    said = running ? `Reading ${site}…` : error ? `Couldn't read ${site}` : `Read ${title || site}`;
-  } else if (m.name === "recall") {
-    said = running ? `Recalling “${query}”…` : error ? `Couldn't recall “${query}”`
-      : `Recalled “${query}”`;
-  } else if (m.name === "remember") {
-    said = running ? "Remembering…" : error ? "Couldn't remember"
-      : `Remembered: ${m.info.memory.text}`;
-  } else if (m.name === "forget") {
-    said = running ? "Forgetting…" : error ? "Couldn't forget" : `Forgot: ${m.info.memory.text}`;
-  } else if (m.name === "weather") {
-    said = running ? `Checking the weather in ${args?.place}…`
-      : error ? `Couldn't check the weather in ${args?.place}` : `Checked the weather in ${m.info.place}`;
-  }
+  const { arguments: args, error, stopped } = m.info ?? {};
+  const lines = LINES[m.name] ?? (() => [`${m.name}…`, m.name, `${m.name} failed`]);
+  const [running, done, failed] = lines(typeof args === "object" ? args : {}, m.info ?? {});
+  const said = !m.content ? running : error ? failed : done;
   return stopped ? `${said} · stopped` : said;
+}
+
+// what a tool's call found, as its line opens on it
+function what(m) {
+  const { arguments: args, results, url, title, error, conversations } = m.info ?? {};
+  if (error || !m.content) return [element("p", "", error ?? "")];
+  if (m.name === "search" && results?.length) {
+    return [listed(results.map((r) => link(r.url, r.title)), true)];
+  }
+  if (m.name === "fetch") return [link(url, title || url)];
+  if (m.name === "recall" && conversations?.length) return [listed(conversations.map(conversationLink))];
+  if (m.name === "write" || m.name === "edit") return [fileLink(args.path)];
+  if (m.name === "run") {
+    const code = element("div");
+    markdown(code, `\`\`\`python\n${args?.code ?? ""}\n\`\`\``);
+    return [code, element("pre", "output", m.content)];
+  }
+  const text = m.content.length > 600 ? `${m.content.slice(0, 600)}…` : m.content;
+  return [element("p", "", text)];
+}
+
+// a file's name, or a skill's, as people say it
+function named(path = "") {
+  return path.startsWith("skills/") ? `the ${path.split("/")[1]} skill` : path;
+}
+
+// the files a reply's turn made or changed, that are still there
+function made(m) {
+  const messages = shown?.messages ?? [], names = [];
+  for (let i = messages.indexOf(m) - 1; i >= 0 && messages[i].role !== "user"; i--) {
+    for (const name of messages[i].info?.files ?? []) {
+      if (!names.includes(name) && files.some((f) => f.name === name)) names.unshift(name);
+    }
+  }
+  return names;
+}
+
+// a file's card, which opens or downloads it
+function card(name) {
+  const a = fileLink(name);
+  a.className = "card";
+  a.prepend(icon("read"));
+  return a;
+}
+
+function fileLink(name) {
+  const a = element("a", "", name);
+  Object.assign(a, { href: `/files/${encodeURIComponent(name)}`, target: "_blank" });
+  return a;
+}
+
+// a size in bytes, as people read it
+function bytes(n) {
+  return n < 1000 ? `${n} B` : n < 1e6 ? `${Math.round(n / 1e3)} KB` : `${(n / 1e6).toFixed(1)} MB`;
 }
 
 // the pages a reply's turn read before it, its sources
@@ -480,12 +622,13 @@ function link(url, text) {
   return a;
 }
 
-function listed(items) {
+// a list of links, each with its site if `hosts`
+function listed(items, hosts = false) {
   const list = element("ol");
   list.append(...items.map((item) => {
     const li = element("li");
     li.append(item);
-  if (item.target) li.append(element("span", "host", host(item.href))); // the web's
+    if (hosts) li.append(element("span", "host", host(item.href)));
     return li;
   }));
   return list;
@@ -506,6 +649,10 @@ const ICONS = {
   fetch: '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/>',
   recall: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/>',
   remember: '<path d="M6 3h12v18l-6-4-6 4z"/>',
+  read: '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/>',
+  write: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
+  edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
+  run: '<path d="m4 17 6-6-6-6"/><path d="M12 19h8"/>',
   weather: '<path d="M17.5 19H9a7 7 0 1 1 6.7-9h1.8a4.5 4.5 0 1 1 0 9z"/>',
   forget: '<path d="M6 3h12v18l-6-4-6 4z"/><path d="m10 8 4 4m0-4-4 4"/>',
   tool: '<circle cx="12" cy="12" r="3"/>',

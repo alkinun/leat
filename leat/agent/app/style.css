@@ -40,11 +40,9 @@ body.menu nav { display: none; } /* on a narrow screen, the menu shows it instea
 }
 #new:hover { background: var(--bubble); }
 #conversations { flex: 1; overflow-y: auto; margin-top: 12px; }
-#remembered {
-  display: flex; gap: 10px; align-items: center; padding: 8px 10px;
-  border-radius: var(--round);
-}
-#remembered:hover, body.memory #remembered { background: var(--bubble); }
+/* the pages beside the conversations, at the sidebar's foot */
+.place { display: flex; gap: 10px; align-items: center; padding: 8px 10px; border-radius: var(--round); }
+.place:hover, body.memory #remembered, body.files #filed { background: var(--bubble); }
 .conversation {
   display: flex; align-items: center; gap: 8px; padding: 6px 4px 6px 10px;
   border-radius: var(--round); cursor: pointer;
@@ -77,29 +75,32 @@ main.empty header { position: absolute; top: 0; }
 main.empty #log { display: none; }
 main.empty #greeting { display: block; margin-bottom: 28px; }
 
-/* the memory's page, in place of a conversation */
-#memory { display: none; flex: 1; overflow-y: auto; padding: 16px max(24px, calc(50% - 368px)); }
-body.memory #memory { display: block; }
-body.memory :is(#log, #composer, #greeting) { display: none; }
-#memory h1 { margin: 24px 0 8px; font: 400 30px/1.3 ui-serif, Georgia, serif; }
-#memory > p { margin: 0 0 24px; color: var(--muted); }
-#remember { display: flex; gap: 8px; margin-bottom: 16px; }
-#remember input {
+/* a page, as the memory's, in place of a conversation */
+.page { display: none; flex: 1; overflow-y: auto; padding: 16px max(24px, calc(50% - 368px)); }
+body.memory #memory, body.files #files { display: block; }
+body:is(.memory, .files) :is(#log, #composer, #greeting) { display: none; }
+.page h1 { margin: 24px 0 8px; font: 400 30px/1.3 ui-serif, Georgia, serif; }
+.page > p { margin: 0 0 24px; color: var(--muted); }
+.page form { display: flex; gap: 8px; margin-bottom: 16px; }
+.page input {
   flex: 1; padding: 10px 16px; border: 1px solid var(--line); border-radius: var(--round-large);
   background: var(--card); font: inherit; color: inherit;
 }
-#remember button {
-  padding: 0 20px; border-radius: var(--round-large); background: var(--accent); color: #fff;
+.page form button {
+  padding: 10px 20px; border-radius: var(--round-large); background: var(--accent); color: #fff;
 }
-#memories { margin: 0; padding: 0; list-style: none; }
-#memories:empty::before { content: "Nothing yet."; color: var(--muted); }
-#memories li {
+.page ul { margin: 0; padding: 0; list-style: none; }
+.page ul:empty::before { content: "Nothing yet."; color: var(--muted); }
+.page li {
   display: flex; align-items: center; gap: 12px; padding: 12px 4px;
   border-bottom: 1px solid var(--line);
 }
-#memories li span { flex: 1; }
-#memories li button { padding: 0 8px; color: var(--muted); font-size: 18px; }
-#memories li:not(:hover) button { visibility: hidden; }
+.page li > :first-child { flex: 1; overflow-wrap: anywhere; }
+.page li a { color: var(--text); text-decoration: none; }
+.page li a:hover { text-decoration: underline; }
+.page .meta { color: var(--muted); font-size: 13px; white-space: nowrap; }
+.page li button { padding: 0 8px; color: var(--muted); font-size: 18px; }
+.page li:not(:hover) button { visibility: hidden; }
 
 .message { margin-bottom: 28px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .user {
@@ -149,6 +150,10 @@ div.math { margin: 12px 0; overflow-x: auto; overflow-y: hidden; }
 .tool a { color: var(--text); text-decoration: none; }
 .tool a:hover { text-decoration: underline; }
 .tool .host { margin-left: 8px; font-size: 12px; }
+.tool pre.output {
+  margin: 8px 0 0; padding: 8px 12px; max-height: 240px; overflow: auto; white-space: pre-wrap;
+  border-radius: var(--round);
+}
 /* a step of the reply's that called tools, close to the work it began */
 .message.step { margin-bottom: 6px; }
 /* a turn's work, folded into a line that says what it does, then what it did */
@@ -159,6 +164,16 @@ div.math { margin: 12px 0; overflow-x: auto; overflow-y: hidden; }
 .work > .message {
   margin: 0 0 0 5px; padding: 0 0 8px 16px; border-left: 2px solid var(--line);
 }
+/* files: those a message attached, and those its answer made */
+.cards { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; white-space: normal; }
+.cards:empty { display: none; }
+.message a.card {
+  display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; font-size: 14px;
+  border: 1px solid var(--line); border-radius: var(--round); background: var(--card);
+  color: var(--text); text-decoration: none;
+}
+.message a.card:hover { background: var(--side); }
+.card svg { width: 16px; height: 16px; flex: none; color: var(--accent); }
 /* the pages a reply read */
 .sources { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; white-space: normal; }
 .sources:empty { display: none; }
@@ -190,11 +205,20 @@ pre code { padding: 0; background: none; }
 .bar button:hover { background: var(--bubble); color: var(--text); }
 
 #composer { padding-bottom: 20px; }
-#composer div {
-  display: flex; align-items: flex-end; gap: 8px; padding: 8px 8px 8px 20px;
-  background: var(--card); border: 1px solid var(--line); border-radius: var(--round-large);
-  box-shadow: 0 4px 20px rgb(0 0 0 / 0.06);
+#composer .box {
+  padding: 8px; background: var(--card); border: 1px solid var(--line);
+  border-radius: var(--round-large); box-shadow: 0 4px 20px rgb(0 0 0 / 0.06);
 }
+#composer .row { display: flex; align-items: flex-end; gap: 8px; }
+#attach { color: var(--muted); border-radius: 50%; padding: 10px; }
+/* the files the next message attaches */
+#attached { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 4px 8px; }
+#attached:empty { display: none; }
+.chip {
+  display: inline-flex; align-items: center; gap: 2px; padding: 2px 4px 2px 12px;
+  border-radius: 999px; background: var(--bubble); font-size: 13px;
+}
+.chip button { padding: 0 6px; color: var(--muted); }
 #input {
   flex: 1; max-height: 240px; padding: 6px 0; resize: none; overflow-y: hidden;
   border: none; outline: none; background: none;
@@ -219,6 +243,6 @@ pre code { padding: 0; background: none; }
     box-shadow: 0 0 40px rgb(0 0 0 / 0.2);
   }
   body.menu nav { display: flex; }
-  #log, #composer, #greeting, #memory { padding-left: 12px; padding-right: 12px; }
-  #memories li button { visibility: visible !important; }
+  #log, #composer, #greeting, .page { padding-left: 12px; padding-right: 12px; }
+  .page li button { visibility: visible !important; }
 }
