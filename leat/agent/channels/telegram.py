@@ -151,14 +151,14 @@ class Telegram:
             return
         text = (message.get("text") or message.get("caption") or "").strip()
         conversation = settings.get("chats", {}).get(str(chat))
-        if text.split(" ")[0].split("@")[0] in ("/start", "/new", "/stop"):
-            return self._command(text.split(" ")[0].split("@")[0], chat, conversation)
+        if (command := text.split(" ")[0].split("@")[0]) in ("/start", "/new", "/stop"):
+            return self._command(command, chat, conversation)
         sent = message.get("document") or (message.get("photo") or [None])[-1]
         if sent is not None and sent.get("file_size", 0) > FILES:
             return self._send(
                 chat, f"That file is too big: Telegram lets me take {FILES >> 20} MB at most."
             )
-        attached = self._files(sent) if sent is not None else []
+        attached = [self._download(sent)] if sent and self.agent.workspace else []
         if not text and not attached:
             return self._send(chat, "I read text and files, but not that yet.")
         if conversation is not None and self.agent.store.conversation(conversation) is None:
@@ -184,10 +184,11 @@ class Telegram:
         elif command == "/start":
             self._send(chat, WELCOME)
 
-    def _files(self, sent: dict[str, Any]) -> list[str]:
-        # a file sent, a document or a photo's largest size, put in the workspace
-        if (workspace := self.agent.workspace) is None:
-            return []
+    def _download(self, sent: dict[str, Any]) -> str:
+        # puts a file sent, a document or a photo's largest size, in the workspace; returns its
+        # name there
+        workspace = self.agent.workspace
+        assert workspace is not None
         path = self._call("getFile", file_id=sent["file_id"])["file_path"]
         token = self._settings()["token"]
         with urllib.request.urlopen(f"{self.api}/file/bot{token}/{path}", timeout=POLL) as response:
@@ -197,7 +198,7 @@ class Telegram:
         )
         workspace.path(name).write_bytes(data)
         self.agent.files_changed()
-        return [name]
+        return name
 
     def _deliver(self) -> None:
         # sends the replies of the turns chats began, and of the tasks of chats' conversations,
