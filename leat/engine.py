@@ -7,13 +7,14 @@ import random
 from collections.abc import Callable, Generator
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from tinygrad import Tensor, TinyJit, UOp, dtypes
 
 from leat.draft import Drafter
 from leat.draft import load as load_drafter
 from leat.gguf import GGUF
-from leat.kernels import MATVEC_TOKENS
+from leat.kernels import MATVEC_TOKENS, VARIABLES
 from leat.model import Config, Transformer
 from leat.ops import Span
 from leat.sampler import GREEDY, Sampling, sample
@@ -490,12 +491,25 @@ class Engine:
         return seen
 
 
-def graph[T](fxn: Callable[..., T]) -> Callable[..., T]:
+class graph[T]:
     """A TinyJit of fxn that captures its graph on the first call: TinyJit runs a function once
-    as is, then captures it on the second, which a fresh process makes the slow one."""
-    jit = TinyJit(fxn)
-    jit.cnt = 1
-    return jit
+    as is, then captures it on the second, which a fresh process makes the slow one. Each call
+    also passes the variables the kernels bind inside, which fxn does not see: a graph replays
+    with the values its arguments carry alone."""
+
+    def __init__(self, fxn: Callable[..., T]):
+        def inner(*args: Any, **kwargs: Any) -> T:
+            return fxn(*args, **{k: v for k, v in kwargs.items() if k not in VARIABLES})
+
+        self.jit = TinyJit(inner)
+        self.jit.cnt = 1
+
+    def __call__(self, *args: Any, **kwargs: Any) -> T:
+        return self.jit(*args, **kwargs, **VARIABLES)
+
+    @property
+    def captured(self) -> Any:
+        return self.jit.captured
 
 
 def _ids(tokens: list[int], size: int) -> Tensor:

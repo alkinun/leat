@@ -6,7 +6,8 @@ import pytest
 from tinygrad import Tensor, UOp, dtypes
 
 from leat import bench
-from leat.engine import FEW_TOKENS, KEEP_BACK, Engine
+from leat.engine import FEW_TOKENS, KEEP_BACK, Engine, graph
+from leat.kernels import VARIABLES
 from leat.gguf import GGUF
 from leat.model import CACHE_TILE, Config, Transformer, _stack, rope_table
 from leat.quant import GGMLType, QTensor
@@ -351,6 +352,14 @@ def test_warm_up(tiny, tiny_assistant, monkeypatch, arch, slots, batches):
     assert all(captured) and engine.cached_prefix(PROMPT) == 0
     assert list(engine.generate(PROMPT, 6)) == generated(path, PROMPT, 6)
     assert [jit.captured for jit in graphs] == captured
+
+
+def test_graph_binds_kernel_variables():
+    # a graph whose kernels bind a variable inside, as matmul's on RDNA, replays with its value:
+    # TinyJit alone takes values from a graph's arguments
+    groups = VARIABLES["groups"].unbind()[0]
+    replayed = graph(lambda x: (x + Tensor.arange(8).float()[: groups.bind(4)].sum()).realize())
+    assert [replayed(Tensor([1.0])).item() for _ in range(3)] == [7.0] * 3
 
 
 def test_one_generation_at_a_time(tiny_model):

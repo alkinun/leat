@@ -19,15 +19,19 @@ from leat.kernels.common import GROUP
 from leat.kernels.cutoff import cutoff, supports_cutoff
 from leat.kernels.delta import delta_net, supports_delta_net
 from leat.kernels.experts import mixture, route, scores, supports_mixture, supports_scores
-from leat.kernels.matmul import feed_forward, matmuls, supports_matmul
+from leat.kernels.matmul import STEP, STEP_GROUPS, feed_forward, matmuls, supports_matmul
 from leat.kernels.matvec import MATVEC_TOKENS, matvecs, supports_matvec, swiglu
 from leat.kernels.norms import add_normed, supports_add_normed
 from leat.kernels.quantize import quantize_q8
 
+# the bound variables kernels bind inside a graph, by name: TinyJit replays a graph with the
+# values its arguments carry, and these ride along there
+VARIABLES = {"groups": STEP_GROUPS.bind(STEP // GROUP)}
+
 __all__ = [
-    "GROUP", "MATVEC_TOKENS", "add_normed", "argmax", "attention", "cutoff", "delta_net",
-    "feed_forward", "flash_attention", "matmuls", "matvecs", "mixture", "quantize_q8", "rotate",
-    "route", "scores", "supports_add_normed", "supports_argmax", "supports_attention",
+    "GROUP", "MATVEC_TOKENS", "VARIABLES", "add_normed", "argmax", "attention", "cutoff",
+    "delta_net", "feed_forward", "flash_attention", "matmuls", "matvecs", "mixture", "quantize_q8",
+    "rotate", "route", "scores", "supports_add_normed", "supports_argmax", "supports_attention",
     "supports_cutoff", "supports_delta_net", "supports_flash_attention", "supports_matmul",
     "supports_matvec", "supports_mixture", "supports_rotate", "supports_scores", "swiglu",
 ]  # fmt: skip

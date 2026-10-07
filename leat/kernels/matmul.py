@@ -56,6 +56,9 @@ WARP_ROWS = 32  # a warp per 32 rows of the tile, and a thread per row to load i
 STEP = 128  # weights per row per step
 SUBTILES_M = WARP_ROWS // 16  # of 16 rows per warp, by subtiles of 8 tokens
 FIXUP_THREADS = 256
+# the groups of a step, as _groups binds them on RDNA: a graph replays with the value the call
+# binds, which a graph that runs the kernels must take as one of its arguments
+STEP_GROUPS = UOp.variable("groups", 1, STEP // GROUP)
 
 # mma.sync on int8: a 16 x k tile of weights times a k x 8 tile of activations, for k = 32 or 16.
 # {0} points at 4 int32 registers for the lane's share of the result, then come the lane's 4 or 2
@@ -847,7 +850,7 @@ def _groups(x: Tensor) -> int | UOp:
     # their count, as clang would unroll a loop of a known count, and tinygrad split one where a
     # type takes groups by pairs, and WMMA's operands, twice mma.sync's, then spill registers
     count = STEP // GROUP
-    return UOp.variable("groups", 1, count).bind(count) if on_rdna3(x) else count
+    return STEP_GROUPS.bind(count) if on_rdna3(x) else count
 
 
 @functools.cache
