@@ -279,8 +279,8 @@ class Telegram:
         self._call("sendMessage", chat_id=chat, text=text, link_preview_options=unlinked, **options)
 
     def _document(self, chat: int, name: str, data: bytes) -> None:
-        # sends a file, in a form's encoding, as the Bot API takes one
-        boundary, quoted = uuid.uuid4().hex, name.replace('"', "'")
+        # sends a file, by its name without its folder, in a form's encoding, as the Bot API takes
+        boundary, quoted = uuid.uuid4().hex, name.rsplit("/", 1)[-1].replace('"', "'")
         field = f"--{boundary}\r\nContent-Disposition: form-data; name="
         body = b"".join([
             f'{field}"chat_id"\r\n\r\n{chat}\r\n'.encode(),

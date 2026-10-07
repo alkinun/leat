@@ -15,9 +15,11 @@ from leat.agent.agent import Agent, NotFound
 from leat.agent.channels import telegram
 from leat.agent.channels.telegram import Telegram, TelegramError, to_html
 from leat.agent.client import Client
+from leat.agent.server import Server
 from leat.agent.store import Store
+from leat.agent.tools import files
 from leat.agent.workspace import Workspace
-from tests.test_agent import HOLD, FakeEngine, until
+from tests.test_agent import HOLD, FakeEngine, call, request, until
 
 TOKEN, OTHER = "123:ok", "789:ok"  # two bots' tokens
 ME, STRANGER = (
@@ -119,7 +121,9 @@ def engine() -> Iterator[FakeEngine]:
 @pytest.fixture
 def bot(bots, engine, tmp_path) -> Telegram:
     workspace = Workspace(tmp_path / "workspace")
-    agent = Agent(Store(tmp_path / "leat.db"), Client(engine.url), [], workspace)
+    agent = Agent(
+        Store(tmp_path / "leat.db"), Client(engine.url), files.tools(workspace), workspace
+    )
     bot = Telegram(agent, f"http://127.0.0.1:{bots.server_port}")
     bot.start()
     return bot
@@ -211,6 +215,15 @@ def test_chat(bot, bots, engine):
     assert len(bot.agent.conversations()) == 2
     assert bot.agent.store.messages(latest)[1]["info"]["files"] == ["plan.pdf"]
     assert bot.agent.workspace.path("plan.pdf").read_bytes() == b"the file's bytes"
+    # the files a turn made follow its answer, by their names
+    engine.replies.put(
+        [{"tool_calls": [call("write", {"path": "notes/plan.txt", "content": "Plan"})]}]
+    )
+    engine.replies.put([{"content": "Made it."}])
+    bots.update(ME, text="Write the plan")
+    assert bots.next("sendMessage")["text"] == "Made it."
+    sent = bots.next("sendDocument")
+    assert b'filename="plan.txt"' in sent and b"\r\n\r\nPlan\r\n" in sent
     # a task of the chat's conversation is answered there
     engine.replies.put([{"content": "Stretch now!"}])
     task = bot.agent.store.add_task("Remind them to stretch", "once", time.time() - 1, latest)
@@ -218,6 +231,26 @@ def test_chat(bot, bots, engine):
 
     run(bot.agent, task)
     assert bots.next("sendMessage")["text"] == "Stretch now!"
+
+
+def test_api(bot, bots):
+    # the app's settings of the bot, through the agent's API
+    with Server(bot.agent, port=0, telegram=bot) as server:
+        threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True).start()
+        url = f"http://127.0.0.1:{server.server_port}/api/telegram"
+        status, body = request(url, "POST", {"token": "456:bad"})
+        assert status == 400 and b"Telegram refused it: it does not know that token" in body
+        assert request(url, "POST", {"token": " "})[0] == 400
+        status, body = request(url, "POST", {"token": TOKEN})
+        assert status == 200 and json.loads(body)["bot"] == "leat_bot"
+        bots.update(STRANGER, text="Hi")
+        bots.next("sendMessage")
+        assert request(f"{url}/people", "POST", {"id": 8})[0] == 404
+        assert request(f"{url}/people", "POST", {"id": 9})[0] == 200
+        assert [p["id"] for p in bot.state()["allowed"]] == [9]
+        assert request(f"{url}/people/9", "DELETE")[0] == 200
+        assert request(url, "DELETE")[0] == 200 and bot.state()["bot"] is None
+        server.shutdown()
 
 
 ONE, TWO = '<a href="https://one.org">[1]</a>', '<a href="https://two.org">[2]</a>'
