@@ -39,10 +39,12 @@ prompt = chat.encode([{"role": "user", "content": "Why is the sky blue?"}])
 print(engine.tokenizer.decode(list(engine.generate(prompt, max_tokens=256))))
 ```
 
-leat agent, the assistant, runs beside the server, whose models it uses, and serves its app at http://127.0.0.1:8000. [docs/agent-plan.md](docs/agent-plan.md) says what it is to become.
+leat agent, the assistant, runs beside the server, whose models it uses, and serves its app at http://127.0.0.1:8000; it searches the web through a [SearXNG](https://github.com/searxng/searxng) on the machine. [docs/agent-plan.md](docs/agent-plan.md) says what it is to become.
 
 ```bash
-DEV=NV uv run leat serve Qwen_Qwen3.6-35B-A3B-Q4_K_M.gguf --max-context 32768
+docker run -d --name searxng -p 127.0.0.1:8888:8080 -e SEARXNG_SECRET=$(openssl rand -hex 32) \
+    -v $PWD/examples/searxng.yml:/etc/searxng/settings.yml:ro searxng/searxng
+DEV=NV uv run leat serve Qwen_Qwen3.6-35B-A3B-Q4_K_M.gguf --max-context 16384
 uv run leat agent
 ```
 
@@ -88,7 +90,7 @@ Speculative decoding: given a drafter with `--draft`, sequences decoding without
 
 Models: `leat serve` takes GGUF files and directories of them, and holds one model at a time, which answers every request whatever model it names. The first file loads at start. `POST /v1/models/load` with `{"model": id}`, an id that `/v1/models` lists, loads another once the completions before it have finished, the last one freed first.
 
-Agent: `leat agent` keeps conversations in one SQLite file, `~/.local/share/leat/leat.db` by default, and runs their turns itself, not in the browser: a reply goes on when its page closes, and every page open on the app sees it stream and can stop it; a turn that fails is taken back, its message returned to send again. The app is a page with no dependencies, its Markdown and math rendered by `leat/agent/app/markdown.mjs`. The agent answers its own machine and network alone: a request must name it by an address or a `.local` name, which a site's page cannot by DNS rebinding, and a write must come from its own page.
+Agent: `leat agent` keeps conversations in one SQLite file, `~/.local/share/leat/leat.db` by default, and runs their turns itself, not in the browser: a reply goes on when its page closes, and every page open on the app sees it stream and can stop it; a turn that fails is taken back, its message returned to send again. The model replies without thinking unless a message asks it to, by the app's Think toggle, sampled as Qwen3.6 recommends either way. It searches the web, through the SearXNG at `--search`, http://127.0.0.1:8888 by default, and reads pages, which the app shows as lines of its work and the pages as the answer's sources; a reply's calls run at once, up to 12 replies a turn, the last offered no tools so that it answers. Pages are the web's alone: an address on the machine's own network is refused, at every redirect too. The app is a page with no dependencies, its Markdown and math rendered by `leat/agent/app/markdown.mjs`. The agent answers its own machine and network alone: a request must name it by an address or a `.local` name, which a site's page cannot by DNS rebinding, and a write must come from its own page.
 
 ## Measurements
 

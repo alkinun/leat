@@ -106,6 +106,31 @@ div.math { margin: 12px 0; overflow-x: auto; overflow-y: hidden; }
 .message a { color: var(--accent); text-underline-offset: 2px; }
 .message hr { margin: 24px 0; border: none; border-top: 1px solid var(--line); }
 .message :is(div, blockquote, li) > :last-child { margin-bottom: 0; }
+/* a tool's work: a line, which opens on what it found */
+.message.tool { margin-bottom: 6px; color: var(--muted); font-size: 14px; white-space: normal; }
+.tool summary { display: flex; align-items: center; gap: 8px; list-style: none; }
+.tool summary::-webkit-details-marker { display: none; }
+.tool summary svg { width: 15px; height: 15px; flex: none; }
+.tool summary span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.tool.running summary span { animation: pulse 1.2s ease-in-out infinite alternate; }
+.tool > div { margin: 6px 0 10px 7px; padding-left: 16px; border-left: 2px solid var(--line); }
+.tool :is(ol, p) { margin: 0; padding-left: 18px; }
+.tool p { padding: 0; overflow-wrap: anywhere; }
+.tool li + li { margin-top: 4px; }
+.tool a { color: var(--text); text-decoration: none; }
+.tool a:hover { text-decoration: underline; }
+.tool .host { margin-left: 8px; font-size: 12px; }
+/* a step of the reply's that called tools, close to the work it began; the answer after it */
+.message.step { margin-bottom: 6px; }
+.message.tool + .message.assistant:not(.step) { margin-top: 18px; }
+/* the pages a reply read */
+.sources { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; white-space: normal; }
+.sources:empty { display: none; }
+.message a.source {
+  padding: 1px 10px; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--side); color: var(--muted); font-size: 12px; text-decoration: none;
+}
+.message a.source:hover { color: var(--text); }
 .note { margin-top: 8px; color: var(--muted); font-size: 12px; }
 .note:empty { display: none; }
 pre, code { font: 14px/1.5 ui-monospace, monospace; background: var(--side); }

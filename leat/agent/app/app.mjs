@@ -260,27 +260,117 @@ function status(text, error = false) {
   $("status").className = error ? "error" : "";
 }
 
-// a message's element, whose update() shows it again as it grows; a system message's is hidden
+// a message's element, whose update() shows it again as it changes: a tool's is a line of the
+// work it did, a system message's is hidden
 function message(m) {
+  if (m.role === "tool") return work(m);
   const item = element("div", `message ${m.role}`);
   const thinking = element("details"), reasoning = element("div");
-  const text = element("div"), note = element("div", "note");
+  const text = element("div"), pages = element("div", "sources"), note = element("div", "note");
   const summary = element("summary", "", "Thinking");
-  item.hidden = m.role === "system";
   thinking.append(summary, reasoning);
-  item.append(thinking, text, note);
+  item.append(thinking, text, pages, note);
   item.update = () => {
+    const answer = m.role === "assistant" && !m.tool_calls; // not a step to the tools it calls
+    item.hidden = m.role === "system" || (!answer && !m.content && !m.reasoning_content);
+    item.classList.toggle("step", Boolean(m.tool_calls));
     thinking.hidden = !m.reasoning_content;
-    const thinks = m.reasoning_content && !m.content && shown?.running;
+    const thinks = !m.content && answer && shown?.running && shown.messages.at(-1) === m;
     summary.textContent = thinks ? "Thinking…" : "Thinking";
     markdown(reasoning, m.reasoning_content ?? "");
     if (m.role === "user") text.textContent = m.content;
     else markdown(text, m.content ?? "");
     item.querySelectorAll(":not(.code) > pre").forEach(codeBar); // the blocks new since
-    note.textContent = m.info ? describe(m.info) : "";
+    if (answer) pages.replaceChildren(...sources(m).map(source));
+    note.textContent = answer ? describe(m.info ?? {}) : "";
+    const { cached, read } = m.info ?? {};
+    note.title = read === undefined ? "" : `the prompt's tokens: ${cached} cached, ${read} read`;
   };
   item.update();
   return item;
+}
+
+// a tool's message, as a line of the work it did, which opens on what it found
+function work(m) {
+  const item = element("details", "message tool");
+  const summary = element("summary"), found = element("div");
+  item.append(summary, found);
+  item.update = () => {
+    const { arguments: args, results, url, title, error, stopped } = m.info ?? {};
+    const running = !m.content, query = args?.query, address = url ?? args?.url ?? "";
+    let line = `${m.name}`, done = [];
+    if (m.name === "search") {
+      line = running ? `Searching for “${query}”…` : error ? `Couldn't search for “${query}”`
+        : `Searched for “${query}”`;
+      done = (results ?? []).map((r) => link(r.url, r.title));
+    } else if (m.name === "fetch") {
+      line = running ? `Reading ${host(address)}…` : error ? `Couldn't read ${host(address)}`
+        : `Read ${title || host(address)}`;
+      if (!error) done = [link(address, title || address)];
+    }
+    if (stopped) line += " · stopped";
+    item.classList.toggle("running", running);
+    summary.replaceChildren(icon(m.name), element("span", "", line));
+    if (error || !done.length) done = [element("p", "", error ?? m.content)];
+    found.replaceChildren(...(done.length > 1 ? [listed(done)] : done));
+  };
+  item.update();
+  return item;
+}
+
+// the pages a reply's turn read before it, its sources
+function sources(m) {
+  const messages = shown?.messages ?? [], pages = [];
+  for (let i = messages.indexOf(m) - 1; i >= 0 && messages[i].role !== "user"; i--) {
+    const { url, title } = (messages[i].role === "tool" && messages[i].info) || {};
+    if (url && !pages.some((p) => p.url === url)) pages.unshift({ url, title });
+  }
+  return pages;
+}
+
+function source({ url, title }) {
+  const a = link(url, host(url));
+  a.className = "source";
+  a.title = title || url;
+  return a;
+}
+
+function link(url, text) {
+  const a = element("a", "", text);
+  Object.assign(a, { href: url, target: "_blank", rel: "noopener noreferrer" });
+  return a;
+}
+
+function listed(items) {
+  const list = element("ol");
+  list.append(...items.map((item) => {
+    const li = element("li");
+    li.append(item, element("span", "host", host(item.href)));
+    return li;
+  }));
+  return list;
+}
+
+// a web address's site, as people name it
+function host(url) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+}
+
+// the icon of a tool's line
+const ICONS = {
+  search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
+  fetch: '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/>',
+  tool: '<circle cx="12" cy="12" r="3"/>',
+};
+function icon(name) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.innerHTML = ICONS[name] ?? ICONS.tool;
+  return svg;
 }
 
 // what a reply's info tells people: its model, its tokens, how fast they came, and whether it

@@ -17,6 +17,7 @@ from leat.agent.agent import Agent, Busy, NotFound, _api
 from leat.agent.client import Client
 from leat.agent.server import Server
 from leat.agent.store import Store
+from leat.agent.tools import Result, Tool, strings
 
 HOLD = None  # in a scripted reply: wait there until the test releases it
 
@@ -66,7 +67,7 @@ class _FakeHandler(BaseHTTPRequestHandler):
                     self.server.released.wait(timeout=5)
                     continue
                 self._chunk({"choices": [{"index": 0, "delta": delta}]})
-            timings = {"predicted_n": 5, "predicted_ms": 100.0}
+            timings = {"predicted_n": 5, "predicted_ms": 100.0, "cache_n": 3, "prompt_n": 7}
             self._chunk({"choices": [{"index": 0, "delta": {}}], "timings": timings})
             self.wfile.write(b"data: [DONE]\n\n")
 
@@ -91,9 +92,14 @@ def engine() -> Iterator[FakeEngine]:
     engine.server_close()
 
 
+def echo(text: str) -> Result:
+    return Result(f"echo: {text}", {"echoed": text})
+
+
 @pytest.fixture
 def agent(engine, tmp_path) -> Agent:
-    return Agent(Store(tmp_path / "leat.db"), Client(engine.url))
+    tool = Tool("echo", "Says the text again", strings(text="what to say"), echo)
+    return Agent(Store(tmp_path / "leat.db"), Client(engine.url), [tool])
 
 
 @pytest.fixture
@@ -119,6 +125,12 @@ def ended(event: dict) -> bool:
 REPLY = [{"reasoning_content": "Hmm."}, {"content": "Hello"}, {"content": " there."}]
 
 
+def call(name: str, arguments: Any, id: str = "call_1") -> dict:
+    """A reply's call of a tool, as leat serve sends it, its arguments as JSON text."""
+    text = arguments if isinstance(arguments, str) else json.dumps(arguments)
+    return {"index": 0, "id": id, "type": "function", "function": {"name": name, "arguments": text}}
+
+
 def test_turn(agent, engine, events):
     # a message starts a conversation, whose reply streams into it and stays
     engine.replies.put(REPLY)
@@ -136,8 +148,9 @@ def test_turn(agent, engine, events):
     assert system["role"] == "system"
     assert f"Today is {today:%A}, {today.day} {today:%B %Y}." in system["content"]
     assert (reply["reasoning_content"], reply["content"]) == ("Hmm.", "Hello there.")
-    assert reply["info"]["model"] == "fake" and reply["info"]["tokens"] == 5
-    assert reply["info"]["rate"] == pytest.approx(40.0) and reply["info"]["first"] >= 0
+    info = reply["info"]
+    assert info["model"] == "fake" and info["tokens"] == 5 and info["rate"] == pytest.approx(40.0)
+    assert info["first"] >= 0 and (info["cached"], info["read"]) == (3, 7)
     assert seen[-2] == {"type": "message", "conversation": id, "index": 2, "message": reply}
     # the model read the system prompt and the message, not thinking, sampled as Qwen3.6
     # recommends then
@@ -188,6 +201,82 @@ def test_next_turn(agent, engine, events):
     until(events, ended)
     again = Agent(agent.store, agent.engine)
     assert [c["id"] for c in again.conversations()] == [other, id]
+
+
+def test_tools(agent, engine, events):
+    # a reply's calls run, and the model replies again, reading their answers, until it calls none
+    engine.replies.put([{"content": "Let me see."}, {"tool_calls": [call("echo", {"text": "hi"})]}])
+    engine.replies.put([{"content": "It said hi."}])
+    id = agent.send(None, "Echo hi")
+    until(events, ended)
+    _, _, step, answer, reply = agent.store.messages(id)
+    function = {"name": "echo", "arguments": '{"text": "hi"}'}
+    assert step["content"] == "Let me see."
+    assert step["tool_calls"] == [{"id": "call_1", "type": "function", "function": function}]
+    assert answer == {
+        "role": "tool", "tool_call_id": "call_1", "name": "echo", "content": "echo: hi",
+        "info": {"arguments": {"text": "hi"}, "echoed": "hi"},
+    }  # fmt: skip
+    assert reply["content"] == "It said hi."
+    first, second = engine.requests
+    assert [tool["function"]["name"] for tool in first["tools"]] == ["echo"]
+    assert second["messages"][-1] == _api(answer)
+
+
+def test_bad_calls(agent, engine, events):
+    # a call the tools cannot answer is answered with why, for the model to try again
+    calls = [call("nothing", {}, "a"), call("echo", "{not JSON", "b"), call("echo", [1], "c"),
+             call("echo", {"words": "hi"}, "d")]  # fmt: skip
+    engine.replies.put([{"tool_calls": calls}])
+    engine.replies.put([{"content": "Sorry."}])
+    id = agent.send(None, "Hi")
+    until(events, ended)
+    answers = [m["content"] for m in agent.store.messages(id) if m["role"] == "tool"]
+    assert answers[0] == "error: there is no tool 'nothing'"
+    assert answers[1] == "error: the arguments must be a JSON object, not '{not JSON'"
+    assert answers[2] == "error: the arguments must be a JSON object, not [1]"
+    assert answers[3].startswith("error: ") and "'words'" in answers[3]
+
+
+def test_calls_at_once(agent, engine, events):
+    # a reply's calls run at once: each of these waits for the other
+    both = threading.Barrier(2, timeout=5)
+    meet = Tool("meet", "Waits for another", strings(), lambda: Result(str(both.wait())))
+    agent.tools["meet"] = meet
+    engine.replies.put([{"tool_calls": [call("meet", {}, "a"), call("meet", {}, "b")]}])
+    engine.replies.put([{"content": "Met."}])
+    id = agent.send(None, "Meet")
+    until(events, ended)
+    answers = [m["content"] for m in agent.store.messages(id) if m["role"] == "tool"]
+    assert sorted(answers) == ["0", "1"]
+
+
+def test_stop_in_call(agent, engine, events):
+    # a stop while a tool runs answers its call so, and ends the turn
+    released = threading.Event()
+    slow = Tool("slow", "Takes its time", strings(), lambda: Result(str(released.wait(5))))
+    agent.tools["slow"] = slow
+    engine.replies.put([{"tool_calls": [call("slow", {})]}])
+    id = agent.send(None, "Hi")
+    until(events, lambda e: e["type"] == "message" and e["message"]["role"] == "tool")
+    assert agent.conversation(id)["messages"][-1]["content"] == ""  # running
+    agent.stop(id)
+    until(events, ended)
+    released.set()
+    answer = agent.store.messages(id)[-1]
+    assert answer["content"] == "Stopped before it answered." and answer["info"]["stopped"]
+    assert len(engine.requests) == 1
+
+
+def test_rounds(agent, engine, events, monkeypatch):
+    # a turn's last reply is offered no tools, so that it answers
+    monkeypatch.setattr("leat.agent.agent.ROUNDS", 3)
+    for _ in range(2):
+        engine.replies.put([{"tool_calls": [call("echo", {"text": "again"})]}])
+    engine.replies.put([{"content": "Done."}])
+    agent.send(None, "Hi")
+    until(events, ended)
+    assert ["tools" in request for request in engine.requests] == [True, True, False]
 
 
 def test_live_reply(agent, engine, events):

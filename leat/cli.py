@@ -16,6 +16,7 @@ from leat.agent.agent import Agent
 from leat.agent.client import Client
 from leat.agent.server import Server as AgentServer
 from leat.agent.store import Store
+from leat.agent.tools import web
 from leat.chat import ChatTemplate, split_reply
 from leat.engine import Engine
 from leat.gguf import GGUF
@@ -34,6 +35,9 @@ def main(argv: list[str] | None = None) -> None:
         "agent", help="run leat agent, the assistant, and serve its app; models come of leat serve"
     )
     agent.add_argument("--engine", default="http://127.0.0.1:8080", help="leat serve's address")
+    agent.add_argument(
+        "--search", default="http://127.0.0.1:8888", help="a SearXNG's address, for web search"
+    )
     agent.add_argument("--host", default="127.0.0.1", help="0.0.0.0 for the home network too")
     agent.add_argument("--port", type=int, default=8000)
     agent.add_argument(
@@ -135,7 +139,7 @@ def _positive(text: str) -> int:
 
 def _agent(args: argparse.Namespace) -> None:
     args.data.mkdir(parents=True, exist_ok=True)
-    agent = Agent(Store(args.data / "leat.db"), Client(args.engine))
+    agent = Agent(Store(args.data / "leat.db"), Client(args.engine), web.tools(args.search))
     with AgentServer(agent, args.host, args.port) as server:
         print(f"leat agent at {_url(args.host, server.server_port)}, its models of {args.engine}. "
               "Ctrl-C quits.", flush=True)  # fmt: skip

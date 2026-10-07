@@ -1,4 +1,4 @@
-# SearXNG's settings for examples/tools.py: its defaults, with the JSON API on
+# SearXNG's settings for leat agent's search: its defaults, with the JSON API on
 use_default_settings: true
 server:
   limiter: false
