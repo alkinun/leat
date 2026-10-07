@@ -273,6 +273,8 @@ you test it before the next.
 | 9. Characters | personas and their chats | roleplay; a tutor |
 | 10. Voice and photos | with the engine's work on them | talking to it; sending a photo |
 
+Done: steps 1 to 5, and 7.
+
 Alongside, the box track: first boot and setup, `leat.local` on the network, HTTPS on the home
 network (a phone's microphone, notifications and home-screen install all need it), updates, and
 later remote access.
@@ -312,7 +314,7 @@ share of it, saving memories first; a reply cut off by the context is redone aft
 characters), or its start with the full text saved, to read on; Claude has code filter results
 before they reach the context; all cite their sources inline, numbered, the app linking them.
 leat agent: pages extracted to markdown, their boilerplate gone, in the sandbox; a budget, the
-rest saved to read on; sources numbered across a turn, cited as [1], linked in the app.
+rest saved to read on; sources numbered across the conversation, cited as [1], linked in the app.
 
 **Files.** Documents are read as markdown that keeps their headings and tables, and made by
 skills, as Claude's; Hermes reads files by ranges. leat agent: PDF, Word, Excel and PowerPoint
@@ -323,7 +325,7 @@ converted to markdown in the sandbox, read by ranges.
 Goes: the chat app's logic in `leat/app.html` (chats in the browser's storage, the tool loop in the
 page, the tools-server setting), and `examples/tools.py`, whose search becomes the agent's `search`.
 
-Stays: the design; `leat/markdown.mjs` and its tests; Temml; `examples/searxng.yml`; the OpenAI
+Stays: the design; `leat/markdown.mjs` and its tests, now `leat/agent/app/markdown.mjs`; Temml; `examples/searxng.yml`; the OpenAI
 message format; the origin checks.
 
 ## 14. Decided
