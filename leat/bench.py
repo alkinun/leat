@@ -16,6 +16,7 @@ from typing import BinaryIO, cast
 
 from tinygrad import Tensor, TinyJit, UOp, dtypes
 
+from leat.chat import ChatTemplate
 from leat.engine import BATCH, Engine, graph
 
 
@@ -77,6 +78,62 @@ def speed(
     tg = statistics.median(decode[2:])
     reads = -(-sequences // BATCH) / sequences  # weight reads per token: one per batch a step
     return Speed(statistics.median(prefill[2:]), tg, streamed * tg * reads / 1e9, sequences)
+
+
+# requests of the kinds a home assistant gets, for decode speed on replies whose tokens a drafter
+# guesses as it would in use, where it guesses random prompts' continuations seldom
+CHAT_PROMPTS = [
+    "Write a Python function that merges two sorted lists into one sorted list, with tests.",
+    "Explain how a refrigerator works to a ten-year-old.",
+    "Give me a weekly meal plan for a family of four on a budget.",
+    "What are the main differences between TCP and UDP? Answer with a table.",
+    "Write a short story about a lighthouse keeper who finds a message in a bottle.",
+    "Summarize the causes of the French Revolution in bullet points.",
+    "How do I set up a Raspberry Pi as a home media server? Step by step.",
+    "Translate into Spanish and French: 'Please remember to water the plants on Tuesday.'",
+]
+
+
+CHAT_CONTEXT = 256  # tokens a chat prompt takes at most, in its template
+
+
+@dataclass(frozen=True)
+class ChatSpeed:
+    decode: float  # tokens/s in all, of `sequences` greedy replies to CHAT_PROMPTS at once
+    per_step: float  # tokens a reply takes per step it decodes in: more than 1 speculatively
+    sequences: int = 1
+
+
+def chat_speed(
+    engine: Engine, gen_tokens: int = 256, reps: int = 2, sequences: int = 1
+) -> ChatSpeed:  # fmt: skip
+    """Decode speed over replies to CHAT_PROMPTS in the model's chat template, `sequences` at
+    once, each to a prompt of its own, timed while all are past their prompts: the best of
+    `reps` runs, after one that compiles the graphs. Prompts keep their last tokens where the
+    context would not hold them and the reply."""
+    template = ChatTemplate(engine.gguf.metadata, engine.tokenizer)
+    room = max(engine.max_context - gen_tokens, 1)
+    prompts = [
+        template.encode([{"role": "user", "content": text}])[-room:] for text in CHAT_PROMPTS
+    ]
+    best: tuple[float, float] = (0.0, 0.0)
+    for rep in range(reps + 1):
+        engine.reset()
+        started = [
+            engine.start(prompts[i % len(prompts)], gen_tokens if rep else 8, ignore_eog=True)
+            for i in range(sequences)
+        ]
+        while not all(s.tokens for s in started):
+            engine.step()
+        start, made, steps = time.perf_counter(), 0, 0
+        while engine.active:
+            decoding = len(engine.active)
+            made += len(engine.step())
+            steps += decoding
+        if rep:
+            best = max(best, (made / (time.perf_counter() - start), made / steps))
+    engine.reset()
+    return ChatSpeed(*best, sequences)
 
 
 def perplexity(

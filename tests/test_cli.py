@@ -62,6 +62,16 @@ def test_bench_draft(tiny, tiny_assistant, capsys):
     assert result["decode"] > 0
 
 
+@pytest.mark.parametrize("sequences", [1, 2])
+def test_bench_chat(tiny, tiny_assistant, capsys, sequences):
+    # replies to chat prompts, which a drafter that guesses them all takes 4 tokens a step of
+    path = tiny("gemma4")[0]
+    args = ("-n", 9, "-r", 1, "-s", sequences, "--draft", tiny_assistant[0], "--chat")
+    result = run_json(capsys, "bench", path, *args)
+    assert result["decode"] > 0 and 1 <= result["per_step"] <= 4
+    assert result["sequences"] == sequences
+
+
 @pytest.mark.usefixtures("reference_ops")
 @pytest.mark.parametrize("mode", [[], ["--decode"]])
 def test_perplexity(tiny_model, tmp_path, capsys, mode):
