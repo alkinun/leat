@@ -208,7 +208,7 @@ def test_agent(tmp_path, monkeypatch, capsys):
     class Fake:
         server_port = 8000
 
-        def __init__(self, agent, host, port):
+        def __init__(self, agent, host, port, telegram):
             agents.append(agent)
 
         def __enter__(self):

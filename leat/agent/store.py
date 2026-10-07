@@ -13,7 +13,8 @@ A conversation's context is the state of what its prompt keeps of it, as leat.ag
 to the model's.
 
 A task is a prompt the agent runs at its next time, in a conversation, first at its first, whose
-wall clock its repeats keep; one done for good is deleted.
+wall clock its repeats keep; one done for good is deleted. Settings are values by name, of JSON,
+as a messaging app's connection.
 """
 
 import json
@@ -86,6 +87,9 @@ _MIGRATIONS = [
       conversation TEXT,
       created REAL NOT NULL
     );
+    """,
+    """
+    CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     """,
 ]
 _SEARCHED = ("user", "assistant")  # the roles of the messages search finds
@@ -243,6 +247,20 @@ class Store:
         """Deletes a memory, and returns it, if it is there."""
         rows = self._query("DELETE FROM memories WHERE id = ? RETURNING *", id)
         return dict(rows[0]) if rows else None
+
+    def setting(self, key: str) -> Any:
+        """A setting's value, or None if it has none."""
+        rows = self._query("SELECT value FROM settings WHERE key = ?", key)
+        return json.loads(rows[0]["value"]) if rows else None
+
+    def set_setting(self, key: str, value: Any) -> None:
+        """Sets a setting's value, or removes it, of None."""
+        with self._lock:
+            if value is None:
+                self._db.execute("DELETE FROM settings WHERE key = ?", (key,))
+            else:
+                sql = "INSERT OR REPLACE INTO settings VALUES (?, ?)"
+                self._db.execute(sql, (key, json.dumps(value, ensure_ascii=False)))
 
     def tasks(self) -> list[dict[str, Any]]:
         """The tasks, the next due first."""

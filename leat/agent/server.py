@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from leat.agent.agent import Agent, Busy, NotFound
+from leat.agent.channels.telegram import Telegram, TelegramError
 from leat.agent.client import EngineError
 
 APP = Path(__file__).parent / "app"
@@ -50,16 +51,20 @@ _SHOWN = {"image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf
 _CONVERSATION = re.compile(r"/api/conversations/([0-9a-f]{12})(/messages|/stop)?")
 _MEMORY = re.compile(r"/api/memories/([0-9]+)")
 _TASK = re.compile(r"/api/tasks/([0-9]+)")
+_PERSON = re.compile(r"/api/telegram/people/(-?[0-9]+)")
 _FILE = re.compile(r"/(?:api/)?files/(.+)")
 
 
 class Server(ThreadingHTTPServer):
-    """Serves `agent` at http://host:port, until shut down."""
+    """Serves `agent` at http://host:port, until shut down, and its `telegram` bot's settings."""
 
     daemon_threads = True  # event streams end with the server
 
-    def __init__(self, agent: Agent, host: str = "127.0.0.1", port: int = 8000):
-        self.agent = agent
+    def __init__(
+        self, agent: Agent, host: str = "127.0.0.1", port: int = 8000,
+        telegram: Telegram | None = None,
+    ):  # fmt: skip
+        self.agent, self.telegram = agent, telegram
         super().__init__((host, port), _Handler)
 
 
@@ -70,7 +75,7 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._trusted():
             return self._error(403, "this server answers its own network's requests alone")
         path = urllib.parse.urlsplit(self.path).path
-        if path in ("/", "/memory", "/files", "/tasks") or path.startswith("/c/"):
+        if path in ("/", "/memory", "/files", "/tasks", "/settings") or path.startswith("/c/"):
             path = "/index.html"
         if path[1:] in _FILES:
             file = APP / path[1:]
@@ -106,6 +111,13 @@ class _Handler(BaseHTTPRequestHandler):
                     raise ValueError("a memory needs text")
                 category = body.get("category", "about")
                 self._json(200, agent.remember(text, category if isinstance(category, str) else ""))
+            elif path == "/api/telegram" and self.server.telegram is not None:
+                if not isinstance(token := body.get("token"), str) or not token.strip():
+                    raise ValueError("a bot needs its token, of @BotFather")
+                self._json(200, self.server.telegram.connect(token))
+            elif path == "/api/telegram/people" and self.server.telegram is not None:
+                self.server.telegram.allow(int(body.get("id", 0)))
+                self._json(200, {})
             elif path == "/api/models/load":
                 if not isinstance(model := body.get("model"), str):
                     raise ValueError("a load needs a model's id")
@@ -121,6 +133,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._error(409, str(e))
         except EngineError as e:
             self._error(502, str(e))
+        except TelegramError as e:
+            self._error(400, f"Telegram refused it: {e}")
 
     def do_DELETE(self) -> None:
         if not self._trusted(write=True):
@@ -133,6 +147,10 @@ class _Handler(BaseHTTPRequestHandler):
                 agent.forget(int(match[1]))
             elif match := _TASK.fullmatch(path):
                 agent.unschedule(int(match[1]))
+            elif path == "/api/telegram" and self.server.telegram is not None:
+                self.server.telegram.disconnect()
+            elif (match := _PERSON.fullmatch(path)) and self.server.telegram is not None:
+                self.server.telegram.refuse(int(match[1]))
             elif path.startswith("/api/files/") and agent.workspace is not None:
                 agent.workspace.delete(urllib.parse.unquote(path.removeprefix("/api/files/")))
                 agent.files_changed()
@@ -191,6 +209,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._event(agent.memories_event())
             self._event(agent.files_event())
             self._event(agent.tasks_event())
+            if self.server.telegram is not None:
+                self._event(self.server.telegram.state())
             self._event(agent.models_event())
             while True:
                 try:

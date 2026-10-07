@@ -24,7 +24,7 @@ from leat.agent import context
 from leat.agent.background import Background
 from leat.agent.client import Client, Completion, EngineError
 from leat.agent.store import Store
-from leat.agent.tools import Context, Result, Tool, arguments, files, memory
+from leat.agent.tools import Context, Result, Tool, arguments, files, memory, numbered
 from leat.agent.tools import tasks as scheduling
 from leat.agent.workspace import Workspace
 
@@ -155,14 +155,16 @@ class Agent:
 
     def send(
         self, id: str | None, content: str, think: bool = False, attached: list[str] | None = None,
-        task: int | None = None,
+        task: int | None = None, via: str | None = None,
     ) -> str:  # fmt: skip
         """Starts a turn of the user's message, in a new conversation without an id; returns the
         conversation's id. The model thinks before it replies if `think`, which takes longer, and
-        reads of the files `attached`, in the workspace. A message of a scheduled task names it.
-        Raises NotFound if there is no such conversation or file, Busy if a turn runs in the
-        conversation."""
+        reads of the files `attached`, in the workspace. A message of a scheduled task names it,
+        and one sent by a messaging app, `via`, that. Raises NotFound if there is no such
+        conversation or file, Busy if a turn runs in the conversation."""
         info: dict[str, Any] = {"think": think} | ({"task": task} if task else {})
+        if via:
+            info["via"] = via
         if attached:
             space = self.workspace
             if space is None or not all(space.path(name).is_file() for name in attached):
@@ -348,7 +350,7 @@ class _Turn:
     def run(self) -> None:
         try:
             self.limit = self.agent.limit()
-            self.sources = _numbered(self.agent.store.messages(self.id))
+            self.sources = numbered(self.agent.store.messages(self.id))
             for n in range(ROUNDS):
                 calls = self._reply(last=n == ROUNDS - 1)
                 if not calls or self.stopped.is_set():
@@ -583,17 +585,6 @@ def _title(content: str) -> str:
     # the first line of the first message, cut at a word
     line = content.strip().split("\n")[0]
     return line if len(line) <= TITLE else line[:TITLE].rsplit(" ", 1)[0] + "…"
-
-
-def _numbered(messages: list[dict[str, Any]]) -> dict[str, int]:
-    # the sources the tools of a conversation's messages numbered, by address
-    numbered: dict[str, int] = {}
-    for m in messages:
-        info = m.get("info", {}) if m["role"] == "tool" else {}
-        for source in [info, *info.get("results", [])]:
-            if source.get("n") and source.get("url"):
-                numbered.setdefault(source["url"], source["n"])
-    return numbered
 
 
 def _speed(timings: dict[str, Any]) -> dict[str, Any]:

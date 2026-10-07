@@ -10,6 +10,7 @@ let memories = []; // what the agent remembers of the user, the oldest first
 let files = []; // the workspace's, the latest changed first: {name, size, modified}
 let attached = []; // the files the next message attaches: {name, uploading}
 let tasks = []; // the scheduled, the next due first: {id, prompt, schedule, conversation}
+let telegram = null; // its bot, if connected, and the people allowed and asking
 // the conversations whose turns ended while another was shown, as this device saw them
 const unread = new Set(JSON.parse(localStorage.getItem("leat.unread") ?? "[]"));
 let models = [], loading = null, unreachable = null; // the engine's, a model it loads, or why not
@@ -18,8 +19,8 @@ let think = localStorage.getItem("leat.think") === "true"; // as the user last c
 let views = []; // the shown messages' elements, by their indexes
 const opened = new Map(); // whether each turn's work is open, as the user left it
 // the pages beside the conversations, each a section of its own name, and their titles
-const PAGES = ["memory", "files", "tasks"];
-const TITLES = { memory: "Memory", files: "Files", tasks: "Tasks" };
+const PAGES = ["memory", "files", "tasks", "settings"];
+const TITLES = { memory: "Memory", files: "Files", tasks: "Tasks", settings: "Settings" };
 
 $("new").onclick = () => {
   open(null);
@@ -29,6 +30,7 @@ $("menu").onclick = () => document.body.classList.toggle("menu");
 $("remembered").onclick = () => turnTo("memory");
 $("filed").onclick = () => turnTo("files");
 $("timed").onclick = () => turnTo("tasks");
+$("set").onclick = () => turnTo("settings");
 $("attach").onclick = () => pick(attach);
 $("upload").onclick = () => pick(upload);
 window.ondragover = (event) => event.preventDefault();
@@ -132,6 +134,10 @@ function handle(event) {
     case "tasks":
       tasks = event.tasks;
       renderTasks();
+      return;
+    case "telegram":
+      telegram = event;
+      renderTelegram();
       return;
     case "done": // a scheduled task's turn, ended
       notify(event.task, event.conversation);
@@ -312,6 +318,49 @@ function renderTasks() {
     ask.onclick = async () => (await Notification.requestPermission(), renderTasks());
     $("notifying").append(ask);
   }
+}
+
+// Telegram's settings: how to make a bot and connect it, or the bot connected, and its people
+function renderTelegram() {
+  const box = $("telegram");
+  if (!telegram?.bot) {
+    const steps = element("ol", "steps");
+    steps.append(...["In Telegram, open @BotFather and send it /newbot.",
+      "Give your bot a name, then a username that ends in “bot”.",
+      "Paste the token BotFather gives you here."].map((step) => element("li", "", step)));
+    const form = element("form"), token = element("input"), button = element("button", "", "Connect");
+    Object.assign(token, { placeholder: "123456:ABC-…", autocomplete: "off" });
+    form.append(token, button);
+    form.onsubmit = async (event) => {
+      event.preventDefault();
+      try {
+        await post("/api/telegram", { token: token.value });
+        status("");
+      } catch (error) {
+        status(error.message, true);
+      }
+    };
+    return box.replaceChildren(element("p", "", "Talk to Leat from Telegram, anywhere."), steps, form);
+  }
+  const bot = link(`https://t.me/${telegram.bot}`, `@${telegram.bot}`);
+  const unlink = element("button", "", "Disconnect");
+  unlink.onclick = () => fetch("/api/telegram", { method: "DELETE" });
+  const connected = element("p", "", "Connected as ");
+  connected.append(bot, ". Only the people you allow can talk to it. ", unlink);
+  const person = (p, asking) => {
+    const item = element("li"), about = element("div");
+    about.append(element("span", "", p.name), element("span", "meta", asking ? "asks to talk to Leat" : "allowed"));
+    const yes = element("button", "allow", "Allow"), no = element("button", "", "×");
+    yes.onclick = () => post("/api/telegram/people", { id: p.id });
+    no.title = asking ? "Turn down" : "Remove";
+    no.onclick = () => fetch(`/api/telegram/people/${p.id}`, { method: "DELETE" });
+    item.append(about, ...(asking ? [yes] : []), no);
+    return item;
+  };
+  const people = element("ul");
+  people.append(...telegram.requests.map((p) => person(p, true)), ...telegram.allowed.map((p) => person(p, false)));
+  const none = element("p", "meta", `No one yet: write to @${telegram.bot}, then allow yourself here.`);
+  box.replaceChildren(connected, telegram.requests.length + telegram.allowed.length ? people : none);
 }
 
 // says a scheduled task is done, in the page, and the system's notification if allowed and the
@@ -563,9 +612,10 @@ function message(m) {
     item.querySelectorAll(":not(.code) > pre").forEach(codeBar); // the blocks new since
     cite(item);
     if (answer) pages.replaceChildren(...sources(m).map(source));
+    if (m.info?.via === "telegram") note.textContent = "via Telegram";
     const names = m.role === "user" ? (m.info?.files ?? []) : answer ? made(m) : [];
     cards.replaceChildren(...names.map(card));
-    note.textContent = answer ? describe(m.info ?? {}) : "";
+    if (m.role !== "user") note.textContent = answer ? describe(m.info ?? {}) : "";
     const { cached, read } = m.info ?? {};
     note.title = read === undefined ? "" : `the prompt's tokens: ${cached} cached, ${read} read`;
   };

@@ -37,6 +37,17 @@ class Tool:
         return {"type": "function", "function": function | {"parameters": self.parameters}}
 
 
+def numbered(messages: list[dict[str, Any]]) -> dict[str, int]:
+    """The sources the calls of a conversation's messages numbered, by their addresses."""
+    found: dict[str, int] = {}
+    for m in messages:
+        info = m.get("info", {}) if m["role"] == "tool" else {}
+        for source in [info, *info.get("results", [])]:
+            if source.get("n") and source.get("url"):
+                found.setdefault(source["url"], source["n"])
+    return found
+
+
 def arguments(raw: Any) -> dict[str, Any]:
     """A call's arguments as an object, of the JSON text leat serve gives them as. Raises
     ValueError if they are not one."""

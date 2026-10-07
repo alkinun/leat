@@ -13,6 +13,7 @@ from tinygrad import Device
 
 from leat import bench
 from leat.agent.agent import Agent
+from leat.agent.channels.telegram import Telegram
 from leat.agent.client import Client
 from leat.agent.server import Server as AgentServer
 from leat.agent.store import Store
@@ -147,7 +148,9 @@ def _agent(args: argparse.Namespace) -> None:
     tools = [*web.tools(args.search, workspace), *weather.tools(), *files.tools(workspace)]
     agent = Agent(Store(args.data / "leat.db"), Client(args.engine), tools, workspace)
     agent.start()
-    with AgentServer(agent, args.host, args.port) as server:
+    telegram = Telegram(agent)
+    telegram.start()
+    with AgentServer(agent, args.host, args.port, telegram) as server:
         print(f"leat agent at {_url(args.host, server.server_port)}, its models of {args.engine}. "
               "Ctrl-C quits.", flush=True)  # fmt: skip
         with contextlib.suppress(KeyboardInterrupt):
