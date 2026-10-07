@@ -8,12 +8,19 @@ let conversations = []; // the latest updated first: {id, title, updated, runnin
 let shown = null; // the conversation shown, with its messages; null for a new one
 let models = [], loading = null, unreachable = null; // the engine's, a model it loads, or why not
 let lost = false; // the events' connection, until it is back
+let think = localStorage.getItem("leat.think") === "true"; // as the user last chose
 
 $("new").onclick = () => {
   open(null);
   $("input").focus();
 };
 $("menu").onclick = () => document.body.classList.toggle("menu");
+$("think").onclick = () => {
+  think = !think;
+  localStorage.setItem("leat.think", think);
+  controls();
+  $("input").focus();
+};
 $("model").onchange = () => load($("model").value);
 $("send").onclick = () => (shown?.running ? stop() : send());
 $("input").oninput = controls;
@@ -144,7 +151,7 @@ async function send() {
   controls();
   try {
     const path = shown ? `/api/conversations/${shown.id}/messages` : "/api/conversations";
-    const { id } = await (await post(path, { content })).json();
+    const { id } = await (await post(path, { content, think })).json();
     if (shown?.id !== id) open(id);
   } catch (error) {
     if (!$("input").value) $("input").value = content;
@@ -240,6 +247,7 @@ function controls() {
   $("main").classList.toggle("empty", !shown);
   $("greeting").textContent = unreachable ? "The engine is not reachable"
     : loading ? "Loading…" : model ? "How can I help?" : "Choose a model";
+  $("think").classList.toggle("on", think);
   $("send").classList.toggle("stop", running);
   $("send").title = running ? "Stop" : "Send";
   $("send").disabled = !running && !(model && input.value.trim());

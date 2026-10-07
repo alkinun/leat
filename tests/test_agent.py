@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from leat.agent.agent import Agent, Busy, NotFound
+from leat.agent.agent import Agent, Busy, NotFound, _api
 from leat.agent.client import Client
 from leat.agent.server import Server
 from leat.agent.store import Store
@@ -127,7 +127,8 @@ def test_turn(agent, engine, events):
     assert [e["type"] for e in seen[:3]] == ["conversation", "message", "message"]
     assert seen[0]["conversation"] | {"updated": 0} == {
         "id": id, "title": "Hi", "updated": 0, "running": True}  # fmt: skip
-    assert seen[1]["message"] == {"role": "user", "content": "Hi\nand more"}
+    user = {"role": "user", "content": "Hi\nand more", "info": {"think": False}}
+    assert seen[1]["message"] == user
     assert seen[2]["index"] == 2 and seen[2]["message"]["content"] == ""
     messages = agent.store.messages(id)
     system, user, reply = messages
@@ -138,10 +139,22 @@ def test_turn(agent, engine, events):
     assert reply["info"]["model"] == "fake" and reply["info"]["tokens"] == 5
     assert reply["info"]["rate"] == pytest.approx(40.0) and reply["info"]["first"] >= 0
     assert seen[-2] == {"type": "message", "conversation": id, "index": 2, "message": reply}
-    # the model read the system prompt and the message, sampled as Qwen3.6 recommends
+    # the model read the system prompt and the message, not thinking, sampled as Qwen3.6
+    # recommends then
     (request,) = engine.requests
-    assert request["messages"] == messages[:2] and request["stream"] is True
-    assert request["temperature"] == 1.0 and request["presence_penalty"] == 1.5
+    assert request["messages"] == [_api(m) for m in messages[:2]] and request["stream"] is True
+    assert request["chat_template_kwargs"] == {"enable_thinking": False}
+    assert request["temperature"] == 0.7 and request["presence_penalty"] == 1.5
+
+
+def test_think(agent, engine, events):
+    # a message may ask the model to think first, sampled as Qwen3.6 recommends for thinking
+    engine.replies.put(REPLY)
+    id = agent.send(None, "Prove it.", think=True)
+    until(events, ended)
+    assert engine.requests[-1]["chat_template_kwargs"] == {"enable_thinking": True}
+    assert engine.requests[-1]["temperature"] == 1.0
+    assert agent.store.messages(id)[1]["info"] == {"think": True}
 
 
 def test_deltas(agent, engine, events):
@@ -166,6 +179,7 @@ def test_next_turn(agent, engine, events):
     until(events, ended)
     sent = engine.requests[-1]["messages"]
     assert [m["role"] for m in sent] == ["system", "user", "assistant", "user"]
+    assert sent[1] == {"role": "user", "content": "Hi"}
     assert sent[2] == {"role": "assistant", "content": "Hello there.", "reasoning_content": "Hmm."}
     assert [m["content"] for m in agent.store.messages(id)][3:] == ["How are you?", "Fine."]
     # and the conversations, the latest updated first, are kept for the next run
@@ -302,6 +316,7 @@ def test_api(server, engine, agent, events):
     # what is wrong with a request, said
     assert request(f"{server}/api/conversations", "POST", {"content": " "})[0] == 400
     assert request(f"{server}/api/conversations", "POST", [1])[0] == 400
+    assert request(f"{server}/api/conversations", "POST", {"content": "Hi", "think": 1})[0] == 400
     assert request(f"{server}/api/conversations/0123456789ab/messages", "POST",
                    {"content": "Hi"})[0] == 404  # fmt: skip
     assert request(f"{server}/api/conversations/0123456789ab")[0] == 404

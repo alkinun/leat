@@ -84,9 +84,9 @@ class _Handler(BaseHTTPRequestHandler):
                 raise ValueError("the body must be a JSON object")
             match = _CONVERSATION.fullmatch(path)
             if path == "/api/conversations":
-                self._json(200, {"id": agent.send(None, _content(body))})
+                self._json(200, {"id": agent.send(None, *_message(body))})
             elif match and match[2] == "/messages":
-                self._json(200, {"id": agent.send(match[1], _content(body))})
+                self._json(200, {"id": agent.send(match[1], *_message(body))})
             elif match and match[2] == "/stop":
                 agent.stop(match[1])
                 self._json(200, {})
@@ -167,7 +167,10 @@ def _local(host: str) -> bool:
     return host in ("localhost", socket.gethostname().lower()) or host.endswith(".local")
 
 
-def _content(body: dict[str, Any]) -> str:
+def _message(body: dict[str, Any]) -> tuple[str, bool]:
+    # a message's content, and whether the model is to think before it replies
     if not isinstance(content := body.get("content"), str) or not content.strip():
         raise ValueError("a message needs content: some text")
-    return content
+    if not isinstance(think := body.get("think", False), bool):
+        raise ValueError("think must be a boolean")
+    return content, think

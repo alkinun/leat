@@ -22,8 +22,11 @@ from typing import Any
 from leat.agent.client import Client, Completion, EngineError
 from leat.agent.store import Store
 
-# sampling as Qwen3.6 recommends for general tasks
-SAMPLING = {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5}
+# sampling as Qwen3.6 recommends for general tasks, thinking first, then not
+SAMPLING = {
+    True: {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5},
+    False: {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5},
+}
 # the system prompt, fixed when a conversation starts so that every prompt after extends the last
 SYSTEM = (
     "You are Leat, an assistant that runs on a computer in the user's home: private, and theirs. "
@@ -90,11 +93,11 @@ class Agent:
                 messages.append(copy.deepcopy(turn.reply))
             return self._summary(c) | {"messages": messages}
 
-    def send(self, id: str | None, content: str) -> str:
+    def send(self, id: str | None, content: str, think: bool = False) -> str:
         """Starts a turn of the user's message, in a new conversation without an id; returns the
-        conversation's id. Raises NotFound if there is no such conversation, Busy if a turn runs
-        in it."""
-        message = {"role": "user", "content": content}
+        conversation's id. The model thinks before it replies if `think`, which takes longer.
+        Raises NotFound if there is no such conversation, Busy if a turn runs in it."""
+        message = {"role": "user", "content": content, "info": {"think": think}}
         with self._lock:
             if id is None:
                 id = self.store.create(_title(content), [_system(), message])["id"]
@@ -106,7 +109,7 @@ class Agent:
                     raise Busy("a reply is already running")
                 start = len(self.store.messages(id))
                 self.store.append(id, message)
-            turn = self._turns[id] = _Turn(self, id, start, content)
+            turn = self._turns[id] = _Turn(self, id, start, content, think)
             self._publish_summary(id)
             self._publish_message(id, start, message)
         threading.Thread(target=turn.run, name=f"turn {id}", daemon=True).start()
@@ -161,8 +164,8 @@ class Agent:
 class _Turn:
     """A turn running in a conversation: its user's message is at `start`, its reply after."""
 
-    def __init__(self, agent: Agent, id: str, start: int, content: str):
-        self.agent, self.id, self.start, self.content = agent, id, start, content
+    def __init__(self, agent: Agent, id: str, start: int, content: str, think: bool):
+        self.agent, self.id, self.start, self.content, self.think = agent, id, start, content, think
         self.reply: dict[str, Any] | None = None  # while it streams
         self.stopped = threading.Event()
         self.completion: Completion | None = None
@@ -192,7 +195,10 @@ class _Turn:
             self.reply = reply
             a._publish_message(self.id, index, reply)
         started = time.monotonic()
-        self.completion = a.engine.complete({"messages": [_api(m) for m in messages]} | SAMPLING)
+        body = {"messages": [_api(m) for m in messages], **SAMPLING[self.think]}
+        # as Qwen3's templates take it, and others ignore
+        body["chat_template_kwargs"] = {"enable_thinking": self.think}
+        self.completion = a.engine.complete(body)
         if self.stopped.is_set():  # before the completion was there to close
             self.completion.close()
         for chunk in self.completion:

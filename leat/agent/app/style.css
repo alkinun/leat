@@ -138,6 +138,14 @@ pre code { padding: 0; background: none; }
   flex: 1; max-height: 240px; padding: 6px 0; resize: none; overflow-y: hidden;
   border: none; outline: none; background: none;
 }
+/* whether the model thinks before it replies: on, in the accent's color */
+#think {
+  display: flex; gap: 6px; align-items: center; padding: 8px 12px;
+  border-radius: var(--round-large); color: var(--muted); font-size: 14px;
+}
+#think:hover { background: var(--bubble); }
+#think.on { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+#think svg { width: 16px; height: 16px; }
 /* as tall as a line of the input, so that it sits centered beside one */
 #send { padding: 10px; border-radius: 50%; background: var(--accent); color: #fff; }
 #send:disabled { opacity: 1; background: var(--bubble); color: var(--muted); }
