@@ -35,6 +35,7 @@ def tools(agent: "Agent") -> list[Tool]:
             "Do something later, once or again and again, as a reminder or a daily briefing: at "
             "its time you are given the task in this conversation, and do it",
             schema(
+                required=2,
                 task=(
                     "string",
                     "what to do then, as you would be asked it, as 'Remind the user "

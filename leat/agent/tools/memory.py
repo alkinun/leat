@@ -64,7 +64,7 @@ def tools(agent: "Agent") -> list[Tool]:
 def remember(agent: "Agent", memory: str, category: str, replaces: int | str | None) -> Result:
     replaced = None if replaces in (None, "") else int(replaces)
     m = agent.remember(memory, category, replaced)
-    said = f"Changed [{m['id']}]." if replaced else f"Remembered, as [{m['id']}]."
+    said = f"Changed [{m['id']}]." if replaced is not None else f"Remembered, as [{m['id']}]."
     return Result(said, {"memory": m, "replaced": replaced is not None})
 
 
