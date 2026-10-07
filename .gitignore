@@ -10,3 +10,4 @@ dist/
 *.gguf
 .claude/worktrees/
 .coverage*
+reports/
