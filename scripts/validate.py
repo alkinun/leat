@@ -202,8 +202,10 @@ def _machine(env: dict) -> dict:
 
 def _tests(env: dict) -> dict:
     start = time.perf_counter()
-    args = [sys.executable, "-m", "pytest", "-m", "gpu", "-q", "-n", "auto", "-p",
-            "no:cacheprovider", str(ROOT / "tests")]  # fmt: skip
+    # one process on a real GPU, which the workers would share; many on the emulated one
+    workers = ["-n", "auto"] if env["DEV"].startswith("MOCK") else []
+    args = [sys.executable, "-m", "pytest", "-m", "gpu", "-q", *workers, "-p", "no:cacheprovider",
+            str(ROOT / "tests")]  # fmt: skip
     done = _run(args, env, 7200, cwd=ROOT)
     lines = done["out"].strip().splitlines()
     summary = next((line for line in reversed(lines) if " in " in line), "no summary")
