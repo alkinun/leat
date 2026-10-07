@@ -1,7 +1,6 @@
 import pytest
 from tinygrad import Tensor
 
-from leat.draft import Gemma4Assistant
 from leat.engine import DRAFT_TOKENS, Engine
 from leat.sampler import GREEDY, Sampling
 from tests.helpers import CONTEXT, Oracle, reference_drafts, reference_mtp_drafts
@@ -110,11 +109,10 @@ def several(engine: Engine, prompts: list[list[int]], sampling: Sampling) -> lis
 @pytest.mark.usefixtures("reference_ops")
 @pytest.mark.parametrize("arch", ARCHS)
 @pytest.mark.parametrize("guessed", ["none", "some"])
-def test_speculative_several(tiny, tiny_assistant, monkeypatch, arch, guessed):
+def test_speculative_several(tiny, tiny_assistant, arch, guessed):
     # sequences decoding at once speculate together, each generating the tokens it would alone,
     # also in steps that prefill another: 2 drafting 3 tokens each, 3 drafting 1, and more than
-    # the drafter takes, 3 here, in plain steps
-    monkeypatch.setattr(Gemma4Assistant, "sequences", 3)
+    # the drafter takes, 3, in plain steps
     path, draft = models(tiny, tiny_assistant, arch)
     prompts = [PROMPT, PROMPT[::-1], PROMPT[3:], PROMPT[5:] + PROMPT[:2]]
     sampling = Sampling(temperature=0.9, top_k=50)
@@ -160,10 +158,9 @@ def test_speculative_kernels(tiny, tiny_assistant, arch, guessed):
 @pytest.mark.gpu
 @pytest.mark.parametrize("arch", ARCHS)
 @pytest.mark.parametrize("guessed", ["none", "some"])
-def test_speculative_several_kernels(tiny, tiny_assistant, monkeypatch, arch, guessed):
+def test_speculative_several_kernels(tiny, tiny_assistant, arch, guessed):
     # through the kernels, of several sequences' rows of several tokens each: the attention and
     # rotate kernels' rows of a token, and Gated DeltaNet's rows of several, saving each state
-    monkeypatch.setattr(Gemma4Assistant, "sequences", 3)
     path, draft = models(tiny, tiny_assistant, arch)
     prompts = [PROMPT, PROMPT[::-1], PROMPT[3:]]
     alone = Engine(path, max_context=CONTEXT)
