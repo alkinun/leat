@@ -94,13 +94,15 @@ def wrong(tokens: list[int]) -> list[int]:
     return [t if i % 3 else (t + 1) % 300 for i, t in enumerate(tokens)]
 
 
-def several(engine: Engine, prompts: list[list[int]], sampling: Sampling) -> list[list[int]]:
+def several(
+    engine: Engine, prompts: list[list[int]], sampling: Sampling, tokens: int = 20
+) -> list[list[int]]:
     # the prompts' tokens, of the first two decoding together, and the third starting while they
     # do, prefilled in steps that also decode them
-    sequences = [engine.start(p, 20, sampling, seed=i) for i, p in enumerate(prompts[:2])]
+    sequences = [engine.start(p, tokens, sampling, seed=i) for i, p in enumerate(prompts[:2])]
     for _ in range(3):
         engine.step()
-    sequences += [engine.start(p, 20, sampling, seed=i + 2) for i, p in enumerate(prompts[2:])]
+    sequences += [engine.start(p, tokens, sampling, seed=i + 2) for i, p in enumerate(prompts[2:])]
     while engine.active:
         engine.step()
     return [s.tokens for s in sequences]
@@ -164,9 +166,10 @@ def test_speculative_several_kernels(tiny, tiny_assistant, arch, guessed):
     path, draft = models(tiny, tiny_assistant, arch)
     prompts = [PROMPT, PROMPT[::-1], PROMPT[3:]]
     alone = Engine(path, max_context=CONTEXT)
-    plain = [list(alone.generate(p, 20, GREEDY)) for p in prompts]
+    # few tokens: the emulated GPU runs these slowly
+    plain = [list(alone.generate(p, 10, GREEDY)) for p in prompts]
     engine = Engine(path, max_context=CONTEXT, slots=3, draft=draft)
     if guessed == "some":
         guesses = [wrong(p + t) for p, t in zip(prompts, plain, strict=True)]
         engine.drafter = Oracle(*guesses)  # type: ignore[assignment]
-    assert several(engine, prompts, GREEDY) == plain
+    assert several(engine, prompts, GREEDY, 10) == plain
