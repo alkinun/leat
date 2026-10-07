@@ -33,8 +33,14 @@ KEEP_BACK = FEW_TOKENS
 # sequences a decode step runs at most in one graph, more in turn: as many tokens as the
 # matrix-vector kernels take, which on AMD are the only kernels for several
 BATCH = MATVEC_TOKENS
-# tokens a drafter guesses ahead of a sequence decoding alone, which the target checks at once
+# tokens a drafter guesses ahead of a sequence, which the target checks at once
 DRAFT_TOKENS = 3
+# tokens a speculative step runs at most, its sequences' last ones and their drafts: as many as
+# the matrix-vector kernels take, as the kernels for more cost more than the guesses save, so that
+# several sequences draft fewer each. For Qwen3.6 35B A3B on the 3090, 3 sequences drafting 3
+# each decoded at 0.88 times the speed of plain steps, 4 at 0.77, and drafting 1 each, 1.11 and
+# 1.01 times.
+SPECULATIVE_TOKENS = MATVEC_TOKENS
 
 
 @dataclass(eq=False)
@@ -76,11 +82,13 @@ class Engine:
     differently from those for one, so a batched sequence may take another token where two are
     close.
 
-    With a drafter, a sequence decoding alone, without presence_penalty, decodes speculatively:
-    the drafter guesses its next DRAFT_TOKENS tokens, and the target runs them with its last in
-    one step, sampling after each as it would have, and keeps them up to the first it would not
-    have generated, and the token it generated there. As a draw depends only on the seed and the
-    position, the sequence generates the tokens it would without, faster where the guesses hold.
+    With a drafter, sequences decoding without presence_penalty decode speculatively, as many at
+    once as the drafter's `sequences`: it guesses each one's next tokens, DRAFT_TOKENS at most and
+    fewer for more sequences, SPECULATIVE_TOKENS in all with their last ones, and the target runs
+    them in one step, sampling after each as it would have, and keeps each sequence's up to the
+    first it would not have generated, and the token it generated there. As a draw depends only
+    on the seed and the position, each sequence generates the tokens it would without, faster
+    where the guesses hold.
 
     A prompt is prefilled only past the longest prefix any slot shares with it. A prompt that
     extends a slot's tokens continues in that slot, so multi-turn chat costs only the latest turn.
@@ -112,10 +120,14 @@ class Engine:
         cache_slots = slots + bool(self._padded)
         weights = gguf.load(names=filter(self.config.uses, gguf.tensors))
         # with a drafter, a recurrent model keeps its states after each token a speculative step
-        # runs, to go back to the last it keeps
-        saved = DRAFT_TOKENS + 1 if draft is not None else 0
+        # runs, to go back to the last each sequence keeps
+        saved = SPECULATIVE_TOKENS if draft is not None else 0
         self.model = Transformer(self.config, weights, max_context, cache_slots, saved)
         self.drafter: Drafter | None = None if draft is None else load_drafter(draft, self.model)
+        # speculative steps of 1 sequence or more, as many as the drafter takes, each drafting a
+        # token at least
+        drafting = 0 if self.drafter is None else min(slots, self.drafter.sequences)
+        self._speculated = [n for n in range(1, drafting + 1) if _drafts(n)]
         # the tokens each slot's sequence has generated, for presence_penalty
         vocab = int(self.model.output.shape[0])
         self._seen = Tensor.zeros(cache_slots, vocab, dtype=dtypes.bool).contiguous().realize()
@@ -135,14 +147,17 @@ class Engine:
         self._copy = graph(self._copy_slot)
         if self.drafter is not None:
             # each slot's normed hidden state that gave its last token, from which drafts go on;
-            # the rows of a speculative step's tokens, of which one becomes it
-            self._hidden = Tensor.zeros(cache_slots, 1, self.config.dim).contiguous().realize()
-            self._rows = Tensor.zeros(DRAFT_TOKENS + 1, 1, self.config.dim).contiguous().realize()
-            self._speculate = graph(self._speculative_step)
-            self._settle = graph(self._settled)
-            self._row = UOp.variable("row", 0, DRAFT_TOKENS)
-            # past a prompt's first token, which the drafter's attention needs to know
-            self._draft_pos = UOp.variable("draft_pos", 1, max_context - 1)
+            # the rows of a speculative step's tokens, of which one of each sequence's becomes it
+            dim = self.config.dim
+            self._hidden = Tensor.zeros(cache_slots, 1, dim).contiguous().realize()
+            self._rows = Tensor.zeros(saved, 1, dim).contiguous().realize()
+            self._speculate = {n: graph(self._speculative_step) for n in self._speculated}
+            self._settle = {n: graph(self._settled) for n in self._speculated}
+            # each sequence's tokens a step keeps, but one; its position, past a prompt's first
+            # token, which the drafter's attention needs to know
+            each = range(max(self._speculated))
+            self._kept_vars = [UOp.variable(f"kept{i}", 0, DRAFT_TOKENS) for i in each]
+            self._draft_vars = [UOp.variable(f"draft_pos{i}", 1, max_context - 1) for i in each]
         self._recurrent = any(self.config.recurrent)
         self._keep, self._restore = graph(self.model.keep), graph(self.model.restore)
         self._kept: list[list[int]] = [[] for _ in range(slots)]  # tokens before each kept state
@@ -203,19 +218,20 @@ class Engine:
         a token of each one past its prompt. Returns the tokens generated, a sequence's first at
         the end of its prompt; sequences that are done leave `active`."""
         decoding = [s for s in self.active if s.tokens]
+        speculating = bool(decoding) and self._speculates(decoding)
         out = []
         prefilling = next((s for s in self.active if not s.tokens), None)
-        if not prefilling and len(decoding) == 1 and self._speculates(decoding[0]):
-            return self._speculative(decoding[0])
         size = min(self.prefill_chunk, SHARED_CHUNK) if decoding else self.prefill_chunk
         if prefilling and (token := self._prefill(prefilling, size)) is not None:
             out.append((prefilling, token))
-        if decoding:
+        if decoding and not speculating:
             tokens = self._decode_step(decoding)
             out += zip(decoding, tokens, strict=True)
         for sequence, token in out:
             sequence.tokens.append(token)
             self._check(sequence)
+        if speculating:
+            out += self._speculative(decoding)
         return out
 
     def cancel(self, sequence: Sequence) -> None:
@@ -245,6 +261,15 @@ class Engine:
             ]
             live = self._live.bind(n) if self._live is not None and n in self._padded else None
             self._decode[n](_ids([0] * n, n), *options, *rows, live=live)
+        # speculative steps of several, each from a slot's second position
+        for n in self._speculated[1:]:
+            sampling = [
+                t for _ in range(n) for t in (Tensor([[0.0] * 5]), Tensor([0], dtype=dtypes.uint32))
+            ]
+            slots = [self._slot_vars[i].bind(i) for i in range(n)]
+            starts = [self._draft_vars[i].bind(1) for i in range(n)]
+            self._speculate[n](_ids([0] * n, n), *sampling, *slots, *starts)
+            self._settle[n](*(x for i in range(n) for x in (self._kept_vars[i].bind(0), slots[i])))
         self._last = {}
         if self.slots > 1:  # copying a cached prefix to another slot has a graph too
             self._copy(self._source.bind(0), self._slot_vars[0].bind(1))
@@ -364,63 +389,93 @@ class Engine:
             self._cached[s.slot].append(s.tokens[-1])
         return out.numpy().ravel()[:k].tolist()
 
-    def _speculates(self, sequence: Sequence) -> bool:
-        # whether a sequence decoding alone decodes speculatively: with a drafter, without
-        # presence_penalty, which tokens drafted would change, with room for the drafts in the
-        # cache, and with more than one token to go
-        room = len(self._cached[sequence.slot]) + DRAFT_TOKENS < self.max_context
-        more = sequence.max_tokens - len(sequence.tokens) > 1
-        plain = sequence.sampling.presence_penalty == 0
-        return self.drafter is not None and plain and room and more
+    def _speculates(self, sequences: list[Sequence]) -> bool:
+        # whether sequences decoding decode speculatively: with a drafter, few enough to draft a
+        # token each, and each without presence_penalty, which tokens drafted would change, with
+        # room for its drafts in the cache, and with more than one token to go
+        drafts = _drafts(len(sequences))
 
-    def _speculative(self, sequence: Sequence) -> list[tuple[Sequence, int]]:
-        # a speculative step of a sequence decoding alone: the drafts it keeps, those the target
+        def each(sequence: Sequence) -> bool:
+            room = len(self._cached[sequence.slot]) + drafts < self.max_context
+            more = sequence.max_tokens - len(sequence.tokens) > 1
+            return sequence.sampling.presence_penalty == 0 and room and more
+
+        few = len(sequences) in self._speculated
+        return self.drafter is not None and few and all(map(each, sequences))
+
+    def _speculative(self, sequences: list[Sequence]) -> list[tuple[Sequence, int]]:
+        # a speculative step of the sequences: of each, the drafts it keeps, those the target
         # generated too, each until the first it would not have, and the token the target
         # generated after them, each appended and checked as step() does
-        slot, last = sequence.slot, sequence.tokens[-1]
-        rows = self._slot_vars[0].bind(slot), self._draft_pos.bind(len(self._cached[slot]))
-        out = self._speculate(_ids([last], 1), *sequence.options, *rows).numpy().tolist()
-        drafted, sampled = out[:DRAFT_TOKENS], out[DRAFT_TOKENS:]
-        pairs = enumerate(zip(drafted, sampled[:DRAFT_TOKENS], strict=True))
-        kept = next((i for i, (d, t) in pairs if d != t), DRAFT_TOKENS)
-        generated = []
-        for ran, token in zip([last, *drafted[:kept]], sampled[: kept + 1], strict=True):
-            self._cached[slot].append(ran)
-            sequence.tokens.append(token)
-            generated.append((sequence, token))
-            self._check(sequence)
-            if sequence.done:
-                break
-        # the row that gave the last token is the slot's hidden state, for the next drafts, and
-        # the recurrent states after it its states
-        self._settle(self._row.bind(len(generated) - 1), self._slot_vars[0].bind(slot))
+        n, drafts = len(sequences), _drafts(len(sequences))
+        slots = [self._slot_vars[i].bind(s.slot) for i, s in enumerate(sequences)]
+        positions = [
+            self._draft_vars[i].bind(len(self._cached[s.slot])) for i, s in enumerate(sequences)
+        ]
+        options = [t for s in sequences for t in s.options]
+        tokens = _ids([s.tokens[-1] for s in sequences], n)
+        out = self._speculate[n](tokens, *options, *slots, *positions).numpy().tolist()
+        generated: list[tuple[Sequence, int]] = []
+        settled = []
+        for i, (sequence, row) in enumerate(zip(sequences, out, strict=True)):
+            drafted, sampled = row[:drafts], row[drafts:]
+            pairs = enumerate(zip(drafted, sampled[:drafts], strict=True))
+            kept = next((j for j, (d, t) in pairs if d != t), drafts)
+            ran = [sequence.tokens[-1], *drafted[:kept]]
+            count = 0
+            for token, after in zip(ran, sampled[: kept + 1], strict=True):
+                self._cached[sequence.slot].append(token)
+                sequence.tokens.append(after)
+                generated.append((sequence, after))
+                count += 1
+                self._check(sequence)
+                if sequence.done:
+                    break
+            settled += [self._kept_vars[i].bind(count - 1), slots[i]]
+        # the row that gave each sequence's last token is its slot's hidden state, for the next
+        # drafts, and the recurrent states after it its states
+        self._settle[n](*settled)
         self._last = {}  # the decode steps' outputs are no longer the sequences' last tokens
         return generated
 
-    def _speculative_step(
-        self, token: Tensor, options: Tensor, seed: Tensor, slot: UOp, pos: UOp
-    ) -> Tensor:
-        # the drafter's DRAFT_TOKENS tokens after `token`, at pos of `slot`, then the target's run
-        # of `token` and them, keeping its hidden rows, and its draws after each: the drafts and
-        # the draws, (2 * DRAFT_TOKENS + 1,)
+    def _speculative_step(self, tokens: Tensor, *args: Tensor | UOp) -> Tensor:
+        # for n sequences' last tokens (1, n): each one's sampling options and seed, then the
+        # slots, then the positions of the tokens. The drafter's tokens after each, `drafts` of
+        # them, then the target's run of each token and its drafts, keeping its hidden rows, and
+        # its draws after each: each sequence's drafts and draws, (n, 2 * drafts + 1)
         assert self.drafter is not None
-        last = self._hidden[slot : slot + 1]
-        drafts = self.drafter.draft(token, last, slot, pos, DRAFT_TOKENS)
-        tokens, spans = token.cat(drafts, dim=1), [Span(slot, pos, DRAFT_TOKENS + 1)]
-        hidden = self.model.run(tokens, spans, save=True)
-        self._rows.assign(hidden.reshape(self._rows.shape)).realize()
-        rows = self._rows.reshape(1, DRAFT_TOKENS + 1, -1)
-        self.drafter.follow(tokens, last.cat(rows[:, :DRAFT_TOKENS], dim=1), spans)
-        logits = self.model.logits(self._rows.reshape(DRAFT_TOKENS + 1, -1))
-        positions = Tensor.stack(*(Tensor(pos + 1 + i) for i in range(DRAFT_TOKENS + 1)))
-        drawn = sample(logits, options, seed, positions).cast(dtypes.int32)
-        return drafts.reshape(-1).cast(dtypes.int32).cat(drawn.reshape(-1)).realize()
+        n = int(tokens.shape[1])
+        drafts = _drafts(n)
+        ran = drafts + 1
+        options = [t for t in args[: 2 * n] if isinstance(t, Tensor)]
+        slots: list[int | UOp] = [u for u in args[2 * n : 3 * n] if isinstance(u, UOp)]
+        starts: list[int | UOp] = [u for u in args[3 * n :] if isinstance(u, UOp)]
+        last = Tensor.cat(*(self._hidden[slot : slot + 1] for slot in slots)).reshape(1, n, -1)
+        drafted = self.drafter.draft(tokens, last, slots, starts, drafts)
+        run = tokens.reshape(n, 1).cat(drafted, dim=1).reshape(1, n * ran)
+        spans = [Span(slot, start, ran) for slot, start in zip(slots, starts, strict=True)]
+        hidden = self.model.run(run, spans, save=True)
+        rows = self._rows[: n * ran]
+        rows.assign(hidden.reshape(rows.shape)).realize()
+        each = rows.reshape(n, ran, -1)
+        before = last.reshape(n, 1, -1).cat(each[:, :drafts], dim=1)
+        self.drafter.follow(run, before.reshape(1, n * ran, -1), spans)
+        logits = self.model.logits(rows.reshape(n * ran, -1))
+        values = Tensor.cat(*(t.expand(ran, int(t.shape[1])) for t in options[0::2]))
+        seeds = Tensor.cat(*(t.expand(ran) for t in options[1::2]))
+        positions = Tensor.stack(*(Tensor(start + 1 + i) for start in starts for i in range(ran)))
+        drawn = sample(logits, values, seeds, positions).cast(dtypes.int32).reshape(n, ran)
+        return drafted.cast(dtypes.int32).cat(drawn, dim=1).realize()
 
-    def _settled(self, row: UOp, slot: UOp) -> None:
-        # the slot's hidden state and recurrent states those after the token in row `row` of a
-        # speculative step, its last kept
-        self._hidden[slot : slot + 1].assign(self._rows[row : row + 1]).realize()
-        self.model.rewind(slot, row)
+    def _settled(self, *rows: UOp) -> None:
+        # for each sequence of a speculative step, its row's last token kept and its slot: the
+        # slot's hidden state and recurrent states those after it
+        pairs = list(zip(rows[::2], rows[1::2], strict=True))
+        ran = _drafts(len(pairs)) + 1
+        for i, (kept, slot) in enumerate(pairs):
+            row = i * ran + kept
+            self._hidden[slot : slot + 1].assign(self._rows[row : row + 1]).realize()
+            self.model.rewind(slot, row)
 
     def _copy_slot(self, source: UOp, slot: UOp) -> None:
         # slot `source`'s cache and states, and what the drafter holds of it, to slot `slot`
@@ -514,6 +569,11 @@ class graph[T]:
     @property
     def cnt(self) -> int:  # the calls so far, the first counting as two
         return self.jit.cnt
+
+
+def _drafts(sequences: int) -> int:
+    # the tokens each of a speculative step's sequences drafts: 0 for too many to draft any
+    return max(min(DRAFT_TOKENS, SPECULATIVE_TOKENS // sequences - 1), 0)
 
 
 def _ids(tokens: list[int], size: int) -> Tensor:

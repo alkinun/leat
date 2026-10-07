@@ -341,12 +341,14 @@ def test_warm_up(tiny, tiny_assistant, monkeypatch, arch, slots, batches):
     monkeypatch.setattr("leat.engine.FEW_TOKENS", 4)
     monkeypatch.setattr("leat.engine.KEEP_BACK", 4)
     path, _ = tiny(arch)
-    draft = tiny_assistant[0] if arch == "gemma4" else None
+    draft = {"gemma4": tiny_assistant[0], "qwen35moe": path}.get(arch)
     engine = Engine(path, max_context=CONTEXT, prefill_chunk=8, slots=slots, draft=draft)
     engine.warm_up()
     graphs = [engine._chunk, engine._few_chunk, *engine._decode.values(), engine._copy]
     graphs += [engine._keep, engine._restore] if arch == "qwen35moe" else []
-    graphs += [engine._speculate, engine._settle] if draft else []
+    if draft:  # of each number of sequences
+        graphs += [*engine._speculate.values(), *engine._settle.values()]
+        assert list(engine._speculate) == list(range(1, min(slots, engine.drafter.sequences) + 1))
     assert list(engine._decode) == batches
     captured = [jit.captured for jit in graphs]
     assert all(captured) and engine.cached_prefix(PROMPT) == 0

@@ -12,14 +12,20 @@ from leat.gguf import GGUF
 from leat.model import Transformer, rope_table
 from leat.ops import Span
 
+Rows = list[int | UOp]  # a value for each sequence of a draft
+
 
 class Drafter(Protocol):
+    # sequences it drafts for at once at most, past which plain steps decode faster
+    sequences: int
+
     def draft(
-        self, token: Tensor, hidden: Tensor, slot: int | UOp, pos: int | UOp, count: int
+        self, tokens: Tensor, hidden: Tensor, slots: Rows, positions: Rows, count: int
     ) -> Tensor:
-        """`count` tokens drafted greedily after `token` (1, 1) at position `pos` of cache slot
-        `slot`, which the target has run up to pos, given its normed hidden state (1, 1, dim)
-        at pos - 1: (1, count) int32."""
+        """`count` tokens drafted greedily after each of several sequences' `tokens` (1, n),
+        sequence i's at position positions[i] of cache slot slots[i], which the target has run up
+        to there, given its normed hidden states (1, n, dim) at the positions before: (n, count)
+        int32."""
         ...
 
     def follow(self, tokens: Tensor, hidden: Tensor, spans: list[Span]) -> None:
@@ -58,6 +64,10 @@ class Gemma4Assistant:
     projected, and gives the next token and a hidden state as the target's, from which the next
     step drafts another at the same position, as llama.cpp's."""
 
+    # for Gemma 4 26B A4B on the 3090, 2 sequences decoded at 0.99 times the speed of plain steps,
+    # and 3 at 0.95
+    sequences = 1
+
     def __init__(self, gguf: GGUF, target: Transformer):
         arch, c = gguf.metadata["general.architecture"], target.config
         if arch != "gemma4-assistant" or c.arch != "gemma4":
@@ -93,14 +103,15 @@ class Gemma4Assistant:
                 self.rope[source] = rope_table(rope, target.max_context, own)
 
     def draft(
-        self, token: Tensor, hidden: Tensor, slot: int | UOp, pos: int | UOp, count: int
+        self, tokens: Tensor, hidden: Tensor, slots: Rows, positions: Rows, count: int
     ) -> Tensor:
-        scale, drafted = self.target.config.embed_scale, []
+        scale, n, drafted = self.target.config.embed_scale, len(slots), []
         for _ in range(count):
-            x = ops.embedding(token, self.target.embed) * scale
-            hidden, logits = self._step(ops.linear(x.cat(hidden, dim=-1), self.pre), slot, pos)
-            token = ops.argmax(logits.reshape(1, -1)).reshape(1, 1)
-            drafted.append(token)
+            x = ops.embedding(tokens, self.target.embed) * scale
+            x = ops.linear(x.cat(hidden, dim=-1), self.pre)
+            hidden, logits = self._step(x, slots, positions)
+            tokens = ops.argmax(logits.reshape(n, -1)).reshape(1, n)
+            drafted.append(tokens.reshape(n, 1))
         return drafted[0].cat(*drafted[1:], dim=1)
 
     def follow(self, tokens: Tensor, hidden: Tensor, spans: list[Span]) -> None:
@@ -109,21 +120,25 @@ class Gemma4Assistant:
     def copy(self, source: int | UOp, slot: int | UOp) -> None:
         pass
 
-    def _step(self, x: Tensor, slot: int | UOp, pos: int | UOp) -> tuple[Tensor, Tensor]:
-        # the hidden state for the next step and the logits, after x (1, 1, width)
-        c, eps = self.target.config, self.eps
+    def _step(self, x: Tensor, slots: Rows, positions: Rows) -> tuple[Tensor, Tensor]:
+        # the hidden states for the next step and the logits, after x (1, n, width)
+        c, eps, n = self.target.config, self.eps, len(slots)
+        spans = [Span(slot, pos - 1) for slot, pos in zip(slots, positions, strict=True)]
         for layer, small, source in zip(self.layers, self.small, self.sources, strict=True):
             q = ops.linear(ops.rms_norm(x, small["attn_norm"], eps), layer["attn_q"])
-            q = q.reshape(1, 1, self.heads, c.head_dims[source])
+            q = q.reshape(1, n, self.heads, c.head_dims[source])
             q = ops.rms_norm(q, small["attn_q_norm"], eps).transpose(1, 2)
             if source in self.rope:
-                cos, sin = (table[pos : pos + 1] for table in self.rope[source])
+                cos, sin = (
+                    Tensor.cat(*(table[pos : pos + 1] for pos in positions))
+                    for table in self.rope[source]
+                )
                 q = ops.rotary(q, cos, sin, c.rope_halves)
             # a query at pos sees the target's positions before it, as one at pos - 1 sees those
             # and its own, and one fewer back for a window
             cache, window = self.target.cache[source], max(c.windows[source] - 1, 0)
             assert cache is not None
-            out = ops.attention(q, cache, [Span(slot, pos - 1)], c.scales[source], window)
+            out = ops.attention(q, cache, spans, c.scales[source], window)
             out = ops.linear(out, layer["attn_output"])
             x = x + ops.rms_norm(out, small["post_attention_norm"], eps)
             mlp = (layer["ffn_gate"], layer["ffn_up"], layer["ffn_down"])
@@ -141,6 +156,10 @@ class Qwen35Mtp:
     and the hidden state before it and gives the next token and its own hidden state, from which
     the next step drafts another at the next position, as llama.cpp's. The keys and values of
     every position the target runs come from its tokens and its hidden states."""
+
+    # for Qwen3.6 35B A3B on the 3090, 2 sequences decoded at 1.14 times the speed of plain
+    # steps, and 3 at 1.11
+    sequences = 3
 
     def __init__(self, gguf: GGUF, target: Transformer):
         c, prefix = target.config, f"blk.{target.config.n_layers}."
@@ -166,13 +185,14 @@ class Qwen35Mtp:
         self.layer = Transformer(config, weights, target.max_context, target.slots)
 
     def draft(
-        self, token: Tensor, hidden: Tensor, slot: int | UOp, pos: int | UOp, count: int
+        self, tokens: Tensor, hidden: Tensor, slots: Rows, positions: Rows, count: int
     ) -> Tensor:
-        drafted = []
+        n, drafted = len(slots), []
         for i in range(count):
-            hidden = self.layer.forward(self._inputs(token, hidden), [Span(slot, pos + i)])
-            token = ops.argmax(self.target.logits(hidden).reshape(1, -1)).reshape(1, 1)
-            drafted.append(token)
+            spans = [Span(slot, pos + i) for slot, pos in zip(slots, positions, strict=True)]
+            hidden = self.layer.forward(self._inputs(tokens, hidden), spans)
+            tokens = ops.argmax(self.target.logits(hidden).reshape(n, -1)).reshape(1, n)
+            drafted.append(tokens.reshape(n, 1))
         return drafted[0].cat(*drafted[1:], dim=1)
 
     def follow(self, tokens: Tensor, hidden: Tensor, spans: list[Span]) -> None:

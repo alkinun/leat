@@ -415,14 +415,18 @@ def write_tiny_assistant(path: Path) -> dict[str, np.ndarray]:
 
 
 class Oracle:
-    """A drafter that drafts the tokens a list holds at the positions after a draft's, as one
-    that guessed them would."""
+    """A drafter that drafts the tokens lists hold, one per slot, at the positions after a draft's,
+    as one that guessed them would."""
 
-    def __init__(self, tokens: list[int]):
-        self.tokens = Tensor(tokens + [0] * CONTEXT, dtype=dtypes.int32).realize()
+    sequences = 3
 
-    def draft(self, token: Tensor, hidden: Tensor, slot: UOp, pos: UOp, count: int) -> Tensor:
-        return self.tokens[pos + 1 : pos + 1 + count].reshape(1, count)
+    def __init__(self, *tokens: list[int]):
+        rows = [t + [0] * (2 * CONTEXT - len(t)) for t in tokens]
+        self.tokens = Tensor(rows, dtype=dtypes.int32).realize()
+
+    def draft(self, tokens: Tensor, hidden: Tensor, slots: list, positions: list, count: int):
+        rows = zip(slots, positions, strict=True)
+        return Tensor.cat(*(self.tokens[s : s + 1, p + 1 : p + 1 + count] for s, p in rows))
 
     def follow(self, tokens: Tensor, hidden: Tensor, spans: list) -> None:
         pass
