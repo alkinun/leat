@@ -6,8 +6,9 @@ appended, but for a turn taken back whole, so that each step's prompt extends th
 user and the model said is indexed for full-text search, the tools' answers not.
 
 A memory is a short sentence about the user, of a category, which every conversation begun after
-it knows. A conversation is reviewed for memories once idle, to the message it was reviewed to, and
-named by the model once.
+it knows, dated when it was last confirmed, and a plan with its last day. What a change replaced or
+forgetting removed is kept, to undo. A conversation is reviewed for memories once idle, to the
+message it was reviewed to, and named by the model once.
 
 A conversation's context is the state of what its prompt keeps of it, as leat.agent.context fits it
 to the model's.
@@ -90,6 +91,24 @@ _MIGRATIONS = [
     """,
     """
     CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    """,
+    # a memory's dates: when it was last made, changed or said again, and a plan's last day; and
+    # every memory forgotten or changed, as it was, to undo
+    """
+    ALTER TABLE memories ADD COLUMN confirmed REAL;
+    UPDATE memories SET confirmed = created;
+    ALTER TABLE memories ADD COLUMN until TEXT;
+    CREATE TABLE forgotten (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      memory INTEGER NOT NULL,
+      text TEXT NOT NULL,
+      category TEXT NOT NULL,
+      until TEXT,
+      created REAL NOT NULL,
+      change TEXT NOT NULL,
+      by TEXT NOT NULL,
+      at REAL NOT NULL
+    );
     """,
 ]
 _SEARCHED = ("user", "assistant")  # the roles of the messages search finds
@@ -230,24 +249,57 @@ class Store:
         """The memories, the oldest first."""
         return [dict(row) for row in self._query("SELECT * FROM memories ORDER BY id")]
 
-    def add_memory(self, text: str, category: str) -> dict[str, Any]:
-        now, sql = time.time(), "INSERT INTO memories (text, created, category) VALUES (?, ?, ?)"
-        with self._lock:
-            cursor = self._db.execute(sql, (text, now, category))
-        return {"id": cursor.lastrowid, "text": text, "created": now, "category": category}
-
-    def replace_memory(self, id: int, text: str, category: str) -> dict[str, Any] | None:
-        """Replaces a memory's text and category, and returns it as it is now, if it is there."""
+    def add_memory(self, text: str, category: str, until: str | None = None) -> dict[str, Any]:
         rows = self._query(
-            "UPDATE memories SET text = ?, category = ?, created = ? WHERE id = ? RETURNING *",
-            text, category, time.time(), id,
+            "INSERT INTO memories (text, created, category, confirmed, until) VALUES"
+            " (?, ?, ?, ?, ?) RETURNING *", text, now := time.time(), category, now, until,
         )  # fmt: skip
-        return dict(rows[0]) if rows else None
+        return dict(rows[0])
 
-    def delete_memory(self, id: int) -> dict[str, Any] | None:
-        """Deletes a memory, and returns it, if it is there."""
-        rows = self._query("DELETE FROM memories WHERE id = ? RETURNING *", id)
-        return dict(rows[0]) if rows else None
+    def replace_memory(
+        self, id: int, text: str, category: str, until: str | None, by: str
+    ) -> dict[str, Any] | None:
+        """Replaces a memory's text, category and last day, keeping what it was; returns it as it
+        is now, if it is there."""
+        return self._change(
+            id, "replaced", by, "UPDATE memories SET text = ?, category = ?, until = ?,"
+            " confirmed = ? WHERE id = ? RETURNING *", text, category, until, time.time(), id,
+        )  # fmt: skip
+
+    def confirm_memory(self, id: int) -> None:
+        """Dates a memory said again now."""
+        self._query("UPDATE memories SET confirmed = ? WHERE id = ?", time.time(), id)
+
+    def delete_memory(self, id: int, by: str) -> dict[str, Any] | None:
+        """Forgets a memory, keeping what it was; returns it, if it was there."""
+        sql = "DELETE FROM memories WHERE id = ? RETURNING *"
+        return self._change(id, "forgotten", by, sql, id)
+
+    def forgotten(self, limit: int = 20) -> list[dict[str, Any]]:
+        """The memories forgotten or changed, as they were, the latest first."""
+        rows = self._query("SELECT * FROM forgotten ORDER BY id DESC LIMIT ?", limit)
+        return [dict(row) for row in rows]
+
+    def restore(self, id: int) -> dict[str, Any] | None:
+        """Puts back a memory as it was before it was forgotten or changed, by its number among
+        the forgotten; returns it, if it can be: not a change of a memory forgotten since."""
+        with self._lock, self._db:
+            self._db.execute("BEGIN")
+            if (old := self._row("SELECT * FROM forgotten WHERE id = ?", id)) is None:
+                return None
+            if old["change"] == "forgotten":
+                sql = ("INSERT OR IGNORE INTO memories (id, text, category, until, created,"
+                       " confirmed) VALUES (?, ?, ?, ?, ?, ?)")  # fmt: skip
+                keys = ("memory", "text", "category", "until", "created")
+                values: tuple[Any, ...] = (*(old[k] for k in keys), time.time())
+            else:
+                sql = ("UPDATE memories SET text = ?, category = ?, until = ?, confirmed = ?"
+                       " WHERE id = ?")  # fmt: skip
+                values = (old["text"], old["category"], old["until"], time.time(), old["memory"])
+            if not self._db.execute(sql, values).rowcount:
+                return None
+            self._db.execute("DELETE FROM forgotten WHERE id = ?", (id,))
+            return self._row("SELECT * FROM memories WHERE id = ?", old["memory"])
 
     def setting(self, key: str) -> Any:
         """A setting's value, or None if it has none."""
@@ -295,6 +347,27 @@ class Store:
     def delete_task(self, id: int) -> dict[str, Any] | None:
         rows = self._query("DELETE FROM tasks WHERE id = ? RETURNING *", id)
         return dict(rows[0]) if rows else None
+
+    def _change(self, id: int, change: str, by: str, sql: str, *parameters: Any) -> dict | None:
+        # changes a memory by sql, keeping what it was in forgotten, `by` whom: the conversation,
+        # the review, or the user in the app; returns it as sql does, if it is there
+        with self._lock, self._db:
+            self._db.execute("BEGIN")
+            if (old := self._row("SELECT * FROM memories WHERE id = ?", id)) is None:
+                return None
+            self._db.execute(
+                "INSERT INTO forgotten (memory, text, category, until, created, change, by, at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (id, old["text"], old["category"], old["until"], old["created"], change, by,
+                 time.time()),
+            )  # fmt: skip
+            return self._row(sql, *parameters)
+
+    def _row(self, sql: str, *parameters: Any) -> dict[str, Any] | None:
+        # the first row of sql, as a dict, in a transaction the caller holds the lock of
+        cursor = self._db.execute(sql, parameters)
+        cursor.row_factory = sqlite3.Row
+        return dict(row) if (row := cursor.fetchone()) is not None else None
 
     def _insert(self, id: str, start: int, messages: list[dict[str, Any]]) -> None:
         rows = [(id, start + i, json.dumps(m, ensure_ascii=False)) for i, m in enumerate(messages)]

@@ -7,6 +7,7 @@ const $ = (id) => document.getElementById(id);
 let conversations = []; // the latest updated first: {id, title, updated, running}
 let shown = null; // the conversation shown, with its messages; null for a new one
 let memories = []; // what the agent remembers of the user, the oldest first
+let forgotten = []; // the memories forgotten or changed, as they were, the latest first
 let files = []; // the workspace's, the latest changed first: {name, size, modified}
 let attached = []; // the files the next message attaches: {name, uploading}
 let tasks = []; // the scheduled, the next due first: {id, prompt, schedule, conversation}
@@ -124,7 +125,7 @@ function handle(event) {
       }
       break;
     case "memories":
-      memories = event.memories;
+      ({ memories, forgotten } = event);
       renderMemories();
       return;
     case "files":
@@ -287,7 +288,7 @@ const ROOM = 3000; // characters, as the agent bounds them
 function renderMemories() {
   const used = memories.reduce((n, m) => n + m.text.length, 0);
   $("room").textContent = memories.length ? `It is ${Math.round((100 * used) / ROOM)}% full.` : "";
-  $("memories").replaceChildren(...Object.entries(CATEGORIES).flatMap(([category, name]) => {
+  const lists = Object.entries(CATEGORIES).flatMap(([category, name]) => {
     const of = memories.filter((m) => m.category === category);
     if (!of.length) return [];
     const list = element("ul");
@@ -295,11 +296,38 @@ function renderMemories() {
       const item = element("li"), remover = element("button", "", "×");
       remover.title = "Forget";
       remover.onclick = () => fetch(`/api/memories/${m.id}`, { method: "DELETE" });
-      item.append(element("span", "", m.text), remover);
+      item.append(element("span", "", m.text), element("span", "meta", dated(m)), remover);
       return item;
     }));
     return [element("h2", "", name), list];
-  }));
+  });
+  if (forgotten.length) { // what was forgotten or changed, as it was, to undo
+    const list = element("ul");
+    list.append(...forgotten.map((f) => {
+      const item = element("li"), undo = element("button", "undo", "Undo");
+      undo.onclick = () => post("/api/memories/restore", { id: f.id }).catch((e) => status(e.message, true));
+      const how = `${f.change === "replaced" ? "changed" : "forgotten"} ${BY[f.by] ?? ""}`;
+      item.append(element("span", "", f.text), element("span", "meta", `${how} · ${day(f.at)}`), undo);
+      return item;
+    }));
+    lists.push(element("h2", "", "Recently forgotten or changed"), list);
+  }
+  $("memories").replaceChildren(...lists);
+}
+
+// who forgot or changed a memory, in words
+const BY = { app: "by you", conversation: "in a chat", review: "while tidying" };
+
+// a memory's date: when it was last said, or of a plan, until when it holds, or that it passed
+function dated(m) {
+  if (!m.until) return day(m.confirmed ?? m.created);
+  const until = new Date(`${m.until}T23:59:59`);
+  return `${until < new Date() ? "passed" : "until"} ${day(until / 1000)}`;
+}
+
+// a time, in seconds, as a day people read
+function day(seconds) {
+  return new Date(seconds * 1000).toLocaleDateString(undefined, { day: "numeric", month: "short" });
 }
 
 function renderTasks() {
@@ -386,9 +414,7 @@ function renderFiles() {
     const item = element("li"), remover = element("button", "", "×");
     remover.title = "Delete";
     remover.onclick = () => fetch(`/api/files/${encodeURIComponent(f.name)}`, { method: "DELETE" });
-    const day = { day: "numeric", month: "short" };
-    const when = new Date(f.modified * 1000).toLocaleDateString(undefined, day);
-    item.append(fileLink(f.name), element("span", "meta", `${bytes(f.size)} · ${when}`), remover);
+    item.append(fileLink(f.name), element("span", "meta", `${bytes(f.size)} · ${day(f.modified)}`), remover);
     return item;
   }));
   // the cards of the files its answers made, where the user reads

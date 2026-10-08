@@ -10,12 +10,14 @@ from typing import Any
 
 @dataclass(frozen=True)
 class Context:
-    """What a call is made in: its conversation, and the numbering of the sources read in it."""
+    """What a call is made in: its conversation, the numbering of the sources read in it, and who
+    makes it."""
 
     conversation: str  # the id of the conversation
     # a source's number, of its address and title, the same each time it is read, for the model to
     # cite and the app to link; 0 where nothing numbers them
     cite: Callable[[str, str], int] = lambda url, title: 0
+    by: str = "conversation"  # who calls: the conversation's model, or its review
 
 
 @dataclass(frozen=True)

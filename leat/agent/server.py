@@ -111,6 +111,8 @@ class _Handler(BaseHTTPRequestHandler):
                     raise ValueError("a memory needs text")
                 category = body.get("category", "about")
                 self._json(200, agent.remember(text, category if isinstance(category, str) else ""))
+            elif path == "/api/memories/restore":
+                self._json(200, agent.restore(int(body.get("id", 0))))
             elif path == "/api/telegram" and self.server.telegram is not None:
                 if not isinstance(token := body.get("token"), str) or not token.strip():
                     raise ValueError("a bot needs its token, of @BotFather")

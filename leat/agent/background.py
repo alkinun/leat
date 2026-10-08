@@ -39,17 +39,20 @@ remember and forget, then reply "Done.".
 
 First look over the memory, below. Forget each memory that is no lasting fact about the user, as \
 "The user asked about the weather", and change, with remember's replaces, each that time has made \
-wrong, as a plan whose date has passed.
+wrong: a plan that has passed, as "The user is going to Rome in May", becomes what happened, \
+"The user went to Rome in May 2026", quoting the old memory as its evidence, or is forgotten.
 
 Then read what the user and Leat said since you last looked, and remember what will matter in \
 later conversations: who the user is, the people in their life, their work and plans, how they \
 like things done. Each fact a memory of its own, written of "the user", as "The user's cat is \
-called Pamuk." Not what they asked about or wondered, what a search finds again, or a task's \
-details. What is remembered already, leave; what changed, change with replaces.
+called Pamuk.", with the user's own words it rests on as its evidence, and a plan with its last \
+day. Only what the user told of themselves: not what Leat said or found, what they asked about or \
+wondered, or a task's details. What is remembered already, leave; what changed, change with \
+replaces.
 
 If nothing is to change, reply "Done." alone.
 
-The memory, each by its number:
+The memory, each by its number and dated when it was last confirmed:
 {memories}"""
 
 
@@ -182,7 +185,7 @@ def _work_on(agent: "Agent", id: str, conversation: list[dict[str, Any]]) -> Non
             try:
                 if (tool := tools.get(f["name"])) is None:
                     raise ValueError(f"there is no tool {f['name']!r}")
-                answer = tool.run(Context(id), **arguments(f["arguments"])).content
+                answer = tool.run(Context(id, by="review"), **arguments(f["arguments"])).content
             except Exception as e:  # for the model, which may try again
                 answer = f"error: {e}"
             conversation.append({"role": "tool", "tool_call_id": call["id"], "content": answer})

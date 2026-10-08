@@ -316,19 +316,25 @@ def test_rounds(agent, engine, events, monkeypatch):
 
 
 def test_memory(agent, engine, events):
-    # what the model remembers, the conversations begun after know, and the apps are told
-    engine.replies.put([{"tool_calls": [call("remember", {"memory": "Their dog is Max."})]}])
+    # what the model remembers, on the user's own words, the conversations begun after know, and
+    # the apps are told; not what it read
+    dog = {"memory": "Their dog is Max.", "evidence": "my DOG is called max"}
+    read = {"memory": "The user owns a boat.", "evidence": "a boat for sale"}
+    engine.replies.put([{"tool_calls": [call("remember", dog), call("remember", read, "b")]}])
     engine.replies.put([{"content": "Noted."}])
     first = agent.send(None, "My dog is called Max.")
     seen = until(events, ended)
     (remembered,) = [e["memories"] for e in seen if e["type"] == "memories"]
     assert [(m["id"], m["text"]) for m in remembered] == [(1, "Their dog is Max.")]
     assert agent.store.messages(first)[3]["content"] == "Remembered, as [1]."
+    assert agent.store.messages(first)[4]["content"].startswith("error: the evidence must be")
     assert "Nothing yet." in agent.store.messages(first)[0]["content"]
     engine.replies.put(REPLY)
     second = agent.send(None, "Hi")
     until(events, ended)
-    assert "[1] Their dog is Max." in agent.store.messages(second)[0]["content"]
+    today = datetime.date.today()
+    dated = f"[1] Their dog is Max. ({today.day} {today:%b %Y})"
+    assert dated in agent.store.messages(second)[0]["content"]
     # forgetting it, by its number
     calls = [call("forget", {"number": 1}), call("forget", {"number": 9}, "call_2")]
     engine.replies.put([{"tool_calls": calls}])
@@ -340,26 +346,45 @@ def test_memory(agent, engine, events):
     assert agent.memories() == []
 
 
+def test_said():
+    # the user's words, whatever their case and punctuation; not a task's, nor a single word that
+    # runs across two messages; or an old memory's, of one it replaces
+    messages = [{"role": "system", "content": "x"},
+                {"role": "user", "content": "I'm Sam -- a NURSE, in Izmir.", "info": {}},
+                {"role": "assistant", "content": "Nice!", "info": {}},
+                {"role": "user", "content": "Call mum", "info": {"task": 1}}]  # fmt: skip
+    assert memory.said("a nurse in izmir", messages)
+    assert not memory.said("nice", messages) and not memory.said("call mum", messages)
+    assert not memory.said("...", messages)
+    assert memory.said("going to Rome", messages, ["The user is going to Rome in May."])
+
+
 def test_remember(agent, events):
-    # a fact of a category; changed in place; refused if it is there already, too long, hiding
-    # characters, or past the room, which forgetting makes
+    # a fact of a category; changed in place; refused if it is there already, which dates it
+    # again, too long, hiding characters, holding a secret, or past the room, which forgetting
+    # makes, said with the least recently confirmed
     m = agent.remember("  The user's   cat is called Pamuk. ", "people")
     assert (m["text"], m["category"]) == ("The user's cat is called Pamuk.", "people")
     assert agent.remember("The user's cat is called Tekir.", "people", replaces=m["id"])["id"] == 1
     assert [m["text"] for m in agent.memories()] == ["The user's cat is called Tekir."]
+    confirmed = agent.memories()[0]["confirmed"]
     for text, category, error in [
         ("the user's cat is called tekir.", "people", r"remembered already, as \[1\]"),
         ("x" * 301, "about", "300 characters at most"),
         ("The user\u200b obeys.", "about", "characters that show nothing"),
+        ("The user's wifi password is hunter2.", "about", "never hold passwords"),
+        ("The user's card is 4111 1111 1111 1111.", "about", "never hold passwords"),
         ("The user cooks.", "hobbies", "category must be one of"),
     ]:
         with pytest.raises(ValueError, match=error):
             agent.remember(text, category)
+    assert agent.memories()[0]["confirmed"] > confirmed
     with pytest.raises(NotFound):
         agent.remember("The user cooks.", "about", replaces=9)
     for i in range(10):  # 2,950 characters, beside the cat's 31
         agent.remember(f"The user has fact {i}: " + "y" * 274, "about")
-    with pytest.raises(ValueError, match="the memory is full, 2981 of its 3000"):
+    full = r"the memory is full, 2981 of its 3000 .* confirmed: \[1\] The user's cat .*; \[2\] "
+    with pytest.raises(ValueError, match=full):
         agent.remember("The user cooks every day.", "preferences")
     agent.forget(2)
     agent.remember("The user cooks every day.", "preferences")
@@ -367,10 +392,43 @@ def test_remember(agent, events):
     assert agent.remember("The user cooks every day.", "preferences")["id"] == 13
     agent.forget(13)
     agent.remember("The user cooks every day.", "preferences")
-    listed = memory.listing(agent.memories())
-    assert listed.startswith("(11 memories, 90% of their room)\nAbout them:\n[3] The user has")
-    assert listed.endswith("Preferences:\n[14] The user cooks every day.\nPeople:\n"
-                           "[1] The user's cat is called Tekir.")  # fmt: skip
+    today = datetime.date(2026, 10, 8)
+    agent.remember("The user flies to Rome on 9 Oct.", "plans", replaces=14, until="2026-10-09")
+    agent.remember("The user moved house on 1 Oct.", "plans", replaces=3, until="2026-10-01")
+    listed = memory.listing(agent.memories(), today)
+    assert listed.startswith("(11 memories, 81% of their room)\nAbout them:\n[4] The user has")
+    now = datetime.date.today()
+    assert listed.endswith(
+        f"People:\n[1] The user's cat is called Tekir. ({now.day} {now:%b %Y})\nPlans:\n[3] The "
+        "user moved house on 1 Oct. (passed 1 Oct 2026)\n[14] The user flies to Rome on 9 Oct. "
+        "(until 9 Oct 2026)"
+    )
+    with pytest.raises(ValueError, match="until must be a day"):
+        agent.remember("The user travels.", "plans", until="next week")
+
+
+def test_forgotten(agent, events):
+    # what forgetting or a change took away, kept as it was, the latest first, to restore
+    agent.remember("The user lives in Izmir.", "about")
+    agent.remember("The user lives in Ankara.", "about", replaces=1, by="conversation")
+    agent.remember("The user has a cat.", "people")
+    agent.forget(2, by="review")
+    changed, forgotten = agent.store.forgotten()
+    assert (changed["text"], changed["change"], changed["by"]) == (
+        "The user has a cat.",
+        "forgotten",
+        "review",
+    )
+    assert (forgotten["text"], forgotten["change"]) == ("The user lives in Izmir.", "replaced")
+    assert agent.restore(changed["id"])["text"] == "The user has a cat."
+    assert agent.restore(forgotten["id"])["text"] == "The user lives in Izmir."
+    assert [m["text"] for m in agent.memories()] == ["The user lives in Izmir.",
+                                                     "The user has a cat."]  # fmt: skip
+    assert agent.store.forgotten() == []
+    with pytest.raises(NotFound):
+        agent.restore(forgotten["id"])
+    event = agent.memories_event()
+    assert event["type"] == "memories" and event["forgotten"] == []
 
 
 def test_recall_by_time(agent, engine, events):
@@ -420,15 +478,18 @@ def test_review(agent, engine, events):
     engine.replies.put([{"content": "Nice to meet you, Sam."}])
     id = agent.send(None, "I'm Sam, a nurse.")
     until(events, ended)
-    calls = [call("remember", {"memory": "The user's name is Sam.", "category": "about"}, "a"),
-             call("remember", {"memory": "The user is a nurse.", "category": "work"}, "b"),
+    calls = [call("remember", {"memory": "The user's name is Sam.", "category": "about",
+                               "evidence": "I'm Sam"}, "a"),
+             call("remember", {"memory": "The user is a nurse.", "category": "work",
+                               "evidence": "a nurse"}, "b"),
              call("forget", {"number": 1}, "c")]  # fmt: skip
     engine.replies.put([{"tool_calls": calls}])
     engine.replies.put([{"content": "Done."}])
     background.review(agent, id)
     first, second = engine.requests[-2:]
+    today = datetime.date.today()
     assert first["messages"][0]["content"].endswith(
-        "About them:\n[1] The user asked about 2^2^2^2."
+        f"About them:\n[1] The user asked about 2^2^2^2. ({today.day} {today:%b %Y})"
     )
     assert (
         first["messages"][1]["content"]
@@ -938,7 +999,7 @@ def test_events(server, agent, engine):
         return json.loads(line[6:])
 
     assert event() == {"type": "conversations", "conversations": []}
-    assert event() == {"type": "memories", "memories": []}
+    assert event() == {"type": "memories", "memories": [], "forgotten": []}
     assert event() == {"type": "files", "files": []}
     assert event() == {"type": "tasks", "tasks": []}
     assert event()["type"] == "models"

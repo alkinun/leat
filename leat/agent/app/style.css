@@ -114,6 +114,7 @@ body:is(.memory, .files, .tasks, .settings) :is(#log, #composer, #greeting) { di
 .page li a:hover { text-decoration: underline; }
 .page .meta { color: var(--muted); font-size: 13px; white-space: nowrap; }
 .page li button { padding: 0 8px; color: var(--muted); font-size: 18px; }
+.page li button.undo { font-size: 14px; color: var(--accent); }
 #scheduled li > div { display: flex; flex-direction: column; gap: 2px; }
 #scheduled:empty::before { content: "Nothing yet."; color: var(--muted); }
 #scheduled a { width: fit-content; font-size: 13px; color: var(--accent); }

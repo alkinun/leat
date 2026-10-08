@@ -46,15 +46,17 @@ words they support.
 When the user tells you something about themselves worth knowing in later conversations, first \
 call remember, then reply: who they are, the people in their life, their work and plans, how they \
 like things done; each fact a memory of its own, written of "the user", as "The user's cat is \
-called Pamuk." Not what they asked about, what a search finds again, or a task's details. When a \
-memory changes, remember the new one in its place; when they ask you to forget something, forget \
-it. Never say you noted something unless you called remember. To find what you talked about in \
+called Pamuk.", with the words they told you it in as its evidence, and a plan with its last day. \
+Only what they tell you: not what they asked about, what you read or found, or a task's details. \
+When a memory changes, remember the new one in its place; when they ask you to forget something, \
+forget it. Never say you noted something unless you called remember. Use what you remember only \
+where it helps your answer, and what the user says now over it. To find what you talked about in \
 earlier conversations that your memory below does not hold, call recall.
 
 When the user wants something done later, once or again and again, as a reminder or a morning's \
 briefing, call schedule.
 {workspace}
-What you remember of the user, each by its number:
+What you remember of the user, each by its number and dated when it was last confirmed:
 {memories}"""
 # of the system prompt, when the agent has a workspace
 WORKSPACE = """
@@ -212,35 +214,55 @@ class Agent:
         return self.store.memories()
 
     def remember(
-        self, text: str, category: str = "about", replaces: int | None = None
-    ) -> dict[str, Any]:
+        self, text: str, category: str = "about", replaces: int | None = None,
+        until: str | None = None, by: str = "app",
+    ) -> dict[str, Any]:  # fmt: skip
         """Remembers a fact of the user, in the conversations begun from now on, in place of the
-        memory `replaces` if given. Raises ValueError if it may not be one, or if it does not fit
-        the memory's room, NotFound if there is no memory to replace."""
-        text = memory.checked(text, category)
+        memory `replaces` if given, a plan until its last day, `by` whom: the app's user, a
+        conversation's model or the review. Raises ValueError if it may not be one, if it is one
+        already, which is dated again, or if it does not fit the memory's room, saying the
+        memories least recently confirmed; NotFound if there is no memory to replace."""
+        text, until = memory.checked(text, category, until)
         with self._lock:
             others = [m for m in self.store.memories() if m["id"] != replaces]
             if same := [m for m in others if m["text"].lower() == text.lower()]:
+                self.store.confirm_memory(same[0]["id"])
+                self.events.publish(self.memories_event())
                 raise ValueError(f"that is remembered already, as [{same[0]['id']}]")
             if (used := sum(len(m["text"]) for m in others)) + len(text) > memory.ROOM:
+                oldest = sorted(others, key=lambda m: m["confirmed"])[:5]
                 raise ValueError(
-                    f"the memory is full, {used} of its {memory.ROOM} characters: forget or "
-                    "change the least useful memories first, or make one of two"
+                    f"the memory is full, {used} of its {memory.ROOM} characters: change or "
+                    "forget memories first, or make one of two. Those least recently "
+                    "confirmed: " + "; ".join(f"[{m['id']}] {m['text'][:80]}" for m in oldest)
                 )
             if replaces is None:
-                m = self.store.add_memory(text, category)
-            elif (changed := self.store.replace_memory(replaces, text, category)) is None:
+                m = self.store.add_memory(text, category, until)
+            elif (
+                changed := self.store.replace_memory(replaces, text, category, until, by)
+            ) is None:
                 raise NotFound(f"there is no memory {replaces}")
             else:
                 m = changed
             self.events.publish(self.memories_event())
         return m
 
-    def forget(self, id: int) -> dict[str, Any]:
-        """Forgets a memory, and returns it. Raises NotFound if there is no such memory."""
+    def forget(self, id: int, by: str = "app") -> dict[str, Any]:
+        """Forgets a memory, `by` whom, and returns it; what it was is kept, to restore. Raises
+        NotFound if there is no such memory."""
         with self._lock:
-            if (m := self.store.delete_memory(id)) is None:
+            if (m := self.store.delete_memory(id, by)) is None:
                 raise NotFound(f"there is no memory {id}")
+            self.events.publish(self.memories_event())
+        return m
+
+    def restore(self, id: int) -> dict[str, Any]:
+        """Undoes a memory's forgetting or change, by its number among the forgotten, and returns
+        the memory. Raises NotFound if it cannot be: if it is not there, or the memory changed was
+        forgotten since."""
+        with self._lock:
+            if (m := self.store.restore(id)) is None:
+                raise NotFound(f"there is nothing to restore as {id}")
             self.events.publish(self.memories_event())
         return m
 
@@ -293,7 +315,9 @@ class Agent:
         return {"type": "tasks", "tasks": self.tasks()}
 
     def memories_event(self) -> Event:
-        return {"type": "memories", "memories": self.store.memories()}
+        """The memories, and the latest forgotten or changed, as they were, to restore."""
+        memories, forgotten = self.store.memories(), self.store.forgotten()
+        return {"type": "memories", "memories": memories, "forgotten": forgotten}
 
     def models(self) -> list[dict[str, Any]]:
         """The engine's models, as it lists them. Raises EngineError."""
