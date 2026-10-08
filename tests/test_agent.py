@@ -172,7 +172,8 @@ def test_turn(agent, engine, events):
     assert info["model"] == "fake" and info["tokens"] == 5 and info["rate"] == pytest.approx(40.0)
     read = len(json.dumps(engine.requests[0]["messages"])) // 3
     assert info["first"] >= 0 and (info["cached"], info["read"]) == (0, read)
-    assert seen[-2] == {"type": "message", "conversation": id, "index": 2, "message": reply}
+    assert seen[-2] == {"type": "message", "conversation": id, "index": 2, "message": reply,
+                        "to": None}  # fmt: skip
     # the model read the system prompt and the message, not thinking, sampled as Qwen3.6
     # recommends then
     (request,) = engine.requests
@@ -429,6 +430,67 @@ def test_forgotten(agent, events):
         agent.restore(forgotten["id"])
     event = agent.memories_event()
     assert event["type"] == "memories" and event["forgotten"] == []
+
+
+def test_household(agent, engine, events):
+    # all that was no one's becomes the first person's, the owner's; then each person's
+    # conversations, memories and tasks are their own, the household's memories everyone's, and
+    # each event says whose it is
+    engine.replies.put(REPLY)
+    before = agent.send(None, "Hi")
+    until(events, ended)
+    agent.remember("The user lives in Izmir.", "about")
+    owner, ada = agent.store.add_person("Alkın"), agent.store.add_person("Ada")
+    assert (owner["owner"], ada["owner"]) == (1, 0)
+    assert [c["id"] for c in agent.conversations(owner["id"])] == [before]
+    assert agent.conversations(ada["id"]) == [] and agent.conversations() == []
+    engine.replies.put(REPLY)
+    with agent.events.watch() as told:
+        mine = agent.send(None, "Hello", person=ada["id"])
+        assert {e.get("to") for e in until(told, ended)} == {ada["id"]}
+    assert "the home of the user, Ada:" in agent.store.messages(mine)[0]["content"]
+    for other in (owner["id"], None):
+        assert agent.conversation(mine, other) is None
+        with pytest.raises(NotFound):
+            agent.send(mine, "Hi", person=other)
+        with pytest.raises(NotFound):
+            agent.delete(mine, other)
+        with pytest.raises(NotFound):
+            agent.stop(mine, other)
+    # memories: Ada's, the household's, which Ada and the owner both know, and not the owner's
+    agent.remember("The user plays the violin.", "about", person=ada["id"])
+    with agent.events.watch() as told:
+        cat = agent.remember("The household's cat is called Pamuk.", "household", person=ada["id"])
+        assert {told.get(timeout=1)["to"] for _ in range(2)} == {owner["id"], ada["id"]}
+    assert cat["person"] is None
+    known = lambda person: [m["text"] for m in agent.memories(person)]  # noqa: E731
+    assert known(ada["id"]) == [
+        "The user plays the violin.",
+        "The household's cat is called Pamuk.",
+    ]
+    assert known(owner["id"]) == [
+        "The user lives in Izmir.",
+        "The household's cat is called Pamuk.",
+    ]
+    izmir = agent.memories(owner["id"])[0]["id"]
+    with pytest.raises(NotFound):
+        agent.forget(izmir, person=ada["id"])
+    with pytest.raises(NotFound):
+        agent.remember("The user lives in Rome.", "about", replaces=izmir, person=ada["id"])
+    agent.forget(cat["id"], person=owner["id"])  # the household's: anyone's to forget
+    (gone,) = agent.store.forgotten(ada["id"])
+    assert agent.restore(gone["id"], ada["id"])["text"] == "The household's cat is called Pamuk."
+    # tasks: each person's own
+    soon = datetime.datetime.now() + datetime.timedelta(hours=1)
+    task = agent.schedule("Practise", soon, "once", mine, ada["id"])
+    assert agent.tasks(owner["id"]) == [] and [t["id"] for t in agent.tasks(ada["id"])] == [
+        task["id"]
+    ]
+    with pytest.raises(NotFound):
+        agent.unschedule(task["id"], owner["id"])
+    # recall finds a person's own conversations alone
+    found = agent.store.search("hello hi", person=owner["id"])
+    assert {f["conversation"] for f in found} == {before}
 
 
 def test_recall_by_time(agent, engine, events):
@@ -719,7 +781,7 @@ def test_task_runs(agent, engine, events):
     engine.replies.put([{"content": "Sunny."}])
     background.run(agent, daily)
     done = until(events, lambda e: e["type"] == "done")[-1]
-    assert done == {"type": "done", "conversation": id, "task": "Give the weather"}
+    assert done == {"type": "done", "conversation": id, "task": "Give the weather", "to": None}
     asked = engine.requests[-1]["messages"][-1]
     assert asked == {
         "role": "user",
@@ -820,7 +882,7 @@ def test_delete(agent, engine, events):
     id = agent.send(None, "Hi")
     until(events, lambda e: e["type"] == "delta")
     agent.delete(id)
-    assert until(events, ended)[-1] == {"type": "deleted", "id": id}
+    assert until(events, ended)[-1] == {"type": "deleted", "id": id, "to": None}
     assert agent.conversations() == [] and agent.store.messages(id) == []
 
 
@@ -831,8 +893,8 @@ def test_failure(agent, engine, events):
     id = agent.send(None, "Hi")
     error, deleted = until(events, ended)[-2:]
     assert error == {"type": "error", "conversation": id, "error": "the prompt is too long",
-                     "start": 1, "content": "Hi"}  # fmt: skip
-    assert deleted == {"type": "deleted", "id": id} and agent.conversations() == []
+                     "start": 1, "content": "Hi", "to": None}  # fmt: skip
+    assert deleted == {"type": "deleted", "id": id, "to": None} and agent.conversations() == []
     engine.replies.put(REPLY)
     id = agent.send(None, "Hi")
     until(events, ended)

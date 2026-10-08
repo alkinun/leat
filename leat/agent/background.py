@@ -39,16 +39,14 @@ remember and forget, then reply "Done.".
 
 First look over the memory, below. Forget each memory that is no lasting fact about the user, as \
 "The user asked about the weather", and change, with remember's replaces, each that time has made \
-wrong: a plan that has passed, as "The user is going to Rome in May", becomes what happened, \
-"The user went to Rome in May 2026", quoting the old memory as its evidence, or is forgotten.
+wrong, as a plan that has passed, quoting the old memory as its evidence.
 
 Then read what the user and Leat said since you last looked, and remember what will matter in \
 later conversations: who the user is, the people in their life, their work and plans, how they \
 like things done. Each fact a memory of its own, written of "the user", as "The user's cat is \
 called Pamuk.", with the user's own words it rests on as its evidence, and a plan with its last \
-day. Only what the user told of themselves: not what Leat said or found, what they asked about or \
-wondered, or a task's details. What is remembered already, leave; what changed, change with \
-replaces.
+day. Not what they asked about or wondered, what Leat said or found, or a task's details. What is \
+remembered already, leave; what changed, change with replaces.
 
 If nothing is to change, reply "Done." alone.
 
@@ -93,7 +91,7 @@ class Background:
                     if not self.agent.running(id):
                         _attempt(review, self.agent, id)
                 # the next task's time, of all but those due at this look that wait, as they were
-                tasks = [t["next"] for t in self.agent.store.tasks() if t not in due]
+                tasks = [t["next"] for t in self.agent.store.tasks(everyone=True) if t not in due]
                 soonest = min(tasks, default=soonest)
             except Exception:
                 traceback.print_exc()
@@ -122,9 +120,9 @@ def run(agent: "Agent", task: dict[str, Any]) -> None:
         raise EngineError("no model is loaded")
     conversation = task["conversation"]
     if conversation is not None and agent.store.conversation(conversation) is None:
-        conversation = None
+        conversation = None  # deleted: a new one, the task's person's
     try:
-        sent = agent.send(conversation, task["prompt"], task=task["id"])
+        sent = agent.send(conversation, task["prompt"], task=task["id"], person=task["person"])
     except Busy:
         return
     now, day = datetime.datetime.now(), datetime.datetime.fromtimestamp(task["first"]).day
@@ -151,24 +149,27 @@ def name(agent: "Agent", id: str) -> None:
 
 
 def review(agent: "Agent", id: str) -> None:
-    """Reviews what is new in a conversation for memories, changing them by the model's calls."""
+    """Reviews what is new in a conversation for memories, its person's and the household's,
+    changing them by the model's calls."""
+    if (c := agent.store.conversation(id)) is None:  # deleted
+        return
     messages = agent.store.messages(id)
     new = [m for m in messages[agent.store.reviewed(id) :] if m["role"] in ("user", "assistant")]
     if any(m.get("content") for m in new):
         today = datetime.date.today()
         system = REVIEW.format(
-            date=f"{today:%A}, {today.day} {today:%B %Y}", memories=memory.listing(agent.memories())
+            date=f"{today:%A}, {today.day} {today:%B %Y}",
+            memories=memory.listing(agent.memories(c["person"])),
         )
         # the latest of it, as much as half the model's context holds
         read = READ if (limit := agent.limit()) is None else min(READ, limit * context.CHARS // 2)
         said = context.transcript([m for m in new if m.get("content")])[-read:]
-        _work_on(
-            agent, id, [{"role": "system", "content": system}, {"role": "user", "content": said}]
-        )
+        conversation = [{"role": "system", "content": system}, {"role": "user", "content": said}]
+        _work_on(agent, Context(id, by="review", person=c["person"]), conversation)
     agent.store.mark_reviewed(id, len(messages))
 
 
-def _work_on(agent: "Agent", id: str, conversation: list[dict[str, Any]]) -> None:
+def _work_on(agent: "Agent", context: Context, conversation: list[dict[str, Any]]) -> None:
     # the model's replies to a conversation of its own, each after the memory's calls it made
     tools = {t.name: t for t in memory.tools(agent) if t.name in ("remember", "forget")}
     body = {
@@ -185,7 +186,7 @@ def _work_on(agent: "Agent", id: str, conversation: list[dict[str, Any]]) -> Non
             try:
                 if (tool := tools.get(f["name"])) is None:
                     raise ValueError(f"there is no tool {f['name']!r}")
-                answer = tool.run(Context(id, by="review"), **arguments(f["arguments"])).content
+                answer = tool.run(context, **arguments(f["arguments"])).content
             except Exception as e:  # for the model, which may try again
                 answer = f"error: {e}"
             conversation.append({"role": "tool", "tool_call_id": call["id"], "content": answer})

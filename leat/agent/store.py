@@ -16,6 +16,11 @@ to the model's.
 A task is a prompt the agent runs at its next time, in a conversation, first at its first, whose
 wall clock its repeats keep; one done for good is deleted. Settings are values by name, of JSON,
 as a messaging app's connection.
+
+The household is its people, the first its owner, and the devices paired to each, known by the hash
+of a secret each holds. A conversation, a memory and a task are each a person's; a memory of the
+household category is everyone's. Before the household has its first person, everything is no
+one's, and becomes the owner's.
 """
 
 import json
@@ -110,9 +115,33 @@ _MIGRATIONS = [
       at REAL NOT NULL
     );
     """,
+    # the household: its people, each device paired to one, and whose each conversation, memory
+    # and task is; a memory of no one's is the household's
+    """
+    CREATE TABLE people (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      owner INTEGER NOT NULL DEFAULT 0,
+      created REAL NOT NULL
+    );
+    CREATE TABLE devices (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      person INTEGER NOT NULL REFERENCES people (id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      token TEXT NOT NULL UNIQUE,
+      created REAL NOT NULL,
+      seen REAL NOT NULL
+    );
+    ALTER TABLE conversations ADD COLUMN person INTEGER REFERENCES people (id);
+    ALTER TABLE memories ADD COLUMN person INTEGER REFERENCES people (id);
+    ALTER TABLE forgotten ADD COLUMN person INTEGER;
+    ALTER TABLE tasks ADD COLUMN person INTEGER REFERENCES people (id);
+    """,
 ]
 _SEARCHED = ("user", "assistant")  # the roles of the messages search finds
-_SUMMARY = "id, title, created, updated"  # a conversation's columns as the apps list it
+_SUMMARY = "id, title, created, updated, person"  # a conversation's columns as the apps list it
+# the memories a person knows: their own, and the household's
+_KNOWN = "(person IS ? OR category = 'household')"
 
 
 class Store:
@@ -131,24 +160,26 @@ class Store:
                     self._db.execute(statement)
                 self._db.execute(f"PRAGMA user_version = {i}")
 
-    def conversations(self) -> list[dict[str, Any]]:
-        """Every conversation, without its messages, the latest updated first."""
-        rows = self._query(f"SELECT {_SUMMARY} FROM conversations ORDER BY updated DESC")
-        return [dict(row) for row in rows]
+    def conversations(self, person: int | None = None) -> list[dict[str, Any]]:
+        """A person's conversations, without their messages, the latest updated first."""
+        sql = f"SELECT {_SUMMARY} FROM conversations WHERE person IS ? ORDER BY updated DESC"
+        return [dict(row) for row in self._query(sql, person)]
 
     def conversation(self, id: str) -> dict[str, Any] | None:
         rows = self._query(f"SELECT {_SUMMARY} FROM conversations WHERE id = ?", id)
         return dict(rows[0]) if rows else None
 
-    def create(self, title: str, messages: list[dict[str, Any]]) -> dict[str, Any]:
-        """A new conversation of these messages."""
+    def create(
+        self, title: str, messages: list[dict[str, Any]], person: int | None = None
+    ) -> dict[str, Any]:
+        """A new conversation of a person's, of these messages."""
         id, now = uuid.uuid4().hex[:12], time.time()
         with self._lock, self._db:
             self._db.execute("BEGIN")
-            sql = "INSERT INTO conversations (id, title, created, updated) VALUES (?, ?, ?, ?)"
-            self._db.execute(sql, (id, title, now, now))
+            sql = "INSERT INTO conversations (id, title, created, updated, person) VALUES"
+            self._db.execute(f"{sql} (?, ?, ?, ?, ?)", (id, title, now, now, person))
             self._insert(id, 0, messages)
-        return {"id": id, "title": title, "created": now, "updated": now}
+        return {"id": id, "title": title, "created": now, "updated": now, "person": person}
 
     def context(self, id: str) -> dict[str, Any]:
         rows = self._query("SELECT context FROM conversations WHERE id = ?", id)
@@ -190,31 +221,35 @@ class Store:
             self._db.execute("DELETE FROM search WHERE conversation = ?", (id,))
 
     def search(
-        self, query: str, exclude: str | None = None, since: float = 0, limit: int = 8
-    ) -> list[dict[str, Any]]:
-        """What the user and the model said that matches any of the query's words, the best first,
-        of conversations updated since a time: each its conversation's id, title and last update,
-        its role and position, and the words around."""
+        self, query: str, person: int | None = None, exclude: str | None = None, since: float = 0,
+        limit: int = 8,
+    ) -> list[dict[str, Any]]:  # fmt: skip
+        """What a person and the model said in their conversations that matches any of the
+        query's words, the best first, of conversations updated since a time: each its
+        conversation's id, title and last update, its role and position, and the words around."""
         if not (words := re.findall(r"\w+", query)):
             return []
         rows = self._query(
             "SELECT s.conversation, c.title, c.updated, s.role, s.position,"
             " snippet(search, 0, '', '', '…', 32) AS text"
             " FROM search s JOIN conversations c ON c.id = s.conversation"
-            " WHERE search MATCH ? AND s.conversation IS NOT ? AND c.updated >= ?"
-            " ORDER BY rank LIMIT ?",
-            " OR ".join(f'"{word}"' for word in words), exclude, since, limit,
+            " WHERE search MATCH ? AND c.person IS ? AND s.conversation IS NOT ?"
+            " AND c.updated >= ? ORDER BY rank LIMIT ?",
+            " OR ".join(f'"{word}"' for word in words), person, exclude, since, limit,
         )  # fmt: skip
         return [dict(row) for row in rows]
 
-    def recent(self, since: float, exclude: str | None = None, limit: int = 10) -> list[dict]:
-        """The conversations updated since a time, the latest first: each's id, title and last
-        update, and its first message of the user's."""
+    def recent(
+        self, since: float, person: int | None = None, exclude: str | None = None, limit: int = 10
+    ) -> list[dict]:
+        """A person's conversations updated since a time, the latest first: each's id, title and
+        last update, and its first message of the user's."""
         rows = self._query(
             "SELECT c.id AS conversation, c.title, c.updated, m.message ->> '$.content' AS text"
             " FROM conversations c JOIN messages m ON m.conversation = c.id AND m.position = 1"
-            " WHERE c.updated >= ? AND c.id IS NOT ? ORDER BY c.updated DESC LIMIT ?",
-            since, exclude, limit,
+            " WHERE c.updated >= ? AND c.person IS ? AND c.id IS NOT ?"
+            " ORDER BY c.updated DESC LIMIT ?",
+            since, person, exclude, limit,
         )  # fmt: skip
         return [dict(row) for row in rows]
 
@@ -245,25 +280,36 @@ class Store:
             sql = "UPDATE conversations SET title = ?, named = 1 WHERE id = ?"
             self._db.execute(sql, (title, id))
 
-    def memories(self) -> list[dict[str, Any]]:
-        """The memories, the oldest first."""
-        return [dict(row) for row in self._query("SELECT * FROM memories ORDER BY id")]
+    def memories(self, person: int | None = None) -> list[dict[str, Any]]:
+        """The memories a person knows, their own and the household's, the oldest first."""
+        sql = f"SELECT * FROM memories WHERE {_KNOWN} ORDER BY id"
+        return [dict(row) for row in self._query(sql, person)]
 
-    def add_memory(self, text: str, category: str, until: str | None = None) -> dict[str, Any]:
+    def memory(self, id: int) -> dict[str, Any] | None:
+        rows = self._query("SELECT * FROM memories WHERE id = ?", id)
+        return dict(rows[0]) if rows else None
+
+    def add_memory(
+        self, text: str, category: str, until: str | None = None, person: int | None = None
+    ) -> dict[str, Any]:
+        """A new memory of a person's, or of no one's, the household's."""
         rows = self._query(
-            "INSERT INTO memories (text, created, category, confirmed, until) VALUES"
-            " (?, ?, ?, ?, ?) RETURNING *", text, now := time.time(), category, now, until,
+            "INSERT INTO memories (text, created, category, confirmed, until, person) VALUES"
+            " (?, ?, ?, ?, ?, ?) RETURNING *", text, now := time.time(), category, now, until,
+            person,
         )  # fmt: skip
         return dict(rows[0])
 
     def replace_memory(
-        self, id: int, text: str, category: str, until: str | None, by: str
-    ) -> dict[str, Any] | None:
-        """Replaces a memory's text, category and last day, keeping what it was; returns it as it
-        is now, if it is there."""
+        self, id: int, text: str, category: str, until: str | None, by: str,
+        person: int | None = None,
+    ) -> dict[str, Any] | None:  # fmt: skip
+        """Replaces a memory's text, category and last day, and whose it is, keeping what it was;
+        returns it as it is now, if it is there."""
         return self._change(
             id, "replaced", by, "UPDATE memories SET text = ?, category = ?, until = ?,"
-            " confirmed = ? WHERE id = ? RETURNING *", text, category, until, time.time(), id,
+            " confirmed = ?, person = ? WHERE id = ? RETURNING *", text, category, until,
+            time.time(), person, id,
         )  # fmt: skip
 
     def confirm_memory(self, id: int) -> None:
@@ -275,10 +321,16 @@ class Store:
         sql = "DELETE FROM memories WHERE id = ? RETURNING *"
         return self._change(id, "forgotten", by, sql, id)
 
-    def forgotten(self, limit: int = 20) -> list[dict[str, Any]]:
-        """The memories forgotten or changed, as they were, the latest first."""
-        rows = self._query("SELECT * FROM forgotten ORDER BY id DESC LIMIT ?", limit)
-        return [dict(row) for row in rows]
+    def forgotten(self, person: int | None = None, limit: int = 20) -> list[dict[str, Any]]:
+        """The memories a person knew that were forgotten or changed, as they were, the latest
+        first."""
+        sql = f"SELECT * FROM forgotten WHERE {_KNOWN} ORDER BY id DESC LIMIT ?"
+        return [dict(row) for row in self._query(sql, person, limit)]
+
+    def forgetting(self, id: int) -> dict[str, Any] | None:
+        """A memory forgotten or changed, as it was, by its number among the forgotten."""
+        rows = self._query("SELECT * FROM forgotten WHERE id = ?", id)
+        return dict(rows[0]) if rows else None
 
     def restore(self, id: int) -> dict[str, Any] | None:
         """Puts back a memory as it was before it was forgotten or changed, by its number among
@@ -288,9 +340,9 @@ class Store:
             if (old := self._row("SELECT * FROM forgotten WHERE id = ?", id)) is None:
                 return None
             if old["change"] == "forgotten":
-                sql = ("INSERT OR IGNORE INTO memories (id, text, category, until, created,"
-                       " confirmed) VALUES (?, ?, ?, ?, ?, ?)")  # fmt: skip
-                keys = ("memory", "text", "category", "until", "created")
+                sql = ("INSERT OR IGNORE INTO memories (id, text, category, until, created, person,"
+                       " confirmed) VALUES (?, ?, ?, ?, ?, ?, ?)")  # fmt: skip
+                keys = ("memory", "text", "category", "until", "created", "person")
                 values: tuple[Any, ...] = (*(old[k] for k in keys), time.time())
             else:
                 sql = ("UPDATE memories SET text = ?, category = ?, until = ?, confirmed = ?"
@@ -315,20 +367,27 @@ class Store:
                 sql = "INSERT OR REPLACE INTO settings VALUES (?, ?)"
                 self._db.execute(sql, (key, json.dumps(value, ensure_ascii=False)))
 
-    def tasks(self) -> list[dict[str, Any]]:
-        """The tasks, the next due first."""
-        return [dict(row) for row in self._query("SELECT * FROM tasks ORDER BY next")]
+    def tasks(self, person: int | None = None, everyone: bool = False) -> list[dict[str, Any]]:
+        """A person's tasks, or `everyone`'s, the next due first."""
+        if everyone:
+            return [dict(row) for row in self._query("SELECT * FROM tasks ORDER BY next")]
+        sql = "SELECT * FROM tasks WHERE person IS ? ORDER BY next"
+        return [dict(row) for row in self._query(sql, person)]
 
     def task(self, id: int) -> dict[str, Any] | None:
         rows = self._query("SELECT * FROM tasks WHERE id = ?", id)
         return dict(rows[0]) if rows else None
 
-    def add_task(self, prompt: str, repeat: str, first: float, conversation: str | None) -> dict:
-        sql = "INSERT INTO tasks (prompt, repeat, first, next, conversation, created) VALUES"
-        with self._lock:
-            values = (prompt, repeat, first, first, conversation, time.time())
-            cursor = self._db.execute(f"{sql} (?, ?, ?, ?, ?, ?)", values)
-        return self.task(cursor.lastrowid or 0) or {}
+    def add_task(
+        self, prompt: str, repeat: str, first: float, conversation: str | None,
+        person: int | None = None,
+    ) -> dict[str, Any]:  # fmt: skip
+        rows = self._query(
+            "INSERT INTO tasks (prompt, repeat, first, next, conversation, created, person)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *",
+            prompt, repeat, first, first, conversation, time.time(), person,
+        )  # fmt: skip
+        return dict(rows[0])
 
     def due(self, now: float) -> list[dict[str, Any]]:
         """The tasks due by a time, the earliest first."""
@@ -348,6 +407,76 @@ class Store:
         rows = self._query("DELETE FROM tasks WHERE id = ? RETURNING *", id)
         return dict(rows[0]) if rows else None
 
+    def people(self) -> list[dict[str, Any]]:
+        """The household's people, the owner first."""
+        return [dict(row) for row in self._query("SELECT * FROM people ORDER BY id")]
+
+    def person(self, id: int) -> dict[str, Any] | None:
+        rows = self._query("SELECT * FROM people WHERE id = ?", id)
+        return dict(rows[0]) if rows else None
+
+    def add_person(self, name: str) -> dict[str, Any]:
+        """A new person of the household's; the first its owner, whose all that was no one's
+        becomes, but the household's memories."""
+        with self._lock, self._db:
+            self._db.execute("BEGIN")
+            first = self._db.execute("SELECT count(*) FROM people").fetchone()[0] == 0
+            person = self._row(
+                "INSERT INTO people (name, owner, created) VALUES (?, ?, ?) RETURNING *",
+                name, int(first), time.time(),
+            )  # fmt: skip
+            assert person is not None
+            if first:
+                for table in ("conversations", "tasks"):
+                    sql = f"UPDATE {table} SET person = ? WHERE person IS NULL"
+                    self._db.execute(sql, (person["id"],))
+                for table in ("memories", "forgotten"):
+                    sql = f"UPDATE {table} SET person = ? WHERE person IS NULL"
+                    self._db.execute(f"{sql} AND category != 'household'", (person["id"],))
+        return person
+
+    def rename_person(self, id: int, name: str) -> None:
+        self._query("UPDATE people SET name = ? WHERE id = ?", name, id)
+
+    def remove_person(self, id: int) -> None:
+        """Removes a person who is not the owner, and all that is theirs: their conversations,
+        memories, tasks and devices."""
+        with self._lock, self._db:
+            self._db.execute("BEGIN")
+            for (conversation,) in self._db.execute(
+                "SELECT id FROM conversations WHERE person = ?", (id,)
+            ).fetchall():
+                self._db.execute("DELETE FROM search WHERE conversation = ?", (conversation,))
+            for table in ("conversations", "memories", "forgotten", "tasks", "devices"):
+                self._db.execute(f"DELETE FROM {table} WHERE person = ?", (id,))
+            self._db.execute("DELETE FROM people WHERE id = ? AND NOT owner", (id,))
+
+    def devices(self) -> list[dict[str, Any]]:
+        """The devices paired, without their tokens, the latest seen first."""
+        sql = "SELECT id, person, name, created, seen FROM devices ORDER BY seen DESC"
+        return [dict(row) for row in self._query(sql)]
+
+    def device(self, token: str) -> dict[str, Any] | None:
+        """The device of a token's hash, without it, if it is paired."""
+        sql = "SELECT id, person, name, created, seen FROM devices WHERE token = ?"
+        rows = self._query(sql, token)
+        return dict(rows[0]) if rows else None
+
+    def add_device(self, person: int, name: str, token: str) -> dict[str, Any]:
+        """Pairs a device to a person, by its token's hash."""
+        rows = self._query(
+            "INSERT INTO devices (person, name, token, created, seen) VALUES (?, ?, ?, ?, ?)"
+            " RETURNING id, person, name, created, seen",
+            person, name, token, now := time.time(), now,
+        )  # fmt: skip
+        return dict(rows[0])
+
+    def seen(self, id: int) -> None:
+        self._query("UPDATE devices SET seen = ? WHERE id = ?", time.time(), id)
+
+    def remove_device(self, id: int) -> bool:
+        return bool(self._query("DELETE FROM devices WHERE id = ? RETURNING id", id))
+
     def _change(self, id: int, change: str, by: str, sql: str, *parameters: Any) -> dict | None:
         # changes a memory by sql, keeping what it was in forgotten, `by` whom: the conversation,
         # the review, or the user in the app; returns it as sql does, if it is there
@@ -356,10 +485,10 @@ class Store:
             if (old := self._row("SELECT * FROM memories WHERE id = ?", id)) is None:
                 return None
             self._db.execute(
-                "INSERT INTO forgotten (memory, text, category, until, created, change, by, at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (id, old["text"], old["category"], old["until"], old["created"], change, by,
-                 time.time()),
+                "INSERT INTO forgotten (memory, text, category, until, created, person, change,"
+                " by, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (id, old["text"], old["category"], old["until"], old["created"], old["person"],
+                 change, by, time.time()),
             )  # fmt: skip
             return self._row(sql, *parameters)
 

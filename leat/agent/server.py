@@ -240,6 +240,8 @@ class _Handler(BaseHTTPRequestHandler):
         return n
 
     def _event(self, event: dict[str, Any]) -> None:
+        # an event as the app reads it, without whose it is
+        event = {k: v for k, v in event.items() if k != "to"}
         self.wfile.write(f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode())
 
     def _json(self, status: int, body: dict[str, Any]) -> None:

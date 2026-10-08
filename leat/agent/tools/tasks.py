@@ -54,30 +54,30 @@ def tools(agent: "Agent") -> list[Tool]:
             "unschedule",
             "Cancel a scheduled task",
             schema(number=("integer", "the task's number")),
-            lambda context, number: unschedule(agent, number),
+            lambda context, number: unschedule(agent, context, number),
         ),
         Tool(
             "tasks",
             "List the scheduled tasks",
             {"type": "object", "properties": {}},
-            lambda context: listed(agent),
+            lambda context: listed(agent, context),
         ),
     ]
 
 
 def schedule(agent: "Agent", context: Context, task: str, at: str, repeat: str) -> Result:
     now = datetime.datetime.now()
-    t = agent.schedule(task, when(at, now), repeat, context.conversation)
+    t = agent.schedule(task, when(at, now), repeat, context.conversation, context.person)
     return Result(f"Scheduled, as task [{t['id']}]: {t['schedule']}.", {"task": t})
 
 
-def unschedule(agent: "Agent", number: int | str) -> Result:
-    t = agent.unschedule(int(number))
+def unschedule(agent: "Agent", context: Context, number: int | str) -> Result:
+    t = agent.unschedule(int(number), context.person)
     return Result(f"Cancelled task [{t['id']}]: {t['prompt']}", {"task": t})
 
 
-def listed(agent: "Agent") -> Result:
-    lines = [f"[{t['id']}] {t['prompt']} ({t['schedule']})" for t in agent.tasks()]
+def listed(agent: "Agent", context: Context) -> Result:
+    lines = [f"[{t['id']}] {t['prompt']} ({t['schedule']})" for t in agent.tasks(context.person)]
     return Result("\n".join(lines) or "No task is scheduled.", {"tasks": len(lines)})
 
 

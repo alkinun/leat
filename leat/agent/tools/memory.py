@@ -30,10 +30,11 @@ LONGEST = 300  # characters of a memory
 FOUND = 8  # messages recall finds at most
 RECENT = 7  # days back recall lists the conversations of, by default
 # the categories, as people read them: who the user is, how they like things, the people in their
-# life, their work, studies and projects, and their plans and dates
+# life, their work, studies and projects, their plans and dates; and the household's, which every
+# person in it shares, as its pets and its address
 CATEGORIES = {
     "about": "About them", "preferences": "Preferences", "people": "People", "work": "Work",
-    "plans": "Plans",
+    "plans": "Plans", "household": "The household",
 }  # fmt: skip
 # what a memory never holds: secrets, and the numbers of identity documents, cards and accounts
 _SECRET = re.compile(
@@ -55,7 +56,12 @@ def tools(agent: "Agent") -> list[Tool]:
                 required=2,
                 memory=("string", "the fact, in a short sentence, as 'The user's daughter is 7.'"),
                 evidence=("string", "the user's own words it rests on, quoted exactly"),
-                category=("string", "what it is of", list(CATEGORIES)),
+                category=(
+                    "string",
+                    "what it is of; household for what everyone at home shares, as a pet "
+                    "or the address, written of the household",
+                    list(CATEGORIES),
+                ),  # fmt: skip
                 replaces=("integer", "the number of the memory it changes, if it does"),
                 until=("string", "of a plan, its last day, as 'YYYY-MM-DD'"),
             ),
@@ -87,19 +93,20 @@ def remember(
     replaces: int | str | None, until: str | None,
 ) -> Result:  # fmt: skip
     replaced = None if replaces in (None, "") else int(replaces)
-    was = [m["text"] for m in agent.memories() if m["id"] == replaced]  # its evidence, once
+    known = agent.memories(context.person)
+    was = [m["text"] for m in known if m["id"] == replaced]  # its evidence, once
     if not said(evidence, agent.store.messages(context.conversation), was):
         raise ValueError(
             "the evidence must be the user's own words, quoted exactly from their messages: "
             "remember only what they told you of themselves, not what you read"
         )
-    m = agent.remember(memory, category, replaced, until or None, context.by)
+    m = agent.remember(memory, category, replaced, until or None, context.by, context.person)
     done = f"Changed [{m['id']}]." if replaced is not None else f"Remembered, as [{m['id']}]."
     return Result(done, {"memory": m, "replaced": replaced is not None})
 
 
 def forget(agent: "Agent", context: Context, number: int | str) -> Result:
-    m = agent.forget(int(number), context.by)
+    m = agent.forget(int(number), context.by, context.person)
     return Result(f"Forgot [{m['id']}]: {m['text']}", {"memory": m})
 
 
@@ -121,12 +128,13 @@ def recall(agent: "Agent", context: Context, query: str, days: int | str | None)
     store, back = agent.store, int(days) if days not in (None, "") else None
     since = time.time() - 86400 * back if back else 0
     if not re.search(r"\w", query):
-        found = store.recent(since or time.time() - 86400 * RECENT, exclude=context.conversation)
+        since = since or time.time() - 86400 * RECENT
+        found = store.recent(since, context.person, exclude=context.conversation)
         lines = [f"“{f['title']}”, {_day(f['updated'])}: the user began, {_clip(f['text'], 300)}"
                  for f in found]  # fmt: skip
         conversations = [{"id": f["conversation"], "title": f["title"]} for f in found]
         return Result("\n".join(lines) or "No conversation then.", {"conversations": conversations})
-    found = store.search(query, exclude=context.conversation, since=since, limit=FOUND)
+    found = store.search(query, context.person, context.conversation, since, FOUND)
     passages: dict[str, list[tuple[int, dict[str, Any]]]] = {}  # by conversation, in order
     titles = {f["conversation"]: (f["title"], f["updated"]) for f in found}
     for f in found:

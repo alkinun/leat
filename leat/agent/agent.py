@@ -35,13 +35,8 @@ SAMPLING = {
 }
 # the system prompt, fixed when a conversation starts so that every prompt after extends the last
 SYSTEM = """\
-You are Leat, an assistant that runs on a computer in the user's home: private, and theirs. Each \
-of the user's messages begins with the date and time they sent it.
-
-When a question needs facts you may not know, or that may have changed since you learned them, \
-call search, then fetch the few pages most likely to answer, three or so, more only if they fall \
-short. Cite what you use by the numbers the tools give their sources, as [1] or [2][3], after the \
-words they support.
+You are Leat, an assistant that runs on a computer in {home} private, and theirs. Each of the \
+user's messages begins with the date and time they sent it.
 
 When the user tells you something about themselves worth knowing in later conversations, first \
 call remember, then reply: who they are, the people in their life, their work and plans, how they \
@@ -52,6 +47,11 @@ When a memory changes, remember the new one in its place; when they ask you to f
 forget it. Never say you noted something unless you called remember. Use what you remember only \
 where it helps your answer, and what the user says now over it. To find what you talked about in \
 earlier conversations that your memory below does not hold, call recall.
+
+When a question needs facts you may not know, or that may have changed since you learned them, \
+call search, then fetch the few pages most likely to answer, three or so, more only if they fall \
+short. Cite what you use by the numbers the tools give their sources, as [1] or [2][3], after the \
+words they support.
 
 When the user wants something done later, once or again and again, as a reminder or a morning's \
 briefing, call schedule.
@@ -108,7 +108,11 @@ class Events:
 
 class Agent:
     """The conversations and memories in `store`, the turns run by the model `engine` serves,
-    which calls the memory's tools and `tools`; and the user's files, in `workspace`, if any."""
+    which calls the memory's tools and `tools`; and the user's files, in `workspace`, if any.
+
+    Each conversation, memory and task is a person's of the household, `person` by its id, and an
+    event that tells of one is to that person's apps alone: "to" says whose. Before the household
+    has its first person, all is no one's, None's."""
 
     def __init__(
         self, store: Store, engine: Client, tools: list[Tool] | None = None,
@@ -141,15 +145,15 @@ class Agent:
             self.store.name(id, title)
             self._publish_summary(id)
 
-    def conversations(self) -> list[dict[str, Any]]:
-        """Every conversation, without its messages, the latest updated first."""
+    def conversations(self, person: int | None = None) -> list[dict[str, Any]]:
+        """A person's conversations, without their messages, the latest updated first."""
         with self._lock:
-            return [self._summary(c) for c in self.store.conversations()]
+            return [self._summary(c) for c in self.store.conversations(person)]
 
-    def conversation(self, id: str) -> dict[str, Any] | None:
-        """A conversation and its messages, with the one a turn is writing."""
+    def conversation(self, id: str, person: int | None = None) -> dict[str, Any] | None:
+        """A person's conversation and its messages, with the one a turn is writing."""
         with self._lock:
-            if (c := self.store.conversation(id)) is None:
+            if (c := self.store.conversation(id)) is None or c["person"] != person:
                 return None
             messages = self.store.messages(id)
             if turn := self._turns.get(id):
@@ -159,13 +163,13 @@ class Agent:
 
     def send(
         self, id: str | None, content: str, think: bool = False, attached: list[str] | None = None,
-        task: int | None = None, via: str | None = None,
+        task: int | None = None, via: str | None = None, person: int | None = None,
     ) -> str:  # fmt: skip
-        """Starts a turn of the user's message, in a new conversation without an id; returns the
+        """Starts a turn of a person's message, in a new conversation without an id; returns the
         conversation's id. The model thinks before it replies if `think`, which takes longer, and
         reads of the files `attached`, in the workspace. A message of a scheduled task names it,
         and one sent by a messaging app, `via`, that. Raises NotFound if there is no such
-        conversation or file, Busy if a turn runs in the conversation."""
+        conversation of the person's, or file, Busy if a turn runs in the conversation."""
         info: dict[str, Any] = {"think": think, "at": time.time()}
         if task:
             info["task"] = task
@@ -179,55 +183,63 @@ class Agent:
         message = {"role": "user", "content": content, "info": info}
         with self._lock:
             if id is None:
-                system = _system(self.store.memories(), self.workspace is not None)
-                id = self.store.create(_title(content), [system, message])["id"]
+                name = (self.store.person(person) or {}).get("name") if person else None
+                system = _system(self.store.memories(person), self.workspace is not None, name)
+                id = self.store.create(_title(content), [system, message], person)["id"]
                 start = 1
             else:
-                if self.store.conversation(id) is None:
-                    raise NotFound(f"there is no conversation {id}")
+                self._own(id, person)
                 if id in self._turns:
                     raise Busy("a reply is already running")
                 start = len(self.store.messages(id))
                 self.store.append(id, message)
-            turn = self._turns[id] = _Turn(self, id, start, content, think, task)
+            turn = self._turns[id] = _Turn(self, id, person, start, content, think, task)
             self._publish_summary(id)
-            self._publish_message(id, start, message)
+            self._publish_message(id, person, start, message)
         threading.Thread(target=turn.run, name=f"turn {id}", daemon=True).start()
         return id
 
-    def stop(self, id: str) -> None:
-        """Stops a conversation's turn, if one runs: its reply so far is kept."""
+    def stop(self, id: str, person: int | None = None) -> None:
+        """Stops a person's conversation's turn, if one runs: its reply so far is kept."""
         with self._lock:
+            self._own(id, person)
             turn = self._turns.get(id)
         if turn is not None:
             turn.stop()
 
-    def delete(self, id: str) -> None:
+    def delete(self, id: str, person: int | None = None) -> None:
+        """Deletes a person's conversation, stopping its turn. Raises NotFound if it is not."""
         with self._lock:
+            self._own(id, person)
             if (turn := self._turns.pop(id, None)) is not None:
                 turn.stop()
             self.store.delete(id)
-            self.events.publish({"type": "deleted", "id": id})
+            self.events.publish({"type": "deleted", "id": id, "to": person})
 
-    def memories(self) -> list[dict[str, Any]]:
-        """What the agent remembers of the user, the oldest first."""
-        return self.store.memories()
+    def memories(self, person: int | None = None) -> list[dict[str, Any]]:
+        """What the agent remembers of a person, and of the household, the oldest first."""
+        return self.store.memories(person)
 
     def remember(
         self, text: str, category: str = "about", replaces: int | None = None,
-        until: str | None = None, by: str = "app",
+        until: str | None = None, by: str = "app", person: int | None = None,
     ) -> dict[str, Any]:  # fmt: skip
-        """Remembers a fact of the user, in the conversations begun from now on, in place of the
-        memory `replaces` if given, a plan until its last day, `by` whom: the app's user, a
-        conversation's model or the review. Raises ValueError if it may not be one, if it is one
-        already, which is dated again, or if it does not fit the memory's room, saying the
-        memories least recently confirmed; NotFound if there is no memory to replace."""
+        """Remembers a fact of a person, or of the household, everyone's, in the conversations
+        begun from now on, in place of the memory `replaces` if given, a plan until its last
+        day, `by` whom: the app's user, a conversation's model or the review. Raises ValueError
+        if it may not be one, if it is one already, which is dated again, or if it does not fit
+        the memory's room, saying the memories least recently confirmed; NotFound if there is no
+        memory of the person's or the household's to replace."""
         text, until = memory.checked(text, category, until)
+        whose = None if category == "household" else person
         with self._lock:
-            others = [m for m in self.store.memories() if m["id"] != replaces]
+            known = self.store.memories(person)
+            if replaces is not None and replaces not in [m["id"] for m in known]:
+                raise NotFound(f"there is no memory {replaces}")
+            others = [m for m in known if m["id"] != replaces]
             if same := [m for m in others if m["text"].lower() == text.lower()]:
                 self.store.confirm_memory(same[0]["id"])
-                self.events.publish(self.memories_event())
+                self._memories_changed(same[0]["person"])
                 raise ValueError(f"that is remembered already, as [{same[0]['id']}]")
             if (used := sum(len(m["text"]) for m in others)) + len(text) > memory.ROOM:
                 oldest = sorted(others, key=lambda m: m["confirmed"])[:5]
@@ -237,33 +249,35 @@ class Agent:
                     "confirmed: " + "; ".join(f"[{m['id']}] {m['text'][:80]}" for m in oldest)
                 )
             if replaces is None:
-                m = self.store.add_memory(text, category, until)
-            elif (
-                changed := self.store.replace_memory(replaces, text, category, until, by)
-            ) is None:
-                raise NotFound(f"there is no memory {replaces}")
+                m = self.store.add_memory(text, category, until, whose)
             else:
-                m = changed
-            self.events.publish(self.memories_event())
+                old = next(m for m in known if m["id"] == replaces)
+                m = self.store.replace_memory(replaces, text, category, until, by, whose) or old
+                self._memories_changed(old["person"])
+            self._memories_changed(whose)
         return m
 
-    def forget(self, id: int, by: str = "app") -> dict[str, Any]:
-        """Forgets a memory, `by` whom, and returns it; what it was is kept, to restore. Raises
-        NotFound if there is no such memory."""
+    def forget(self, id: int, by: str = "app", person: int | None = None) -> dict[str, Any]:
+        """Forgets a memory of a person's or the household's, `by` whom, and returns it; what it
+        was is kept, to restore. Raises NotFound if there is no such memory."""
         with self._lock:
+            if id not in [m["id"] for m in self.store.memories(person)]:
+                raise NotFound(f"there is no memory {id}")
             if (m := self.store.delete_memory(id, by)) is None:
                 raise NotFound(f"there is no memory {id}")
-            self.events.publish(self.memories_event())
+            self._memories_changed(m["person"])
         return m
 
-    def restore(self, id: int) -> dict[str, Any]:
-        """Undoes a memory's forgetting or change, by its number among the forgotten, and returns
-        the memory. Raises NotFound if it cannot be: if it is not there, or the memory changed was
-        forgotten since."""
+    def restore(self, id: int, person: int | None = None) -> dict[str, Any]:
+        """Undoes the forgetting or change of a memory of a person's or the household's, by its
+        number among the forgotten, and returns the memory. Raises NotFound if it cannot be: if
+        it is not there, or the memory changed was forgotten since."""
         with self._lock:
+            if id not in [f["id"] for f in self.store.forgotten(person, limit=-1)]:
+                raise NotFound(f"there is nothing to restore as {id}")
             if (m := self.store.restore(id)) is None:
                 raise NotFound(f"there is nothing to restore as {id}")
-            self.events.publish(self.memories_event())
+            self._memories_changed(m["person"])
         return m
 
     def files_changed(self) -> None:
@@ -277,47 +291,52 @@ class Agent:
         return {"type": "files", "files": self.workspace.files() if self.workspace else []}
 
     def schedule(
-        self, prompt: str, at: datetime.datetime, repeat: str, conversation: str | None = None
-    ) -> dict[str, Any]:
-        """Schedules a task, first at a time of the box's clock, then as often as `repeat` says,
-        in a conversation. Raises ValueError if it may not be one, as at a time passed."""
+        self, prompt: str, at: datetime.datetime, repeat: str, conversation: str | None = None,
+        person: int | None = None,
+    ) -> dict[str, Any]:  # fmt: skip
+        """Schedules a person's task, first at a time of the box's clock, then as often as
+        `repeat` says, in a conversation. Raises ValueError if it may not be one, as at a time
+        passed."""
         now = datetime.datetime.now()
         at = scheduling.first(at, repeat, now)
         prompt = scheduling.checked(prompt, at, repeat, now)
         with self._lock:
-            if len(self.store.tasks()) >= scheduling.MOST:
+            if len(self.store.tasks(person)) >= scheduling.MOST:
                 raise ValueError(f"{scheduling.MOST} tasks are scheduled, the most: cancel one")
-            task = self.store.add_task(prompt, repeat, at.timestamp(), conversation)
-            self.events.publish(self.tasks_event())
+            task = self.store.add_task(prompt, repeat, at.timestamp(), conversation, person)
+            self.events.publish(self.tasks_event(person))
         if self.background is not None:
             self.background.wake()
         return task | {"schedule": scheduling.describe(task)}
 
-    def unschedule(self, id: int) -> dict[str, Any]:
-        """Cancels a task, and returns it. Raises NotFound if there is no such task."""
+    def unschedule(self, id: int, person: int | None = None) -> dict[str, Any]:
+        """Cancels a person's task, and returns it. Raises NotFound if there is no such task."""
         with self._lock:
-            if (task := self.store.delete_task(id)) is None:
+            if (task := self.store.task(id)) is None or task["person"] != person:
                 raise NotFound(f"there is no task {id}")
-            self.events.publish(self.tasks_event())
+            self.store.delete_task(id)
+            self.events.publish(self.tasks_event(person))
         return task
 
-    def tasks(self) -> list[dict[str, Any]]:
-        """The tasks, the next due first, each with its times in words."""
-        return [t | {"schedule": scheduling.describe(t)} for t in self.store.tasks()]
+    def tasks(self, person: int | None = None) -> list[dict[str, Any]]:
+        """A person's tasks, the next due first, each with its times in words."""
+        return [t | {"schedule": scheduling.describe(t)} for t in self.store.tasks(person)]
 
     def ran(self, id: int, due: float | None, conversation: str) -> None:
         """Sets when a task that ran runs next, in the conversation it ran in; or ends it."""
         with self._lock:
-            self.store.advance(id, due, conversation)
-            self.events.publish(self.tasks_event())
+            if (task := self.store.task(id)) is not None:
+                self.store.advance(id, due, conversation)
+                self.events.publish(self.tasks_event(task["person"]))
 
-    def tasks_event(self) -> Event:
-        return {"type": "tasks", "tasks": self.tasks()}
+    def tasks_event(self, person: int | None = None) -> Event:
+        return {"type": "tasks", "tasks": self.tasks(person), "to": person}
 
-    def memories_event(self) -> Event:
-        """The memories, and the latest forgotten or changed, as they were, to restore."""
-        memories, forgotten = self.store.memories(), self.store.forgotten()
-        return {"type": "memories", "memories": memories, "forgotten": forgotten}
+    def memories_event(self, person: int | None = None) -> Event:
+        """A person's memories and the household's, and the latest forgotten or changed, as they
+        were, to restore."""
+        memories, forgotten = self.store.memories(person), self.store.forgotten(person)
+        return {"type": "memories", "memories": memories, "forgotten": forgotten, "to": person}
 
     def models(self) -> list[dict[str, Any]]:
         """The engine's models, as it lists them. Raises EngineError."""
@@ -352,26 +371,43 @@ class Agent:
         except EngineError as e:
             return {"type": "models", "models": [], "error": str(e)}
 
+    def _own(self, id: str, person: int | None) -> dict[str, Any]:
+        # a person's conversation, or NotFound if it is not one
+        if (c := self.store.conversation(id)) is None or c["person"] != person:
+            raise NotFound(f"there is no conversation {id}")
+        return c
+
+    def _memories_changed(self, whose: int | None) -> None:
+        # tells a person's apps of their memories, or, of the household's, everyone's
+        people = [p["id"] for p in self.store.people()] or [None]
+        for person in people if whose is None else [whose]:
+            self.events.publish(self.memories_event(person))
+
     def _summary(self, c: dict[str, Any]) -> dict[str, Any]:
         running = c["id"] in self._turns
         return {"id": c["id"], "title": c["title"], "updated": c["updated"], "running": running}
 
     def _publish_summary(self, id: str) -> None:
         if (c := self.store.conversation(id)) is not None:
-            self.events.publish({"type": "conversation", "conversation": self._summary(c)})
+            event = {"type": "conversation", "conversation": self._summary(c)}
+            self.events.publish(event | {"to": c["person"]})
 
-    def _publish_message(self, id: str, index: int, message: dict[str, Any]) -> None:
-        event = {"type": "message", "conversation": id, "index": index}
+    def _publish_message(
+        self, id: str, person: int | None, index: int, message: dict[str, Any]
+    ) -> None:
+        event = {"type": "message", "conversation": id, "index": index, "to": person}
         self.events.publish(event | {"message": copy.deepcopy(message)})
 
 
 class _Turn:
-    """A turn running in a conversation, of the user's message at `start`."""
+    """A turn running in a person's conversation, of their message at `start`."""
 
     def __init__(
-        self, agent: Agent, id: str, start: int, content: str, think: bool, task: int | None
+        self, agent: Agent, id: str, person: int | None, start: int, content: str, think: bool,
+        task: int | None,
     ):  # fmt: skip
         self.agent, self.id, self.start, self.content, self.think = agent, id, start, content, think
+        self.person = person
         self.task = task  # the scheduled task the message is of, if any
         self.state = agent.store.context(id)  # the prompt's, as it was, to take the turn back to
         self.kept = start + 1  # the conversation's messages kept
@@ -446,7 +482,8 @@ class _Turn:
                 for key in ("reasoning_content", "content"):
                     if text := delta.get(key):
                         info.setdefault("first", time.monotonic() - started)
-                        event = {"type": "delta", "conversation": self.id, "index": index}
+                        event = {"type": "delta", "conversation": self.id, "index": index,
+                                 "to": self.person}  # fmt: skip
                         a.events.publish(event | {"key": key, "at": len(reply[key]), "text": text})
                         reply[key] += text
                 if calls := delta.get("tool_calls"):  # leat serve sends them whole, at the end
@@ -491,7 +528,7 @@ class _Turn:
             a.store.set_context(self.id, smaller)
             if (summarized := smaller.get("summarized")) != state.get("summarized"):
                 event = {"type": "compacted", "conversation": self.id, "summarized": summarized}
-                a.events.publish(event)
+                a.events.publish(event | {"to": self.person})
         return smaller
 
     def _summarize(self, before: str | None, messages: list[dict[str, Any]], tokens: int) -> str:
@@ -545,14 +582,14 @@ class _Turn:
             if (tool := a.tools.get(message["name"])) is None:
                 raise ValueError(f"there is no tool {message['name']!r}")
             called = arguments(message["info"]["arguments"])
-            result = tool.run(Context(self.id, self._cite), **called)
+            result = tool.run(Context(self.id, self._cite, person=self.person), **called)
         except Exception as e:  # for the model, which may try again
             result = Result(f"error: {e}", {"error": str(e)})
         with a._lock:
             if not message["content"]:
                 message["content"] = result.content or "(nothing)"
                 message["info"] |= result.info
-                a._publish_message(self.id, index, message)
+                a._publish_message(self.id, self.person, index, message)
         answered.put(index)
 
     def _cite(self, url: str, title: str) -> int:
@@ -567,7 +604,7 @@ class _Turn:
             for message in messages:
                 indexes.append(self.kept + len(self.live))
                 self.live.append(message)
-                self.agent._publish_message(self.id, indexes[-1], message)
+                self.agent._publish_message(self.id, self.person, indexes[-1], message)
             return indexes
 
     def _keep(self) -> None:
@@ -578,7 +615,7 @@ class _Turn:
                 raise _Deleted
             a.store.append(self.id, *self.live)
             for i, message in enumerate(self.live):
-                a._publish_message(self.id, self.kept + i, message)
+                a._publish_message(self.id, self.person, self.kept + i, message)
             self.kept += len(self.live)
             self.live = []
 
@@ -590,7 +627,7 @@ class _Turn:
                 a._publish_summary(self.id)
                 if self.task:  # a scheduled task done, for the apps to say
                     done = {"type": "done", "conversation": self.id, "task": self.content}
-                    a.events.publish(done)
+                    a.events.publish(done | {"to": self.person})
         if a.background is not None:
             a.background.wake()
 
@@ -604,17 +641,17 @@ class _Turn:
             del a._turns[self.id]
             self.live = []
             event = {"type": "error", "conversation": self.id, "error": error, "start": self.start}
-            a.events.publish(event | {"content": self.content})
+            a.events.publish(event | {"content": self.content, "to": self.person})
             if self.start == 1:  # its first turn
                 a.store.delete(self.id)
-                a.events.publish({"type": "deleted", "id": self.id})
+                a.events.publish({"type": "deleted", "id": self.id, "to": self.person})
             else:
                 summarized = a.store.context(self.id).get("summarized")
                 a.store.truncate(self.id, self.start)
                 a.store.set_context(self.id, self.state)
                 if (before := self.state.get("summarized")) != summarized:
                     event = {"type": "compacted", "conversation": self.id, "summarized": before}
-                    a.events.publish(event)
+                    a.events.publish(event | {"to": self.person})
                 a._publish_summary(self.id)
 
 
@@ -622,13 +659,14 @@ class _Deleted(Exception):
     """The turn's conversation was deleted."""
 
 
-def _system(memories: list[dict[str, Any]], workspace: bool) -> dict[str, Any]:
-    # the system prompt of a conversation begun now, which knows these memories, and the
-    # workspace's tools if `workspace`
+def _system(memories: list[dict[str, Any]], workspace: bool, name: str | None = None) -> dict:
+    # the system prompt of a conversation begun now with the user, of a `name` if the household
+    # has people, which knows these memories, and the workspace's tools if `workspace`
     remembered = memory.listing(memories)
     skills = "\n".join(f"- {path}: {about}" for path, about in files.skills())
     space = WORKSPACE.format(skills=skills) if workspace else ""
-    content = SYSTEM.format(memories=remembered, workspace=space)
+    home = f"the home of the user, {name}:" if name else "the user's home:"
+    content = SYSTEM.format(home=home, memories=remembered, workspace=space)
     return {"role": "system", "content": content}
 
 
