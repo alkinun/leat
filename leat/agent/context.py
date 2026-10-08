@@ -57,7 +57,13 @@ def message(m: dict[str, Any]) -> dict[str, Any]:
     reasoning is sent back, which templates such as Qwen3.5's show the steps of an agent's turn."""
     api = {k: v for k, v in m.items() if k != "info" and (v or k != "reasoning_content")}
     info = m.get("info", {})
-    if task := info.get("task"):
+    if (task := info.get("task")) and (quiet := info.get("quiet")):
+        check = api["content"].rstrip(" .")
+        api["content"] = (
+            f"(Your scheduled check [{task}] is due now: {check}. Tell the user only if {quiet}; "
+            "if not, reply NOTHING alone.)"
+        )
+    elif task:
         api["content"] = f"(Your scheduled task [{task}] is due now: {api['content']})"
     if attached := info.get("files"):
         api["content"] += f"\n\n(Attached, in the workspace: {', '.join(attached)})"

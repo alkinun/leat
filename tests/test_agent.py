@@ -883,6 +883,31 @@ def test_task_runs(agent, engine, events):
     assert other != id and [t["id"] for t in agent.tasks()] == [1]
 
 
+def test_check(agent, engine, events):
+    # a check tells only if its condition holds: one that finds nothing is withdrawn, as if it
+    # never ran, and the apps are told nothing is done; one that finds it is kept, and told
+    engine.replies.put(REPLY)
+    id = agent.send(None, "Hi")
+    until(events, ended)
+    tomorrow = datetime.datetime.now() + datetime.timedelta(days=1)
+    check = agent.schedule("Look at tomorrow's weather in Izmir", tomorrow, "daily", id,
+                           condition=" it will  rain ")  # fmt: skip
+    assert check["condition"] == "it will rain"
+    assert check["schedule"].endswith(", telling only if it will rain")
+    engine.replies.put([{"content": "NOTHING."}])
+    background.run(agent, agent.store.task(check["id"]))
+    seen = until(events, ended)
+    assert "withdrawn" in [e["type"] for e in seen] and "done" not in [e["type"] for e in seen]
+    asked = engine.requests[-1]["messages"][-1]["content"]
+    due = "(Your scheduled check [1] is due now: Look at tomorrow's weather in Izmir. Tell the "
+    assert asked.endswith(due + "user only if it will rain; if not, reply NOTHING alone.)")
+    assert len(agent.store.messages(id)) == 3  # as it was
+    engine.replies.put([{"content": "Take an umbrella: rain is coming."}])
+    background.run(agent, agent.store.task(check["id"]))
+    assert until(events, lambda e: e["type"] == "done")[-1]["task"].startswith("Look at")
+    assert agent.store.messages(id)[-1]["content"] == "Take an umbrella: rain is coming."
+
+
 def test_task_waits(agent, engine, events, monkeypatch):
     # a task due in a conversation whose turn runs waits, without looking again and again, for the
     # turn's end

@@ -155,6 +155,8 @@ CASES = [
          [called("schedule"), schedules(r"trash.*\(once\)")]),
     Case("briefing", "Every weekday at 7:30, give me the weather in London.",
          [called("schedule"), schedules(r"weather.*London.*\(weekdays\)")]),
+    Case("watch", "Every morning at 7, check whether it will rain in London that day, and only "
+         "tell me if it will.", [called("schedule"), schedules(r"London.*\(daily\) if .*rain")]),
     Case("shopping", "We're out of milk and eggs, put them on the shopping list.",
          [called("add_to_list"), lists(r"shopping: .*milk"), lists(r"shopping: .*eggs")]),
     Case("noticed", "I'm planning my daughter Ada's 7th birthday party for next Saturday. Suggest "
@@ -248,7 +250,8 @@ def _run(case: Case, args: argparse.Namespace) -> Outcome:
         answer = messages[-1]["content"] if messages and messages[-1]["role"] == "assistant" else ""
         memories = [m["text"] for m in agent.memories(person)]
         names = [f["name"] for f in workspace.files()]
-        tasks = [f"{t['prompt']} ({t['repeat']})" for t in agent.tasks(person)]
+        tasks = [f"{t['prompt']} ({t['repeat']})" + (f" if {c}" if (c := t["condition"]) else "")
+                 for t in agent.tasks(person)]  # fmt: skip
         infos = [m["info"] for m in messages if m["role"] == "assistant" and "read" in m["info"]]
         held, read = sum(i["cached"] or 0 for i in infos), sum(i["read"] for i in infos)
         share = held / (held + read) if held + read else 0.0

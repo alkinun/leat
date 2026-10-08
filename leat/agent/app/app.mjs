@@ -26,6 +26,7 @@ let lost = false; // the events' connection, until it is back
 let think = localStorage.getItem("leat.think") === "true"; // as the user last chose
 let views = []; // the shown messages' elements, by their indexes
 const opened = new Map(); // whether each turn's work is open, as the user left it
+const quietly = new Set(); // the conversations a check withdrew its turn from, finding nothing
 // the pages beside the conversations, each a section of its own name, and their titles
 const PAGES = ["memory", "files", "tasks", "lists", "characters", "settings"];
 const TITLES = { memory: "Memory", files: "Files", tasks: "Tasks", lists: "Lists",
@@ -199,6 +200,13 @@ function handle(event) {
         renderLog();
       }
       return;
+    case "withdrawn": // a check's turn, which found nothing to tell: as if it never ran
+      quietly.add(event.conversation);
+      if (showing(event.conversation)) {
+        shown.messages.length = event.start;
+        renderLog();
+      }
+      break;
     case "error": // the turn taken back, its message to send again
       if (showing(event.conversation)) {
         shown.messages.length = event.start;
@@ -260,7 +268,7 @@ function handle(event) {
 // a conversation's summary, new or changed: one whose turn ended unseen, unread
 function update(c) {
   const before = conversations.find((other) => other.id === c.id);
-  if (before?.running && !c.running && shown?.id !== c.id) {
+  if (before?.running && !c.running && !quietly.delete(c.id) && shown?.id !== c.id) {
     unread.add(c.id);
     localStorage.setItem("leat.unread", JSON.stringify([...unread]));
   }

@@ -144,7 +144,10 @@ def run(agent: "Agent", task: dict[str, Any]) -> None:
     if conversation is not None and agent.store.conversation(conversation) is None:
         conversation = None  # deleted: a new one, the task's person's
     try:
-        sent = agent.send(conversation, task["prompt"], task=task["id"], person=task["person"])
+        sent = agent.send(
+            conversation, task["prompt"], task=task["id"], person=task["person"],
+            quiet=task["condition"],
+        )  # fmt: skip
     except Busy:
         return
     now, day = datetime.datetime.now(), datetime.datetime.fromtimestamp(task["first"]).day

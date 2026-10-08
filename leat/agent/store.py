@@ -172,6 +172,10 @@ _MIGRATIONS = [
     """
     ALTER TABLE people ADD COLUMN child INTEGER NOT NULL DEFAULT 0;
     """,
+    # a task that is a check, which tells the user only if its condition holds
+    """
+    ALTER TABLE tasks ADD COLUMN condition TEXT;
+    """,
 ]
 _SEARCHED = ("user", "assistant")  # the roles of the messages search finds
 # a conversation's columns as the apps list it
@@ -421,12 +425,13 @@ class Store:
 
     def add_task(
         self, prompt: str, repeat: str, first: float, conversation: str | None,
-        person: int | None = None,
+        person: int | None = None, condition: str | None = None,
     ) -> dict[str, Any]:  # fmt: skip
+        """A task of a person's, a check if it has a condition."""
         rows = self._query(
-            "INSERT INTO tasks (prompt, repeat, first, next, conversation, created, person)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *",
-            prompt, repeat, first, first, conversation, time.time(), person,
+            "INSERT INTO tasks (prompt, repeat, first, next, conversation, created, person,"
+            " condition) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *",
+            prompt, repeat, first, first, conversation, time.time(), person, condition,
         )  # fmt: skip
         return dict(rows[0])
 

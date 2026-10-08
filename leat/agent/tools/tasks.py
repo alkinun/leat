@@ -47,8 +47,15 @@ def tools(agent: "Agent") -> list[Tool]:
                     "'in 20 minutes'",
                 ),
                 repeat=("string", "how often", list(REPEATS)),
+                only_if=(
+                    "string",
+                    "for a check, what must hold for the user to be told, as 'it will rain' or "
+                    "'the price is under 400 euros'; without it, they are told each time",
+                ),
             ),  # fmt: skip
-            lambda context, task, at, repeat="once": schedule(agent, context, task, at, repeat),
+            lambda context, task, at, repeat="once", only_if=None: schedule(
+                agent, context, task, at, repeat, only_if
+            ),
         ),
         Tool(
             "unschedule",
@@ -65,9 +72,11 @@ def tools(agent: "Agent") -> list[Tool]:
     ]
 
 
-def schedule(agent: "Agent", context: Context, task: str, at: str, repeat: str) -> Result:
+def schedule(
+    agent: "Agent", context: Context, task: str, at: str, repeat: str, only_if: str | None
+) -> Result:
     now = datetime.datetime.now()
-    t = agent.schedule(task, when(at, now), repeat, context.conversation, context.person)
+    t = agent.schedule(task, when(at, now), repeat, context.conversation, context.person, only_if)
     return Result(f"Scheduled, as task [{t['id']}]: {t['schedule']}.", {"task": t})
 
 
@@ -94,6 +103,16 @@ def checked(prompt: str, at: datetime.datetime, repeat: str, now: datetime.datet
     if at <= now:
         raise ValueError(f"that time has passed: it is {_day(now)}, {now:%H:%M} now")
     return prompt
+
+
+def condition(text: str | None) -> str | None:
+    """A check's condition, its spaces made one, if it has one. Raises ValueError if it is too
+    long."""
+    if not (text := " ".join((text or "").split())):
+        return None
+    if len(text) > LONGEST:
+        raise ValueError(f"a condition is said in {LONGEST} characters at most: say it shorter")
+    return text
 
 
 def first(at: datetime.datetime, repeat: str, now: datetime.datetime) -> datetime.datetime:
@@ -141,7 +160,14 @@ def following(t: datetime.datetime, repeat: str, day: int) -> datetime.datetime 
 
 
 def describe(task: dict[str, Any]) -> str:
-    """A task's times, in words, as "every day at 08:00, next Thursday 8 October"."""
+    """A task's times, in words, as "every day at 08:00, next Thursday 8 October", and what must
+    hold for a check to tell."""
+    told = f", telling only if {when}" if (when := task.get("condition")) else ""
+    return _times(task) + told
+
+
+def _times(task: dict[str, Any]) -> str:
+    # a task's times, in words
     first, due = (datetime.datetime.fromtimestamp(task[key]) for key in ("first", "next"))
     clock, on = f"{due:%H:%M}", f"{due:%A} {due.day} {due:%B}"
     if task["repeat"] == "once":
