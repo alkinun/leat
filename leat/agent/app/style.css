@@ -1,21 +1,22 @@
 :root {
   /* the theme's, as themes.mjs has Leat's, until it makes the app the one chosen */
   color-scheme: light dark;
-  --font: system-ui, sans-serif; --font-display: system-ui, sans-serif; --display-weight: 500;
-  --font-mono: ui-monospace, monospace; --size: 16px;
-  --round: 12px; --round-large: 22px; /* controls and code; bubbles, the composer, round buttons */
+  --font: "Geist", "Inter", system-ui, sans-serif;
+  --font-display: "Geist", "Inter", system-ui, sans-serif; --display-weight: 600;
+  --font-mono: "Geist Mono", ui-monospace, monospace; --size: 16px;
+  --round: 6px; --round-large: 12px; /* controls and code; bubbles, the composer, round buttons */
   --density: 1; /* the room around things, as a share of Leat's */
-  --page: #f7f8f7; --side: #eff2f1; --card: #fff; --bubble: #e6eeec; --line: #dfe5e3;
-  --text: #15201e; --muted: #64716e; --accent: #0f7b72; --on-accent: #fff; --error: #c2362b;
-  --keyword: #7e4ccb; --string: #1f7a4d; --number: #b0631a;
-  --shadow: 0 2px 12px rgb(15 40 36 / 0.06);
+  --page: #fff; --side: #fafafa; --card: #fff; --bubble: #f2f2f2; --line: #e6e6e6;
+  --text: #0a0a0a; --muted: #6e6e6e; --accent: #0a0a0a; --on-accent: #fff; --error: #d92d20;
+  --keyword: #7c3aed; --string: #15803d; --number: #b45309;
+  --shadow: none;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --page: #121817; --side: #0d1211; --card: #1a2120; --bubble: #212c2a; --line: #28322f;
-    --text: #e4ecea; --muted: #8d9b98; --accent: #5cc8b6; --on-accent: #06221e; --error: #f2877c;
-    --keyword: #c4a1ff; --string: #8fd6a8; --number: #f0b37a;
-    --shadow: 0 2px 12px rgb(0 0 0 / 0.3);
+    --page: #0a0a0a; --side: #000; --card: #111; --bubble: #1a1a1a; --line: #262626;
+    --text: #ededed; --muted: #8f8f8f; --accent: #ededed; --on-accent: #0a0a0a; --error: #ff6369;
+    --keyword: #c4a1ff; --string: #86efac; --number: #fdba74;
+    --shadow: none;
   }
 }
 * { box-sizing: border-box; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }

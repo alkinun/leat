@@ -98,10 +98,9 @@ def run():
 def test_themes(run):
     themes = run["themes"]
     names = [t["name"] for t in themes]
-    assert names == ["Leat", "Graphite", "Void", "Hermes", "Newsprint"]
+    assert names == ["Leat", "Hermes", "Newsprint"]
     assert run["again"] == themes  # each complete already, as a file saved of it would be
-    assert all("light" in t or "dark" in t for t in themes)
-    assert [t["name"] for t in themes if "light" not in t] == ["Void"]  # dark alone
+    assert all("light" in t and "dark" in t for t in themes)
 
 
 @pytest.mark.parametrize(("index", "error"), list(enumerate(error for _, error in REFUSED)))

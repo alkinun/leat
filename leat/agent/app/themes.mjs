@@ -30,54 +30,24 @@ const PIXELS = new Set(["size", "radius", "radiusLarge"]);
 const SANS = "system-ui, sans-serif";
 const MONO = "ui-monospace, monospace";
 
-// Leat's own, after its name, a channel that brings water to a mill: cool stone, and water's teal
+// Leat's own: black on white, and white on black, its corners sharp, its lines rather than shadows
 const LEAT = {
   name: "Leat",
-  font: SANS, displayFont: SANS, displayWeight: 500, codeFont: MONO,
-  size: 16, radius: 12, radiusLarge: 22, density: 1,
+  font: `"Geist", "Inter", ${SANS}`, displayFont: `"Geist", "Inter", ${SANS}`, displayWeight: 600,
+  codeFont: `"Geist Mono", ${MONO}`, size: 16, radius: 6, radiusLarge: 12, density: 1,
   light: {
-    page: "#f7f8f7", side: "#eff2f1", card: "#fff", bubble: "#e6eeec", line: "#dfe5e3",
-    text: "#15201e", muted: "#64716e", accent: "#0f7b72", onAccent: "#fff", error: "#c2362b",
-    keyword: "#7e4ccb", string: "#1f7a4d", number: "#b0631a",
-    shadow: "0 2px 12px rgb(15 40 36 / 0.06)",
+    page: "#fff", side: "#fafafa", card: "#fff", bubble: "#f2f2f2", line: "#e6e6e6",
+    text: "#0a0a0a", muted: "#6e6e6e", accent: "#0a0a0a", onAccent: "#fff", error: "#d92d20",
+    keyword: "#7c3aed", string: "#15803d", number: "#b45309", shadow: "none",
   },
   dark: {
-    page: "#121817", side: "#0d1211", card: "#1a2120", bubble: "#212c2a", line: "#28322f",
-    text: "#e4ecea", muted: "#8d9b98", accent: "#5cc8b6", onAccent: "#06221e", error: "#f2877c",
-    keyword: "#c4a1ff", string: "#8fd6a8", number: "#f0b37a",
-    shadow: "0 2px 12px rgb(0 0 0 / 0.3)",
+    page: "#0a0a0a", side: "#000", card: "#111", bubble: "#1a1a1a", line: "#262626",
+    text: "#ededed", muted: "#8f8f8f", accent: "#ededed", onAccent: "#0a0a0a", error: "#ff6369",
+    keyword: "#c4a1ff", string: "#86efac", number: "#fdba74", shadow: "none",
   },
 };
 
 export const THEMES = [LEAT, ...[
-  { // neutral grays, black on white or white on black, and pills
-    name: "Graphite",
-    font: `"Söhne", "Inter", ${SANS}`, displayFont: `"Söhne", "Inter", ${SANS}`, displayWeight: 500,
-    radius: 12, radiusLarge: 28,
-    light: {
-      page: "#fff", side: "#f9f9f9", card: "#fff", bubble: "#f1f1f1", line: "#e6e6e6",
-      text: "#0d0d0d", muted: "#6b6b6b", accent: "#0d0d0d", onAccent: "#fff", error: "#d93025",
-      keyword: "#8b3fd9", string: "#18794e", number: "#b35900",
-      shadow: "0 2px 12px rgb(0 0 0 / 0.08)",
-    },
-    dark: {
-      page: "#212121", side: "#181818", card: "#2f2f2f", bubble: "#3a3a3a", line: "#3a3a3a",
-      text: "#ececec", muted: "#a4a4a4", accent: "#ececec", onAccent: "#0d0d0d", error: "#f28b82",
-      keyword: "#c49cff", string: "#7ee2a8", number: "#ffb86b",
-      shadow: "0 2px 12px rgb(0 0 0 / 0.3)",
-    },
-  },
-  { // dark alone: black, white and light type, wide open
-    name: "Void",
-    font: `"Geist", "Inter", ${SANS}`, displayFont: `"Geist", "Inter", ${SANS}`, displayWeight: 300,
-    codeFont: `"Geist Mono", "JetBrains Mono", ${MONO}`, radius: 14, radiusLarge: 32, density: 1.1,
-    dark: {
-      page: "#000", side: "#0a0a0a", card: "#131313", bubble: "#1c1c1c", line: "#262626",
-      text: "#f5f5f5", muted: "#8a8a8a", accent: "#f5f5f5", onAccent: "#000", error: "#ff6b6b",
-      keyword: "#b4a1ff", string: "#9fe0b8", number: "#ffcf8a",
-      shadow: "0 0 0 1px #262626, 0 8px 40px rgb(255 255 255 / 0.04)",
-    },
-  },
   { // a terminal's: monospace, square, gold on black, after Hermes Agent's
     name: "Hermes",
     font: `"JetBrains Mono", "IBM Plex Mono", "Iosevka", ${MONO}`,
