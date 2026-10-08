@@ -214,19 +214,23 @@ class Agent:
         self, id: str | None, content: str, think: bool = False, attached: list[str] | None = None,
         task: int | None = None, via: str | None = None, person: int | None = None,
         character: int | None = None, shared: bool = False, quiet: str | None = None,
+        trial: bool = False,
     ) -> str:  # fmt: skip
         """Starts a turn of a person's message, in a new conversation without an id, with one of
         the household's characters if given, or in a group chat if `shared`; returns the
         conversation's id. The model thinks before it replies if `think`, which takes longer,
         and reads of the files `attached`, in the workspace. A message of a scheduled task names
-        it, with the condition of a check, `quiet`, that tells only if it holds; one sent by a
-        messaging app, `via`, that. Raises NotFound if there is no such conversation of the
-        person's, file or character, Busy if a turn runs in the conversation."""
+        it, with the condition of a check, `quiet`, that tells only if it holds, but for a `trial`
+        run, which tells what it found; one sent by a messaging app, `via`, that. Raises NotFound
+        if there is no such conversation of the person's, file or character, Busy if a turn runs
+        in the conversation."""
         info: dict[str, Any] = {"think": think, "at": time.time()}
         if task:
             info["task"] = task
         if quiet:
             info["quiet"] = quiet
+        if trial:
+            info["trial"] = True
         if via:
             info["via"] = via
         if attached:
@@ -258,7 +262,7 @@ class Agent:
                     raise Busy("a reply is already running")
                 start = len(self.store.messages(id))
                 self.store.append(id, message)
-            turn = _Turn(self, id, person, start, content, think, task, c, quiet)
+            turn = _Turn(self, id, person, start, content, think, task, c, None if trial else quiet)
             self._turns[id] = turn
             self._publish_summary(id)
             self._publish_message(id, person, start, message)
@@ -414,6 +418,20 @@ class Agent:
             self.store.delete_task(id)
             self.events.publish(self.tasks_event(person))
         return task
+
+    def run_now(self, id: int, person: int | None = None) -> str:
+        """Runs a person's task now, to try it, in its conversation, or a new one that becomes
+        its; when it runs next stays as it was. Returns the conversation's id. Raises NotFound if
+        there is no such task, Busy if a turn runs in its conversation."""
+        if (task := self.store.task(id)) is None or task["person"] != person:
+            raise NotFound(f"there is no task {id}")
+        conversation = task["conversation"]
+        if conversation is not None and self.store.conversation(conversation) is None:
+            conversation = None
+        sent = self.send(conversation, task["prompt"], task=id, person=person,
+                         quiet=task["condition"], trial=True)  # fmt: skip
+        self.ran(id, task["next"], sent)
+        return sent
 
     def tasks(self, person: int | None = None) -> list[dict[str, Any]]:
         """A person's tasks, the next due first, each with its times in words."""

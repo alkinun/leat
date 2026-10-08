@@ -443,15 +443,37 @@ function day(seconds) {
   return new Date(seconds * 1000).toLocaleDateString(undefined, { day: "numeric", month: "short" });
 }
 
+// tasks one may schedule in a click: a morning brief, the week ahead, and a check for rain
+const SUGGESTED = [
+  ["A morning brief, each day at 8:00", "Give the user a short morning brief: today's weather where they live, and the main news.", "08:00", "daily"],
+  ["The week ahead, on Sundays at 18:00", "Help the user plan the week ahead: ask what is coming up, and suggest what to prepare.", sunday(), "weekly"],
+  ["A word the evening before rain, at 19:00", "Look at tomorrow's weather where the user lives.", "19:00", "daily", "it will rain"],
+];
+
 function renderTasks() {
   $("scheduled").replaceChildren(...tasks.map((t) => {
     const item = element("li"), about = element("div"), remover = element("button", "", "×");
     remover.title = "Cancel";
     remover.onclick = () => fetch(`/api/tasks/${t.id}`, { method: "DELETE" });
+    const now = element("button", "talk", "Run now");
+    now.onclick = async () => {
+      try {
+        open((await (await post(`/api/tasks/${t.id}/run`, {})).json()).id);
+      } catch (error) {
+        status(error.message, true);
+      }
+    };
     about.append(element("span", "", t.prompt), element("span", "meta", t.schedule));
     if (t.conversation) about.append(conversationLink({ id: t.conversation, title: "Its chat" }));
-    item.append(about, remover);
+    item.append(about, now, remover);
     return item;
+  }));
+  const unset = SUGGESTED.filter(([, prompt]) => !tasks.some((t) => t.prompt === prompt));
+  $("suggested").replaceChildren(...unset.map(([label, prompt, at, repeat, only_if]) => {
+    const add = element("button", "", `+ ${label}`);
+    add.onclick = () => post("/api/tasks", { prompt, at, repeat, ...(only_if ? { only_if } : {}) })
+      .catch((error) => status(error.message, true));
+    return add;
   }));
   const secure = window.isSecureContext && "Notification" in window;
   $("notifying").replaceChildren();
@@ -651,6 +673,14 @@ function renderTelegram() {
   list.append(...telegram.requests.map((p) => person(p, true)), ...telegram.allowed.map((p) => person(p, false)));
   const none = element("p", "meta", `No one yet: write to @${telegram.bot}, then allow yourself here.`);
   box.replaceChildren(connected, telegram.requests.length + telegram.allowed.length ? list : none);
+}
+
+// the next Sunday at 18:00, as a task's first time: "YYYY-MM-DD 18:00"
+function sunday() {
+  const day = new Date();
+  day.setDate(day.getDate() + ((7 - day.getDay()) % 7 || 7));
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${day.getFullYear()}-${pad(day.getMonth() + 1)}-${pad(day.getDate())} 18:00`;
 }
 
 // says a scheduled task is done, in the page, and the system's notification if allowed and the

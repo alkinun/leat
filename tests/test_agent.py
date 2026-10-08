@@ -1211,12 +1211,25 @@ def test_api_lists(server, agent):
     assert agent.store.lists() == [] and request(f"{server}/lists")[0] == 200
 
 
-def test_api_tasks(server, agent):
+def test_api_tasks(server, agent, engine, events):
     in_an_hour = datetime.datetime.now() + datetime.timedelta(hours=1)
     task = agent.schedule("Remind the user to stretch", in_an_hour, "daily", person=1)
     assert request(f"{server}/api/tasks/{task['id']}", "DELETE")[0] == 200
     assert request(f"{server}/api/tasks/{task['id']}", "DELETE")[0] == 404
     assert request(f"{server}/tasks")[0] == 200  # the app's page of them
+    # one the user schedules themselves, a check, and runs now, to try it, in a chat that is its
+    url = f"{server}/api/tasks"
+    body = {"prompt": "Look at tomorrow's weather", "at": "19:00", "repeat": "daily",
+            "only_if": "it will rain"}  # fmt: skip
+    status, made = request(url, "POST", body)
+    check = json.loads(made)
+    assert status == 200 and check["schedule"].endswith("telling only if it will rain")
+    assert request(url, "POST", body | {"repeat": "yearly"})[0] == 400
+    engine.replies.put([{"content": "It will rain."}])
+    status, ran = request(f"{url}/{check['id']}/run", "POST", {})
+    until(events, lambda e: e["type"] == "done")
+    assert agent.store.task(check["id"])["conversation"] == json.loads(ran)["id"]
+    assert agent.store.task(check["id"])["next"] == check["next"]  # its time as it was
 
 
 def test_joining(server, agent, engine, events):

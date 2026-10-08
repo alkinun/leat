@@ -12,6 +12,7 @@ alone the household's people and devices, Telegram, and the engine's model.
 """
 
 import contextlib
+import datetime
 import http.cookies
 import ipaddress
 import json
@@ -29,6 +30,7 @@ from leat.agent.channels.telegram import Telegram, TelegramError
 from leat.agent.client import EngineError
 from leat.agent.household import Household
 from leat.agent.tools import lists
+from leat.agent.tools import tasks as scheduling
 
 APP = Path(__file__).parent / "app"
 # the app's files, each served at its path in app/, and their types; the app's pages, /c/<id> one
@@ -62,7 +64,7 @@ _SHOWN = {"image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf
 # /files/<name> to download it and of /api/files/<name> to upload or delete it
 _CONVERSATION = re.compile(r"/api/conversations/([0-9a-f]{12})(/messages|/stop)?")
 _MEMORY = re.compile(r"/api/memories/([0-9]+)")
-_TASK = re.compile(r"/api/tasks/([0-9]+)")
+_TASK = re.compile(r"/api/tasks/([0-9]+)(/run)?")
 _TELEGRAM = re.compile(r"/api/telegram/people/(-?[0-9]+)")
 _REQUEST = re.compile(r"/api/pairings/([0-9a-f]{16})(/allow)?")
 _DEVICE = re.compile(r"/api/devices/([0-9]+)")
@@ -157,6 +159,14 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(200, agent.remember(_text(body, "text"), category, person=person))
             elif path == "/api/memories/restore":
                 self._json(200, agent.restore(int(body.get("id", 0)), person))
+            elif path == "/api/tasks":  # a task the user schedules themselves, as a suggestion
+                at = scheduling.when(_text(body, "at"), datetime.datetime.now())
+                repeat = body.get("repeat", "once")
+                condition = body.get("only_if") if isinstance(body.get("only_if"), str) else None
+                self._json(200, agent.schedule(_text(body, "prompt"), at, str(repeat), None,
+                                               person, condition))  # fmt: skip
+            elif (match := _TASK.fullmatch(path)) and match[2]:  # a task run now, to try it
+                self._json(200, {"id": agent.run_now(int(match[1]), person)})
             elif path == "/api/characters":
                 self._json(200, agent.add_character(_text(body, "name"), _text(body, "about")))
             elif path == "/api/lists":
@@ -208,7 +218,7 @@ class _Handler(BaseHTTPRequestHandler):
                 agent.delete(match[1], person)
             elif match := _MEMORY.fullmatch(path):
                 agent.forget(int(match[1]), person=person)
-            elif match := _TASK.fullmatch(path):
+            elif (match := _TASK.fullmatch(path)) and not match[2]:
                 agent.unschedule(int(match[1]), person)
             elif match := _CHARACTER.fullmatch(path):
                 agent.remove_character(int(match[1]))
