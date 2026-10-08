@@ -156,6 +156,12 @@ def _fast() -> bool:
     return os.environ.get("LEAT_KERNELS") != "ref"
 
 
+def halved(x: Tensor) -> bool:
+    # whether plain ops on x take matrices in f16, summed in f32, on the matrix cores, as
+    # llama.cpp's cuBLAS does: on a GPU of them, but with LEAT_KERNELS=ref
+    return _fast() and kernels.on_matrix_cores(x)
+
+
 def embedding(tokens: Tensor, w: QTensor) -> Tensor:
     # Gathers whole rows of storage, then decodes only those; tinygrad lowers the gather to a load.
     # A bound number of tokens gathers as many as there may be: tinygrad leaves a copy along a
@@ -192,11 +198,13 @@ def rotary(x: Tensor, cos: Tensor, sin: Tensor, halves: bool) -> Tensor:
 
 @dataclass(frozen=True)
 class Span:
-    """`length` consecutive tokens of one sequence, from position `start` of cache slot `slot`."""
+    """`length` consecutive tokens of one sequence, from position `start` of cache slot `slot`;
+    each sees those before it, or if not `causal` all the span's, as an image's do."""
 
     slot: int | UOp
     start: int | UOp
     length: int | UOp = 1
+    causal: bool = True
 
 
 def rotate(
@@ -273,8 +281,9 @@ def attention(
     sinks: Tensor | None = None,
 ) -> Tensor:  # fmt: skip
     # q: (1, H, T, D), the spans' tokens in turn; cache: (2, slots, KV_H, positions, D). Each
-    # token attends causally over its span's slot, and over only the last `window` positions if
-    # given, with scores q.k * scale; with a sink per head, if given, a score that takes its
+    # token attends over its span's slot, causally or over all the span's tokens as the span
+    # has it, and over only the last `window` positions before it if given, with scores
+    # q.k * scale; with a sink per head, if given, a score that takes its
     # share of the softmax and adds no value, as gpt-oss's. Returns (1, T, H * D), the layout the
     # output projection reads.
     # a token per row: of a single span of one, or of several spans, each token its own row
@@ -291,7 +300,9 @@ def attention(
     if len(spans) == 1:
         span = spans[0]
         if _fast() and kernels.supports_flash_attention(q, cache):
-            return kernels.flash_attention(q, cache, span.slot, span.start, scale, window, sinks)
+            return kernels.flash_attention(
+                q, cache, span.slot, span.start, scale, window, sinks, span.causal
+            )
         return _attention(q, cache, span, scale, window, sinks)
     outs, at = [], 0
     for span in spans:
@@ -309,11 +320,14 @@ def _attention(
     slot, start_pos = span.slot, span.start
     k, v = (cache[i, slot : slot + 1, :, : start_pos + T].cast(q.dtype) for i in (0, 1))
     mask = None
-    if window or not (isinstance(T, int) and T == 1):
+    causal = span.causal and not (isinstance(T, int) and T == 1)
+    if window or causal:
         full = Tensor.full((1, 1, T, k.shape[2]), float("-inf"), dtype=q.dtype)
-        mask = full.triu(start_pos + 1)  # later positions
-        if window:  # and positions `window` or more back
-            mask = mask + full.tril(start_pos - window)
+        # later positions, where the span sees only those before each token, and positions
+        # `window` or more back
+        masks = ([full.triu(start_pos + 1)] if causal else []) + (
+            [full.tril(start_pos - window)] if window else [])  # fmt: skip
+        mask = sum(masks[1:], masks[0])
     if sinks is None:
         out = (q * (scale * math.sqrt(D))).scaled_dot_product_attention(k, v, mask, enable_gqa=True)
         return out.transpose(1, 2).reshape(B, T, H * D)

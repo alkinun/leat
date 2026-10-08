@@ -4,7 +4,7 @@ import array
 import functools
 import itertools
 import random
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
@@ -19,6 +19,7 @@ from leat.model import Config, Transformer
 from leat.ops import Span
 from leat.sampler import GREEDY, Sampling, sample
 from leat.tokenizer import Tokenizer
+from leat.vision import Image, Vision, blank
 
 # prompt tokens up to which a chunk takes a graph bound to that many, whose kernels size their
 # work for so few: the matrix kernels take tiles of 16 tokens
@@ -45,7 +46,8 @@ SPECULATIVE_TOKENS = MATVEC_TOKENS
 
 @dataclass(eq=False)
 class Sequence:
-    """A generation in progress: its prompt, how it samples, and the tokens it has generated."""
+    """A generation in progress: its prompt and the images it holds, by key, how it samples, and
+    the tokens it has generated."""
 
     prompt: list[int]
     max_tokens: int
@@ -53,6 +55,7 @@ class Sequence:
     seed: int
     ignore_eog: bool
     slot: int
+    images: dict[int, Image] = field(default_factory=dict)
     tokens: list[int] = field(default_factory=list)  # generated so far, the last not yet run
     done: bool = False  # generated all it will, or cancelled
     # its sampling options and seed for the graphs, as (1, 5) and (1,) tensors
@@ -97,11 +100,15 @@ class Engine:
     state, as Qwen3.5's Gated DeltaNet, holds it for all the tokens a slot ran, and so shares a
     slot's tokens only when it shares all of them, or else all those before the state it kept
     KEEP_BACK tokens before its last prompt's end.
+
+    With a vision encoder, prompts hold images: each at as many positions as it has embeddings,
+    which run in a chunk of their own, the image's whole, and see each other, as Gemma's do. The
+    image is encoded when its chunk runs, and not again where the cache holds it.
     """
 
     def __init__(
         self, path: str | Path, max_context: int = 4096, prefill_chunk: int = 512, slots: int = 1,
-        draft: str | Path | None = None,
+        draft: str | Path | None = None, vision: str | Path | None = None,
     ):  # fmt: skip
         if slots < 1:
             raise ValueError(f"slots must be at least 1, got {slots}")
@@ -124,6 +131,11 @@ class Engine:
         saved = SPECULATIVE_TOKENS if draft is not None else 0
         self.model = Transformer(self.config, weights, max_context, cache_slots, saved)
         self.drafter: Drafter | None = None if draft is None else load_drafter(draft, self.model)
+        self.vision: Vision | None = None
+        if vision is not None:
+            self.vision = Vision(GGUF.open(vision), self.tokenizer, self.config.dim)
+            self._image_len = UOp.variable("image_len", 1, self.vision.tokens)
+            self._encode, self._image_chunk = graph(self.vision.encode), graph(self._step)
         # speculative steps of 1 sequence or more, as many as the drafter takes, each drafting a
         # token at least
         drafting = 0 if self.drafter is None else min(slots, self.drafter.sequences)
@@ -174,6 +186,7 @@ class Engine:
         sampling: Sampling = GREEDY,
         seed: int | None = None,
         ignore_eog: bool = False,
+        images: Iterable[Image] = (),
     ) -> Generator[int, None, None]:
         """Yields up to `max_tokens` ids; stops early at end of generation or the context limit.
 
@@ -183,7 +196,7 @@ class Engine:
         """
         if self.active:
             raise RuntimeError("another generation is unfinished: exhaust or close it first")
-        sequence = self.start(prompt, max_tokens, sampling, seed, ignore_eog)
+        sequence = self.start(prompt, max_tokens, sampling, seed, ignore_eog, images)
         try:
             while not sequence.done:
                 for _, token in self.step():
@@ -198,18 +211,25 @@ class Engine:
         sampling: Sampling = GREEDY,
         seed: int | None = None,
         ignore_eog: bool = False,
+        images: Iterable[Image] = (),
     ) -> Sequence:
-        """Starts a generation in a free slot, as generate() would; step() advances it."""
+        """Starts a generation in a free slot, as generate() would; step() advances it. The
+        prompt shows each of `images` with its tokens."""
         if max_tokens < 1:
             raise ValueError(f"max_tokens must be at least 1, got {max_tokens}")
         if not 0 < len(prompt) < self.max_context:
             raise ValueError(
                 f"prompt must have 1 to {self.max_context - 1} tokens, got {len(prompt)}"
             )
+        shown = {image.key: image for image in images}
+        for start, end in _images(prompt):
+            if (image := shown.get(prompt[start])) is None or end - start != image.size:
+                raise ValueError(f"the prompt's image at {start} is none of those given")
         if len(self.active) == self.slots:
             raise RuntimeError(f"all {self.slots} slots are generating")
         seed = random.getrandbits(32) if seed is None else seed % 2**32
-        sequence = Sequence(prompt, max_tokens, sampling, seed, ignore_eog, self._claim(prompt))
+        slot = self._claim(prompt)
+        sequence = Sequence(prompt, max_tokens, sampling, seed, ignore_eog, slot, shown)
         self.active.append(sequence)
         return sequence
 
@@ -276,7 +296,20 @@ class Engine:
         if self._recurrent:  # and keeping recurrent state, and going back to it
             self._keep(self._slot_vars[0].bind(0))
             self._restore(self._slot_vars[0].bind(0))
+        if self.vision is not None:  # and encoding an image, and its chunk
+            image = self.image(blank())
+            if len(image.tokens) < self.max_context:
+                self.reset()
+                for _ in self.generate(image.tokens, 1, ignore_eog=True, images=[image]):
+                    pass
         self.reset()
+
+    def image(self, data: bytes) -> Image:
+        """An image of its file's bytes, for a prompt: its tokens show it there, and start()
+        takes it."""
+        if self.vision is None:
+            raise ValueError("the model has no vision encoder")
+        return self.vision.image(data)
 
     def cached_prefix(self, prompt: list[int]) -> int:
         """How many leading tokens of `prompt` the cache holds: generation prefills the rest. Of
@@ -334,23 +367,42 @@ class Engine:
         return shared
 
     def _prefill(self, sequence: Sequence, size: int) -> int | None:
-        # runs the next chunk of the sequence's prompt, of up to `size` tokens: up to FEW_TOKENS in
-        # the graph bound to that many, more in the one bound to prefill_chunk. Returns the token
-        # sampled after the prompt's last chunk.
+        # runs the next chunk of the sequence's prompt: an image whole, or else up to `size`
+        # tokens before the next, up to FEW_TOKENS in the graph bound to that many, more in the
+        # one bound to prefill_chunk. Returns the token sampled after the prompt's last chunk.
         cached, mark = self._cached[sequence.slot], len(sequence.prompt) - KEEP_BACK
-        if self._recurrent and len(cached) < mark:  # a chunk ends where the state is kept
-            size = min(size, mark - len(cached))
-        pos, chunk = len(cached), sequence.prompt[len(cached) : len(cached) + size]
+        pos = len(cached)
         row = self._slot_vars[0].bind(sequence.slot), self._pos_vars[0].bind(pos)
-        few = (n := len(chunk)) <= FEW_TOKENS
-        graph, length = (self._few_chunk, self._few) if few else (self._chunk, self._len)
-        tokens = _ids(chunk, int(length.vmax)).shrink(((0, 1), (0, length.bind(n))))
-        token = graph(tokens, *sequence.options, *row)
+        if (key := sequence.prompt[pos]) < 0:
+            image = sequence.images[key]
+            chunk = sequence.prompt[pos : pos + image.size]
+            token = self._prefill_image(image, sequence.options, row)
+        else:
+            if self._recurrent and pos < mark:  # a chunk ends where the state is kept
+                size = min(size, mark - pos)
+            chunk = sequence.prompt[pos : pos + size]
+            chunk = chunk[: next((i for i, t in enumerate(chunk) if t < 0), len(chunk))]
+            few = (n := len(chunk)) <= FEW_TOKENS
+            graph, length = (self._few_chunk, self._few) if few else (self._chunk, self._len)
+            tokens = _ids(chunk, int(length.vmax)).shrink(((0, 1), (0, length.bind(n))))
+            token = graph(tokens, *sequence.options, *row)
         cached += chunk
         if self._recurrent and len(cached) == mark:
             self._keep(self._slot_vars[0].bind(sequence.slot))
             self._kept[sequence.slot] = list(cached)
         return int(token.item()) if len(cached) == len(sequence.prompt) else None
+
+    def _prefill_image(
+        self, image: Image, options: tuple[Tensor, Tensor], row: tuple[UOp, UOp]
+    ) -> Tensor:
+        # runs an image's embeddings in the image chunk's graph, its positions' tokens the one
+        # that fills an image, which a drafter takes in
+        assert self.vision is not None
+        n, dim = self._image_len.bind(image.size), self.config.dim
+        embeddings = self._encode(image.pixels, image.positions).reshape(1, -1, dim)
+        tokens = _ids([self.vision.fill] * image.size, self.vision.tokens)
+        x, tokens = embeddings.shrink(((0, 1), (0, n), (0, dim))), tokens.shrink(((0, 1), (0, n)))
+        return self._image_chunk(tokens, *options, *row, image=x)
 
     def _decode_step(self, sequences: list[Sequence]) -> list[int]:
         # runs each sequence's last token, in batches of BATCH at most. A batch of the same
@@ -491,18 +543,23 @@ class Engine:
 
     def _step(
         self, tokens: Tensor, options: Tensor, seed: Tensor, *rows: UOp, live: UOp | None = None,
-        decode: bool = False,
+        decode: bool = False, image: Tensor | None = None,
     ) -> Tensor:  # fmt: skip
         # rows: the slot and start position of each span, in turn. A single span takes every
-        # token, as a chunk of prompt or a decode step of one; several take one each, as a decode
-        # step does, the first `live` of them its sequences' if given, the rest padding.
+        # token, as a chunk of prompt or a decode step of one, or an image's embeddings in place
+        # of its tokens; several take one each, as a decode step does, the first `live` of them
+        # its sequences' if given, the rest padding.
         pairs = list(zip(rows[::2], rows[1::2], strict=True))
         slots = [slot for slot, _ in pairs]
         seen = self._generated(tokens, slots, decode)
         if len(pairs) == 1:
             (slot, start), length = pairs[0], tokens.shape[1]
-            spans = [Span(slot, start, length)]
-            hidden = self._followed(tokens, self.model.run(tokens, spans), spans)
+            spans = [Span(slot, start, length, causal=image is None)]
+            if image is None:
+                hidden = self.model.run(tokens, spans)
+            else:  # the embeddings as they are, not scaled as the tokens' are
+                hidden = self.model.forward(image, spans)
+            hidden = self._followed(tokens, hidden, spans)
             logits = self.model.logits(hidden[:, -1, :])
             return sample(logits, options, seed, start + length, seen).realize()
         spans = [Span(slot, start) for slot, start in pairs]
@@ -587,7 +644,20 @@ def _resumes(prompt: list[int], kept: list[int]) -> bool:
 
 
 def _shared(prompt: list[int], cached: list[int]) -> int:
-    # how many leading tokens a slot holds of the prompt, all but its last at most: generation
-    # starts from the logits of running that one
+    # how many leading tokens a slot holds of the prompt, all but its last at most, as generation
+    # starts from the logits of running that one, and none of an image, which runs whole
     pairs = zip(prompt[:-1], cached, strict=False)
-    return sum(1 for _ in itertools.takewhile(lambda p: p[0] == p[1], pairs))
+    n = sum(1 for _ in itertools.takewhile(lambda p: p[0] == p[1], pairs))
+    while 0 < n < len(prompt) and prompt[n] < 0 and prompt[n - 1] == prompt[n]:
+        n -= 1
+    return n
+
+
+def _images(prompt: list[int]) -> Generator[tuple[int, int], None, None]:
+    # where each image of a prompt starts and ends: runs of a negative key
+    start = 0
+    for i, token in enumerate(prompt):
+        if token < 0 and (i == 0 or prompt[i - 1] != token):
+            start = i
+        if token < 0 and (i + 1 == len(prompt) or prompt[i + 1] != token):
+            yield start, i + 1

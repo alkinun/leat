@@ -452,11 +452,12 @@ class _WmmaQueries(_MmaQueries):
 @functools.cache
 def _flash_attention_kernel(
     out: UOp, *srcs: UOp, slot: int | UOp, start: int | UOp, tokens: int | UOp, window: int,
-    key_tile: int, parts: int, splits: int, wmma: bool = False,
+    key_tile: int, parts: int, splits: int, wmma: bool = False, causal: bool = True,
 ) -> UOp:  # fmt: skip
     # srcs: q (count, heads, dim) in f16, scaled so that exp2 gives the softmax, and the f16
     # cache, read as words of f16 pairs; query i is at position start + i and sees the slot's
-    # positions up to it, or the last `window` of them. Blocks take key_tile keys at a time, and
+    # positions up to it, or if not causal up to the last query's, and of those before it the
+    # last `window` only, if given. Blocks take key_tile keys at a time, and
     # 1 / parts of their outputs, which warps work out on WMMA's fragments if wmma, else on
     # mma.sync's. Split, the queries are one tile, whose key tiles blocks take in turn, each
     # writing out (count * heads, splits, dim) unnormalized and first in srcs the max and sum of
@@ -480,7 +481,7 @@ def _flash_attention_kernel(
     rows = [tile * QUERIES + r for r in frags.queries]  # the lane's queries
     # the keys and values from the tile's first query's window to its last query, key_tile at a
     # time: keys as they are in the cache, values transposed so that fragments of keys are words
-    end = start + (tile * QUERIES + QUERIES).minimum(tokens)
+    end = start + ((tile * QUERIES + QUERIES).minimum(tokens) if causal else tokens)
     first = _since(start + tile * QUERIES + 1, window) // key_tile
     seen_tiles = (end + key_tile - 1) // key_tile - first
     split = UOp.const(0, dtypes.weakint)
@@ -528,8 +529,10 @@ def _flash_attention_kernel(
     of, scores = [], []  # the query of each of the lane's scores, and the scores masked to the
     # positions it sees
     for r, key, score in frags.scores(query, keys, dim, key_tile):
-        back = start + rows[r] - (kt * key_tile + key)  # how far the key is
-        seen = (back >= 0) & (back < window) if window else back >= 0
+        position = kt * key_tile + key
+        back = start + rows[r] - position  # how far the key is
+        seen = back >= 0 if causal else position < start + tokens
+        seen = seen & (back < window) if window else seen
         of.append(r)
         scores.append(seen.where(score, -math.inf))
 
@@ -598,11 +601,12 @@ def supports_flash_attention(q: Tensor, cache: Tensor) -> bool:
 
 def flash_attention(
     q: Tensor, cache: Tensor, slot: int | UOp, start_pos: int | UOp, scale: float, window: int = 0,
-    sinks: Tensor | None = None,
+    sinks: Tensor | None = None, causal: bool = True,
 ) -> Tensor:  # fmt: skip
-    """Causal attention of query tokens (1, H, T, D) at positions start_pos.. over a slot of the
-    cache, which already holds their keys and values, or over the last `window` positions of
-    each, with scores q.k * scale, and a sink (H,) per head if given. Returns (1, T, H * D)."""
+    """Attention of query tokens (1, H, T, D) at positions start_pos.. over a slot of the cache,
+    which already holds their keys and values: causal, or if not over all the tokens', and over
+    the last `window` positions before each if given, with scores q.k * scale, and a sink (H,)
+    per head if given. Returns (1, T, H * D)."""
     _, heads, tokens, dim = q.shape
     count = -(-q.max_shape[2] // QUERIES) * QUERIES
     shape = _flash_shape(int(cache.shape[3]), int(dim))
@@ -623,7 +627,7 @@ def flash_attention(
     outs[0], slot = carry(outs[0], slot)
     fxn = functools.partial(
         _flash_attention_kernel, slot=slot, start=start, tokens=bound, window=window,
-        key_tile=shape[0], parts=shape[1], splits=splits, wmma=on_rdna3(q),
+        key_tile=shape[0], parts=shape[1], splits=splits, wmma=on_rdna3(q), causal=causal,
     )  # fmt: skip
     extra = () if sinks is None else (sinks.float().contiguous(),)
     outs = Tensor.custom_kernel(*outs, q, cache, *(extra if splits == 1 else ()), fxn=fxn)

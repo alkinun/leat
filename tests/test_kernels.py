@@ -469,15 +469,15 @@ def slot(symbolic: bool) -> int | UOp:
 
 def reference_attention(
     q: np.ndarray, cache: np.ndarray, start: int, window: int = 0, scale: float | None = None,
-    sinks: np.ndarray | None = None, slot: int = SLOT,
+    sinks: np.ndarray | None = None, slot: int = SLOT, causal: bool = True,
 ) -> np.ndarray:  # fmt: skip
-    # q (heads, T, dim) at positions start.. against a slot, causally and within the window if
-    # given, with a sink per head if given, in f64: (T, heads, dim)
+    # q (heads, T, dim) at positions start.. against a slot, causally or over all T, and within
+    # the window if given, with a sink per head if given, in f64: (T, heads, dim)
     heads, tokens, dim = q.shape
     group = heads // cache.shape[2]
     k, v = (cache[i, slot, :, : start + tokens].astype(np.float64) for i in range(2))
     back = start + np.arange(tokens)[:, None] - np.arange(start + tokens)
-    hidden = (back < 0) | (back >= window) if window else back < 0
+    hidden = (back < 0) & causal | (back >= window) & (window > 0)
     out = np.empty((tokens, heads, dim))
     for h in range(heads):
         scores = q[h] @ k[h // group].T * (dim**-0.5 if scale is None else scale)
@@ -648,6 +648,29 @@ def test_flash_attention_window(tokens, start, dim, window, symbolic):
     got = kernels.flash_attention(q_t, cache_t, slot(symbolic), pos, 1.0, window)
     got = got.pad_to((1, 512, 16 * dim)).numpy()[0, :tokens]
     expected = reference_attention(q[0, :, :tokens], cache, start, window, 1.0)
+    np.testing.assert_allclose(got.reshape(expected.shape), expected, rtol=3e-3, atol=3e-3)
+
+
+# an image's tokens, which see each other: Gemma 4's sliding-window and full-attention heads, a
+# tile of queries whose keys blocks split, and several tiles
+@pytest.mark.parametrize("tokens, start", [(280, 0), (256, 1000), (16, 1500), (100, 3000)])
+@pytest.mark.parametrize("kv_heads, dim, window", [(8, 256, 1024), (2, 512, 0)])
+@pytest.mark.parametrize("symbolic", [False, True])
+@matrix_cores
+def test_flash_attention_not_causal(tokens, start, kv_heads, dim, window, symbolic):
+    rng = np.random.default_rng(tokens + start + dim)
+    cache = rng.standard_normal((2, SLOTS, kv_heads, 4096, dim)).astype(np.float16)
+    # scores as spread for either width, which f16's rounding of the weights keeps in tolerance
+    q = rng.standard_normal((1, 16, 512, dim)).astype(np.float32) * 0.2 * (256 / dim) ** 0.5
+    q_t, cache_t = Tensor(q).realize(), Tensor(cache).realize()
+    if symbolic:
+        pos = UOp.variable("start_pos", 0, 4095).bind(start)
+        q_t = q_t[:, :, : chunk_len(tokens)]
+    else:
+        pos, q_t = start, q_t[:, :, :tokens]
+    got = kernels.flash_attention(q_t, cache_t, slot(symbolic), pos, 1.0, window, causal=False)
+    got = got.pad_to((1, 512, 16 * dim)).numpy()[0, :tokens]
+    expected = reference_attention(q[0, :, :tokens], cache, start, window, 1.0, causal=False)
     np.testing.assert_allclose(got.reshape(expected.shape), expected, rtol=3e-3, atol=3e-3)
 
 

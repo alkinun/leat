@@ -128,8 +128,9 @@ def write_tiny_model(path: Path, arch: str = "llama") -> dict[str, np.ndarray]:
     return weights
 
 
-def _writer(path: Path, arch: str):
-    # a GGUF writer with the tiny tokenizer, its weights, and add(name, shape, type, scale), which
+def _writer(path: Path, arch: str, specials: tuple[str, ...] = ()):
+    # a GGUF writer with the tiny tokenizer, its last tokens `specials`, control tokens, its
+    # weights, and add(name, shape, type, scale), which
     # writes a random tensor and keeps it decoded: a norm weight by default, an F32 vector uniform
     # from 1 to `scale`, 1.5; other F32 tensors, biases too, normal times `scale`; and else blocks
     # whose f16 fields are up to `scale`
@@ -139,8 +140,10 @@ def _writer(path: Path, arch: str):
     w.add_float32(f"{arch}.attention.layer_norm_rms_epsilon", 1e-5)
     w.add_string("tokenizer.ggml.model", "gpt2")
     w.add_string("tokenizer.ggml.pre", "llama-bpe")
-    w.add_array("tokenizer.ggml.tokens", [*_BYTE_CHAR.values()] + [f"t{i}" for i in range(V - 256)])
-    w.add_array("tokenizer.ggml.token_type", [NORMAL] * V)
+    names = [f"t{i}" for i in range(V - 256 - len(specials))] + list(specials)
+    w.add_array("tokenizer.ggml.tokens", [*_BYTE_CHAR.values()] + names)
+    types = [NORMAL] * (V - len(specials)) + [CONTROL] * len(specials)
+    w.add_array("tokenizer.ggml.token_type", types)
     w.add_array("tokenizer.ggml.merges", [])
     w.add_chat_template("{{ prefix | default('') }}{{ messages[-1]['content'] }}")
     weights: dict[str, np.ndarray] = {}
@@ -170,13 +173,14 @@ def _finish(w: gguf.GGUFWriter) -> None:
 
 # Gemma 4: a sliding-window layer of 2 kv heads of 32, and a full-attention one of a kv head of
 # 64 whose values are its keys; both with an MLP, and beside it, as in 26B A4B, experts whose gate
-# and up are stacked
+# and up are stacked. Its vocab ends with the tokens that open, fill and close an image.
 G_WINDOW, G_DIMS, G_KV_HEADS, G_CAP = 4, (32, 64), (2, 1), 5.0
+G_IMAGE = ("<|image>", "<|image|>", "<image|>")
 
 
 def _write_gemma4(path: Path, experts: bool) -> dict[str, np.ndarray]:
     # with experts beside each MLP, as Gemma 4 26B A4B, or without, as the dense models
-    w, weights, add = _writer(path, "gemma4")
+    w, weights, add = _writer(path, "gemma4", G_IMAGE)
     a = "gemma4."
     for key, value in [("block_count", LAYERS), ("embedding_length", D),
                        ("feed_forward_length", HIDDEN), ("attention.head_count", HEADS),
@@ -228,11 +232,13 @@ def _write_gemma4(path: Path, experts: bool) -> dict[str, np.ndarray]:
 
 
 def reference_logits(
-    w: dict[str, np.ndarray], tokens: list[int], arch: str = "llama"
-) -> np.ndarray:
-    # an independent float64 model, with keys and values rounded to f16 like leat's cache
+    w: dict[str, np.ndarray], tokens: list[int], arch: str = "llama",
+    images: dict[int, np.ndarray] | None = None,
+) -> np.ndarray:  # fmt: skip
+    # an independent float64 model, with keys and values rounded to f16 like leat's cache; of
+    # Gemma 4, images' embeddings by key in place of the tokens that hold it
     if arch.startswith("gemma4"):
-        return _reference_gemma4(w, tokens)
+        return _reference_gemma4(w, tokens, images)
     if arch in _REFERENCES:
         return _REFERENCES[arch](w, tokens)
 
@@ -326,8 +332,10 @@ def cuts(scores, top_k, top_p):
     return ranked[0], ranked[-1], ranked[max((likelier < top_p * weights.sum()).sum(), 1) - 1]
 
 
-def _reference_gemma4(w: dict[str, np.ndarray], tokens: list[int]) -> np.ndarray:
-    logits = _gemma4_hidden(w, tokens)[0] @ w["token_embd.weight"].T
+def _reference_gemma4(
+    w: dict[str, np.ndarray], tokens: list[int], images: dict[int, np.ndarray] | None = None
+) -> np.ndarray:
+    logits = _gemma4_hidden(w, tokens, images)[0] @ w["token_embd.weight"].T
     return np.tanh(logits / G_CAP) * G_CAP
 
 
@@ -339,10 +347,21 @@ def _gemma4_rope(dim: int, sliding: bool, positions: np.ndarray, factors: np.nda
     return np.cos(angles), np.sin(angles)
 
 
-def _gemma4_hidden(w: dict[str, np.ndarray], tokens: list[int]):
-    # the normed hidden states (T, D) and each layer's keys and values, as in the cache
+def _gemma4_hidden(
+    w: dict[str, np.ndarray], tokens: list[int], images: dict[int, np.ndarray] | None = None
+):  # fmt: skip
+    # the normed hidden states (T, D) and each layer's keys and values, as in the cache; images'
+    # embeddings (n, D) by key in place of the tokens that hold it, which see each other
     T, positions, cache = len(tokens), np.arange(len(tokens)), []
-    x = w["token_embd.weight"][tokens].astype(np.float64) * np.sqrt(D)
+    x = np.stack([
+        images[t][tokens[:i].count(t) % len(images[t])] if t < 0
+        else w["token_embd.weight"][t] * np.sqrt(D)
+        for i, t in enumerate(tokens)
+    ]).astype(np.float64)  # fmt: skip
+    # each position's image, counted along the prompt, -1 for a token
+    run = np.cumsum([t < 0 and (i == 0 or tokens[i - 1] != t) for i, t in enumerate(tokens)])
+    run = np.where(np.array(tokens) < 0, run, -1)
+    image = (run[:, None] == run) & (run[:, None] >= 0)
     for i, (dim, kv_heads, sliding) in enumerate(
         zip(G_DIMS, G_KV_HEADS, (True, False), strict=True)
     ):
@@ -357,7 +376,7 @@ def _gemma4_hidden(w: dict[str, np.ndarray], tokens: list[int]):
             rotate_halves(norm(z, lw[f"attn_{n}_norm"]), cos, sin) for z, n in ((q, "q"), (k, "k"))
         )
         back = positions[:, None] - positions
-        mask = np.where((back < 0) | (sliding & (back >= G_WINDOW)), -np.inf, 0)
+        mask = np.where((back < 0) & ~image | (sliding & (back >= G_WINDOW)), -np.inf, 0)
         cache.append((k, v))
         out = attention(q, k, v, mask, 1.0) @ lw["attn_output"].T
         x = x + norm(out, lw["post_attention_norm"])
@@ -463,6 +482,96 @@ def reference_drafts(
         h = x @ assistant["nextn.post_projection.weight"].T
         drafts.append(token)
     return drafts
+
+
+# Gemma 4's vision encoder for the tiny Gemma 4: 2 layers of 2 heads of 16, over patches of 4 by 4
+# pixels whose embeddings each pool 3 by 3
+V_WIDTH, V_HEADS, V_HIDDEN, V_PATCH, V_LAYERS, V_COLUMNS = 32, 2, 64, 4, 2, 64
+V_EPS = 1e-6
+
+
+def write_tiny_mmproj(path: Path) -> dict[str, np.ndarray]:
+    rng = np.random.default_rng(1)
+    w = gguf.GGUFWriter(path, arch="clip")
+    w.add_string("clip.vision.projector_type", "gemma4v")
+    for key, value in [("patch_size", V_PATCH), ("embedding_length", V_WIDTH),
+                       ("feed_forward_length", V_HIDDEN), ("block_count", V_LAYERS),
+                       ("attention.head_count", V_HEADS), ("projection_dim", D)]:  # fmt: skip
+        w.add_uint32(f"clip.vision.{key}", value)
+    w.add_float32("clip.vision.attention.layer_norm_epsilon", V_EPS)
+    weights: dict[str, np.ndarray] = {}
+
+    def add(name: str, shape: tuple[int, ...], scale: float = 0.0) -> None:
+        # matrices f16, normal times `scale`, and vectors f32 uniform from 0.5 to 1.5
+        if scale:
+            weights[name] = (rng.standard_normal(shape) * scale).astype(np.float16)
+        else:
+            weights[name] = rng.uniform(0.5, 1.5, shape).astype(np.float32)
+        w.add_tensor(name, weights[name])
+
+    head = V_WIDTH // V_HEADS
+    add("v.patch_embd.weight", (V_WIDTH, 3, V_PATCH, V_PATCH), 0.2)
+    weights["v.position_embd.weight"] = rng.standard_normal((2, V_COLUMNS, V_WIDTH)).astype(
+        np.float32)  # fmt: skip
+    w.add_tensor("v.position_embd.weight", weights["v.position_embd.weight"])
+    for i in range(V_LAYERS):
+        b = f"v.blk.{i}."
+        for name in ("attn_q", "attn_k", "attn_v", "attn_out"):
+            add(b + name + ".weight", (V_WIDTH, V_WIDTH), 0.2)
+        add(b + "ffn_gate.weight", (V_HIDDEN, V_WIDTH), 0.2)
+        add(b + "ffn_up.weight", (V_HIDDEN, V_WIDTH), 0.2)
+        add(b + "ffn_down.weight", (V_WIDTH, V_HIDDEN), 0.2)
+        for name in ("ln1", "attn_post_norm", "ln2", "ffn_post_norm"):
+            add(b + name + ".weight", (V_WIDTH,))
+        add(b + "attn_q_norm.weight", (head,))
+        add(b + "attn_k_norm.weight", (head,))
+    add("v.std_bias", (V_WIDTH,))
+    add("v.std_scale", (V_WIDTH,))
+    add("mm.input_projection.weight", (D, V_WIDTH), 0.2)
+    _finish(w)
+    return {n: v.astype(np.float64) for n, v in weights.items()}
+
+
+def reference_image(w: dict[str, np.ndarray], pixels: np.ndarray, pool: int = 3) -> np.ndarray:
+    # the embeddings (tokens, D) of an image's pixels (H, W, 3), as transformers' Gemma 4: its
+    # patches, rows of RGB, projected, with learned embeddings of their columns and rows, through
+    # the layers, then pooled each `pool` by `pool`, scaled, standardized, normed and projected
+    rows, columns = pixels.shape[0] // V_PATCH, pixels.shape[1] // V_PATCH
+    patches = pixels.reshape(rows, V_PATCH, columns, V_PATCH, 3).transpose(0, 2, 1, 3, 4)
+    x = (patches.reshape(rows * columns, -1) / 255 - 0.5) * 2
+    x = x @ w["v.patch_embd.weight"].transpose(0, 2, 3, 1).reshape(V_WIDTH, -1).T
+    column, row = np.tile(np.arange(columns), rows), np.repeat(np.arange(rows), columns)
+    x = x + w["v.position_embd.weight"][0][column] + w["v.position_embd.weight"][1][row]
+    head, n = V_WIDTH // V_HEADS, len(x)
+    freqs = 100.0 ** (-np.arange(0, head // 2, 2) / (head // 2))
+
+    def rope(z):  # each half of a head's dimensions rotated by the column, then by the row
+        halves = []
+        for part, at in zip(np.split(z, 2, axis=-1), (column, row), strict=True):
+            angles = at[:, None, None] * freqs
+            halves.append(rotate_halves(part, np.cos(angles), np.sin(angles)))
+        return np.concatenate(halves, -1)
+
+    def vnorm(z, weight=1.0):
+        return z / np.sqrt((z * z).mean(-1, keepdims=True) + V_EPS) * weight
+
+    for i in range(V_LAYERS):
+        lw = _layer({k[2:]: v for k, v in w.items() if k.startswith("v.")}, i)
+        h = vnorm(x, lw["ln1"])
+        q, k, v = ((h @ lw[f"attn_{c}"].T).reshape(n, V_HEADS, head) for c in "qkv")
+        q, k = rope(vnorm(q, lw["attn_q_norm"])), rope(vnorm(k, lw["attn_k_norm"]))
+        out = []
+        for hd in range(V_HEADS):
+            scores = q[:, hd] @ k[:, hd].T
+            p = np.exp(scores - scores.max(-1, keepdims=True))
+            out.append(p / p.sum(-1, keepdims=True) @ vnorm(v[:, hd]))
+        x = x + vnorm(np.concatenate(out, -1) @ lw["attn_out"].T, lw["attn_post_norm"])
+        out = mlp(vnorm(x, lw["ln2"]), lw["ffn_gate"], lw["ffn_up"], lw["ffn_down"], "gelu")
+        x = x + vnorm(out, lw["ffn_post_norm"])
+    cells = x.reshape(rows // pool, pool, columns // pool, pool, V_WIDTH).mean((1, 3))
+    x = cells.reshape(-1, V_WIDTH) * np.sqrt(V_WIDTH)
+    x = (x - w["v.std_bias"]) * w["v.std_scale"]
+    return vnorm(x) @ w["mm.input_projection.weight"].T
 
 
 def rotate_halves(z, cos, sin):
