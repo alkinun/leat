@@ -42,7 +42,8 @@ body.menu nav { display: none; } /* on a narrow screen, the menu shows it instea
 #conversations { flex: 1; overflow-y: auto; margin-top: 12px; }
 /* the pages beside the conversations, at the sidebar's foot */
 .place { display: flex; gap: 10px; align-items: center; padding: 8px 10px; border-radius: var(--round); }
-.place:hover, body.memory #remembered, body.files #filed, body.tasks #timed, body.settings #set {
+.place:hover, body.memory #remembered, body.files #filed, body.tasks #timed, body.settings #set,
+body.characters #cast {
   background: var(--bubble);
 }
 .conversation {
@@ -86,8 +87,11 @@ main.empty #greeting { display: block; margin-bottom: 28px; }
 
 /* a page, as the memory's, in place of a conversation */
 .page { display: none; flex: 1; overflow-y: auto; padding: 16px max(24px, calc(50% - 368px)); }
-body.memory #memory, body.files #files, body.tasks #tasks, body.settings #settings { display: block; }
-body:is(.memory, .files, .tasks, .settings) :is(#log, #composer, #greeting) { display: none; }
+body.memory #memory, body.files #files, body.tasks #tasks, body.characters #characters,
+body.settings #settings { display: block; }
+body:is(.memory, .files, .tasks, .characters, .settings) :is(#log, #composer, #greeting) {
+  display: none;
+}
 .page h1 { margin: 24px 0 8px; font: 400 30px/1.3 ui-serif, Georgia, serif; }
 .page > p { margin: 0 0 24px; color: var(--muted); }
 .page form { display: flex; gap: 8px; margin-bottom: 16px; }
@@ -335,3 +339,22 @@ body.gated #gate { display: grid; place-items: center; min-height: 100vh; paddin
   font-size: 14px;
 }
 body:not(.owner) .owned { display: none; }
+/* the household's characters, and the one a new chat is with */
+#character { flex-direction: column; align-items: stretch; }
+#character textarea {
+  padding: 10px 16px; border: 1px solid var(--line); border-radius: var(--round); resize: vertical;
+  background: var(--card); font: inherit; color: inherit;
+}
+#character .row { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+#presets { display: flex; flex-wrap: wrap; gap: 6px; }
+#presets button, #cast-list li button.talk, #with button {
+  padding: 4px 12px; border: 1px solid var(--line); border-radius: var(--round);
+  background: var(--card); font-size: 14px; color: var(--text);
+}
+#cast-list li > div { display: flex; flex-direction: column; gap: 2px; }
+#cast-list .meta { white-space: normal; }
+#cast-list li button.talk { visibility: visible; }
+#cast-list:empty::before { content: "None yet: add one below, or begin with one of these."; color: var(--muted); }
+#with:empty { display: none; }
+#with { display: flex; align-items: center; gap: 8px; padding: 4px 8px 0; color: var(--muted); font-size: 14px; }
+.conversation .with { color: var(--muted); }

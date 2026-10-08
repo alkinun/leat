@@ -30,6 +30,9 @@
   <button id="timed" class="place">
     <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Tasks
   </button>
+  <button id="cast" class="place">
+    <svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="4"/><path d="M2 21a7 7 0 0 1 14 0"/><path d="M16 4a4 4 0 0 1 0 8M19 21a7 7 0 0 0-3-5.7"/></svg>Characters
+  </button>
   <button id="filed" class="place">
     <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>Files
   </button>
@@ -73,6 +76,20 @@
       brief you every morning. <span id="notifying"></span></p>
     <ul id="scheduled"></ul>
   </section>
+  <section id="characters" class="page">
+    <h1>Characters</h1>
+    <p>Characters Leat plays, for everyone at home: a tutor, a language partner, someone to make up
+      stories with. They know what Leat remembers of you, but remember nothing of what you say to
+      them.</p>
+    <div id="cast-list"></div>
+    <h2>A new character</h2>
+    <form id="character">
+      <input id="character-name" placeholder="Their name" autocomplete="off" maxlength="40">
+      <textarea id="character-about" rows="4" maxlength="2000"
+        placeholder="Who they are and how they talk"></textarea>
+      <div class="row"><span id="presets"></span><button>Add</button></div>
+    </form>
+  </section>
   <section id="settings" class="page">
     <h1>Settings</h1>
     <h2>People and devices</h2>
@@ -91,6 +108,7 @@
   <div id="composer">
     <div class="box">
       <div id="attached"></div>
+      <div id="with"></div>
       <div class="row">
         <button id="attach" class="icon" title="Attach files">
           <svg viewBox="0 0 24 24"><path d="m21 12-8.5 8.5a5 5 0 0 1-7-7L14 5a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L15 8"/></svg>

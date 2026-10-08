@@ -16,6 +16,8 @@ let tasks = []; // the scheduled, the next due first: {id, prompt, schedule, con
 let telegram = null; // its bot, if connected, and the people allowed and asking
 let me = null; // the person whose this device is: {person, name, owner, device}
 let household = null; // the owner's to manage: its people and their devices, and those asking
+let characters = []; // the household's, which a new chat may be with
+let cast = null; // the character the next new chat is with, if one
 // the conversations whose turns ended while another was shown, as this device saw them
 const unread = new Set(JSON.parse(localStorage.getItem("leat.unread") ?? "[]"));
 let models = [], loading = null, unreachable = null; // the engine's, a model it loads, or why not
@@ -24,10 +26,12 @@ let think = localStorage.getItem("leat.think") === "true"; // as the user last c
 let views = []; // the shown messages' elements, by their indexes
 const opened = new Map(); // whether each turn's work is open, as the user left it
 // the pages beside the conversations, each a section of its own name, and their titles
-const PAGES = ["memory", "files", "tasks", "settings"];
-const TITLES = { memory: "Memory", files: "Files", tasks: "Tasks", settings: "Settings" };
+const PAGES = ["memory", "files", "tasks", "characters", "settings"];
+const TITLES = { memory: "Memory", files: "Files", tasks: "Tasks", characters: "Characters",
+  settings: "Settings" };
 
 $("new").onclick = () => {
+  cast = null;
   open(null);
   $("input").focus();
 };
@@ -36,6 +40,18 @@ $("remembered").onclick = () => turnTo("memory");
 $("filed").onclick = () => turnTo("files");
 $("timed").onclick = () => turnTo("tasks");
 $("set").onclick = () => turnTo("settings");
+$("cast").onclick = () => turnTo("characters");
+$("character").onsubmit = async (event) => {
+  event.preventDefault();
+  const name = $("character-name").value.trim(), about = $("character-about").value.trim();
+  if (!name || !about) return;
+  try {
+    await post("/api/characters", { name, about });
+    $("character-name").value = $("character-about").value = "";
+  } catch (error) {
+    status(error.message, true);
+  }
+};
 $("attach").onclick = () => pick(attach);
 $("upload").onclick = () => pick(upload);
 window.ondragover = (event) => event.preventDefault();
@@ -196,6 +212,10 @@ function handle(event) {
       telegram = event;
       renderTelegram();
       return;
+    case "characters":
+      characters = event.characters;
+      renderCharacters();
+      break;
     case "household":
       household = event;
       renderHousehold();
@@ -288,8 +308,10 @@ async function send() {
   try {
     const path = shown ? `/api/conversations/${shown.id}/messages` : "/api/conversations";
     const names = attached.map((a) => a.name);
-    const { id } = await (await post(path, { content, think, files: names })).json();
+    const body = { content, think, files: names, ...(!shown && cast ? { character: cast } : {}) };
+    const { id } = await (await post(path, body)).json();
     attached = [];
+    cast = null;
     renderAttached();
     if (shown?.id !== id) open(id);
   } catch (error) {
@@ -463,6 +485,59 @@ function renderHousehold() {
   box.replaceChildren(...(asking.length ? [requests] : []), ...people, how);
 }
 
+// characters one may add in a click, as a start
+const PRESETS = [
+  ["Tutor", "A patient tutor for any school subject. Asks what the learner knows already, explains one step at a time with an example, and asks a question to check before going on. Helps with homework without simply giving the answers."],
+  ["Language partner", "A friendly partner to practise a language with. Speaks only the language the user wants to practise, in simple sentences, and gently corrects their mistakes after each reply."],
+  ["Storyteller", "Makes up stories together with the user: begins one in the world they ask for, stops at the moments where they choose what happens next, and keeps every story kind and fit for children."],
+];
+
+// the household's characters, each to talk to in a new chat, and those to add in a click
+function renderCharacters() {
+  $("cast-list").replaceChildren(...characters.map((c) => {
+    const item = element("li"), about = element("div");
+    const brief = c.about.length > 140 ? `${c.about.slice(0, 140)}…` : c.about;
+    about.append(element("span", "", c.name), element("span", "meta", brief));
+    const talk = element("button", "talk", "Talk"), remover = element("button", "", "×");
+    talk.onclick = () => talkTo(c.id);
+    remover.title = "Remove";
+    remover.onclick = () => fetch(`/api/characters/${c.id}`, { method: "DELETE" });
+    item.append(about, talk, remover);
+    return item;
+  }));
+  const unadded = PRESETS.filter(([name]) => !characters.some((c) => c.name === name));
+  $("presets").replaceChildren(...unadded.map(([name, about]) => {
+    const add = element("button", "", `+ ${name}`);
+    add.type = "button";
+    add.onclick = () => post("/api/characters", { name, about }).catch((e) => status(e.message, true));
+    return add;
+  }));
+  renderWith();
+}
+
+// begins a new chat with a character
+function talkTo(id) {
+  open(null);
+  cast = id;
+  renderWith();
+  controls();
+  $("input").focus();
+}
+
+// whom the next new chat is with, if not Leat itself
+function renderWith() {
+  const c = !shown && characters.find((other) => other.id === cast);
+  if (!c) return $("with").replaceChildren();
+  const leave = element("button", "", "×");
+  leave.title = "Talk to Leat instead";
+  leave.onclick = () => {
+    cast = null;
+    renderWith();
+    controls();
+  };
+  $("with").replaceChildren(`With ${c.name}`, leave);
+}
+
 // Telegram's settings: how to make a bot and connect it, or the bot connected, and its people
 function renderTelegram() {
   const box = $("telegram");
@@ -601,6 +676,7 @@ function ready() {
 function render() {
   renderList();
   renderLog();
+  renderWith();
   controls();
 }
 
@@ -616,7 +692,9 @@ function renderList() {
       event.stopPropagation();
       remove(c);
     };
-    item.append(element("span", "", c.title), remover);
+    const title = element("span", "", c.title), played = characters.find((p) => p.id === c.character);
+    if (played) title.prepend(element("span", "with", `${played.name} · `));
+    item.append(title, remover);
     item.onclick = () => open(c.id);
     return item;
   }));
@@ -718,8 +796,9 @@ function controls() {
   const paged = PAGES.some((name) => document.body.classList.contains(name));
   if (!paged) document.title = shown?.title || "leat";
   $("main").classList.toggle("empty", !shown && !paged);
+  const played = characters.find((c) => c.id === cast);
   $("greeting").textContent = unreachable ? "The engine is not reachable"
-    : loading ? "Loading…" : model ? "How can I help?" : "Choose a model";
+    : loading ? "Loading…" : !model ? "Choose a model" : played ? `Talk to ${played.name}` : "How can I help?";
   $("think").classList.toggle("on", think);
   $("send").classList.toggle("stop", running);
   $("send").title = running ? "Stop" : "Send";
