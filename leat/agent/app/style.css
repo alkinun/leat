@@ -1,21 +1,21 @@
 :root {
   /* the theme's, as themes.mjs has Leat's, until it makes the app the one chosen */
   color-scheme: light dark;
-  --font: system-ui, sans-serif; --font-display: ui-serif, Georgia, serif; --display-weight: 400;
+  --font: system-ui, sans-serif; --font-display: system-ui, sans-serif; --display-weight: 500;
   --font-mono: ui-monospace, monospace; --size: 16px;
-  --round: 10px; --round-large: 24px; /* controls and code; bubbles, the composer, round buttons */
+  --round: 12px; --round-large: 22px; /* controls and code; bubbles, the composer, round buttons */
   --density: 1; /* the room around things, as a share of Leat's */
-  --page: #faf9f5; --side: #f3f1ea; --card: #fff; --bubble: #ece9e0; --line: #e3dfd4;
-  --text: #1f1e1d; --muted: #75736c; --accent: #c96442; --on-accent: #fff; --error: #b3261e;
-  --keyword: #a626a4; --string: #50a14f; --number: #986801;
-  --shadow: 0 4px 20px rgb(0 0 0 / 0.06);
+  --page: #f7f8f7; --side: #eff2f1; --card: #fff; --bubble: #e6eeec; --line: #dfe5e3;
+  --text: #15201e; --muted: #64716e; --accent: #0f7b72; --on-accent: #fff; --error: #c2362b;
+  --keyword: #7e4ccb; --string: #1f7a4d; --number: #b0631a;
+  --shadow: 0 2px 12px rgb(15 40 36 / 0.06);
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --page: #262624; --side: #1f1e1d; --card: #30302e; --bubble: #3a3936; --line: #3e3d39;
-    --text: #ece9e1; --muted: #a3a097; --accent: #d97757; --on-accent: #fff; --error: #f2847b;
-    --keyword: #c678dd; --string: #98c379; --number: #d19a66;
-    --shadow: 0 4px 20px rgb(0 0 0 / 0.06);
+    --page: #121817; --side: #0d1211; --card: #1a2120; --bubble: #212c2a; --line: #28322f;
+    --text: #e4ecea; --muted: #8d9b98; --accent: #5cc8b6; --on-accent: #06221e; --error: #f2877c;
+    --keyword: #c4a1ff; --string: #8fd6a8; --number: #f0b37a;
+    --shadow: 0 2px 12px rgb(0 0 0 / 0.3);
   }
 }
 * { box-sizing: border-box; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }

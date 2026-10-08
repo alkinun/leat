@@ -123,8 +123,10 @@ def test_stylesheet(run):
     leat = run["themes"][0]
     system, dark = run["system"], run["dark"]
     assert "@media (prefers-color-scheme: dark)" in system and "@media" not in dark
-    assert f"--accent: {leat['dark']['accent']};" in dark and "--round-large: 24px;" in dark
-    assert "--on-accent: #fff;" in dark and "--font-display: ui-serif, Georgia, serif;" in dark
+    assert f"--accent: {leat['dark']['accent']};" in dark and "color-scheme: dark;" in dark
+    assert f"--on-accent: {leat['dark']['onAccent']};" in dark
+    assert f"--round-large: {leat['radiusLarge']}px;" in dark
+    assert f"--font-display: {leat['displayFont']};" in dark
 
 
 def test_defaults(run):

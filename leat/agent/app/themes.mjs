@@ -30,21 +30,22 @@ const PIXELS = new Set(["size", "radius", "radiusLarge"]);
 const SANS = "system-ui, sans-serif";
 const MONO = "ui-monospace, monospace";
 
+// Leat's own, after its name, a channel that brings water to a mill: cool stone, and water's teal
 const LEAT = {
   name: "Leat",
-  font: SANS, displayFont: "ui-serif, Georgia, serif", displayWeight: 400, codeFont: MONO,
-  size: 16, radius: 10, radiusLarge: 24, density: 1,
+  font: SANS, displayFont: SANS, displayWeight: 500, codeFont: MONO,
+  size: 16, radius: 12, radiusLarge: 22, density: 1,
   light: {
-    page: "#faf9f5", side: "#f3f1ea", card: "#fff", bubble: "#ece9e0", line: "#e3dfd4",
-    text: "#1f1e1d", muted: "#75736c", accent: "#c96442", onAccent: "#fff", error: "#b3261e",
-    keyword: "#a626a4", string: "#50a14f", number: "#986801",
-    shadow: "0 4px 20px rgb(0 0 0 / 0.06)",
+    page: "#f7f8f7", side: "#eff2f1", card: "#fff", bubble: "#e6eeec", line: "#dfe5e3",
+    text: "#15201e", muted: "#64716e", accent: "#0f7b72", onAccent: "#fff", error: "#c2362b",
+    keyword: "#7e4ccb", string: "#1f7a4d", number: "#b0631a",
+    shadow: "0 2px 12px rgb(15 40 36 / 0.06)",
   },
   dark: {
-    page: "#262624", side: "#1f1e1d", card: "#30302e", bubble: "#3a3936", line: "#3e3d39",
-    text: "#ece9e1", muted: "#a3a097", accent: "#d97757", onAccent: "#fff", error: "#f2847b",
-    keyword: "#c678dd", string: "#98c379", number: "#d19a66",
-    shadow: "0 4px 20px rgb(0 0 0 / 0.06)",
+    page: "#121817", side: "#0d1211", card: "#1a2120", bubble: "#212c2a", line: "#28322f",
+    text: "#e4ecea", muted: "#8d9b98", accent: "#5cc8b6", onAccent: "#06221e", error: "#f2877c",
+    keyword: "#c4a1ff", string: "#8fd6a8", number: "#f0b37a",
+    shadow: "0 2px 12px rgb(0 0 0 / 0.3)",
   },
 };
 
