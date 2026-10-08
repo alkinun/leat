@@ -111,15 +111,19 @@ def forget(agent: "Agent", context: Context, number: int | str) -> Result:
 
 
 def said(evidence: str, messages: list[dict[str, Any]], also: Iterable[str] = ()) -> bool:
-    """Whether the user said these words, whatever their case and punctuation, in their messages,
-    not a scheduled task's, or in the texts `also`, as a memory that was evidenced once."""
+    """Whether the user said these words, two at least, whole, whatever their case and
+    punctuation, in their messages, not a scheduled task's, or in the texts `also`, as a memory
+    that was evidenced once: a word or a part of one is in almost any message."""
     told = [
         m["content"] for m in messages if m["role"] == "user" and "task" not in m.get("info", {})
     ]
-    words = " ".join(re.findall(r"\w+", evidence.lower()))
-    return bool(words) and any(
-        words in " ".join(re.findall(r"\w+", text.lower())) for text in [*told, *also]
-    )
+    words = re.findall(r"\w+", evidence.lower())
+    return len(words) > 1 and any(f" {' '.join(words)} " in _spoken(t) for t in [*told, *also])
+
+
+def _spoken(text: str) -> str:
+    # a text's words, lowercase, each between spaces
+    return f" {' '.join(re.findall(r'\w+', text.lower()))} "
 
 
 def recall(agent: "Agent", context: Context, query: str, days: int | str | None) -> Result:

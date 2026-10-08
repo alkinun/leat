@@ -354,7 +354,8 @@ def test_said():
                 {"role": "user", "content": "Call mum", "info": {"task": 1}}]  # fmt: skip
     assert memory.said("a nurse in izmir", messages)
     assert not memory.said("nice", messages) and not memory.said("call mum", messages)
-    assert not memory.said("...", messages)
+    assert not memory.said("...", messages) and not memory.said("nurse", messages)
+    assert not memory.said("a nur", messages)  # parts of words
     assert memory.said("going to Rome", messages, ["The user is going to Rome in May."])
 
 

@@ -256,7 +256,13 @@ class _WebHTTPS(urllib.request.HTTPSHandler):
 
 
 _TLS = ssl.create_default_context()
-_OPENER = urllib.request.build_opener(_WebHTTP, _WebHTTPS)
+# the web's alone: no handlers of ftp:, file: or data:, to which a page could redirect past the
+# check of addresses, nor of proxies
+_OPENER = urllib.request.OpenerDirector()
+for _handler in (_WebHTTP(), _WebHTTPS(), urllib.request.HTTPRedirectHandler(),
+                 urllib.request.HTTPDefaultErrorHandler(), urllib.request.HTTPErrorProcessor(),
+                 urllib.request.UnknownHandler()):  # fmt: skip
+    _OPENER.add_handler(_handler)
 
 
 class _Text(HTMLParser):

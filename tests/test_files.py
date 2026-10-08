@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from leat.agent import workspace as workspace_module
 from leat.agent.agent import Agent, NotFound
 from leat.agent.client import Client
 from leat.agent.context import message as _api
@@ -129,6 +130,10 @@ except OSError:
     assert result.content.endswith("Files made or changed: made.txt")
     assert "It failed, with exit status 1." in files.run(workspace, "1 / 0").content
     assert workspace.run("while True: pass", timeout=1).status is None
+    # a loop of prints, read as it comes, of which the start and the end are kept
+    printed = workspace.run("while True: print('x' * 1000)", timeout=1)
+    assert printed.status is None and "bytes left out" in printed.output
+    assert len(printed.output) < workspace_module.OUTPUT + 100
 
 
 @documents

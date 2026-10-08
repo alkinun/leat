@@ -117,10 +117,13 @@ def condition(text: str | None) -> str | None:
 
 def first(at: datetime.datetime, repeat: str, now: datetime.datetime) -> datetime.datetime:
     """When a task first runs: at its time, or, of one that repeats, at the first of its times
-    after now, as "every morning at 8" set in the evening begins tomorrow."""
+    after now, as "every morning at 8" set in the evening begins tomorrow, and of weekdays on one,
+    as one set on Friday for 8 begins on Monday."""
     day = at.day  # of the month, which a monthly one keeps to past shorter months
-    while repeat in REPEATS and repeat != "once" and at <= now:
+    weekend = repeat == "weekdays" and at.weekday() >= 5
+    while repeat in REPEATS and repeat != "once" and (at <= now or weekend):
         at = following(at, repeat, day) or at
+        weekend = False  # weekdays' following ones are
     return at
 
 

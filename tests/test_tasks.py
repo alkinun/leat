@@ -49,6 +49,9 @@ def test_first():
     assert tasks.first(morning, "daily", NOW) == datetime.datetime(2026, 10, 8, 8)
     assert tasks.first(morning, "weekly", NOW) == datetime.datetime(2026, 10, 14, 8)
     assert tasks.first(morning, "once", NOW) == morning
+    # of weekdays, one set for a weekend begins on Monday
+    saturday = datetime.datetime(2026, 10, 10, 8)
+    assert tasks.first(saturday, "weekdays", NOW) == datetime.datetime(2026, 10, 12, 8)
     # a monthly one on the 31st, set long after, keeps to it past shorter months
     long_ago = datetime.datetime(2026, 1, 31, 8)
     assert tasks.first(long_ago, "monthly", NOW) == datetime.datetime(2026, 10, 31, 8)

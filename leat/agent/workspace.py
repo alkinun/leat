@@ -11,13 +11,15 @@ that a file of the workspace's, as docx.py, cannot take a library's place, and w
 import os
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 TIMEOUT = 120  # seconds a run may take
 MEMORY = 4 << 30  # bytes of memory a run may take
-OUTPUT = 20000  # characters of a run's output kept, its start and its end
+OUTPUT = 20000  # bytes of a run's output kept, its start and its end
+LONGEST = 50_000_000  # bytes of a document's text kept, which is read whole
 # the sandbox's view of the box: the system, read-only, and fonts' settings, for charts
 _SYSTEM = [
     "--ro-bind", "/usr", "/usr", "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64",
@@ -85,7 +87,8 @@ class Workspace:
         self, code: str, *args: str, timeout: float = TIMEOUT, kept: int | None = OUTPUT
     ) -> Ran:
         """Runs Python code in the sandbox, in the workspace, with `args` as its sys.argv[1:]; of
-        its output, `kept` characters at most, its start and its end, or all of it of None."""
+        its output, `kept` bytes at most, its start and its end, or of None all of it to
+        LONGEST."""
         if shutil.which("bwrap") is None:
             raise RuntimeError("the sandbox needs bubblewrap, which is not installed")
         python, mounts = "/usr/bin/python3", []
@@ -100,19 +103,38 @@ class Workspace:
             "--setenv", "HOME", "/tmp", "--setenv", "MPLBACKEND", "Agg",
             python, "-I", "-B", "-c", code, *args,
         ]  # fmt: skip
-        try:
-            done = subprocess.run(
-                command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout,
-                env={"PATH": os.environ.get("PATH", "/usr/bin")},
-            )  # fmt: skip
-        except subprocess.TimeoutExpired as e:
-            return Ran(None, _kept((e.output or b"").decode(errors="replace"), kept))
-        return Ran(done.returncode, _kept(done.stdout.decode(errors="replace"), kept))
+        env, stopped = {"PATH": os.environ.get("PATH", "/usr/bin")}, threading.Event()
+        out = subprocess.PIPE
+        with subprocess.Popen(command, stdout=out, stderr=subprocess.STDOUT, env=env) as process:
+
+            def stop() -> None:  # out of time
+                stopped.set()
+                process.kill()
+
+            timer = threading.Timer(timeout, stop)
+            timer.start()
+            assert process.stdout is not None
+            output = _kept(process.stdout, kept)
+            status = process.wait()
+            timer.cancel()
+        return Ran(None if stopped.is_set() else status, output)
 
 
-def _kept(output: str, n: int | None) -> str:
-    # an output's start and end, if it is longer than n characters
-    if n is None or len(output) <= n:
-        return output
+def _kept(stream: IO[bytes], n: int | None) -> str:
+    # a process's output, read as it comes, which never waits on a full pipe: its start and end
+    # if it is longer than n bytes, or of None its start to LONGEST bytes, so that a loop of
+    # prints never fills leat's memory
+    keep = LONGEST if n is None else n
+    head, tail, total = bytearray(), bytearray(), 0
+    for chunk in iter(lambda: stream.read(1 << 16), b""):
+        total += len(chunk)
+        head += chunk[: keep - len(head)]
+        if n is not None:
+            tail = (tail + chunk)[-keep:]
+    if total <= keep:
+        return head.decode(errors="replace")
+    if n is None:
+        return f"{head.decode(errors='replace')}\n… ({total - keep} bytes left out)"
     half = n // 2
-    return f"{output[:half]}\n… ({len(output) - n} characters left out) …\n{output[-half:]}"
+    start, end = head[:half].decode(errors="replace"), tail[-half:].decode(errors="replace")
+    return f"{start}\n… ({total - 2 * half} bytes left out) …\n{end}"

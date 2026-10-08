@@ -2,6 +2,7 @@ import json
 import os
 import socket
 import threading
+import urllib.error
 import urllib.parse
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -49,9 +50,10 @@ class _Site(BaseHTTPRequestHandler):
         if path == "/search":
             self.queries.append(urllib.parse.parse_qs(query))
             return self._send("application/json", json.dumps({"results": RESULTS}))
-        if path == "/away":
+        if path in ("/away", "/ftp"):  # redirects to this network, and to FTP
             self.send_response(302)
-            self.send_header("Location", "http://10.0.0.1/")
+            where = "http://10.0.0.1/" if path == "/away" else "ftp://127.0.0.1:9/secret"
+            self.send_header("Location", where)
             return self.end_headers()
         kinds = {"/page": "text/html", "/article": "text/html", "/long": "text/html",
                  "/text": "text/plain", "/odd": "text/plain; charset=klingon"}  # fmt: skip
@@ -135,6 +137,8 @@ def test_fetch_the_web_alone(site, monkeypatch):
     allow(monkeypatch, site)
     with pytest.raises(ValueError, match="10.0.0.1 is on this network"):
         web.fetch(f"{site}/away")
+    with pytest.raises(urllib.error.URLError, match="unknown url type: ftp"):  # no check of FTP's
+        web.fetch(f"{site}/ftp")
     # a name of an address on this network, refused before any connection is made to it
     monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: [(0, 0, 0, "", ("10.0.0.2", 80))])
     with pytest.raises(ValueError, match="rebinding.example is on this network"):
