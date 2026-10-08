@@ -273,7 +273,7 @@ you test it before the next.
 | 9. Characters | personas and their chats | roleplay; a tutor |
 | 10. Voice and photos | with the engine's work on them | talking to it; sending a photo |
 
-Done: steps 1 to 5, and 7.
+Done: steps 1 to 7, with memory v3 and the context's fixes of [research.md](research.md).
 
 Alongside, the box track: first boot and setup, `leat.local` on the network, HTTPS on the home
 network (a phone's microphone, notifications and home-screen install all need it), updates, and
