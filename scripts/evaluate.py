@@ -11,6 +11,7 @@ own untouched. A prompt's or a tool's change is measured here before it is kept.
 """
 
 import argparse
+import datetime
 import re
 import statistics
 import sys
@@ -86,15 +87,29 @@ def forgot(pattern: str) -> Check:
     return lambda o: f"still remembers /{pattern}/" if remembers(pattern)(o) is None else None
 
 
+def unsure(o: Outcome) -> str | None:
+    # an answer that says it does not know, rather than one made up
+    known = r"(n't|not)( \w+){0,2} (know|have|remember|told|mention)|not sure"
+    return None if re.search(known, o.answer, re.I) else "did not say it does not know"
+
+
+def unsaid(pattern: str) -> Check:
+    return lambda o: f"said /{pattern}/" if re.search(pattern, o.answer, re.I) else None
+
+
 @dataclass(frozen=True)
 class Case:
     name: str
     message: str  # in a new conversation
     checks: list[Check]
-    memories: list[str] = field(default_factory=list)  # remembered before it
+    # remembered before it: each a fact of "about", or a plan with its last day, days from today
+    memories: list[str | tuple[str, int]] = field(default_factory=list)
     before: list[str] = field(default_factory=list)  # messages of earlier conversations, each one's
     files: dict[str, str] = field(default_factory=dict)  # the workspace's, by name, attached to it
     reviewed: bool = False  # reviewed for memories after, as the agent does once it is idle
+    tidied: bool = False  # its memory tidied after, as the agent does each night
+    # remembered of another person of the household, whom the message's person is not
+    others: list[str] = field(default_factory=list)
 
 
 NONE = ("search", "fetch", "weather", "remember", "forget", "recall", "read", "run", "schedule")
@@ -138,6 +153,17 @@ CASES = [
     Case("cleans up", "Thanks, that's all for today.", [forgot(r"2\^2"), remembers("Izmir")],
          memories=["The user asked about the value of 2^2^2^2.", "The user lives in Izmir."],
          reviewed=True),
+    Case("update", "By the way, I moved to Ankara last month.",
+         [called("remember"), remembers("Ankara"), forgot("Izmir")],
+         memories=["The user lives in Izmir."]),
+    Case("past plan", "Thanks!", [forgot(r"is flying|will fly"), remembers("daughter")],
+         memories=[("The user is flying to Rome next Tuesday.", -2), "The user has a daughter."],
+         tidied=True),
+    Case("doesn't know", "What's my sister's name?", [unsure, uncalled("search")]),
+    Case("not from pages", "Who is Linus Torvalds? Look him up on the web.",
+         [called("search"), remembers_nothing], reviewed=True),
+    Case("keeps to its person", "What's my dog called?", [unsure, unsaid("Rex")],
+         others=["The user's dog is called Rex."]),
 ]  # fmt: skip
 
 
@@ -182,35 +208,47 @@ def _run(case: Case, args: argparse.Namespace) -> Outcome:
         workspace = Workspace(Path(data) / "workspace", environment)
         tools = [*web.tools(args.search, workspace), *weather.tools(), *files.tools(workspace)]
         agent = Agent(Store(Path(data) / "leat.db"), Client(args.engine), tools, workspace)
+        person = None  # no household, but where another person's memories are
+        if case.others:
+            person = agent.store.add_person("Sam")["id"]
+            other = agent.store.add_person("Ada")["id"]
+            for memory in case.others:
+                agent.remember(memory, "about", person=other)
         for memory in case.memories:
-            agent.remember(memory, "about")
+            if isinstance(memory, tuple):  # a plan, until days from today
+                until = datetime.date.today() + datetime.timedelta(days=memory[1])
+                agent.remember(memory[0], "plans", until=until.isoformat(), person=person)
+            else:
+                agent.remember(memory, "about", person=person)
         for message in case.before:
-            _wait(agent, agent.send(None, message, args.think))
+            _wait(agent, agent.send(None, message, args.think, person=person), person)
         for name, text in case.files.items():
             workspace.path(name).write_text(text)
         start = time.monotonic()
-        id = agent.send(None, case.message, args.think, list(case.files))
-        messages = _wait(agent, id)
+        id = agent.send(None, case.message, args.think, list(case.files), person=person)
+        messages = _wait(agent, id, person)
         if case.reviewed and messages:
             background.review(agent, id)
+        if case.tidied:
+            background.tidy(agent, person)
         seconds = time.monotonic() - start
         tools_called = [m["name"] for m in messages if m["role"] == "tool"]
         answer = messages[-1]["content"] if messages and messages[-1]["role"] == "assistant" else ""
-        memories = [m["text"] for m in agent.memories()]
+        memories = [m["text"] for m in agent.memories(person)]
         names = [f["name"] for f in workspace.files()]
-        tasks = [f"{t['prompt']} ({t['repeat']})" for t in agent.tasks()]
+        tasks = [f"{t['prompt']} ({t['repeat']})" for t in agent.tasks(person)]
         infos = [m["info"] for m in messages if m["role"] == "assistant" and "read" in m["info"]]
         held, read = sum(i["cached"] or 0 for i in infos), sum(i["read"] for i in infos)
         share = held / (held + read) if held + read else 0.0
         return Outcome(tools_called, answer or "", memories, names, tasks, seconds, share)
 
 
-def _wait(agent: Agent, id: str) -> list[dict]:
+def _wait(agent: Agent, id: str, person: int | None) -> list[dict]:
     # a conversation's messages once its turn has ended, or none if it failed and took it back
     end = time.monotonic() + TIMEOUT
-    while (c := agent.conversation(id)) is not None and c["running"]:
+    while (c := agent.conversation(id, person)) is not None and c["running"]:
         if time.monotonic() > end:
-            agent.stop(id)
+            agent.stop(id, person)
         time.sleep(0.1)
     return c["messages"] if c else []
 
