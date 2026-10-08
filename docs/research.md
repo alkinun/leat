@@ -187,6 +187,14 @@ the model or persona silently.
 
 ## 4. The plan
 
+Done on 8 October, as below unless said: memory v3, every part but local embeddings; the context's
+fixes 1 to 3 and 6, with every page cleared saying where it is saved; household accounts; readers
+and research; and of the features, characters, the household's lists, checks that tell only when
+they find something, children's rules, and Leat in a Telegram group. The evaluation passes 50 of
+52, the misses an introduction now and then, which the review catches. Left: compaction in big
+steps and summarized in place (4), the engine's states at more points (5), a 64k window on the
+Strix Halo (7), local embeddings for recall; and voice and photos.
+
 ### Memory v3: small, dated, checked, undoable, per person
 
 - **Facts with dates.** Each memory keeps when it was made and last confirmed; a plan has the date
