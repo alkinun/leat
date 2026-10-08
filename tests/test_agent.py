@@ -22,7 +22,7 @@ from leat.agent import background, context
 from leat.agent.agent import LAST, Agent, Busy, NotFound
 from leat.agent.client import Client, EngineError
 from leat.agent.context import message as _api
-from leat.agent.server import Server
+from leat.agent.server import BODY, Server
 from leat.agent.store import Store
 from leat.agent.tools import Result, Tool, memory, strings
 
@@ -1376,6 +1376,12 @@ def test_trust(server, engine):
     hi = {"content": "Hi"}
     assert request(url, "POST", hi, Origin="http://evil.example")[0] == 403
     assert request(url, "POST", hi, Origin=f"http://{own}")[0] == 200
+    # nor a body larger than any request's, which it does not read: it may come from anyone
+    connection = http.client.HTTPConnection(own)
+    connection.putrequest("POST", "/api/pairings")
+    connection.putheader("Content-Length", str(BODY + 1))
+    connection.endheaders()
+    assert connection.getresponse().status == 413
 
 
 def test_events(server, agent, engine):

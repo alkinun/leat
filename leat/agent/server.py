@@ -59,6 +59,7 @@ _TYPES = {
 }
 _KEEP_ALIVE = 15  # seconds between comments on a quiet event stream, which find its client gone
 UPLOAD = 100 << 20  # bytes of a file uploaded at most
+BODY = 10 << 20  # bytes of a request's JSON at most, which may come before its device is known
 COOKIE = "leat"  # the cookie of a device's secret
 _YEARS = 10 * 365 * 86400  # seconds a device keeps its cookie: till it is unpaired
 # the types of the workspace's files a browser shows in the page; it downloads the others, as a page
@@ -146,7 +147,9 @@ class _Handler(BaseHTTPRequestHandler):
             # a POST, of this server's page alone: a link another gave could log a browser in
             return self._joined(match[1])
         with self._answering():
-            body = json.loads(self.rfile.read(self._length()))
+            if (size := self._length()) > BODY:
+                return self._error(413, f"a request may be {BODY >> 20} MB at most")
+            body = json.loads(self.rfile.read(size))
             if not isinstance(body, dict):
                 raise ValueError("the body must be a JSON object")
             if path == "/api/setup":  # the household's first person, its owner
