@@ -1,6 +1,7 @@
 """Measures how the agent does what people ask of it: whether it calls the tools it should, says
 what it should, and remembers and forgets what it should, each case run several times, in a state
-of its own. Prints a Markdown table of each case's passes and mean time.
+of its own. Prints a Markdown table of each case's passes, mean time, and the share of the
+prompts' tokens the engine's cache held.
 
     uv run python scripts/evaluate.py [--engine http://127.0.0.1:8080] [-n 3] [--think] [-k name]
 
@@ -43,6 +44,7 @@ class Outcome:
     files: list[str]
     tasks: list[str]  # each its prompt and how often it repeats, as "Call Ada (once)"
     seconds: float
+    cached: float  # of the prompts' tokens, the share the engine's cache held
 
 
 Check = Callable[[Outcome], str | None]  # why an outcome fails, or None if it passes
@@ -154,20 +156,22 @@ def main() -> None:
     cases = [case for case in CASES if not args.k or args.k in case.name]
     rows, passed = [], 0
     for case in cases:
-        failures, seconds = [], []
+        failures, seconds, cached = [], [], []
         for _ in range(args.runs):
             outcome = _run(case, args)
             seconds.append(outcome.seconds)
+            cached.append(outcome.cached)
             why = [w for check in case.checks if (w := check(outcome))]
             failures += why[:1]
             print(f"{case.name}: {why[0] if why else 'passed'}", file=sys.stderr, flush=True)
         passed += args.runs - len(failures)
         failed = "; ".join(sorted(set(failures)))
         rows.append(f"| {case.name} | {args.runs - len(failures)}/{args.runs} | "
-                    f"{statistics.mean(seconds):.1f} | {failed} |")  # fmt: skip
+                    f"{statistics.mean(seconds):.1f} | {statistics.mean(cached):.0%} | "
+                    f"{failed} |")  # fmt: skip
     mode = "thinking" if args.think else "not thinking"
     print(f"\n{passed} of {len(cases) * args.runs} passed, {mode}\n")
-    print("| case | passed | mean s | failures |\n|---|---:|---:|---|")
+    print("| case | passed | mean s | cached | failures |\n|---|---:|---:|---:|---|")
     print("\n".join(rows))
 
 
@@ -195,7 +199,10 @@ def _run(case: Case, args: argparse.Namespace) -> Outcome:
         memories = [m["text"] for m in agent.memories()]
         names = [f["name"] for f in workspace.files()]
         tasks = [f"{t['prompt']} ({t['repeat']})" for t in agent.tasks()]
-        return Outcome(tools_called, answer or "", memories, names, tasks, seconds)
+        infos = [m["info"] for m in messages if m["role"] == "assistant" and "read" in m["info"]]
+        held, read = sum(i["cached"] or 0 for i in infos), sum(i["read"] for i in infos)
+        share = held / (held + read) if held + read else 0.0
+        return Outcome(tools_called, answer or "", memories, names, tasks, seconds, share)
 
 
 def _wait(agent: Agent, id: str) -> list[dict]:
