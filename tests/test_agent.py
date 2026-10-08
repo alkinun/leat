@@ -99,16 +99,6 @@ class _FakeHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
-@pytest.fixture
-def engine() -> Iterator[FakeEngine]:
-    engine = FakeEngine()
-    threading.Thread(target=engine.serve_forever, args=(0.01,), daemon=True).start()
-    yield engine
-    engine.released.set()
-    engine.shutdown()
-    engine.server_close()
-
-
 def echo(context, text: str) -> Result:
     return Result(f"echo: {text}", {"echoed": text})
 

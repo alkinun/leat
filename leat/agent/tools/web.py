@@ -10,8 +10,14 @@ the sandbox, where a page made to attack a parser attacks nothing else, or of it
 menus, without the sandbox's environment; whole up to a budget, or its start. The page is saved in
 the workspace, to read on, or again once the conversation has cleared it to make room. Each source
 is numbered, across the conversation, for the model to cite.
+
+A page read for a question is read by a reader, as Claude's research and Hermes Agent's delegation
+read theirs: the model, in a conversation of its own, which says what the page says of it, so that
+the conversation takes those findings, not the page, and stays small. The model's calls run at once,
+so its readers do, the engine batching them.
 """
 
+import contextlib
 import hashlib
 import http.client
 import ipaddress
@@ -24,7 +30,8 @@ import urllib.request
 from html.parser import HTMLParser
 from typing import Any
 
-from leat.agent.tools import Context, Result, Tool, strings
+from leat.agent.client import Client, EngineError
+from leat.agent.tools import Context, Result, Tool, schema, strings
 from leat.agent.workspace import Workspace
 
 RESULTS = 6  # search results the model reads
@@ -57,11 +64,24 @@ BLOCKS = {
     "section", "article", "main", "table", "ul", "ol", "dl", "dt", "dd", "figcaption",
 }  # fmt: skip
 _AGENT = "Mozilla/5.0 (compatible; leat)"
+WHOLE = (
+    4000  # characters of a page read whole even for a question, as its findings would be no less
+)
+READER = 24000  # characters of a page a reader reads at most, its start
+FOUND = 600  # tokens of a reader's findings at most
+# a reader's instructions, of a page and a question
+READING = """\
+You read a web page for Leat, an assistant, who must answer a question. Say what the page says \
+that answers it: the facts, numbers, names and dates, briefly, quoting what matters most word for \
+word. If the page does not answer it, say so in a line. Add nothing the page does not say."""
 
 
-def tools(searxng: str, workspace: Workspace | None = None) -> list[Tool]:
+def tools(
+    searxng: str, workspace: Workspace | None = None, reader: Client | None = None
+) -> list[Tool]:
     """search, through the SearXNG at `searxng`, and fetch, which reads pages in the sandbox of
-    `workspace`, and saves them there, if given."""
+    `workspace`, and saves them there, if given, and reads them for a question by the model
+    `reader` serves, if given."""
     return [
         Tool(
             "search",
@@ -71,9 +91,16 @@ def tools(searxng: str, workspace: Workspace | None = None) -> list[Tool]:
         ),
         Tool(
             "fetch",
-            "Read a web page, its content as markdown, numbered",
-            strings(url="the page's address, as a search result's"),
-            lambda context, url: fetch(url, workspace, context),
+            "Read a web page, numbered: what it says of a question, or the page itself",
+            schema(
+                url=("string", "the page's address, as a search result's"),
+                question=(
+                    "string",
+                    "what you want the page to answer; without one, the page "
+                    "itself, for one the user asked you to read",
+                ),
+            ),  # fmt: skip
+            lambda context, url, question=None: fetch(url, workspace, context, question, reader),
         ),
     ]
 
@@ -98,7 +125,10 @@ def search(searxng: str, query: str, context: Context | None = None) -> Result:
     return Result(content or "No results.", {"query": query, "results": found})
 
 
-def fetch(url: str, workspace: Workspace | None = None, context: Context | None = None) -> Result:
+def fetch(
+    url: str, workspace: Workspace | None = None, context: Context | None = None,
+    question: str | None = None, reader: Client | None = None,
+) -> Result:  # fmt: skip
     if urllib.parse.urlsplit(url).scheme not in ("http", "https"):
         raise ValueError(f"not a web page's address: {url}")
     request = urllib.request.Request(url, headers={"User-Agent": _AGENT})
@@ -117,12 +147,29 @@ def fetch(url: str, workspace: Workspace | None = None, context: Context | None 
     text = _absolute(text.strip(), final) or "The page has no text."
     n = context.cite(final, title) if context else 0
     saved = _save(workspace, final, text) if workspace is not None else None
+    head = f"[{n}] {title}" if n else title
+    info = {"url": final, "title": title, "n": n} | ({"saved": saved} if saved else {})
+    if question and reader is not None and len(text) > WHOLE:
+        with contextlib.suppress(EngineError):  # read as it is, if the engine cannot
+            found = _read(reader, question, f"{title}, {final}", text)
+            whole = f" The whole page is saved at {saved}." if saved else ""
+            said = f"{found}\n\n(What the page says of: {question}.{whole})"
+            return Result(f"{head}\n{final}\n\n{said}".strip(), info | {"question": question})
     if (rest := len(text) - PAGE) > 0:
         more = f": read {saved} from start={PAGE} for them" if saved else ""
         text = f"{text[:PAGE]}\n\n(The page goes on, {rest} characters more{more}.)"
-    head = f"[{n}] {title}" if n else title
-    info = {"url": final, "title": title, "n": n} | ({"saved": saved} if saved else {})
     return Result(f"{head}\n{final}\n\n{text}".strip(), info)
+
+
+def _read(reader: Client, question: str, page: str, text: str) -> str:
+    # what a page says of a question, as the model reads it in a conversation of its own
+    body = {
+        "messages": [{"role": "system", "content": READING},
+                     {"role": "user", "content": f"The question: {question}\n\nThe page, "
+                      f"{page}:\n\n{text[:READER]}"}],
+        "max_tokens": FOUND, "temperature": 0.3, "chat_template_kwargs": {"enable_thinking": False},
+    }  # fmt: skip
+    return reader.reply(body)["content"].strip() or "The page says nothing of it."
 
 
 def _readable(html: str, url: str, workspace: Workspace | None) -> tuple[str, str]:

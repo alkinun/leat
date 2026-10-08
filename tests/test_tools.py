@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from leat.agent.client import Client
 from leat.agent.tools import Context, weather, web
 from leat.agent.workspace import Workspace
 
@@ -205,6 +206,29 @@ def test_fetch_long(site, monkeypatch, tmp_path):
     assert workspace.files() == []  # hidden, of the user's files
     assert web._absolute("[a](/b) [c](d) [e](https://f/) [g](#h)", "https://x.org/y/z") == (
         "[a](https://x.org/b) [c](https://x.org/y/d) [e](https://f/) [g](#h)")  # fmt: skip
+
+
+def test_fetch_for_a_question(site, monkeypatch, tmp_path, engine):
+    # a long page read for a question by a reader, the model in a conversation of its own, whose
+    # findings the conversation takes, the page saved; a short one, or one the engine cannot
+    # read, as it is
+    allow(monkeypatch, site)
+    workspace, reader = Workspace(tmp_path), Client(engine.url)
+    engine.replies.put([{"content": "It stays open late on Thursdays."}])
+    result = web.fetch(f"{site}/long", workspace, numbering(), "When is it open late?", reader)
+    assert result.content.startswith(f"[1] The story - News\n{site}/long\n\nIt stays open late")
+    assert result.content.endswith("(What the page says of: When is it open late?. The whole page "
+                                   f"is saved at {result.info['saved']}.)")  # fmt: skip
+    asked = engine.requests[-1]["messages"]
+    assert asked[0]["content"] == web.READING and "Paragraph 0" in asked[1]["content"]
+    assert len(asked[1]["content"]) < web.READER + 200  # the page's start
+    assert result.info["question"] == "When is it open late?"
+    assert web.fetch(f"{site}/page", workspace, None, "What?", reader).content.endswith("An item")
+    engine.replies.put("the engine is busy")  # read as it is
+    assert (
+        "(The page goes on" in web.fetch(f"{site}/long", workspace, None, "When?", reader).content
+    )
+    assert len(engine.requests) == 2
 
 
 @pytest.mark.skipif(not os.environ.get("LEAT_SANDBOX"), reason="needs LEAT_SANDBOX")

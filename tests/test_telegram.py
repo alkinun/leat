@@ -18,7 +18,7 @@ from leat.agent.client import Client
 from leat.agent.store import Store
 from leat.agent.tools import files
 from leat.agent.workspace import Workspace
-from tests.test_agent import HOLD, FakeEngine, call, request, serving, until
+from tests.test_agent import HOLD, call, request, serving, until
 
 TOKEN, OTHER = "123:ok", "789:ok"  # two bots' tokens
 ME, STRANGER = (
@@ -106,15 +106,6 @@ def bots() -> Iterator[FakeBots]:
     threading.Thread(target=bots.serve_forever, args=(0.01,), daemon=True).start()
     yield bots
     bots.shutdown()
-
-
-@pytest.fixture
-def engine() -> Iterator[FakeEngine]:
-    engine = FakeEngine()
-    threading.Thread(target=engine.serve_forever, args=(0.01,), daemon=True).start()
-    yield engine
-    engine.released.set()
-    engine.shutdown()
 
 
 @pytest.fixture

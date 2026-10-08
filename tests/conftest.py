@@ -99,3 +99,18 @@ def wikitext() -> Path:
     if not (path := os.environ.get("WIKITEXT")):
         pytest.skip("needs WIKITEXT=path/to/wiki.test.raw")
     return Path(path).expanduser()
+
+
+@pytest.fixture
+def engine():
+    # leat agent's tests' fake of leat serve, scripted reply by reply: see tests/test_agent.py
+    import threading
+
+    from tests.test_agent import FakeEngine
+
+    engine = FakeEngine()
+    threading.Thread(target=engine.serve_forever, args=(0.01,), daemon=True).start()
+    yield engine
+    engine.released.set()
+    engine.shutdown()
+    engine.server_close()

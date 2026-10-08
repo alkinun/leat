@@ -206,8 +206,10 @@ def _run(case: Case, args: argparse.Namespace) -> Outcome:
     with tempfile.TemporaryDirectory() as data:
         environment = args.sandbox if args.sandbox.exists() else None
         workspace = Workspace(Path(data) / "workspace", environment)
-        tools = [*web.tools(args.search, workspace), *weather.tools(), *files.tools(workspace)]
-        agent = Agent(Store(Path(data) / "leat.db"), Client(args.engine), tools, workspace)
+        engine = Client(args.engine)
+        tools = [*web.tools(args.search, workspace, engine), *weather.tools(),
+                 *files.tools(workspace)]  # fmt: skip
+        agent = Agent(Store(Path(data) / "leat.db"), engine, tools, workspace)
         person = None  # no household, but where another person's memories are
         if case.others:
             person = agent.store.add_person("Sam")["id"]

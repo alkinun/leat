@@ -143,8 +143,9 @@ def _agent(args: argparse.Namespace) -> None:
     args.data.mkdir(parents=True, exist_ok=True)
     environment = args.data / "sandbox"
     workspace = Workspace(args.data / "workspace", environment if environment.exists() else None)
-    tools = [*web.tools(args.search, workspace), *weather.tools(), *files.tools(workspace)]
-    agent = Agent(Store(args.data / "leat.db"), Client(args.engine), tools, workspace)
+    engine = Client(args.engine)
+    tools = [*web.tools(args.search, workspace, engine), *weather.tools(), *files.tools(workspace)]
+    agent = Agent(Store(args.data / "leat.db"), engine, tools, workspace)
     agent.start()
     telegram = Telegram(agent)
     telegram.start()
