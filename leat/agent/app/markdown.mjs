@@ -26,8 +26,14 @@ export function markdown(element, text) {
 export function parse(text) {
   closers.clear();
   brackets.clear();
+  depth = 0;
   return blocks(text.split("\n"));
 }
+
+// how deep blocks and spans are in others, past DEEPEST of which they are text: no page shows
+// so many, and reading them would overflow the stack
+let depth = 0;
+const DEEPEST = 32;
 
 function render(nodes) {
   return nodes.map((node) => {
@@ -49,7 +55,8 @@ function tex(source, display) {
   e.className = "math";
   try {
     temml.render(source, e, { displayMode: display, throwOnError: true });
-    return e;
+    for (const tagged of e.querySelectorAll("[id]")) tagged.removeAttribute("id"); // \label's,
+    return e; // which would stand for the page's own elements
   } catch {
     const code = ["code", ...(display ? [{ class: "language-tex" }] : []), source];
     return render([display ? ["pre", code] : code])[0];
@@ -57,23 +64,26 @@ function tex(source, display) {
 }
 
 function blocks(lines) {
+  if (depth === DEEPEST) return [["p", lines.join("\n")]];
   const out = [];
+  depth++;
   for (let i = 0; i < lines.length; ) {
     if (!lines[i].trim()) i++;
     else i = (starts(lines, i) ?? paragraph)(lines, i, out);
   }
+  depth--;
   return out;
 }
 
 const FENCE = /^( {0,3})(`{3,}|~{3,})\s*([^\s`]*)/;
 const MATH = /^ {0,3}(\$\$|\\\[)/;
-const HEADING = /^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$/;
+const HEADING = /^ {0,3}(#{1,6})(?:[ \t]|$)/;
 const RULE = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
 const QUOTE = /^ {0,3}> ?/;
 const ITEM = /^( {0,3})([-*+]|(\d{1,9})[.)])([ \t]+|$)/;
-const DELIMITER = /^ {0,3}\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$/;
-const TABLE = {
-  test: (line, next = "") => line.includes("|") && DELIMITER.test(next)
+const TABLE = { // a row, then one of its columns' alignments, :--, --: or :-:
+  test: (line, next = "") => line.includes("|") && /^ {0,3}[|:-]/.test(next)
+    && cells(next).every((cell) => /^:?-+:?$/.test(cell))
     && cells(line).length === cells(next).length,
 };
 
@@ -113,8 +123,12 @@ function displayMath(lines, i, out) {
   return i + text.slice(0, end).split("\n").length;
 }
 
+// # a heading, without the #s that may close it
 function heading(lines, i, out) {
-  const [, hashes, text = ""] = HEADING.exec(lines[i]);
+  const [opening, hashes] = HEADING.exec(lines[i]);
+  let text = lines[i].slice(opening.length).trim(), end = text.length;
+  while (text[end - 1] === "#") end--;
+  if (!end || /[ \t]/.test(text[end - 1])) text = text.slice(0, end).trim();
   out.push([`h${hashes.length}`, ...inline(text)]);
   return i + 1;
 }
@@ -201,13 +215,16 @@ function paragraph(lines, i, out) {
 
 // a paragraph's text, its spans set apart
 function inline(text) {
+  if (depth === DEEPEST) return [text];
   const out = [];
+  depth++;
   for (let i = 0; i < text.length; ) {
     const [node, end] = span(text, i);
     if (typeof node === "string" && typeof out.at(-1) === "string") out[out.length - 1] += node;
     else out.push(node);
     i = end;
   }
+  depth--;
   return out;
 }
 
@@ -258,7 +275,9 @@ function codeSpan(text, i) {
   const match = close.exec(text);
   if (!match) return [run, i + run.length];
   let content = text.slice(i + run.length, match.index).replaceAll("\n", " ");
-  if (/^ .*[^ ].* $/.test(content)) content = content.slice(1, -1);
+  if (content[0] === " " && content.at(-1) === " " && /[^ ]/.test(content)) {
+    content = content.slice(1, -1);
+  }
   return [["code", content], match.index + run.length];
 }
 
@@ -316,6 +335,8 @@ function search(text, s, c, memo) {
       if (s.j > s.from && run >= s.n && closes(text, s.j, run)) return s.j;
       if (opens(text, s.j, run) && !memo.has(`${c}${inner}:${s.j + run}`)) return undefined;
       const end = opens(text, s.j, run) ? memo.get(`${c}${inner}:${s.j + run}`) : -1;
+      // a span that never closes, of a run no longer: no run that would close this one follows
+      if (end < 0 && opens(text, s.j, run) && inner <= s.n) return -1;
       s.j = end < 0 ? s.j + run : end + inner;
     }
   }
@@ -388,10 +409,11 @@ function autolink(text, i) {
 function url(text, i) {
   let href = /^https?:\/\/[^\s<]+/.exec(text.slice(i))?.[0];
   if (!href || /[^\s(*_~]/.test(text[i - 1] ?? " ")) return null;
-  const unbalanced = () => href.split(")").length > href.split("(").length;
-  while (/[?!.,:;*_~'"]$/.test(href) || (href.endsWith(")") && unbalanced())) {
-    href = href.slice(0, -1);
+  let end = href.length, unclosed = href.split("(").length - href.split(")").length;
+  for (; /[?!.,:;*_~'"]/.test(href[end - 1]) || (href[end - 1] === ")" && unclosed < 0); end--) {
+    if (href[end - 1] === ")") unclosed++;
   }
+  href = href.slice(0, end);
   return /^https?:\/\/./.test(href) ? [["a", { href }, href], i + href.length] : null;
 }
 

@@ -1,5 +1,6 @@
 """The app's Markdown as markdown.mjs parses it, run by Node: every case in one run."""
 
+import functools
 import json
 import shutil
 import subprocess
@@ -164,6 +165,9 @@ CASES = [
     # runs that open spans none closes, as C's pointers, in time linear in them, not exponential
     ("int *a, " * 59 + "int *a", [["p", "int *a, " * 59 + "int *a"]]),
     ("a _b **c " * 39 + "a _b **c", [["p", "a _b **c " * 39 + "a _b **c"]]),
+    # blocks deeper than a page shows, text
+    ("> " * 40 + "deep", [functools.reduce(lambda tree, _: ["blockquote", tree], range(32),
+                                           ["p", "> " * 8 + "deep"])]),
 ]  # fmt: skip
 
 
@@ -184,3 +188,38 @@ def parsed() -> dict[str, list]:
 @pytest.mark.parametrize(("text", "tree"), CASES, ids=[repr(text) for text, _ in CASES])
 def test_parse(parsed, text, tree):
     assert parsed[text] == tree
+
+
+# texts a reply may hold, or a page it read, that took seconds or overflowed the stack: spans that
+# never close, runs regular expressions backtrack over, and blocks or spans thousands deep
+HARD = {
+    "pointers": "int *a, " * 5000,
+    "unclosed code": "*a " * 3000 + "``" + " `x`" * 3000,
+    "alternating": "**a ~~b " * 500 + "c" + "~~ d** " * 500,
+    "heading": "# a" + " " * 40000 + "b",
+    "url": "https://x" + ")" * 40000,
+    "code": "` " + "a" * 40000 + "`",
+    "delimiter": "a|b\n-" + " " * 40000 + "x",
+    "quotes": ">" * 4000 + " deep",
+    "lists": "- + " * 1300,
+    "links": "[" * 3000 + "x" + "](https://x.io)" * 3000,
+}
+
+
+def test_hard_texts_parse_quickly():
+    script = f"""
+        import {{ parse }} from "{MODULE}";
+        let input = "";
+        for await (const chunk of process.stdin) input += chunk;
+        console.log(JSON.stringify(JSON.parse(input).map((text) => {{
+            const start = performance.now();
+            parse(text);
+            return performance.now() - start;
+        }})));
+    """
+    run = subprocess.run([NODE, "--input-type=module", "-e", script],
+                         input=json.dumps(list(HARD.values())), capture_output=True, text=True,
+                         check=True, timeout=60)  # fmt: skip
+    times = dict(zip(HARD, json.loads(run.stdout), strict=True))
+    assert all(ms < 300 for ms in times.values()), times  # each takes 30 ms at most here
+

@@ -293,6 +293,9 @@ function route() {
 }
 
 function handle(event) {
+  // the shown conversation's, while it loads: taken after it, which may have come before them
+  const of = event.conversation?.id ?? event.conversation;
+  if (shown?.messages === null && of === shown.id) return shown.later.push(event);
   switch (event.type) {
     case "conversations":
       conversations = event.conversations;
@@ -319,13 +322,13 @@ function handle(event) {
     case "withdrawn": // a check's turn, which found nothing to tell: as if it never ran
       quietly.add(event.conversation);
       if (showing(event.conversation)) {
-        shown.messages.length = event.start;
+        shown.messages.length = Math.min(event.start, shown.messages.length);
         renderLog();
       }
       break;
     case "error": // the turn taken back, its message to send again
       if (showing(event.conversation)) {
-        shown.messages.length = event.start;
+        shown.messages.length = Math.min(event.start, shown.messages.length);
         renderLog();
       }
       if (shown?.id === event.conversation) {
@@ -421,7 +424,8 @@ async function open(id, push = true) {
   if (push) history.pushState(null, "", id ? `/c/${id}` : "/");
   if (unread.delete(id)) localStorage.setItem("leat.unread", JSON.stringify([...unread]));
   document.body.classList.remove("menu", ...PAGES);
-  shown = id ? { id, title: "", messages: null, running: false } : null; // until it comes
+  const running = conversations.find((c) => c.id === id)?.running ?? false;
+  shown = id ? { id, title: "", messages: null, running, later: [] } : null; // until it comes
   render();
   if (!id) return;
   try {
@@ -429,8 +433,10 @@ async function open(id, push = true) {
     if (!response.ok) throw new Error((await response.json()).error.message);
     const c = await response.json();
     if (shown?.id !== id) return;
+    const { later } = shown;
     shown = c;
     render();
+    later.forEach(handle);
   } catch (error) {
     if (shown?.id !== id) return;
     history.replaceState(null, "", "/");
@@ -448,13 +454,14 @@ async function send() {
   controls();
   try {
     const path = shown ? `/api/conversations/${shown.id}/messages` : "/api/conversations";
-    const names = attached.map((a) => a.name);
-    const body = { content, think, files: names, ...(!shown && cast ? { character: cast } : {}) };
+    const sent = attached, from = shown?.id;
+    const files = sent.map((a) => a.name);
+    const body = { content, think, files, ...(!shown && cast ? { character: cast } : {}) };
     const { id } = await (await post(path, body)).json();
-    attached = [];
+    attached = attached.filter((a) => !sent.includes(a)); // not those added meanwhile
     cast = null;
     renderAttached();
-    if (shown?.id !== id) open(id);
+    if (shown?.id === from && from !== id) open(id); // unless another was opened meanwhile
   } catch (error) {
     if (!$("input").value) $("input").value = content;
     status(error.message, true);
