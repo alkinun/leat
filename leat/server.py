@@ -503,8 +503,8 @@ class _Handler(BaseHTTPRequestHandler):
         if loaded:  # and if it takes images, the tokens an image takes at most
             model["max_context"] = loaded.engine.max_context
             if (vision := loaded.engine.vision) is not None:
-                # its embeddings and the few tokens that open and close it
-                model |= {"vision": True, "image_tokens": vision.tokens + 8}
+                # a square image's embeddings, as most images are, and the few that wrap them
+                model |= {"vision": True, "image_tokens": vision.typical + 8}
         return model | {"status": status}
 
     def _head(self, c: _Completion, kind: str) -> dict[str, Any]:

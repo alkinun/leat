@@ -706,7 +706,8 @@ class _Turn:
 
     def _seen(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         # the prompt's messages, each image a message shows before its text as a data: URL if
-        # the model sees images, or else a tool's said to be unseen, as the user's are named
+        # the model sees images; a tool's said to be unseen if it does not, or gone if the
+        # workspace no longer has it, as the user's are named
         for m in messages:
             if not (names := m.pop("images", None)):
                 continue
@@ -715,7 +716,8 @@ class _Turn:
                 parts = [{"type": "image_url", "image_url": {"url": url}} for url in urls]
                 m["content"] = [*parts, {"type": "text", "text": m.get("content") or ""}]
             elif m["role"] == "tool":
-                m["content"] += " You cannot see it: the model takes no images."
+                m["content"] += (" It is no longer in the workspace." if self.image
+                                 else " You cannot see it: the model takes no images.")  # fmt: skip
         return messages
 
     def _estimate(self, messages: list[dict[str, Any]], state: context.State, extra: int) -> int:

@@ -428,13 +428,14 @@ class Engine:
     def _turn(self, sequence: Sequence, pos: int) -> None:
         # of M-RoPE, moves the sequence's slot's RoPE on to its offset at prompt position pos:
         # of each image before, as many as its grid's longer side less its embeddings
-        if not self._mrope:
+        slot = sequence.slot
+        if not self._mrope or not sequence.images and self._offsets[slot] == 0:
             return
         offset = sum(max(sequence.images[sequence.prompt[start]].grid) - (end - start)
                      for start, end in _images(sequence.prompt[:pos]))  # fmt: skip
-        if offset != self._offsets[sequence.slot]:
-            self._shift(self._slot_vars[0].bind(sequence.slot), self._offset.bind(offset))
-            self._offsets[sequence.slot] = offset
+        if offset != self._offsets[slot]:
+            self._shift(self._slot_vars[0].bind(slot), self._offset.bind(offset))
+            self._offsets[slot] = offset
 
     def _shift_slot(self, slot: UOp, offset: UOp) -> None:
         # slot `slot`'s RoPE moved on `offset`, and what the drafter holds of it

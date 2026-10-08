@@ -118,6 +118,11 @@ class Vision:
                 del self._kept[next(iter(self._kept))]
         return image
 
+    @property
+    def typical(self) -> int:
+        """The embeddings a square image takes, as most images are: as many as any may."""
+        return self.tokens
+
     def inputs(self, image: Image) -> tuple[Tensor, Tensor]:
         """An image's pixels and positions on the device, as encode() takes them."""
         pixels = Tensor(image.pixels, dtype=dtypes.uint8).reshape(self.patches, -1)
@@ -418,6 +423,10 @@ class Pixtral(Vision):
         rows, columns = height // cell, width // cell
         tokens = [*[key] * (rows * (columns + 1) - 1), self.close]
         return Image(key, tokens, (rows, columns + 1), pixels, positions)
+
+    @property
+    def typical(self) -> int:
+        return self.cells + math.isqrt(self.cells) - 1  # with a break ending each row but the last
 
     def _projected(self, x: Tensor, name: str, half: bool) -> Tensor:
         out = _linear(x, self.w[f"{name}.weight"], half)

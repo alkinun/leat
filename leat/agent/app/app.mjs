@@ -73,8 +73,8 @@ $("character").onsubmit = async (event) => {
 $("attach").onclick = () => pick(attach);
 $("upload").onclick = () => pick(upload);
 $("input").onpaste = (event) => { // images pasted, as a screenshot, attached to the next message
-  const pasted = [...event.clipboardData.files];
-  if (!pasted.length) return;
+  const pasted = [...event.clipboardData.files]; // but text pasted with a picture of it, as Office's
+  if (!pasted.length || event.clipboardData.getData("text/plain")) return;
   event.preventDefault();
   pasted.forEach(attach);
 };
