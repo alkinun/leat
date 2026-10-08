@@ -1085,6 +1085,18 @@ def test_engine_stuck(tmp_path, monkeypatch):
         assert time.monotonic() - start < 2
 
 
+def test_hang_up_is_quiet(agent, capsys):
+    # a page closed before its answer was written is no error to print; any other error is
+    with Server(agent, port=0) as server:
+        for error in (BrokenPipeError(), ConnectionResetError(), ValueError("a bug")):
+            try:
+                raise error
+            except Exception:
+                server.handle_error(None, ("127.0.0.1", 1))
+    printed = capsys.readouterr().err
+    assert "ValueError: a bug" in printed and "Broken" not in printed and "Reset" not in printed
+
+
 @contextlib.contextmanager
 def serving(agent: Agent, telegram: Any = None) -> Iterator[str]:
     """The agent's server, its household's owner set up, whose cookie urllib's requests send from

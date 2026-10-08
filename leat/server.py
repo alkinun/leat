@@ -14,6 +14,7 @@ import json
 import queue
 import select
 import socket
+import sys
 import threading
 import time
 import urllib.parse
@@ -161,7 +162,8 @@ class Server(ThreadingHTTPServer):
         self.options, self.created = options, int(time.time())
         self.loaded: _Loaded | None = None
         self.loading: str | None = None  # the id of the model the worker is loading
-        self.ready = threading.Event()  # set but while a model loads, which completions wait for
+        self.ready = threading.Event()  # clear from a load's request till it is done, which
+        # completions wait for
         self.ready.set()
         self.requests: queue.SimpleQueue[_Completion | _Load | None] = queue.SimpleQueue()
         super().__init__((host, port), _Handler)
@@ -172,6 +174,7 @@ class Server(ThreadingHTTPServer):
         and compiles its graphs; returns when it is ready. Loading the loaded model does nothing."""
         if name not in self.models:
             raise ValueError(f"there is no model {name!r}")
+        self.ready.clear()  # a completion asked from now on waits for it, rendered by its template
         self.requests.put(load := _Load(name))
         if (error := load.done.get()) is not None:
             raise RuntimeError(f"loading {name} failed: {error!r}") from error
@@ -179,6 +182,12 @@ class Server(ThreadingHTTPServer):
     def server_close(self) -> None:
         super().server_close()
         self.requests.put(None)  # the worker stops after the requests before it
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        # a client that hung up before its answer was written, as one that gave up waiting, is
+        # no error to print
+        if not isinstance(sys.exc_info()[1], ConnectionError):
+            super().handle_error(request, client_address)
 
     def _work(self) -> None:
         # starts waiting requests in turn, then steps every running completion; waits for a
@@ -282,8 +291,8 @@ class Server(ThreadingHTTPServer):
     def _load(self, load: _Load) -> None:
         # replaces the loaded model, whose memory is freed first: a GPU holds one model at most
         if self.loaded is not None and self.loaded.name == load.name:
+            self.ready.set()
             return load.done.put(None)
-        self.ready.clear()
         self.loaded, self.loading = None, load.name
         gc.collect()  # an engine's graphs refer back to it
         error: Exception | None = None

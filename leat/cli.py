@@ -8,6 +8,7 @@ import argparse
 import contextlib
 import json
 import os
+import threading
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -23,6 +24,7 @@ from leat.agent.workspace import Workspace
 
 if TYPE_CHECKING:
     from leat.chat import ChatTemplate
+    from leat.server import Server
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -245,11 +247,26 @@ def _serve(args: argparse.Namespace) -> None:
         raise SystemExit("--draft drafts for one model: serve that one alone")
     options = {"max_context": args.max_context, "slots": args.slots, "draft": args.draft}
     with Server(models, args.host, args.port, **options) as server:
-        print(f"{models[0].stem} on {Device.DEFAULT}, compiling...", end=" ", flush=True)
-        server.load(models[0].stem)
-        print(f"the API at {_url(args.host, server.server_port)}/v1. Ctrl-C quits.", flush=True)
+        # served at once, the model loading meanwhile, so that a client asking while it compiles
+        # hears it is loading, its completions waiting for it, rather than no answer
+        url, name = _url(args.host, server.server_port), models[0].stem
+        failed: list[Exception] = []
+        print(f"{name} on {Device.DEFAULT}, the API at {url}/v1, compiling...", end=" ", flush=True)
+        threading.Thread(target=_start, args=(server, name, failed), daemon=True).start()
         with contextlib.suppress(KeyboardInterrupt):
             server.serve_forever()
+        if failed:
+            raise failed[0]
+
+
+def _start(server: "Server", name: str, failed: list[Exception]) -> None:
+    # loads the model a server starts with, or stops the server if it cannot
+    try:
+        server.load(name)
+        print("ready. Ctrl-C quits.", flush=True)
+    except Exception as e:
+        failed.append(e)
+        server.shutdown()
 
 
 def _bench(args: argparse.Namespace) -> None:

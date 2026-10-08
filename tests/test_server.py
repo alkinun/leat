@@ -117,17 +117,26 @@ def test_load(tiny_model, tmp_path):
             load(client, "tinier")
 
 
-def test_completion_waits_for_a_load(tiny_model, monkeypatch):
-    # a completion asked for while a model loads waits for it, rather than finding none loaded
+def test_completion_waits_for_a_load(tiny_model, tmp_path, monkeypatch):
+    # a completion asked for once a model is to load waits for it, rather than finding none
+    # loaded, and the models asked for meanwhile say it is loading, as when leat serve starts
+    (other := tmp_path / "other.gguf").symlink_to(tiny_model[0])
     warm_up = Engine.warm_up
     monkeypatch.setattr(Engine, "warm_up", lambda self: time.sleep(0.5) or warm_up(self))
-    with serving(tiny_model[0], max_context=CONTEXT) as server:
+    with serving(tiny_model[0], other, max_context=CONTEXT) as server:
         client = connect(server)
-        loading = threading.Thread(target=load, args=(client, "tiny"))
+        loading = threading.Thread(target=server.load, args=("tiny",))
+        loading.start()
+        while server.ready.is_set():
+            time.sleep(0.001)
+        assert chat(client, "hello", max_tokens=2).model == "tiny"
+        loading.join()
+        loading = threading.Thread(target=load, args=(client, "other"))
         loading.start()
         while server.loading is None:
             time.sleep(0.01)
-        assert chat(client, "hello", max_tokens=2).model == "tiny"
+        statuses = {model.id: model.status for model in client.models.list()}
+        assert statuses == {"tiny": "unloaded", "other": "loading"}
         loading.join()
 
 
@@ -135,6 +144,18 @@ def test_api_alone(server):
     # the API and nothing else: the app is leat agent's
     with pytest.raises(urllib.error.HTTPError, match="404"):
         urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/")
+
+
+def test_hang_up_is_quiet(server, capsys):
+    # a client that hung up before its answer was written, as the agent's wait for the models
+    # does while the engine compiles, is no error to print; any other error is
+    for error in (BrokenPipeError(), ConnectionResetError(), ValueError("a bug")):
+        try:
+            raise error
+        except Exception:
+            server.handle_error(None, ("127.0.0.1", 1))
+    printed = capsys.readouterr().err
+    assert "ValueError: a bug" in printed and "Broken" not in printed and "Reset" not in printed
 
 
 def check_timings(timings: dict, usage) -> None:

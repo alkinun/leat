@@ -20,6 +20,7 @@ import mimetypes
 import queue
 import re
 import socket
+import sys
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -87,6 +88,12 @@ class Server(ThreadingHTTPServer):
     ):  # fmt: skip
         self.agent, self.telegram, self.household = agent, telegram, Household(agent)
         super().__init__((host, port), _Handler)
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        # a client that hung up before its answer was written, as one that gave up waiting, is
+        # no error to print
+        if not isinstance(sys.exc_info()[1], ConnectionError):
+            super().handle_error(request, client_address)
 
 
 class _Unpaired(Exception):

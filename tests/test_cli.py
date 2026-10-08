@@ -1,5 +1,6 @@
 import json
 import struct
+import threading
 
 import jinja2
 import numpy as np
@@ -167,17 +168,17 @@ def test_run_past_the_context(tiny_model, monkeypatch, capsys):
 
 
 def test_serve_directories(tiny_model, tmp_path, monkeypatch, capsys):
-    # of directories alone, the first file found loads at start; a server on every address is
-    # browsed at this machine's
+    # of directories alone, the first file found loads at start, served meanwhile; a server on
+    # every address is browsed at this machine's; a model that fails to load stops the server
     (models := tmp_path / "models").mkdir()
     (models / "tiny.gguf").symlink_to(tiny_model[0])
-    loaded = []
+    loaded, failing = [], []
 
     class Fake:
         server_port = 8080
 
         def __init__(self, files, host, port, **options):
-            self.files = files
+            self.files, self.stopped = files, threading.Event()
 
         def __enter__(self):
             return self
@@ -186,14 +187,24 @@ def test_serve_directories(tiny_model, tmp_path, monkeypatch, capsys):
             return False
 
         def load(self, name):
+            if failing:
+                raise RuntimeError(f"loading {name} failed")
             loaded.append(name)
+            self.stopped.set()  # as Ctrl-C would, once it is ready
 
         def serve_forever(self):
-            pass
+            assert self.stopped.wait(5)
+
+        def shutdown(self):
+            self.stopped.set()
 
     monkeypatch.setattr("leat.server.Server", Fake)
     main(["serve", str(models), "--host", "0.0.0.0"])
-    assert loaded == ["tiny"] and "the API at http://127.0.0.1:8080/v1" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert loaded == ["tiny"] and "the API at http://127.0.0.1:8080/v1, compiling..." in out
+    failing.append(True)
+    with pytest.raises(RuntimeError, match="loading tiny failed"):
+        main(["serve", str(models)])
     (empty := tmp_path / "empty").mkdir()
     with pytest.raises(SystemExit, match="no GGUF files"):
         main(["serve", str(empty)])
