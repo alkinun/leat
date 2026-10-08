@@ -21,7 +21,7 @@ COMPACT = 0.6  # of the context, past which a prompt is made smaller
 TAIL = 0.2  # of the context, of the latest messages kept whole, as Hermes Agent keeps its
 KEEP = 200  # characters of a tool's answer kept whole, however old
 CHARS = 3  # characters to a token, as an estimate that errs long
-IMAGE = 300  # tokens of an image the model sees, as an estimate that errs long: Gemma 4's take 280
+IMAGE = 300  # tokens of an image the model sees, where the engine says no more: Gemma 4's take 280
 CLEARED = "[This old answer was cleared to make room; call the tool again if you need it.]"
 # of an answer saved in the workspace, as a page read
 SAVED = "[This old answer was cleared to make room; read {saved} if you need it again.]"
@@ -117,19 +117,24 @@ def prompt(messages: list[dict[str, Any]], state: State) -> list[dict[str, Any]]
     return [system, *([{"role": "user", "content": GOING_ON}] if going_on else []), *view[start:]]
 
 
-def estimate(messages: list[dict[str, Any]], state: State, extra: int = 0) -> int:
+def estimate(
+    messages: list[dict[str, Any]], state: State, extra: int = 0, image: int = IMAGE
+) -> int:
     """The tokens the prompt of a conversation's messages takes, with `extra` characters more, as
-    the tools' declarations: the engine's count of the last, and an estimate of what is new."""
+    the tools' declarations, each image `image` tokens: the engine's count of the last, and an
+    estimate of what is new."""
     if state.get("used") is not None:
-        return state["used"] + sum(_tokens(message(m)) for m in messages[state["at"] :])
-    return sum(_tokens(m) for m in prompt(messages, state)) + extra // CHARS
+        return state["used"] + sum(_tokens(message(m), image) for m in messages[state["at"] :])
+    return sum(_tokens(m, image) for m in prompt(messages, state)) + extra // CHARS
 
 
 def compact(
     messages: list[dict[str, Any]], state: State, limit: int, extra: int,
     summarize: Callable[[str | None, list[dict[str, Any]], int], str], force: bool = False,
+    image: int = IMAGE,
 ) -> State:  # fmt: skip
-    """The state in which a conversation's prompt takes COMPACT of the context `limit` at most,
+    """The state in which a conversation's prompt, each image `image` tokens, takes COMPACT of
+    the context `limit` at most,
     if clearing old answers or summarizing old messages can make it, or the most they can; one
     smaller anyway if `force`, as for a reply the context cut off. `summarize` gives a summary of
     messages, with the last one, in some tokens at most. Messages are summarized only if they take
@@ -138,13 +143,13 @@ def compact(
     What came before the turn running is made smaller first, and its own answers only if that is
     not enough, so that a turn reading many pages keeps what it found to answer from."""
     view = _view(messages, state)
-    tail = _tail(view, limit)
+    tail = _tail(view, limit, image)
     turn = next((i for i in range(len(view) - 1, 0, -1) if view[i]["role"] == "user"), tail)
     smaller = state
     for edge in dict.fromkeys((min(turn, tail), tail)):
-        smaller = _compact_to(messages, smaller, limit, extra, summarize, edge, force)
+        smaller = _compact_to(messages, smaller, limit, extra, summarize, edge, force, image)
         if smaller is not state and (
-            force or estimate(messages, smaller, extra) <= COMPACT * limit
+            force or estimate(messages, smaller, extra, image) <= COMPACT * limit
         ):
             return smaller
     return smaller
@@ -153,15 +158,17 @@ def compact(
 def _compact_to(
     messages: list[dict[str, Any]], state: State, limit: int, extra: int,
     summarize: Callable[[str | None, list[dict[str, Any]], int], str], edge: int, force: bool,
+    image: int,
 ) -> State:  # fmt: skip
     # the state made smaller up to the message at `edge`: the tools' answers before it cleared,
     # and if that is not enough, the messages before it summarized
     cleared = state | {"cleared": max(state.get("cleared", 0), edge), "used": None}
-    small = estimate(messages, cleared, extra) <= COMPACT * limit
+    small = estimate(messages, cleared, extra, image) <= COMPACT * limit
     if cleared["cleared"] > state.get("cleared", 0) and (small or force):
         return cleared
     start, tokens = state.get("summarized", 1), summary_tokens(limit)
-    if edge <= start or sum(_tokens(m) for m in _view(messages, cleared)[start:edge]) <= 2 * tokens:
+    spanned = sum(_tokens(m, image) for m in _view(messages, cleared)[start:edge])
+    if edge <= start or spanned <= 2 * tokens:
         return cleared if cleared["cleared"] > state.get("cleared", 0) else state
     summary = summarize(state.get("summary"), messages[start:edge], tokens)
     return cleared | {"summary": summary, "summarized": edge}
@@ -201,17 +208,17 @@ def _view(messages: list[dict[str, Any]], state: State) -> list[dict[str, Any]]:
     return view
 
 
-def _tail(view: list[dict[str, Any]], limit: int) -> int:
+def _tail(view: list[dict[str, Any]], limit: int, image: int) -> int:
     # where the latest messages begin that take TAIL of the context, the last one at least, and
     # never at a tool's answer, which goes with the reply that called it
-    start, tokens = len(view) - 1, _tokens(view[-1])
-    while start > 1 and tokens + _tokens(view[start - 1]) <= TAIL * limit:
-        start, tokens = start - 1, tokens + _tokens(view[start - 1])
+    start, tokens = len(view) - 1, _tokens(view[-1], image)
+    while start > 1 and tokens + _tokens(view[start - 1], image) <= TAIL * limit:
+        start, tokens = start - 1, tokens + _tokens(view[start - 1], image)
     while start > 1 and view[start]["role"] == "tool":
         start -= 1
     return start
 
 
-def _tokens(m: dict[str, Any]) -> int:
-    # of a message as the model reads it, its images seen
-    return len(json.dumps(m)) // CHARS + IMAGE * len(m.get("images", []))
+def _tokens(m: dict[str, Any], image: int = IMAGE) -> int:
+    # of a message as the model reads it, each of its images `image` tokens
+    return len(json.dumps(m)) // CHARS + image * len(m.get("images", []))

@@ -544,7 +544,7 @@ class _Turn:
         self.stopped = threading.Event()
         self.completion: Completion | None = None
         self.limit: int | None = None  # the model's context, once the turn asks
-        self.vision = False  # whether the model sees images, once the turn asks
+        self.image = 0  # the tokens an image takes at most, of a model that sees them, once asked
         self.redone = False  # a reply the context cut off, after the prompt was made smaller
         self.sources: dict[str, int] = {}  # the conversation's, by address, numbered for citing
 
@@ -556,7 +556,7 @@ class _Turn:
     def run(self) -> None:
         try:
             loaded = self.agent.loaded()
-            self.limit, self.vision = loaded.get("max_context"), bool(loaded.get("vision"))
+            self.limit, self.image = loaded.get("max_context"), loaded.get("image_tokens") or 0
             self.sources = numbered(self.agent.store.messages(self.id))
             for n in range(ROUNDS):
                 calls = self._reply(last=n == ROUNDS - 1)
@@ -588,7 +588,7 @@ class _Turn:
         messages, state = a.store.messages(self.id), a.store.context(self.id)
         declared = [tool.declaration() for tool in self.tools.values()] if tools else []
         extra = len(json.dumps(declared))
-        if self.limit and context.estimate(messages, state, extra) > context.COMPACT * self.limit:
+        if self.limit and self._estimate(messages, state, extra) > context.COMPACT * self.limit:
             state = self._compact(messages, state, extra)
         reply: dict[str, Any] = {"role": "assistant", "content": "", "reasoning_content": ""}
         info: dict[str, Any] = {}
@@ -657,7 +657,8 @@ class _Turn:
         def summarize(before: str | None, span: list[dict[str, Any]], tokens: int) -> str:
             return self._summarize(before, span, tokens, messages, state, extra)
 
-        smaller = context.compact(messages, state, self.limit, extra, summarize, force)
+        image = self.image or context.IMAGE
+        smaller = context.compact(messages, state, self.limit, extra, summarize, force, image)
         keys = ("cleared", "summarized")
         if [smaller.get(k) for k in keys] == [state.get(k) for k in keys]:
             return state
@@ -679,7 +680,7 @@ class _Turn:
         # span alone, as a transcript, the latest of it that the context holds
         assert self.limit is not None
         asking = len(context.IN_PLACE) // context.CHARS
-        if context.estimate(messages, state, extra) + asking + tokens < self.limit:
+        if self._estimate(messages, state, extra) + asking + tokens < self.limit:
             note = {"role": "user", "content": context.IN_PLACE}
             body = {
                 "messages": [*self._seen(context.prompt(messages, state)), note],
@@ -709,13 +710,16 @@ class _Turn:
         for m in messages:
             if not (names := m.pop("images", None)):
                 continue
-            urls = [url for name in names if (url := self._url(name))] if self.vision else []
+            urls = [url for name in names if (url := self._url(name))] if self.image else []
             if urls:
                 parts = [{"type": "image_url", "image_url": {"url": url}} for url in urls]
                 m["content"] = [*parts, {"type": "text", "text": m.get("content") or ""}]
             elif m["role"] == "tool":
                 m["content"] += " You cannot see it: the model takes no images."
         return messages
+
+    def _estimate(self, messages: list[dict[str, Any]], state: context.State, extra: int) -> int:
+        return context.estimate(messages, state, extra, self.image or context.IMAGE)
 
     def _url(self, name: str) -> str | None:
         # a workspace's image as a data: URL, or None if it is gone

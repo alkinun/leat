@@ -1,4 +1,5 @@
 import base64
+import functools
 import io
 from pathlib import Path
 
@@ -12,21 +13,24 @@ from leat import vision
 from leat.engine import Engine
 from leat.gguf import GGUF
 from leat.tokenizer import Tokenizer
-from leat.vision import _fit, _within, beside, projector
+from leat.vision import _fit, _resized, _within, beside, projector
 from tests.helpers import (
     CONTEXT,
     G3_IMAGE,
     G_IMAGE,
     P_IMAGE,
+    Q_IMAGE,
     V_PATCH,
     D,
     ids,
     reference_image,
     reference_logits,
     reference_pixtral,
+    reference_qwen_vl,
     reference_siglip,
     write_tiny_mmproj,
     write_tiny_pixtral,
+    write_tiny_qwen_vl,
 )
 from tests.helpers import (
     _finish as finish,
@@ -38,7 +42,8 @@ G3_TOKENS = ("<start_of_image>", "<end_of_image>")
 
 
 # each projector's tiny model
-FAMILIES = {"gemma4v": "gemma4", "gemma3": "gemma3", "pixtral": "llama"}
+FAMILIES = {"gemma4v": "gemma4", "gemma3": "gemma3", "pixtral": "llama",
+            "qwen3vl_merger": "qwen35moe"}  # fmt: skip
 
 
 @pytest.fixture(scope="session")
@@ -49,8 +54,9 @@ def projectors(tmp_path_factory):
     def projector(kind: str) -> tuple[Path, dict]:
         if kind not in made:
             path = tmp_path_factory.mktemp(kind) / "mmproj.gguf"
-            made[kind] = path, (write_tiny_pixtral(path) if kind == "pixtral" else
-                                write_tiny_mmproj(path, kind))  # fmt: skip
+            writer = {"pixtral": write_tiny_pixtral, "qwen3vl_merger": write_tiny_qwen_vl}.get(
+                kind, functools.partial(write_tiny_mmproj, kind=kind))  # fmt: skip
+            made[kind] = path, writer(path)
         return made[kind]
 
     return projector
@@ -65,6 +71,8 @@ def tiny_mmproj(projectors):
 def _budget(monkeypatch):
     monkeypatch.setattr(vision, "IMAGE_TOKENS", TOKENS)
     monkeypatch.setattr(vision, "PIXTRAL_TOKENS", TOKENS)
+    monkeypatch.setattr(vision, "QWEN_TOKENS", TOKENS)
+    monkeypatch.setattr(vision, "QWEN_PIXELS", 64)
 
 
 def png(width: int, height: int, seed: int = 0, mode: str = "RGB") -> bytes:
@@ -78,6 +86,10 @@ def png(width: int, height: int, seed: int = 0, mode: str = "RGB") -> bytes:
 def embeddings(weights: dict, data: bytes, kind: str = "gemma4v") -> np.ndarray:
     # the f64 reference's embeddings of an image, scaled as its kind's encoder scales it
     picture = Picture.open(io.BytesIO(data)).convert("RGB")
+    if kind == "qwen3vl_merger":
+        size = _resized(*picture.size, 2 * V_PATCH, 64, TOKENS * (2 * V_PATCH) ** 2)
+        scaled = picture.resize(size, Picture.Resampling.BICUBIC)
+        return reference_qwen_vl(weights, np.asarray(scaled))
     if kind == "pixtral":
         size = _within(*picture.size, P_IMAGE, 2 * V_PATCH, TOKENS)
         return reference_pixtral(
@@ -106,6 +118,34 @@ def engine(tiny, mmproj, kind: str = "gemma4v", **options) -> Engine:
 )  # fmt: skip
 def test_fit(size, tokens, expected):
     assert _fit(*size, 16, 3, tokens) == expected
+
+
+# transformers' smart_resize of Qwen2-VL, rounded to cells of 32 pixels, of 64 by 64 to 1024 by
+# 1024 pixels: as it is, scaled up and down, and rounded half to even
+@pytest.mark.parametrize(
+    "size, expected",
+    [((700, 532), (704, 544)), ((10, 10), (64, 64)), ((4000, 3000), (1152, 864)),
+     ((48, 80), (64, 64)), ((112, 100), (128, 96))],
+)  # fmt: skip
+def test_resized(size, expected):
+    assert _resized(*size, 32, 64 * 64, 1024 * 1024) == expected
+
+
+@pytest.mark.usefixtures("reference_ops")
+@pytest.mark.parametrize("size", [(16, 16), (24, 9), (8, 30)])
+def test_qwen_matches_reference(tiny, projectors, size):
+    # Qwen3.5's: the image scaled to whole cells, its embeddings those the f64 reference gives,
+    # between the tokens that open and close it, of a grid of its cells
+    path, weights = projectors("qwen3vl_merger")
+    tokenizer = Tokenizer(GGUF.open(tiny("qwen35moe")[0]).metadata)
+    v = vision.load(path, tokenizer, D)
+    data = png(*size)
+    image, expected = v.image(data), embeddings(weights, data, "qwen3vl_merger")
+    opened, closed = ids(tokenizer, Q_IMAGE[0], Q_IMAGE[2])
+    assert image.tokens == [opened, *[image.key] * len(expected), closed]
+    assert image.grid[0] * image.grid[1] == len(expected)
+    got = v.encode(*v.inputs(image)).numpy()
+    np.testing.assert_allclose(got[: image.size], expected, rtol=1e-4, atol=1e-4)
 
 
 @pytest.mark.usefixtures("reference_ops")
@@ -197,25 +237,26 @@ def test_generate_with_images(tiny, projectors, monkeypatch, kind):
     starts = prefill_starts(e, monkeypatch)
     prompt = [5, 77, *image.tokens, 120, 3, *image.tokens, 9]  # the same image twice
     out = list(e.generate(prompt, 6, images=[image]))
-    expected = reference_logits(weights, prompt + out, arch, shown)
+    expected = reference_logits(weights, prompt + out, arch, shown, {image.key: image.grid})
     assert out == expected[len(prompt) - 1 :].argmax(-1)[: len(out)].tolist()
     first = [i for i, t in enumerate(prompt) if t == image.key and prompt[i - 1] != t]
     within = [i for i in starts if prompt[i] == image.key and prompt[i - 1] == image.key]
     assert set(first) <= set(starts) and not within
 
     # a prompt that goes on from it runs only its new tokens; one of another image after the
-    # same tokens runs from that image on, the first image's keys and values copied
-    longer = prompt + out[:2] + [7]
+    # same tokens runs from that image on, the first image's keys and values copied, but for a
+    # model with recurrent state, which shares no part of a slot's tokens
+    longer = prompt + out + [7]
     starts.clear()
     got = list(e.generate(longer, 4, images=[image]))
     assert got == fresh(tiny, mmproj, kind, longer, image)
-    assert starts == [len(prompt) + 2]
+    assert starts == [len(prompt) + len(out) - 1]
     other = e.image(png(30, 30, 1))
     branch = prompt[: first[1]] + other.tokens[other.tokens.index(other.key) :] + [9]
     starts.clear()
     got = list(e.generate(branch, 4, images=[image, other]))
     assert got == fresh(tiny, mmproj, kind, branch, image, other)
-    assert starts[0] == first[1]
+    assert starts[0] == first[1] or arch == "qwen35moe"
 
 
 def fresh(tiny, mmproj, kind: str, prompt: list[int], *images) -> list[int]:
@@ -271,7 +312,8 @@ def test_server_takes_images(tiny, tiny_mmproj):
     with serving(path, max_context=CONTEXT, prefill_chunk=8, vision=tiny_mmproj[0]) as server:
         server.load("tiny")
         client = connect(server)
-        assert client.models.list().data[0].vision is True
+        model = client.models.list().data[0]
+        assert model.vision is True and model.image_tokens == TOKENS + 8
         messages = [{"role": "user", "content": parts}]
         reply = client.chat.completions.create(
             model="tiny", messages=messages, max_tokens=4, temperature=0

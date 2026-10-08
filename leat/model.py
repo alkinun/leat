@@ -87,6 +87,9 @@ class Config:
     embed_scale: float = 1.0
     v_norm: bool = False  # values RMSNormed without a weight, as Gemma 4's
     logit_cap: float = 0.0
+    # M-RoPE's sections of the frequencies, interleaved, that turn by an image's time, height and
+    # width, as Qwen3.5's: text, of the same position on each, turns as by plain RoPE
+    mrope: tuple[int, ...] = ()
 
     @staticmethod
     def from_gguf(metadata: dict[str, Any]) -> "Config":
@@ -161,6 +164,7 @@ class Config:
             embed_scale=math.sqrt(dim) if arch in ("gemma3", "gemma4") else 1.0,
             v_norm=arch == "gemma4",
             logit_cap=m.get("final_logit_softcapping", 0.0),
+            mrope=tuple(m.get("rope.dimension_sections", [])[:3]) if arch == "qwen35moe" else (),
         )
 
     def uses(self, name: str) -> bool:
@@ -263,6 +267,11 @@ class Transformer:
             if rope.dims and rope not in tables:
                 tables[rope] = rope_table(rope, max_context, _factors(rope, weights, max_context))
         self.rope = [tables.get(rope) for rope in config.ropes]
+        # of M-RoPE, each slot's tables, which shift() moves on from the base ones
+        self.base = self.rope
+        if config.mrope:
+            own = {r: (_slots(cos, slots), _slots(sin, slots)) for r, (cos, sin) in tables.items()}
+            self.rope = [own.get(rope) for rope in config.ropes]
         # whole tiles of positions, which the attention kernels need; the rest stay unused
         positions = -(-max_context // CACHE_TILE) * CACHE_TILE
         self.cache = [
@@ -311,16 +320,18 @@ class Transformer:
         return self.forward(x, spans, live, save)
 
     def forward(
-        self, x: Tensor, spans: list[Span], live: int | UOp | None = None, save: bool = False
-    ) -> Tensor:
-        """run() from the tokens' embeddings x (1, T, dim), or any inputs of the first layer."""
+        self, x: Tensor, spans: list[Span], live: int | UOp | None = None, save: bool = False,
+        positions: Tensor | None = None,
+    ) -> Tensor:  # fmt: skip
+        """run() from the tokens' embeddings x (1, T, dim), or any inputs of the first layer;
+        of M-RoPE, an image's, at `positions` (T, 3), each token's time, height and width."""
         if len(spans) > 1 and not all(isinstance(s.length, int) for s in spans):
             raise ValueError("several spans need lengths known in advance")
         for i in range(self.config.n_layers):
             if self.config.recurrent[i]:
                 x = self._delta_net(i, x, spans, save)
             else:
-                x = self._attention(i, x, spans)
+                x = self._attention(i, x, spans, positions)
             x = self._feed_forward(i, x, live)
         return ops.rms_norm(x, self.output_norm, self.config.norm_eps)
 
@@ -361,14 +372,28 @@ class Transformer:
         if writes:
             Tensor.realize(*writes)
 
+    def shift(self, slot: int | UOp, offset: int | UOp) -> None:
+        """Turns slot `slot`'s queries and keys from here on as RoPE turns those `offset`
+        positions on from theirs: M-RoPE's text after images, whose positions take more of the
+        cache than of RoPE's."""
+        writes = []
+        for base, own in {id(o): (b, o) for b, o in zip(self.base, self.rope, strict=True)
+                          if o is not None and b is not None}.values():  # fmt: skip
+            rows = (Tensor.arange(int(base[0].shape[0])) + Tensor(offset)).maximum(0)
+            writes += [o[slot : slot + 1].assign(b[rows].unsqueeze(0))
+                       for b, o in zip(base, own, strict=True)]  # fmt: skip
+        Tensor.realize(*writes)
+
     def store(self, i: int, x: Tensor, spans: list[Span]) -> None:
         """Stores layer i's keys and values of x, its inputs, in its cache, as running it would."""
         Tensor.realize(self._rotated(i, x, spans)[1])
 
-    def _attention(self, i: int, x: Tensor, spans: list[Span]) -> Tensor:
+    def _attention(
+        self, i: int, x: Tensor, spans: list[Span], positions: Tensor | None = None
+    ) -> Tensor:
         # x + the attention block's output
         c, w, s = self.config, self.layers[i], self.small[i]
-        (q, gate), cache = self._rotated(i, x, spans)
+        (q, gate), cache = self._rotated(i, x, spans, positions)
         out = ops.attention(q, cache, spans, c.scales[i], c.windows[i], s.get("attn_sinks"))
         if gate is not None:
             out = out * gate.reshape(out.shape).sigmoid()
@@ -382,10 +407,10 @@ class Transformer:
         )  # fmt: skip
 
     def _rotated(
-        self, i: int, x: Tensor, spans: list[Span]
+        self, i: int, x: Tensor, spans: list[Span], positions: Tensor | None = None
     ) -> tuple[tuple[Tensor, Tensor | None], Tensor]:
-        # layer i's queries of x, rotated, and the gates of their heads' outputs if any, and its
-        # cache with x's keys and values stored
+        # layer i's queries of x, rotated, of M-RoPE at their positions if given, and the gates
+        # of their heads' outputs if any, and its cache with x's keys and values stored
         c, w, s = self.config, self.layers[i], self.small[i]
         B, T, _ = x.shape
         kv_heads, dim, eps = c.kv_heads[i], c.head_dims[i], c.norm_eps
@@ -402,11 +427,13 @@ class Transformer:
             biases = (s["attn_q.bias"], s["attn_k.bias"], s["attn_v.bias"])
         norms = (s["attn_q_norm"], s["attn_k_norm"]) if "attn_q_norm" in s else None
         table = self.rope[i]
+        if positions is not None and (base := self.base[i]) is not None:
+            table = _mrope(base, positions, c.mrope)  # each token's own angles
         rope = None if table is None else (table, c.ropes[i].dims)
         cache = self.cache[i]
         assert cache is not None
         q, cache = ops.rotate(q, k, v, cache, spans, rope, c.rope_halves, biases, norms, c.v_norm,
-                              eps)  # fmt: skip
+                              eps, positions is not None)  # fmt: skip
         return (q, gate), cache
 
     def _delta_net(self, i: int, x: Tensor, spans: list[Span], save: bool = False) -> Tensor:
@@ -461,6 +488,19 @@ class Transformer:
         return ops.add_normed(x, parts, s["post_ffw_norm"], eps, scale)
 
 
+def _mrope(
+    tables: tuple[Tensor, Tensor], positions: Tensor, sections: tuple[int, ...]
+) -> tuple[Tensor, Tensor]:
+    # cos and sin (T, R/2) of tokens at positions (T, 3) of time, height and width, of the
+    # tables of plain RoPE: frequency j turns by the token's height if j % 3 is 1, below three
+    # times the height's section, by its width if 2, below three times the width's, else by time
+    half = int(tables[0].shape[1])
+    axes = [1 if j % 3 == 1 and j < 3 * sections[1] else 2 if j % 3 == 2 and j < 3 * sections[2]
+            else 0 for j in range(half)]  # fmt: skip
+    pick = Tensor.arange(3).reshape(1, 3, 1) == Tensor(axes).reshape(1, 1, half)
+    return tuple(pick.where(t[positions], 0.0).sum(1) for t in tables)  # type: ignore[return-value]
+
+
 def _factors(rope: Rope, weights: dict[str, QTensor], max_context: int) -> Tensor | None:
     # what divides a layer's RoPE frequencies, if anything
     name = "rope_freqs.weight" if rope.freqs else None
@@ -500,6 +540,11 @@ def _copy_slot(
     pairs = [(s, t) for ss, ts in zip(sources, targets, strict=True) if ss and ts
              for s, t in zip(ss, ts, strict=True)]  # fmt: skip
     Tensor.realize(*(t[slot : slot + 1].assign(s[slot : slot + 1]) for s, t in pairs))
+
+
+def _slots(table: Tensor, slots: int) -> Tensor:
+    # a table for each of the slots, each as it is
+    return table.unsqueeze(0).expand(slots, *table.shape).contiguous().realize()
 
 
 def _zeros(*shape: int, dtype: DType = dtypes.float32) -> Tensor:

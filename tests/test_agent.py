@@ -59,7 +59,7 @@ class _FakeHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         model = {"id": "fake", "status": self.server.status}
         if self.server.vision:
-            model["vision"] = True
+            model |= {"vision": True, "image_tokens": 300}
         if self.server.context:
             model["max_context"] = self.server.context
         self._json(200, {"object": "list", "data": [model]})

@@ -37,6 +37,10 @@ class Drafter(Protocol):
         """Copies what the drafter holds of slot `source` to slot `slot`."""
         ...
 
+    def shift(self, slot: int | UOp, offset: int | UOp) -> None:
+        """Turns what it runs of slot `slot` from here on as the target's Transformer.shift()."""
+        ...
+
 
 def load(path: str | Path, target: Transformer) -> Drafter:
     """The drafter in a GGUF for a target model: Gemma 4's assistant, or the target's own file
@@ -120,6 +124,9 @@ class Gemma4Assistant:
     def copy(self, source: int | UOp, slot: int | UOp) -> None:
         pass
 
+    def shift(self, slot: int | UOp, offset: int | UOp) -> None:
+        pass  # of Gemma 4, whose RoPE is plain
+
     def _step(self, x: Tensor, slots: Rows, positions: Rows) -> tuple[Tensor, Tensor]:
         # the hidden states for the next step and the logits, after x (1, n, width)
         c, eps, n = self.target.config, self.eps, len(slots)
@@ -200,6 +207,9 @@ class Qwen35Mtp:
 
     def copy(self, source: int | UOp, slot: int | UOp) -> None:
         self.layer.copy(source, slot)
+
+    def shift(self, slot: int | UOp, offset: int | UOp) -> None:
+        self.layer.shift(slot, offset)
 
     def _inputs(self, tokens: Tensor, hidden: Tensor) -> Tensor:
         # the layer's inputs: the tokens' embeddings and the hidden states before them

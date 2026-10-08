@@ -211,14 +211,17 @@ def rotate(
     q: Tensor, k: Tensor, v: Tensor, cache: Tensor, spans: list[Span],
     rope: tuple[tuple[Tensor, Tensor], int] | None, halves: bool,
     biases: tuple[Tensor, Tensor, Tensor] | None, norms: tuple[Tensor, Tensor] | None,
-    v_norm: bool, eps: float,
+    v_norm: bool, eps: float, own: bool = False,
 ) -> tuple[Tensor, Tensor]:  # fmt: skip
     # q (1, T, H, D), k and v (1, T, KV_H, D), the spans' tokens in turn: plus their biases (H * D
     # or KV_H * D), if given; each head of q and k normed with its weight, if given, and of v
     # without, if v_norm; the first R dimensions of q and k rotated by RoPE's tables (positions,
-    # R/2) at their positions, for rope ((cos, sin), R), if given; and k and v stored there in
-    # their slots of the cache. Returns q (1, H, T, D) and the cache.
+    # R/2), or each slot's (slots, positions, R/2), at their positions, or if `own` by the tokens'
+    # own angles (T, R/2) of a single span, for rope ((cos, sin), R), if given; and k and v stored
+    # there in their slots of the cache. Returns q (1, H, T, D) and the cache.
     args = (rope, halves, biases, norms, v_norm, eps)
+    if own:
+        return _rotate(q, k, v, cache, spans[0], *args, own=True)
     if _fast() and kernels.supports_rotate(q, cache) and (rows := _rows(spans)) is not None:
         slots, positions = rows
         return kernels.rotate(q, k, v, cache, slots, positions, *args)
@@ -238,7 +241,7 @@ def _rotate(
     q: Tensor, k: Tensor, v: Tensor, cache: Tensor, span: Span,
     rope: tuple[tuple[Tensor, Tensor], int] | None, halves: bool,
     biases: tuple[Tensor, Tensor, Tensor] | None, norms: tuple[Tensor, Tensor] | None,
-    v_norm: bool, eps: float,
+    v_norm: bool, eps: float, own: bool = False,
 ) -> tuple[Tensor, Tensor]:  # fmt: skip
     # rotate() for one span
     T, slot, start_pos = q.shape[1], span.slot, span.start
@@ -250,7 +253,8 @@ def _rotate(
         v = rms_norm(v, None, eps)
     q, k = q.transpose(1, 2), k.transpose(1, 2)
     if rope is not None:
-        cos, sin = (table[start_pos : start_pos + T] for table in rope[0])
+        tables = rope[0] if own or rope[0][0].ndim == 2 else (t[slot] for t in rope[0])
+        cos, sin = tables if own else (table[start_pos : start_pos + T] for table in tables)
         q, k = (rotary(t, cos, sin, halves) for t in (q, k))
     new = Tensor.stack(k, v.transpose(1, 2)).cast(cache.dtype)
     cache[:, slot : slot + 1, :, start_pos : start_pos + T].assign(new)

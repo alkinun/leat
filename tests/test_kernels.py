@@ -729,16 +729,19 @@ def test_rotate(monkeypatch, halves, biased, normed, v_norm, kv_heads, symbolic,
 
 
 @pytest.mark.parametrize("symbolic", [False, True])
-def test_rotate_rows(monkeypatch, symbolic):
+@pytest.mark.parametrize("per_slot", [False, True])
+def test_rotate_rows(monkeypatch, symbolic, per_slot):
     # tokens of a decode step, each at a position of a slot of its own or two in one slot, with
-    # Qwen2's halves and biases: the kernel as the reference ops, span by span
+    # Qwen2's halves and biases, and tables of RoPE shared or each slot's, as M-RoPE's: the
+    # kernel as the reference ops, span by span
     rng = np.random.default_rng(19)
     rows, dim, kv_heads = [(0, 7), (2, 300), (1, 511), (2, 3)], 128, 8
     q, k, v = (
         Tensor(rng.standard_normal((1, len(rows), h, dim)).astype(np.float32)).realize()
         for h in (32, kv_heads, kv_heads)
     )
-    angles = rng.uniform(0, 6, (512, dim // 2)).astype(np.float32)
+    shape = (SLOTS, 512, dim // 2) if per_slot else (512, dim // 2)
+    angles = rng.uniform(0, 6, shape).astype(np.float32)
     rope = ((Tensor(np.cos(angles)).realize(), Tensor(np.sin(angles)).realize()), dim)
     biases = tuple(Tensor(rng.standard_normal(h * dim).astype(np.float32)) for h in (32, 8, 8))
     spans = [ops.Span(s, p) for s, p in rows]

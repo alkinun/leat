@@ -137,6 +137,12 @@ class Engine:
             self.vision = load_vision(vision, self.tokenizer, self.config.dim)
             self._image_len = UOp.variable("image_len", 1, self.vision.tokens)
             self._encode, self._image_chunk = graph(self.vision.encode), graph(self._step)
+        # of M-RoPE, each slot's offset of RoPE's positions from the cache's, which an image's
+        # change, as it takes fewer of RoPE's than of the cache's; and what moves it on
+        self._mrope = bool(self.config.mrope)
+        self._offsets = [0] * slots
+        self._offset = UOp.variable("offset", -max_context, 0)
+        self._shift = graph(self._shift_slot)
         # speculative steps of 1 sequence or more, as many as the drafter takes, each drafting a
         # token at least
         drafting = 0 if self.drafter is None else min(slots, self.drafter.sequences)
@@ -297,6 +303,8 @@ class Engine:
         if self._recurrent:  # and keeping recurrent state, and going back to it
             self._keep(self._slot_vars[0].bind(0))
             self._restore(self._slot_vars[0].bind(0))
+        if self._mrope:  # and moving a slot's RoPE on
+            self._shift(self._slot_vars[0].bind(0), self._offset.bind(0))
         if self.vision is not None:  # and encoding an image, and its chunk
             image = self.image(blank())
             if len(image.tokens) < self.max_context:
@@ -374,10 +382,13 @@ class Engine:
         cached, mark = self._cached[sequence.slot], len(sequence.prompt) - KEEP_BACK
         pos = len(cached)
         row = self._slot_vars[0].bind(sequence.slot), self._pos_vars[0].bind(pos)
+        self._turn(sequence, pos)
         if (key := sequence.prompt[pos]) < 0:
             image = sequence.images[key]
             chunk = sequence.prompt[pos : pos + image.size]
-            token = self._prefill_image(image, sequence.options, row)
+            start = pos + self._offsets[sequence.slot]  # its RoPE position, of M-RoPE
+            token = self._prefill_image(image, sequence.options, row, start)
+            self._turn(sequence, pos + image.size)  # for the tokens after it
         else:
             if self._recurrent and pos < mark:  # a chunk ends where the state is kept
                 size = min(size, mark - pos)
@@ -394,16 +405,40 @@ class Engine:
         return int(token.item()) if len(cached) == len(sequence.prompt) else None
 
     def _prefill_image(
-        self, image: Image, options: tuple[Tensor, Tensor], row: tuple[UOp, UOp]
+        self, image: Image, options: tuple[Tensor, Tensor], row: tuple[UOp, UOp], start: int
     ) -> Tensor:
         # runs an image's embeddings in the image chunk's graph, its positions' tokens the one
-        # that fills an image, which a drafter takes in
+        # that fills an image, which a drafter takes in; of M-RoPE, each embedding at its time,
+        # the image's RoPE position `start`, and that plus its row and column
         assert self.vision is not None
-        n, dim = self._image_len.bind(image.size), self.config.dim
+        n, dim, most = self._image_len.bind(image.size), self.config.dim, self.vision.tokens
         embeddings = self._encode(*self.vision.inputs(image)).reshape(1, -1, dim)
-        tokens = _ids([self.vision.fill] * image.size, self.vision.tokens)
+        tokens = _ids([self.vision.fill] * image.size, most)
         x, tokens = embeddings.shrink(((0, 1), (0, n), (0, dim))), tokens.shrink(((0, 1), (0, n)))
-        return self._image_chunk(tokens, *options, *row, image=x)
+        positions = None
+        if self._mrope:
+            places = [(start, start + i // image.grid[1], start + i % image.grid[1])
+                      for i in range(image.size)] + [(0, 0, 0)] * (most - image.size)  # fmt: skip
+            flat = array.array("i", [p for place in places for p in place]).tobytes()
+            positions = Tensor(flat, dtype=dtypes.int32).reshape(most, 3).shrink(((0, n), (0, 3)))
+        return self._image_chunk(tokens, *options, *row, image=x, positions=positions)
+
+    def _turn(self, sequence: Sequence, pos: int) -> None:
+        # of M-RoPE, moves the sequence's slot's RoPE on to its offset at prompt position pos:
+        # of each image before, as many as its grid's longer side less its embeddings
+        if not self._mrope:
+            return
+        offset = sum(max(sequence.images[sequence.prompt[start]].grid) - (end - start)
+                     for start, end in _images(sequence.prompt[:pos]))  # fmt: skip
+        if offset != self._offsets[sequence.slot]:
+            self._shift(self._slot_vars[0].bind(sequence.slot), self._offset.bind(offset))
+            self._offsets[sequence.slot] = offset
+
+    def _shift_slot(self, slot: UOp, offset: UOp) -> None:
+        # slot `slot`'s RoPE moved on `offset`, and what the drafter holds of it
+        self.model.shift(slot, offset)
+        if self.drafter is not None:
+            self.drafter.shift(slot, offset)
 
     def _decode_step(self, sequences: list[Sequence]) -> list[int]:
         # runs each sequence's last token, in batches of BATCH at most. A batch of the same
@@ -544,7 +579,7 @@ class Engine:
 
     def _step(
         self, tokens: Tensor, options: Tensor, seed: Tensor, *rows: UOp, live: UOp | None = None,
-        decode: bool = False, image: Tensor | None = None,
+        decode: bool = False, image: Tensor | None = None, positions: Tensor | None = None,
     ) -> Tensor:  # fmt: skip
         # rows: the slot and start position of each span, in turn. A single span takes every
         # token, as a chunk of prompt or a decode step of one, or an image's embeddings in place
@@ -561,7 +596,7 @@ class Engine:
             if image is None:
                 hidden = self.model.run(tokens, spans)
             else:  # the embeddings as they are, not scaled as the tokens' are
-                hidden = self.model.forward(image, spans)
+                hidden = self.model.forward(image, spans, positions=positions)
             hidden = self._followed(tokens, hidden, spans)
             logits = self.model.logits(hidden[:, -1, :])
             return sample(logits, options, seed, start + length, seen).realize()

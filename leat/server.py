@@ -487,9 +487,11 @@ class _Handler(BaseHTTPRequestHandler):
         loaded = s.loaded if s.loaded is not None and s.loaded.name == name else None
         status = "loaded" if loaded else "loading" if s.loading == name else "unloaded"
         model = {"id": name, "object": "model", "created": s.created, "owned_by": "leat"}
-        if loaded:  # and whether it takes images
-            model |= {"max_context": loaded.engine.max_context,
-                      "vision": loaded.engine.vision is not None}  # fmt: skip
+        if loaded:  # and if it takes images, the tokens an image takes at most
+            model["max_context"] = loaded.engine.max_context
+            if (vision := loaded.engine.vision) is not None:
+                # its embeddings and the few tokens that open and close it
+                model |= {"vision": True, "image_tokens": vision.tokens + 8}
         return model | {"status": status}
 
     def _head(self, c: _Completion, kind: str) -> dict[str, Any]:

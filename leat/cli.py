@@ -197,10 +197,10 @@ def _run(args: argparse.Namespace) -> None:
         except (EOFError, KeyboardInterrupt):
             print()
             return
-        if line.startswith("/image ") and engine.vision is not None:
+        if line.startswith("/image "):
             try:  # shown before the next message's text
                 attached.append(engine.image(Path(line[7:].strip()).expanduser().read_bytes()))
-            except (OSError, ValueError) as e:
+            except (OSError, ValueError) as e:  # as of a model without a vision encoder
                 print(f"[no image: {e}]")
             continue
         n = len(attached)  # the message's images, before its text

@@ -8,7 +8,8 @@ every image padded to as many patches as its largest, so that one compiled graph
 - Gemma 4's, of 2D RoPE over the image scaled, its aspect kept, to as many patches of 16 by 16
   pixels as fit IMAGE_TOKENS embeddings, each of 3 by 3 patches pooled;
 - Mistral Small 3's, Pixtral, of 2D RoPE over the image scaled, its aspect kept, to whole cells
-  of 2 by 2 patches of 14 pixels, each merged into an embedding, PIXTRAL_TOKENS at most.
+  of 2 by 2 patches of 14 pixels, each merged into an embedding, PIXTRAL_TOKENS at most;
+- Qwen3.5's, of 2D RoPE too, over whole cells of 2 by 2 patches of 16 pixels, QWEN_TOKENS at most.
 """
 
 import array
@@ -16,6 +17,7 @@ import hashlib
 import io
 import math
 import re
+import threading
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -36,6 +38,9 @@ from leat.tokenizer import Tokenizer
 IMAGE_TOKENS = 280
 # those of Mistral Small 3's, but for its breaks, as llama.cpp's: an image of 896 by 896 pixels
 PIXTRAL_TOKENS = 1024
+# those of Qwen3.5's, of 1024 by 1024 pixels, a quarter of llama.cpp's, whose patches' attention
+# would not fit the GPU; and the pixels it takes at least, as transformers'
+QWEN_TOKENS, QWEN_PIXELS = 1024, 65536
 KEPT = 16  # images kept, made of their bytes, to be given again
 
 
@@ -43,12 +48,13 @@ KEPT = 16  # images kept, made of their bytes, to be given again
 class Image:
     """An image ready for a prompt. `tokens` show it there: those that open and close it, around
     a position for each of its embeddings, which hold `key`, a negative id of a digest of the
-    image by which the cache tells images apart. `pixels` and `positions` are the encoder's, as
-    bytes the engine uploads when it encodes the image: each patch's pixels, rows of RGB, and its
-    column and row as int32, -1 for padding."""
+    image by which the cache tells images apart; `grid`, the rows and columns of its embeddings.
+    `pixels` and `positions` are the encoder's, as bytes the engine uploads when it encodes the
+    image: each patch's pixels, rows of RGB, and its column and row as int32, -1 for padding."""
 
     key: int
     tokens: list[int]
+    grid: tuple[int, int]
     pixels: bytes
     positions: bytes
 
@@ -93,6 +99,7 @@ class Vision:
         embed = sum(kernels[1:], kernels[0]).permute(0, 2, 3, 1).flatten().contiguous().realize()
         self.embed = QTensor(embed, GGMLType.F32, (self.width, 3 * self.patch**2))
         self._kept: dict[int, Image] = {}  # the latest images, by key, the latest used last
+        self._lock = threading.Lock()  # of _kept, which handlers' threads share
 
     def image(self, data: bytes) -> Image:
         """An image of its file's bytes, in any format Pillow reads, upright as its EXIF has it,
@@ -100,12 +107,15 @@ class Vision:
         may be a decompression bomb. Of the host alone, so that any thread may call it. The
         latest are kept, as a conversation sends its images again with every message."""
         key = -1 - int.from_bytes(hashlib.sha256(data).digest()[:7], "little")
-        if (kept := self._kept.pop(key, None)) is not None:
-            self._kept[key] = kept  # the latest used, last
-            return kept
-        image = self._kept[key] = self._image(_picture(data), key)
-        while len(self._kept) > KEPT:
-            self._kept.pop(next(iter(self._kept)), None)
+        with self._lock:
+            if (kept := self._kept.pop(key, None)) is not None:
+                self._kept[key] = kept  # the latest used, last
+                return kept
+        image = self._image(_picture(data), key)
+        with self._lock:
+            self._kept[key] = image
+            while len(self._kept) > KEPT:
+                del self._kept[next(iter(self._kept))]
         return image
 
     def inputs(self, image: Image) -> tuple[Tensor, Tensor]:
@@ -204,7 +214,8 @@ class Vision:
         # products of f16 if half, the scores and their softmax f32: unscaled, they run to tens;
         # v padded to whole tiles of the matrix cores, its product whole before the padding goes
         v = v.pad_to((*v.shape[:-1], -(-head // 16) * 16))
-        q, k, v = (t.half() if half else t for t in (q, k, v))
+        # materialized: fused into the scores' product, the rotation runs once for each pair
+        q, k, v = ((t.half() if half else t).contiguous() for t in (q, k, v))
         weights = (q.dot(k.transpose(-1, -2), dtype=dtypes.float32) + mask).softmax(-1)
         out = (weights.half() if half else weights).dot(v, dtype=dtypes.float32)
         out = out.contiguous()[..., :head].transpose(1, 2).reshape(1, n, self.width)
@@ -272,7 +283,9 @@ class Gemma3(Vision):
         pixels, positions = self._patches(
             picture, self.square, self.square, Picture.Resampling.BILINEAR
         )
-        return Image(key, [*self.open, *[key] * self.tokens, *self.close], pixels, positions)
+        side = math.isqrt(self.tokens)
+        tokens = [*self.open, *[key] * self.tokens, *self.close]
+        return Image(key, tokens, (side, side), pixels, positions)
 
 
 class Gemma4(Vision):
@@ -325,8 +338,10 @@ class Gemma4(Vision):
     def _image(self, picture: Picture.Image, key: int) -> Image:
         width, height = _fit(*picture.size, self.patch, self.pool, self.tokens)
         pixels, positions = self._patches(picture, width, height, Picture.Resampling.BICUBIC)
-        size = width * height // (self.patch * self.pool) ** 2
-        return Image(key, [self.open, *[key] * size, self.close], pixels, positions)
+        cell = self.patch * self.pool
+        grid = height // cell, width // cell
+        tokens = [self.open, *[key] * (grid[0] * grid[1]), self.close]
+        return Image(key, tokens, grid, pixels, positions)
 
 
 class Pixtral(Vision):
@@ -380,15 +395,84 @@ class Pixtral(Vision):
         bicubic = Picture.Resampling.BICUBIC
         pixels, positions = self._patches(picture, width, height, bicubic, self.merge)
         rows, columns = height // cell, width // cell
-        return Image(key, [*[key] * (rows * (columns + 1) - 1), self.close], pixels, positions)
+        tokens = [*[key] * (rows * (columns + 1) - 1), self.close]
+        return Image(key, tokens, (rows, columns + 1), pixels, positions)
 
     def _projected(self, x: Tensor, name: str, half: bool) -> Tensor:
         out = _linear(x, self.w[f"{name}.weight"], half)
         return out + self.w[f"{name}.bias"].dequant() if f"{name}.bias" in self.w else out
 
 
+class Qwen3(Vision):
+    """Qwen3.5's and Qwen3.6's, Qwen3-VL's merger: the image scaled, its aspect kept, to whole
+    cells of merge by merge patches, QWEN_PIXELS to QWEN_TOKENS cells, as transformers'
+    smart_resize; its patches of a video's two frames, the image's twice, each with the learned
+    embedding of its place, of a grid side by side interpolated to the image's, and rotated by row
+    over the first quarter of each head's frequencies and by column over the second; each cell's
+    patches, which come together, normed and joined, then projected. Read causally, its embeddings
+    at the image's M-RoPE positions."""
+
+    causal = True
+
+    def __init__(self, m: dict[str, Any], w: dict[str, QTensor], tokenizer: Tokenizer):
+        super().__init__(m, w, tokenizer)
+        self.merge, self.tokens = m.get("spatial_merge_size", 2), QWEN_TOKENS
+        self.patches = -(-self.tokens * self.merge**2 // 64) * 64
+        table = w["v.position_embd.weight"]
+        self.side = math.isqrt(int(table.shape[0]))  # of the learned grid
+        head = self.width // self.heads
+        self.freqs = Tensor([10000.0 ** (-2 * i / (head // 2)) for i in range(head // 4)])
+        self.open, self.fill, self.close = (
+            self._special(t) for t in ("<|vision_start|>", "<|image_pad|>", "<|vision_end|>")
+        )
+
+    def encode(self, pixels: Tensor, positions: Tensor) -> Tensor:
+        n, half, k = self.patches, ops.halved(pixels), self.merge
+        valid = positions[:, 0] >= 0
+        column, row = (positions[:, i].maximum(0) for i in (0, 1))
+        x = self._embedded(pixels) + self._places(column, row)
+        angles = (row.float().reshape(-1, 1) * self.freqs).cat(
+            column.float().reshape(-1, 1) * self.freqs, dim=-1)  # fmt: skip
+        cos, sin = angles.cos(), angles.sin()
+        mask = valid.where(0.0, -math.inf).reshape(1, 1, 1, n)
+        x = self._encoder(x, mask, half, lambda t: ops.rotary(t, cos, sin, True))
+        x = x.reshape(1, n // k**2, -1)  # each cell's patches, which come together, joined
+        x = _linear(x, self.w["mm.0.weight"], half) + self.w["mm.0.bias"].dequant()
+        x = 0.5 * x * (1 + (x / math.sqrt(2)).erf())
+        return (_linear(x, self.w["mm.2.weight"], half) + self.w["mm.2.bias"].dequant())[0]
+
+    def _image(self, picture: Picture.Image, key: int) -> Image:
+        cell = self.patch * self.merge
+        width, height = _resized(*picture.size, cell, QWEN_PIXELS, self.tokens * cell**2)
+        bicubic = Picture.Resampling.BICUBIC
+        pixels, positions = self._patches(picture, width, height, bicubic, self.merge)
+        grid = height // cell, width // cell
+        tokens = [self.open, *[key] * (grid[0] * grid[1]), self.close]
+        return Image(key, tokens, grid, pixels, positions)
+
+    def _places(self, column: Tensor, row: Tensor) -> Tensor:
+        # each patch's learned embedding of its place: of the four of the learned grid around
+        # it, bilinearly, as the image's grid spreads over the learned one, corner to corner
+        (r0, r1, fr), (c0, c1, fc) = (self._spread(at) for at in (row, column))
+        corners = [(r0, c0, (1 - fr) * (1 - fc)), (r0, c1, (1 - fr) * fc),
+                   (r1, c0, fr * (1 - fc)), (r1, c1, fr * fc)]  # fmt: skip
+        rows = Tensor.stack(*(r * self.side + c for r, c, _ in corners))
+        weights = Tensor.stack(*(wt for _, _, wt in corners)).unsqueeze(-1)
+        places = (ops.embedding(rows, self.w["v.position_embd.weight"]) * weights).sum(0)
+        return places.reshape(1, -1, self.width)
+
+    def _spread(self, at: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        # the learned grid's rows or columns before and after each of the image's, and how far
+        # between, as transformers' linspace over the learned side
+        spot = at.float() * ((self.side - 1) / at.max().maximum(1).float())
+        low = spot.floor().cast(dtypes.int32)
+        return low, (low + 1).minimum(self.side - 1), spot - low
+
+
 # the encoders leat runs, by the projector types of llama.cpp's GGUFs
-PROJECTORS: dict[str, type[Vision]] = {"gemma3": Gemma3, "gemma4v": Gemma4, "pixtral": Pixtral}
+PROJECTORS: dict[str, type[Vision]] = {
+    "gemma3": Gemma3, "gemma4v": Gemma4, "pixtral": Pixtral, "qwen3vl_merger": Qwen3,
+}  # fmt: skip
 
 
 def load(path: str | Path, tokenizer: Tokenizer, dim: int) -> Vision:
@@ -447,6 +531,19 @@ def _within(width: int, height: int, side: int, cell: int, cells: int) -> tuple[
     w, h = -(-width // cell) * cell, -(-height // cell) * cell
     while (w // cell) * (h // cell) > cells:  # rounded up past the budget: a cell less
         w, h = (w - cell, h) if w >= h else (w, h - cell)
+    return w, h
+
+
+def _resized(width: int, height: int, cell: int, least: int, most: int) -> tuple[int, int]:
+    # as transformers' smart_resize: each side rounded to whole cells, then scaled, its aspect
+    # kept, to `least` pixels at least and `most` at most
+    w, h = round(width / cell) * cell, round(height / cell) * cell
+    if w * h > most:
+        beta = math.sqrt(width * height / most)
+        w, h = (max(cell, math.floor(side / beta / cell) * cell) for side in (width, height))
+    elif w * h < least:
+        beta = math.sqrt(least / (width * height))
+        w, h = (math.ceil(side * beta / cell) * cell for side in (width, height))
     return w, h
 
 

@@ -235,14 +235,17 @@ def _write_gemma4(path: Path, experts: bool) -> dict[str, np.ndarray]:
 
 def reference_logits(
     w: dict[str, np.ndarray], tokens: list[int], arch: str = "llama",
-    images: dict[int, np.ndarray] | None = None,
+    images: dict[int, np.ndarray] | None = None, grids: dict[int, tuple[int, int]] | None = None,
 ) -> np.ndarray:  # fmt: skip
-    # an independent float64 model, with keys and values rounded to f16 like leat's cache; of
-    # Gemma 4, images' embeddings by key in place of the tokens that hold it
+    # an independent float64 model, with keys and values rounded to f16 like leat's cache;
+    # images' embeddings by key in place of the tokens that hold it, of grids by key, which
+    # Qwen3.5's M-RoPE places
     if arch.startswith("gemma4"):
         return _reference_gemma4(w, tokens, images)
     if arch == "gemma3":
         return _reference_gemma3(w, tokens, images)
+    if arch == "qwen35moe":
+        return _reference_qwen35moe(w, tokens, images, grids)
     if arch in _REFERENCES:
         return _REFERENCES[arch](w, tokens)
 
@@ -674,6 +677,115 @@ def reference_pixtral(w: dict[str, np.ndarray], pixels: np.ndarray) -> np.ndarra
     return np.concatenate([lines, breaks], 1).reshape(-1, D)[:-1]
 
 
+def write_tiny_qwen_vl(path: Path) -> dict[str, np.ndarray]:
+    # Qwen3.5's encoder, Qwen3-VL's merger, of patches of 4 by 4 pixels, each cell of 2 by 2
+    rng = np.random.default_rng(3)
+    w = gguf.GGUFWriter(path, arch="clip")
+    w.add_string("clip.projector_type", "qwen3vl_merger")
+    for key, value in [("patch_size", V_PATCH), ("embedding_length", V_WIDTH),
+                       ("feed_forward_length", V_HIDDEN), ("block_count", V_LAYERS),
+                       ("attention.head_count", V_HEADS), ("projection_dim", D),
+                       ("spatial_merge_size", 2)]:  # fmt: skip
+        w.add_uint32(f"clip.vision.{key}", value)
+    w.add_float32("clip.vision.attention.layer_norm_epsilon", V_EPS)
+    w.add_bool("clip.use_gelu", True)
+    w.add_array("clip.vision.image_mean", [0.5] * 3)
+    w.add_array("clip.vision.image_std", [0.5] * 3)
+    weights: dict[str, np.ndarray] = {}
+
+    def add(name: str, shape: tuple[int, ...], scale: float = 0.0) -> None:
+        # matrices f16, normal times `scale`; biases f32, normal times 0.1; other vectors f32,
+        # uniform from 0.5 to 1.5
+        if scale:
+            values = (rng.standard_normal(shape) * scale).astype(np.float16)
+        elif name.endswith(".bias"):
+            values = (rng.standard_normal(shape) * 0.1).astype(np.float32)
+        else:
+            values = rng.uniform(0.5, 1.5, shape).astype(np.float32)
+        weights[name] = values
+        w.add_tensor(name, values)
+
+    def matrix(name: str, shape: tuple[int, ...], scale: float = 0.2) -> None:
+        add(name + ".weight", shape, scale)
+        add(name + ".bias", shape[:1])
+
+    kernel = (V_WIDTH, 3, V_PATCH, V_PATCH)
+    matrix("v.patch_embd", kernel)
+    add("v.patch_embd.weight.1", kernel, 0.2)  # the second frame's
+    weights["v.position_embd.weight"] = rng.standard_normal((Q_SIDE**2, V_WIDTH)).astype(
+        np.float32)  # fmt: skip
+    w.add_tensor("v.position_embd.weight", weights["v.position_embd.weight"])
+    for i in range(V_LAYERS):
+        b = f"v.blk.{i}."
+        matrix(b + "attn_qkv", (3 * V_WIDTH, V_WIDTH))
+        matrix(b + "attn_out", (V_WIDTH, V_WIDTH))
+        matrix(b + "ffn_up", (V_HIDDEN, V_WIDTH))
+        matrix(b + "ffn_down", (V_WIDTH, V_HIDDEN))
+        for name in ("ln1", "ln2"):
+            add(b + name + ".weight", (V_WIDTH,))
+            add(b + name + ".bias", (V_WIDTH,))
+    add("v.post_ln.weight", (V_WIDTH,))
+    add("v.post_ln.bias", (V_WIDTH,))
+    matrix("mm.0", (4 * V_WIDTH, 4 * V_WIDTH), 0.1)
+    matrix("mm.2", (D, 4 * V_WIDTH), 0.1)
+    _finish(w)
+    return {n: v.astype(np.float64) for n, v in weights.items()}
+
+
+def reference_qwen_vl(w: dict[str, np.ndarray], pixels: np.ndarray) -> np.ndarray:
+    # the embeddings of an image's pixels (H, W, 3), as transformers' Qwen3.5: its patches, cell
+    # by cell, normalized and projected by both frames' kernels, with the learned embeddings of
+    # their places bilinearly interpolated, as transformers' linspace spreads the image's grid over
+    # the learned one; through the layers, q and k rotated by row over the first quarter of each
+    # head's frequencies and by column over the second, as transformers' rotate_half does; normed,
+    # each cell's patches joined and projected
+    rows, columns = pixels.shape[0] // V_PATCH, pixels.shape[1] // V_PATCH
+    grid = pixels.reshape(rows // 2, 2, V_PATCH, columns // 2, 2, V_PATCH, 3)
+    patches = grid.transpose(0, 3, 1, 4, 2, 5, 6).reshape(rows * columns, -1, 3)
+    order = [(2 * r + i, 2 * c + j) for r in range(rows // 2) for c in range(columns // 2)
+             for i in range(2) for j in range(2)]  # fmt: skip
+    row, column = (np.array([o[k] for o in order]) for k in (0, 1))
+    kernel = w["v.patch_embd.weight"] + w["v.patch_embd.weight.1"]
+    x = ((patches / 255 - 0.5) / 0.5).reshape(rows * columns, -1)
+    x = x @ kernel.transpose(0, 2, 3, 1).reshape(V_WIDTH, -1).T + w["v.patch_embd.bias"]
+
+    def spread(at, size):  # the learned rows before and after, and how far between
+        spot = np.linspace(0, Q_SIDE - 1, size)[at]
+        low = np.floor(spot).astype(int)
+        return low, np.minimum(low + 1, Q_SIDE - 1), spot - low
+
+    (r0, r1, fr), (c0, c1, fc) = spread(row, rows), spread(column, columns)
+    table = w["v.position_embd.weight"]
+    x = x + sum(table[a * Q_SIDE + b] * wt[:, None] for a, b, wt in [
+        (r0, c0, (1 - fr) * (1 - fc)), (r0, c1, (1 - fr) * fc),
+        (r1, c0, fr * (1 - fc)), (r1, c1, fr * fc)])  # fmt: skip
+    head = V_WIDTH // V_HEADS
+    freqs = 10000.0 ** (-np.arange(0, head // 2, 2) / (head // 2))
+    angles = np.concatenate([row[:, None] * freqs, column[:, None] * freqs], -1)
+    cos, sin = (f(np.concatenate([angles, angles], -1))[:, None] for f in (np.cos, np.sin))
+
+    def rope(z):
+        return z * cos + np.concatenate([-z[..., head // 2 :], z[..., : head // 2]], -1) * sin
+
+    def layernorm(z, name):
+        z = (z - z.mean(-1, keepdims=True)) / np.sqrt(z.var(-1, keepdims=True) + V_EPS)
+        return z * w[f"{name}.weight"] + w[f"{name}.bias"]
+
+    def linear(z, name):
+        return z @ w[f"{name}.weight"].T + w[f"{name}.bias"]
+
+    for i in range(V_LAYERS):
+        b = f"v.blk.{i}."
+        q, k, v = np.split(linear(layernorm(x, b + "ln1"), b + "attn_qkv"), 3, -1)
+        q, k, v = (z.reshape(-1, V_HEADS, head) for z in (q, k, v))
+        x = x + linear(_full_attention(rope(q), rope(k), v, head**-0.5), b + "attn_out")
+        g = linear(layernorm(x, b + "ln2"), b + "ffn_up")
+        x = x + linear(glu("gelu", g, 1.0), b + "ffn_down")
+    x = layernorm(x, "v.post_ln").reshape(-1, 4 * V_WIDTH)
+    x = linear(x, "mm.0")
+    return linear(0.5 * x * (1 + np.vectorize(math.erf)(x / np.sqrt(2))), "mm.2")
+
+
 def reference_siglip(w: dict[str, np.ndarray], pixels: np.ndarray) -> np.ndarray:
     # the embeddings (tokens, D) of an image's pixels (G3_IMAGE square, 3), as transformers'
     # Gemma 3: SigLIP over its patches, normalized to [-1, 1], with a learned position each, then
@@ -975,12 +1087,15 @@ def _reference_phi3(w: dict[str, np.ndarray], tokens: list[int]) -> np.ndarray:
 # beside a shared one with a gate of its own; and a layer past the others, for predicting
 # further tokens, which leat leaves unread
 Q35_EVERY, Q35_ROTATED, Q35_HEAD = 3, 16, 64  # every 3rd layer attention; heads of 64
+Q35_SECTIONS = (3, 3, 2)  # of M-RoPE's 8 frequencies: of time, height and width
+Q_IMAGE = ("<|vision_start|>", "<|image_pad|>", "<|vision_end|>")
+Q_SIDE = 4  # of the learned grid of the tiny Qwen3-VL's places
 Q35_K_HEADS, Q35_V_HEADS, Q35_DIM, Q35_CONV, Q35_SHARED = 2, 4, 32, 4, 128
 Q35_CHANNELS = (2 * Q35_K_HEADS + Q35_V_HEADS) * Q35_DIM
 
 
 def _write_qwen35moe(path: Path) -> dict[str, np.ndarray]:
-    w, weights, add = _writer(path, "qwen35moe")
+    w, weights, add = _writer(path, "qwen35moe", Q_IMAGE)
     a = "qwen35moe."
     for key, value in [("block_count", Q35_EVERY + 1), ("nextn_predict_layers", 1),
                        ("embedding_length", D), ("attention.head_count", HEADS),
@@ -995,6 +1110,7 @@ def _write_qwen35moe(path: Path) -> dict[str, np.ndarray]:
                        ("full_attention_interval", Q35_EVERY)]:  # fmt: skip
         w.add_uint32(a + key, value)
     w.add_float32(a + "rope.freq_base", 1e7)
+    w.add_array(a + "rope.dimension_sections", [*Q35_SECTIONS, 0])
     add("token_embd.weight", *TENSORS["token_embd.weight"])
     add("output.weight", *TENSORS["output.weight"])
     add("output_norm.weight", (D,))
@@ -1038,23 +1154,53 @@ def _write_qwen35moe(path: Path) -> dict[str, np.ndarray]:
     return weights
 
 
-def _reference_qwen35moe(w: dict[str, np.ndarray], tokens: list[int]) -> np.ndarray:
-    return _qwen35_hidden(w, tokens) @ w["output.weight"].T
+def _reference_qwen35moe(
+    w: dict[str, np.ndarray], tokens: list[int], images: dict[int, np.ndarray] | None = None,
+    grids: dict[int, tuple[int, int]] | None = None,
+) -> np.ndarray:  # fmt: skip
+    return _qwen35_hidden(w, tokens, images, grids) @ w["output.weight"].T
 
 
-def _qwen35_hidden(w: dict[str, np.ndarray], tokens: list[int]) -> np.ndarray:
-    # the normed hidden states
-    x = w["token_embd.weight"][tokens].astype(np.float64)
+def _qwen35_hidden(
+    w: dict[str, np.ndarray], tokens: list[int], images: dict[int, np.ndarray] | None = None,
+    grids: dict[int, tuple[int, int]] | None = None,
+) -> np.ndarray:  # fmt: skip
+    # the normed hidden states; images' embeddings by key in place of the tokens that hold them,
+    # at M-RoPE's positions of their grids, by key
+    x, places = _embedded(w, tokens, images, 1.0), _mrope_places(tokens, grids or {})
     for i in range(Q35_EVERY):
-        x = _qwen35_layer(_layer(w, i), x, i < Q35_EVERY - 1)
+        x = _qwen35_layer(_layer(w, i), x, i < Q35_EVERY - 1, places)
     return norm(x, w["output_norm.weight"])
 
 
-def _qwen35_layer(lw: dict[str, np.ndarray], x: np.ndarray, recurrent: bool) -> np.ndarray:
-    # a Gated DeltaNet or full-attention layer of positions 0..T-1, then its experts and shared
-    # expert
+def _mrope_places(tokens: list[int], grids: dict[int, tuple[int, int]]) -> np.ndarray:
+    # each token's time, height and width, as transformers' Qwen3.5 has them: of text, the next
+    # position on each; of an image, its first's on time, and that plus its row and column, after
+    # which text goes on past its longer side
+    places, at, i = [], 0, 0
+    while i < len(tokens):
+        if tokens[i] >= 0:
+            places.append((at, at, at))
+            at, i = at + 1, i + 1
+            continue
+        rows, columns = grids[tokens[i]]
+        places += [(at, at + n // columns, at + n % columns) for n in range(rows * columns)]
+        at, i = at + max(rows, columns), i + rows * columns
+    return np.array(places)
+
+
+def _qwen35_layer(
+    lw: dict[str, np.ndarray], x: np.ndarray, recurrent: bool, places: np.ndarray
+) -> np.ndarray:
+    # a Gated DeltaNet or full-attention layer of tokens at M-RoPE's places (T, 3), then its
+    # experts and shared expert; frequency j turns by height if j % 3 is 1 within the height's
+    # section, by width if 2 within the width's, else by time
     T = len(x)
-    angles = np.arange(T)[:, None, None] * 1e7 ** (-np.arange(0, Q35_ROTATED, 2) / Q35_ROTATED)
+    half = Q35_ROTATED // 2
+    axes = [1 if j % 3 == 1 and j < 3 * Q35_SECTIONS[1] else 2 if j % 3 == 2 and
+            j < 3 * Q35_SECTIONS[2] else 0 for j in range(half)]  # fmt: skip
+    freqs = 1e7 ** (-np.arange(0, Q35_ROTATED, 2) / Q35_ROTATED)
+    angles = (places[:, axes] * freqs)[:, None, :]
     cos, sin = np.cos(angles), np.sin(angles)
 
     def rope(z):  # the first Q35_ROTATED dimensions, i with i + Q35_ROTATED / 2
@@ -1094,7 +1240,8 @@ def reference_mtp_drafts(w: dict[str, np.ndarray], tokens: list[int], count: int
         e = norm(w["token_embd.weight"][tokens].astype(np.float64), lw["nextn.enorm"])
         h = norm(np.stack(before), lw["nextn.hnorm"])
         x = np.concatenate([e, h], -1) @ lw["nextn.eh_proj"].T
-        out = norm(_qwen35_layer(lw, x, False), lw["nextn.shared_head_norm"])[-1]
+        places = _mrope_places(tokens, {})
+        out = norm(_qwen35_layer(lw, x, False, places), lw["nextn.shared_head_norm"])[-1]
         drafts.append(int((out @ w["output.weight"].T).argmax()))
         tokens.append(drafts[-1])
         before.append(out)
@@ -1156,5 +1303,4 @@ _WRITERS = {
 }  # fmt: skip
 _REFERENCES = {
     "gpt-oss": _reference_gpt_oss, "phi3": _reference_phi3,
-    "qwen35moe": _reference_qwen35moe,
 }  # fmt: skip
