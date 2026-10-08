@@ -825,7 +825,10 @@ function what(m) {
   if (m.name === "search" && results?.length) {
     return [listed(results.map((r) => link(r.url, r.title)), true)];
   }
-  if (m.name === "fetch") return [link(url, title || url)];
+  if (m.name === "fetch") { // and the question it was read for, if one
+    const asked = m.info?.question ? [element("p", "meta", `Read for: ${m.info.question}`)] : [];
+    return [link(url, title || url), ...asked];
+  }
   if (m.name === "recall" && conversations?.length) return [listed(conversations.map(conversationLink))];
   if (m.name === "write" || m.name === "edit") return [fileLink(args.path)];
   if (m.name === "run") {
