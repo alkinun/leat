@@ -347,3 +347,24 @@ def test_projector_beside(tmp_path):
     assert beside(model) is None
     own = write("mmproj-google_gemma-3-4b-it-f16.gguf", None)
     assert beside(model) == own and not projector(model)
+
+
+def test_no_room_for_vision(tiny, tiny_mmproj, monkeypatch, capsys):
+    # a model whose projector beside it the GPU has no room for loads without it, saying so; one
+    # the options name fails to load
+    from tests.test_server import serving
+
+    def engine(path, vision=None, **options):
+        if vision is not None:
+            raise MemoryError("Allocation of 1.00 GB failed")
+        return Engine(path, **options)
+
+    monkeypatch.setattr("leat.server.Engine", engine)
+    monkeypatch.setattr("leat.server.beside", lambda model: tiny_mmproj[0])
+    with serving(tiny("gemma4")[0], max_context=CONTEXT) as server:
+        server.load("tiny")
+        assert server.loaded.engine.vision is None
+        assert "has no room for mmproj.gguf" in capsys.readouterr().err
+    given = serving(tiny("gemma4")[0], max_context=CONTEXT, vision=tiny_mmproj[0])
+    with given as server, pytest.raises(RuntimeError, match="Allocation"):
+        server.load("tiny")

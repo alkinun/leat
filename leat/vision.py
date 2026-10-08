@@ -28,7 +28,7 @@ from PIL import Image as Picture
 from PIL import ImageOps
 from tinygrad import Tensor, dtypes
 
-from leat import ops
+from leat import kernels, ops
 from leat.gguf import GGUF
 from leat.quant import GGMLType, QTensor
 from leat.tokenizer import Tokenizer
@@ -209,17 +209,38 @@ class Vision:
             q, k = rope(q), rope(k)
         if self.v_norm:
             v = ops.rms_norm(v, None, self.eps)
-        if (scale := self.scale or head**-0.5) != 1:
-            q = q * scale
-        # products of f16 if half, the scores and their softmax f32: unscaled, they run to tens;
-        # v padded to whole tiles of the matrix cores, its product whole before the padding goes
-        v = v.pad_to((*v.shape[:-1], -(-head // 16) * 16))
-        # materialized: fused into the scores' product, the rotation runs once for each pair
-        q, k, v = ((t.half() if half else t).contiguous() for t in (q, k, v))
-        weights = (q.dot(k.transpose(-1, -2), dtype=dtypes.float32) + mask).softmax(-1)
-        out = (weights.half() if half else weights).dot(v, dtype=dtypes.float32)
-        out = out.contiguous()[..., :head].transpose(1, 2).reshape(1, n, self.width)
+        scale = self.scale or head**-0.5
+        if (out := self._flashed(q, k, v, mask, scale) if half else None) is None:
+            # products of f16 if half, the scores and their softmax f32: unscaled, they run to
+            # tens; v padded to whole tiles of the matrix cores, its product whole before the
+            # padding goes; q, k and v made first, as fused into the scores' product, the
+            # rotation runs once for each pair
+            v = v.pad_to((*v.shape[:-1], -(-head // 16) * 16))
+            q, k, v = ((t.half() if half else t).contiguous() for t in (q * scale, k, v))
+            weights = (q.dot(k.transpose(-1, -2), dtype=dtypes.float32) + mask).softmax(-1)
+            out = (weights.half() if half else weights).dot(v, dtype=dtypes.float32)
+            out = out.contiguous()[..., :head].transpose(1, 2).reshape(1, n, self.width)
         return self._linear(out.contiguous(), w, s, "attn_out", half)  # a copy the cores read
+
+    def _flashed(
+        self, q: Tensor, k: Tensor, v: Tensor, mask: Tensor, scale: float
+    ) -> Tensor | None:
+        # attention (1, n, width) of q, k and v (1, heads, n, head) by FlashAttention's kernel,
+        # which makes no matrix of scores, if it takes them: each head widened to whole tiles,
+        # the dimension past its own 1 in q, and in k 0 for patches, and for padding, as the
+        # additive mask (1, 1, 1, n) has it, its only one, far below, so that it takes no weight
+        _, heads, n, head = (int(d) for d in q.shape)
+        width = -(-(head + 1) // 16) * 16
+        spare = (Tensor.arange(width) == head).float()
+        # made first: fused into the stack of keys and values, their products run off the cores
+        q, k, v = (t.contiguous().pad_to((1, heads, n, width)) for t in (q, k, v))
+        padding = mask.reshape(1, 1, n, 1) < 0  # whose keys take only the dimension past
+        q, k = q + spare, padding.where(spare * -30000.0, k + spare * 0)
+        cache = Tensor.stack(k, v).half().contiguous()  # as a slot's keys and values
+        if not kernels.supports_flash_attention(q, cache):
+            return None
+        out = kernels.flash_attention(q, cache, 0, 0, scale, causal=False)
+        return out.reshape(1, n, heads, width)[..., :head].reshape(1, n, heads * head)
 
     def _linear(
         self, x: Tensor, w: dict[str, QTensor], s: dict[str, Tensor], name: str, half: bool

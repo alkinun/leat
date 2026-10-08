@@ -301,17 +301,30 @@ class Server(ThreadingHTTPServer):
         gc.collect()  # an engine's graphs refer back to it
         error: Exception | None = None
         try:
-            path = self.models[load.name]
-            vision = self.options.get("vision") or beside(path)
-            engine = Engine(path, **self.options | {"vision": vision})
-            chat = ChatTemplate(engine.gguf.metadata, engine.tokenizer)
-            engine.warm_up()
-            self.loaded = _Loaded(load.name, engine, chat)
+            self.loaded = _Loaded(load.name, *self._engine(self.models[load.name]))
         except Exception as e:  # for the client; the server carries on with no model
             error = e
         self.loading = None
         self.ready.set()
         load.done.put(error)
+
+    def _engine(self, path: Path) -> tuple[Engine, ChatTemplate]:
+        # a model's engine, warmed up, and its template; with the vision encoder the options
+        # name, or else the projector beside it, but where the GPU has no room for that too
+        given = self.options.get("vision")
+        if given is None and (vision := beside(path)) is not None:
+            with contextlib.suppress(MemoryError):
+                return self._warmed(path, vision)
+            gc.collect()  # what the try took, its traceback gone
+            print(f"{path.stem}: the GPU has no room for {vision.name} beside it, so it takes "
+                  "no images", file=sys.stderr, flush=True)  # fmt: skip
+        return self._warmed(path, given)
+
+    def _warmed(self, path: Path, vision: Path | None) -> tuple[Engine, ChatTemplate]:
+        engine = Engine(path, **self.options | {"vision": vision})
+        chat = ChatTemplate(engine.gguf.metadata, engine.tokenizer)
+        engine.warm_up()
+        return engine, chat
 
     def _arrivals(self, wait: bool) -> Iterator[_Completion | _Load | None]:
         # the requests queued so far, after waiting for one if `wait`
