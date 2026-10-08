@@ -601,6 +601,35 @@ def test_background_failures(agent, engine, events, monkeypatch):
     assert reviewed == [ids[1]]
 
 
+def test_tidy(agent, engine, events):
+    # a person's memory tidied: what says the same merged, by replaces alone, which adds nothing;
+    # a quarter forgotten at most, or 3; the day noted, and all it did kept, to undo
+    for i in range(5):
+        agent.remember(f"The user has fact {i}.", "about")
+    agent.remember("The user lives in Izmir.", "about")
+    agent.remember("The user is based in Izmir.", "about")
+    calls = [
+        call("remember", {"memory": "The user lives in Izmir, Turkey.", "replaces": 6,
+                          "evidence": "lives in Izmir"}, "a"),
+        call("remember", {"memory": "The user is new.", "evidence": "x"}, "b"),
+        *(call("forget", {"number": n}, f"f{n}") for n in (7, 1, 2, 3)),
+    ]  # fmt: skip
+    engine.replies.put([{"tool_calls": calls}])
+    engine.replies.put([{"content": "Done."}])
+    background.tidy(agent, None)
+    said = [m["content"] for m in engine.requests[-1]["messages"] if m["role"] == "tool"]
+    assert said[0] == "Changed [6]." and said[1].startswith("error: tidying changes memories")
+    forgot = ["Forgot [7]: The user is based in Izmir.", "Forgot [1]: The user has fact 0.",
+              "Forgot [2]: The user has fact 1."]  # fmt: skip
+    assert said[2:5] == forgot
+    assert said[5] == "error: a tidying forgets 3 memories at most"
+    assert [m["text"] for m in agent.memories()] == [
+        "The user has fact 2.", "The user has fact 3.", "The user has fact 4.",
+        "The user lives in Izmir, Turkey."]  # fmt: skip
+    assert {f["by"] for f in agent.store.forgotten()} == {"tidy"}
+    assert agent.store.setting(background.TIDIED) == {"None": datetime.date.today().isoformat()}
+
+
 def test_background(agent, engine, events):
     # once started, the agent names a conversation after its turn, and reviews it once idle; one
     # whose naming failed, as the engine was away, is named at the next look

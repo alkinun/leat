@@ -377,7 +377,7 @@ function renderMemories() {
 }
 
 // who forgot or changed a memory, in words
-const BY = { app: "by you", conversation: "in a chat", review: "while tidying" };
+const BY = { app: "by you", conversation: "in a chat", review: "after a chat", tidy: "while tidying" };
 
 // a memory's date: when it was last said, or of a plan, until when it holds, or that it passed
 function dated(m) {
