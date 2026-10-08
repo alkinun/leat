@@ -795,6 +795,24 @@ def test_summary(agent, engine, events):
     assert compacted["summarized"] == 3 == agent.conversation(id)["summarized"]
 
 
+def test_summary_in_place(agent, engine, events):
+    # a summary asked at the end of the conversation's prompt, as the engine's cache holds it,
+    # when the prompt and the summary fit the context; its tools declared, that it extends the last
+    engine.context = 4400
+    engine.replies.put([{"content": "Noted."}])
+    id = agent.send(None, "a" * 3600)
+    until(events, ended)
+    engine.replies.put([{"content": "Goal: the user writes long."}])  # the summary
+    engine.replies.put([{"content": "Noted again."}])
+    agent.send(id, "b" * 3600)
+    until(events, ended)
+    first, summarizing, reply = engine.requests
+    asked = summarizing["messages"]
+    assert asked[-1] == {"role": "user", "content": context.IN_PLACE}
+    assert asked[:2] == first["messages"] and summarizing["tools"] == first["tools"]
+    assert reply["messages"][0]["content"].endswith("Goal: the user writes long.")
+
+
 def test_cut_off(agent, engine, events):
     # a reply the context cuts off is redone in its place, once the prompt is smaller
     engine.context = 3000

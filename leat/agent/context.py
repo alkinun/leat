@@ -44,6 +44,17 @@ addresses that matter.
 - Next: what is left to do.
 Write these sections, short, in the conversation's language, and nothing else."""
 SUMMARY_TOKENS = 1500
+# the note that asks for a summary at the end of the conversation, as the engine holds it
+IN_PLACE = """\
+(Write a summary of this conversation so far, for yourself to go on from it without it, keeping \
+what the summary above, if there is one, says that still matters. In these sections, short:
+- Goal: what the user wants, and what they asked last.
+- The user: what they told of themselves, and how they like things done.
+- Done and found: what you did and found, with the facts, numbers, names and web addresses that \
+matter.
+- Files: the files made or read, by name.
+- Next: what is left to do.
+Write the summary alone, in the conversation's language, and call no tools.)"""
 
 State = dict[str, Any]  # "cleared": tools' answers before this message's index cleared;
 # "summary", "summarized": the summary of the messages before that index; "used", "at": the tokens

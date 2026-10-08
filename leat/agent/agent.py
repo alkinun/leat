@@ -627,7 +627,11 @@ class _Turn:
         # makes the prompt smaller, as context.compact can, telling the apps where any summary
         # ends; returns the state, the same if it is no smaller
         assert self.limit is not None
-        smaller = context.compact(messages, state, self.limit, extra, self._summarize, force)
+
+        def summarize(before: str | None, span: list[dict[str, Any]], tokens: int) -> str:
+            return self._summarize(before, span, tokens, messages, state, extra)
+
+        smaller = context.compact(messages, state, self.limit, extra, summarize, force)
         keys = ("cleared", "summarized")
         if [smaller.get(k) for k in keys] == [state.get(k) for k in keys]:
             return state
@@ -639,11 +643,27 @@ class _Turn:
                 a.events.publish(event | {"to": self.person})
         return smaller
 
-    def _summarize(self, before: str | None, messages: list[dict[str, Any]], tokens: int) -> str:
-        # a summary of messages in `tokens` at most, with that of those before them, by the model,
-        # whose context the summary and its prompt must fit; of messages too many, the latest
+    def _summarize(
+        self, before: str | None, span: list[dict[str, Any]], tokens: int,
+        messages: list[dict[str, Any]], state: context.State, extra: int,
+    ) -> str:  # fmt: skip
+        # a summary, in `tokens` at most, of the messages of `span`, with that of those before
+        # them, by the model: asked at the end of the conversation's prompt, as the engine's cache
+        # holds it, if it and the summary fit the context, as Claude Code asks its own; or of the
+        # span alone, as a transcript, the latest of it that the context holds
         assert self.limit is not None
-        text, so_far = context.transcript(messages), f"The summary so far:\n{before}\n\n"
+        asking = len(context.IN_PLACE) // context.CHARS
+        if context.estimate(messages, state, extra) + asking + tokens < self.limit:
+            note = {"role": "user", "content": context.IN_PLACE}
+            body = {
+                "messages": [*context.prompt(messages, state), note], "max_tokens": tokens,
+                "temperature": 0.3, "tools": [t.declaration() for t in self.tools.values()],
+                "chat_template_kwargs": {"enable_thinking": False, "preserve_thinking": True},
+            }  # fmt: skip
+            reply = self.agent.engine.reply(body)
+            if (summary := reply["content"].strip()) and not reply.get("tool_calls"):
+                return summary
+        text, so_far = context.transcript(span), f"The summary so far:\n{before}\n\n"
         room = (self.limit - tokens) * context.CHARS
         room -= len(context.SUMMARIZE) + len(so_far if before else "") + 200
         latest = text[max(0, len(text) - room) :]
