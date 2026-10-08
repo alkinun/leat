@@ -1,10 +1,12 @@
 """Chat prompts, rendered with the model's own Jinja template from GGUF metadata, and replies
 split into their reasoning, text and tool calls, in each supported model's syntax."""
 
+import base64
+import binascii
 import contextlib
 import json
 import re
-from collections.abc import Container
+from collections.abc import Container, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -14,13 +16,19 @@ from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 from leat.tokenizer import Tokenizer
 
+# where an image of a message's content stands in the rendered text, which tokens() replaces with
+# the image's own tokens: the object replacement character, which text parts never hold
+IMAGE = "\ufffc"
+
 
 class ChatTemplate:
     """Turns OpenAI-style messages into prompt tokens.
 
     Rendering matches transformers' `apply_chat_template` once text parts are joined and the JSON
     arguments of tool calls decoded, as templates expect. As there and in llama.cpp, control-token
-    text inside message content is parsed as control tokens.
+    text inside message content is parsed as control tokens. Images, `image_url` parts as images()
+    reads them, stand as IMAGE in the text, as llama.cpp's markers do, whatever the template does
+    with images: tokens() puts each image's own there.
     """
 
     def __init__(self, metadata: dict[str, Any], tokenizer: Tokenizer):
@@ -67,11 +75,17 @@ class ChatTemplate:
     ) -> list[int]:
         return self.tokens(self.render(messages, add_generation_prompt, **kwargs))
 
-    def tokens(self, text: str) -> list[int]:
-        """A rendered prompt's tokens."""
+    def tokens(self, text: str, images: Sequence[list[int]] = ()) -> list[int]:
+        """A rendered prompt's tokens, each IMAGE in it the tokens that show an image, in turn."""
         # most templates write the BOS text themselves; add it only when they don't
         bos = self._tokenizer.add_bos and not (self._bos and text.startswith(self._bos))
-        return self._tokenizer.encode(text, bos=bos, special=True)
+        first, *rest = text.split(IMAGE)
+        if len(rest) != len(images):
+            raise ValueError(f"the prompt shows {len(rest)} images, {len(images)} are given")
+        ids = self._tokenizer.encode(first, bos=bos, special=True)
+        for image, piece in zip(images, rest, strict=True):
+            ids += image + self._tokenizer.encode(piece, bos=False, special=True)
+        return ids
 
     def opens_thinking(self, text: str) -> bool:
         """Whether a rendered prompt ends inside a block of reasoning, which the reply then
@@ -285,16 +299,43 @@ def _blank(text: str, i: int) -> int:
     return i
 
 
+def images(messages: list[dict[str, Any]]) -> list[bytes]:
+    """The images of messages' content in turn, `image_url` parts of data: URLs, as bytes: a
+    ValueError for one of another URL, which leat does not fetch."""
+    out = []
+    for message in messages:
+        parts = message.get("content")
+        for part in parts if isinstance(parts, list) else []:
+            if not isinstance(part, dict) or part.get("type") != "image_url":
+                continue
+            url = part["image_url"].get("url") if isinstance(part.get("image_url"), dict) else None
+            if not isinstance(url, str) or not re.match(r"data:[^,]*;base64,", url):
+                raise ValueError("an image_url's url must be a data: URL of base64")
+            try:
+                out.append(base64.b64decode(url.partition(",")[2], validate=True))
+            except binascii.Error as e:
+                raise ValueError(f"an image_url's data is not base64: {e}") from None
+    return out
+
+
 def _message(message: dict[str, Any]) -> dict[str, Any]:
-    # an OpenAI message as templates read it: content as one string, and tool calls only where
-    # there are some, with their arguments as objects rather than JSON text
+    # an OpenAI message as templates read it: content as one string, its text parts joined by
+    # newlines and its images, `image_url` parts or transformers' `image` ones, IMAGE, which text
+    # never holds; and tool calls only where there are some, with their arguments as objects
+    # rather than JSON text
     message = dict(message)
-    if isinstance(parts := message.get("content"), list):
-        if any(not isinstance(part, dict) or part.get("type") != "text" for part in parts):
-            raise ValueError("only text content is supported")
-        if any(not isinstance(part.get("text"), str) for part in parts):
+    if isinstance(content := message.get("content"), str):
+        message["content"] = content.replace(IMAGE, "")
+    elif isinstance(content, list):
+        kinds = ("text", "image", "image_url")
+        if any(not isinstance(part, dict) or part.get("type") not in kinds for part in content):
+            raise ValueError("content parts must be text, image or image_url")
+        if any(p["type"] == "text" and not isinstance(p.get("text"), str) for p in content):
             raise ValueError("a text part's text must be a string")
-        message["content"] = "\n".join(part["text"] for part in parts)
+        pieces = [p["text"].replace(IMAGE, "") if p["type"] == "text" else IMAGE for p in content]
+        message["content"] = "".join(
+            p if i == 0 or IMAGE in (p, pieces[i - 1]) else "\n" + p for i, p in enumerate(pieces)
+        )
     if calls := message.pop("tool_calls", None):
         if not isinstance(calls, list) or not all(
             isinstance(call, dict) and isinstance(call.get("function"), dict) for call in calls

@@ -208,7 +208,7 @@ def test_serve_directories(tiny_model, tmp_path, monkeypatch, capsys):
     (empty := tmp_path / "empty").mkdir()
     with pytest.raises(SystemExit, match="no GGUF files"):
         main(["serve", str(empty)])
-    with pytest.raises(SystemExit, match="drafts for one model"):
+    with pytest.raises(SystemExit, match="--draft is of one model"):
         main(["serve", str(models), str(tiny_model[0]), "--draft", str(tiny_model[0])])
 
 

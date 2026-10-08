@@ -25,6 +25,7 @@ from leat.agent.workspace import Workspace
 if TYPE_CHECKING:
     from leat.chat import ChatTemplate
     from leat.server import Server
+    from leat.vision import Image
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -60,6 +61,11 @@ def main(argv: list[str] | None = None) -> None:
     run.add_argument("--presence-penalty", type=float, default=0.0)
     run.add_argument("--system", help="system prompt")
     run.add_argument(
+        "--mmproj", type=Path,
+        help="a vision encoder's GGUF, for images; by default the projector beside the model of "
+        "its name, if any. `/image PATH` attaches an image to the next message",
+    )  # fmt: skip
+    run.add_argument(
         "--draft",
         type=Path,
         help="a drafter's GGUF, for speculative decoding: Gemma 4's assistant for Gemma 4, or "
@@ -81,6 +87,11 @@ def main(argv: list[str] | None = None) -> None:
     serve.add_argument(
         "--draft", type=Path, help="a drafter's GGUF, for speculative decoding, of the one model"
     )
+    serve.add_argument(
+        "--mmproj", type=Path,
+        help="a vision encoder's GGUF, of the one model; by default each model takes the "
+        "projector beside it of its name, if any",
+    )  # fmt: skip
 
     speed = commands.add_parser("bench", help="measure prefill and decode speed")
     speed.add_argument("model", type=Path, help="GGUF file")
@@ -169,34 +180,49 @@ def _run(args: argparse.Namespace) -> None:
     from leat.chat import ChatTemplate, split_reply
     from leat.engine import Engine
     from leat.sampler import Sampling
+    from leat.vision import Image, beside
 
-    engine = Engine(args.model, max_context=args.max_context, draft=args.draft)
+    vision = args.mmproj or beside(args.model)
+    engine = Engine(args.model, max_context=args.max_context, draft=args.draft, vision=vision)
     chat, tok = ChatTemplate(engine.gguf.metadata, engine.tokenizer), engine.tokenizer
     sampling = Sampling(args.temperature, args.top_k, args.top_p, args.min_p, args.presence_penalty)
     first = [{"role": "system", "content": args.system}] if args.system else []
-    messages = list(first)
+    messages, pictures, attached = list(first), list[Image](), list[Image]()
     print(f"{engine.gguf.path.stem} on {Device.DEFAULT}, compiling...", end="", flush=True)
     engine.warm_up()
-    print(" ready. Ctrl-D quits.")
+    print(f" ready.{' /image PATH attaches an image.' if engine.vision else ''} Ctrl-D quits.")
     while True:
         try:
-            messages.append({"role": "user", "content": input("> ")})
+            line = input("> ")
         except (EOFError, KeyboardInterrupt):
             print()
             return
-        prompt, thinking = _prompt(chat, messages)
+        if line.startswith("/image ") and engine.vision is not None:
+            try:  # shown before the next message's text
+                attached.append(engine.image(Path(line[7:].strip()).expanduser().read_bytes()))
+            except (OSError, ValueError) as e:
+                print(f"[no image: {e}]")
+            continue
+        n = len(attached)  # the message's images, before its text
+        images = [{"type": "image"}] * n + [{"type": "text", "text": line}]
+        messages.append({"role": "user", "content": images if n else line})
+        pictures, attached = pictures + attached, []
+        prompt, thinking = _prompt(chat, messages, pictures)
         if len(prompt) >= engine.max_context and len(messages) > len(first) + 1:
             print(f"[the conversation is {len(prompt)} tokens, over --max-context; starting over]")
             messages = [*first, messages[-1]]  # from the message just written
-            prompt, thinking = _prompt(chat, messages)
+            pictures = pictures[len(pictures) - n :]
+            prompt, thinking = _prompt(chat, messages, pictures)
         if len(prompt) >= engine.max_context:
             print(f"[the message makes {len(prompt)} tokens, over --max-context]")
             messages.pop()
+            pictures = pictures[: len(pictures) - n]
             continue
         reply, step, start = [], tok.stream(), time.perf_counter()
         text, shown = "", ("", "")  # the reply so far, and its reasoning and text printed
         try:
-            for t in engine.generate(prompt, engine.max_context - len(prompt), sampling):
+            for t in engine.generate(prompt, engine.max_context - len(prompt), sampling,
+                                     images=pictures):  # fmt: skip
                 if t in tok.eog_ids:
                     break
                 reply.append(t)
@@ -212,15 +238,17 @@ def _run(args: argparse.Namespace) -> None:
         messages.append({"role": "assistant", "content": parts.content})
 
 
-def _prompt(chat: "ChatTemplate", messages: list[dict]) -> tuple[list[int], bool]:
-    # the chat's prompt, and whether it opens a block of reasoning
+def _prompt(
+    chat: "ChatTemplate", messages: list[dict], images: list["Image"]
+) -> tuple[list[int], bool]:
+    # the chat's prompt, showing its images in turn, and whether it opens a block of reasoning
     import jinja2
 
     try:
         rendered = chat.render(messages)
     except jinja2.TemplateError as e:  # such as a system prompt the template does not take
         raise SystemExit(f"the model's chat template refuses this chat: {e}") from None
-    return chat.tokens(rendered), chat.opens_thinking(rendered)
+    return chat.tokens(rendered, [image.tokens for image in images]), chat.opens_thinking(rendered)
 
 
 def _show(parts, shown: tuple[str, str]) -> tuple[str, str]:
@@ -239,13 +267,17 @@ def _serve(args: argparse.Namespace) -> None:
     from tinygrad import Device
 
     from leat.server import Server
+    from leat.vision import projector
 
     models = [f for p in args.models for f in (sorted(p.glob("*.gguf")) if p.is_dir() else [p])]
+    models = [f for f in models if not projector(f)]  # each model's vision encoder, not a model
     if not models:
         raise SystemExit("no GGUF files: give some, or directories that hold some")
-    if args.draft and len(models) > 1:
-        raise SystemExit("--draft drafts for one model: serve that one alone")
-    options = {"max_context": args.max_context, "slots": args.slots, "draft": args.draft}
+    for flag in ("draft", "mmproj"):
+        if getattr(args, flag) and len(models) > 1:
+            raise SystemExit(f"--{flag} is of one model: serve that one alone")
+    options = {"max_context": args.max_context, "slots": args.slots, "draft": args.draft,
+               "vision": args.mmproj}  # fmt: skip
     with Server(models, args.host, args.port, **options) as server:
         # served at once, the model loading meanwhile, so that a client asking while it compiles
         # hears it is loading, its completions waiting for it, rather than no answer

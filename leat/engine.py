@@ -306,7 +306,7 @@ class Engine:
 
     def image(self, data: bytes) -> Image:
         """An image of its file's bytes, for a prompt: its tokens show it there, and start()
-        takes it."""
+        takes it. Any thread may call it."""
         if self.vision is None:
             raise ValueError("the model has no vision encoder")
         return self.vision.image(data)
@@ -399,7 +399,7 @@ class Engine:
         # that fills an image, which a drafter takes in
         assert self.vision is not None
         n, dim = self._image_len.bind(image.size), self.config.dim
-        embeddings = self._encode(image.pixels, image.positions).reshape(1, -1, dim)
+        embeddings = self._encode(*self.vision.inputs(image)).reshape(1, -1, dim)
         tokens = _ids([self.vision.fill] * image.size, self.vision.tokens)
         x, tokens = embeddings.shrink(((0, 1), (0, n), (0, dim))), tokens.shrink(((0, 1), (0, n)))
         return self._image_chunk(tokens, *options, *row, image=x)

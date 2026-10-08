@@ -11,7 +11,10 @@ import array
 import hashlib
 import io
 import math
+import re
+import warnings
 from dataclasses import dataclass
+from pathlib import Path
 
 from PIL import Image as Picture
 from PIL import ImageOps
@@ -25,6 +28,7 @@ from leat.tokenizer import Tokenizer
 # the embeddings an image takes at most: of Gemma 4's budgets, 70, 140, 280, 560 or 1120, its
 # processor's default
 IMAGE_TOKENS = 280
+PROJECTORS = {"gemma4v"}  # the vision encoders leat runs, as llama.cpp's projector types name them
 _LAYER = ("ln1", "attn_q", "attn_k", "attn_v", "attn_q_norm", "attn_k_norm", "attn_out",
           "attn_post_norm", "ln2", "ffn_gate", "ffn_up", "ffn_down", "ffn_post_norm")  # fmt: skip
 
@@ -33,13 +37,14 @@ _LAYER = ("ln1", "attn_q", "attn_k", "attn_v", "attn_q_norm", "attn_k_norm", "at
 class Image:
     """An image ready for a prompt. `tokens` show it there: those that open and close it, around
     a position for each of its embeddings, which hold `key`, a negative id of a digest of the
-    image by which the cache tells images apart. `pixels` and `positions` are the encoder's: each
-    patch's pixels, rows of RGB, and its column and row, -1 for padding."""
+    image by which the cache tells images apart. `pixels` and `positions` are the encoder's, as
+    bytes the engine uploads when it encodes the image: each patch's pixels, rows of RGB, and its
+    column and row as int32, -1 for padding."""
 
     key: int
     tokens: list[int]
-    pixels: Tensor  # (patches, 3 * patch * patch) uint8
-    positions: Tensor  # (patches, 2) int32
+    pixels: bytes
+    positions: bytes
 
     @property
     def size(self) -> int:
@@ -53,7 +58,7 @@ class Vision:
 
     def __init__(self, gguf: GGUF, tokenizer: Tokenizer, dim: int):
         m = {k.removeprefix("clip.vision."): v for k, v in gguf.metadata.items()}
-        if (kind := m.get("projector_type")) != "gemma4v":
+        if (kind := m.get("projector_type")) not in PROJECTORS:
             raise NotImplementedError(f"vision projector {kind!r} is not supported")
         if m["projection_dim"] != dim:
             raise ValueError(f"vision projects to {m['projection_dim']} dims, the model has {dim}")
@@ -90,9 +95,15 @@ class Vision:
 
     def image(self, data: bytes) -> Image:
         """An image of its file's bytes, in any format Pillow reads, upright as its EXIF has it,
-        and transparency over white."""
-        with Picture.open(io.BytesIO(data)) as opened:
-            picture = ImageOps.exif_transpose(opened)
+        and transparency over white; a ValueError for bytes of no image, or of one so large it
+        may be a decompression bomb. Of the host alone, so that any thread may call it."""
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", Picture.DecompressionBombWarning)
+                with Picture.open(io.BytesIO(data)) as opened:
+                    picture = ImageOps.exif_transpose(opened)
+        except (OSError, Picture.DecompressionBombError, Picture.DecompressionBombWarning) as e:
+            raise ValueError(f"not an image Pillow reads: {e}") from None
         if picture.has_transparency_data:
             rgba = picture.convert("RGBA")
             picture = Picture.alpha_composite(Picture.new("RGBA", rgba.size, "white"), rgba)
@@ -110,11 +121,13 @@ class Vision:
         places = [c for y in range(rows) for x in range(columns) for c in (x, y)] + [-1] * 2 * pad
         key = -1 - int.from_bytes(hashlib.sha256(data).digest()[:7], "little")
         size = columns * rows // self.pool**2
-        return Image(
-            key, [self.open, *[key] * size, self.close],
-            Tensor(pixels, dtype=dtypes.uint8).reshape(self.patches, -1),
-            Tensor(array.array("i", places).tobytes(), dtype=dtypes.int32).reshape(-1, 2),
-        )  # fmt: skip
+        tokens = [self.open, *[key] * size, self.close]
+        return Image(key, tokens, pixels, array.array("i", places).tobytes())
+
+    def inputs(self, image: Image) -> tuple[Tensor, Tensor]:
+        """An image's pixels and positions on the device, as encode() takes them."""
+        pixels = Tensor(image.pixels, dtype=dtypes.uint8).reshape(self.patches, -1)
+        return pixels, Tensor(image.positions, dtype=dtypes.int32).reshape(self.patches, 2)
 
     def encode(self, pixels: Tensor, positions: Tensor) -> Tensor:
         """The embeddings (tokens, dim) of an image's pixels and positions, as Image holds them:
@@ -205,6 +218,29 @@ def _special(tokenizer: Tokenizer, text: str) -> int:
     if len(ids) != 1:
         raise ValueError(f"the model's vocab lacks {text}")
     return ids[0]
+
+
+def projector(path: Path) -> bool:
+    """Whether a GGUF is a projector, as llama.cpp's converters name them: mmproj-*.gguf."""
+    return "mmproj" in path.name.lower()
+
+
+def beside(model: Path) -> Path | None:
+    """The projector beside a model, of a kind leat runs, for its embeddings and of its name, as
+    its converter writes both: the first in the model's directory whose general.name, or file
+    name without one, holds the model's general.name, but for case and punctuation."""
+
+    def name(metadata: dict, path: Path) -> str:
+        return re.sub(r"[^a-z0-9]", "", str(metadata.get("general.name", path.stem)).lower())
+
+    m = GGUF.open(model).metadata
+    own, dim = name(m, model), m.get(f"{m.get('general.architecture')}.embedding_length")
+    for path in sorted(model.parent.glob("*.gguf")):
+        p = GGUF.open(path).metadata if projector(path) else {}
+        kind, width = p.get("clip.vision.projector_type"), p.get("clip.vision.projection_dim")
+        if kind in PROJECTORS and width == dim and own and own in name(p, path):
+            return path
+    return None
 
 
 def blank() -> bytes:

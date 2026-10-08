@@ -27,10 +27,11 @@ from typing import Any
 
 import jinja2
 
-from leat.chat import ChatTemplate, Reply, parse_tool_calls, split_reply, tool_call_start
+from leat.chat import ChatTemplate, Reply, images, parse_tool_calls, split_reply, tool_call_start
 from leat.engine import Engine, Sequence
 from leat.sampler import Sampling
 from leat.tokenizer import Tokenizer
+from leat.vision import Image, beside
 
 # seconds between a handler's checks that its client is still there, while it waits for text
 _HANG_UP_CHECK = 0.25
@@ -118,6 +119,7 @@ class _Completion:
     tools: list[dict[str, Any]] | None
     stream: bool
     stream_usage: bool
+    images: list[Image] = field(default_factory=list)  # those the prompt shows
     form: str | None = None  # how the reply marks its reasoning, as ChatTemplate.form
     thinking: bool = False  # the prompt opened a <think> block
     id: str = field(default_factory=lambda: f"chatcmpl-{uuid.uuid4().hex}")
@@ -151,7 +153,8 @@ class Server(ThreadingHTTPServer):
     """Serves GGUF models at http://host:port, the API at /v1, until shut down.
 
     One model is loaded at a time, none until load(), as Engine(path, **options); it answers every
-    request, whatever model it names. A model's id is its file name without .gguf.
+    request, whatever model it names. A model's id is its file name without .gguf. Unless the
+    options name a vision encoder, a model takes the projector beside it, if any, of its name.
     """
 
     def __init__(
@@ -280,8 +283,9 @@ class Server(ThreadingHTTPServer):
         try:  # timed from before start(), which copies a prefix in or restores a kept state
             started, cached = time.perf_counter(), engine.cached_prefix(request.prompt)
             sequence = engine.start(
-                request.prompt, request.max_tokens, request.sampling, request.seed
-            )
+                request.prompt, request.max_tokens, request.sampling, request.seed,
+                images=request.images,
+            )  # fmt: skip
         except Exception as e:  # for the client; the server carries on
             request.out.put(e)
             return True
@@ -297,7 +301,9 @@ class Server(ThreadingHTTPServer):
         gc.collect()  # an engine's graphs refer back to it
         error: Exception | None = None
         try:
-            engine = Engine(self.models[load.name], **self.options)
+            path = self.models[load.name]
+            vision = self.options.get("vision") or beside(path)
+            engine = Engine(path, **self.options | {"vision": vision})
             chat = ChatTemplate(engine.gguf.metadata, engine.tokenizer)
             engine.warm_up()
             self.loaded = _Loaded(load.name, engine, chat)
@@ -481,8 +487,9 @@ class _Handler(BaseHTTPRequestHandler):
         loaded = s.loaded if s.loaded is not None and s.loaded.name == name else None
         status = "loaded" if loaded else "loading" if s.loading == name else "unloaded"
         model = {"id": name, "object": "model", "created": s.created, "owned_by": "leat"}
-        if loaded:
-            model["max_context"] = loaded.engine.max_context
+        if loaded:  # and whether it takes images
+            model |= {"max_context": loaded.engine.max_context,
+                      "vision": loaded.engine.vision is not None}  # fmt: skip
         return model | {"status": status}
 
     def _head(self, c: _Completion, kind: str) -> dict[str, Any]:
@@ -531,7 +538,10 @@ def _completion(body: Any, server: Server) -> _Completion:
     # options for the template too, such as Qwen3's enable_thinking, as llama.cpp and vLLM take
     options = (body.get("chat_template_kwargs") or {}) | ({"tools": tools} if tools else {})
     text = loaded.chat.render(body["messages"], **options)
-    prompt = loaded.chat.tokens(text)
+    if (files := images(body["messages"])) and loaded.engine.vision is None:
+        raise ValueError(f"{loaded.name} takes no images: it has no vision encoder")
+    shown = [loaded.engine.image(data) for data in files]
+    prompt = loaded.chat.tokens(text, [image.tokens for image in shown])
     if len(prompt) >= (context := loaded.engine.max_context):
         raise ValueError(f"the prompt has {len(prompt)} tokens, too many for {context} of context")
     stop, given = body.get("stop") or [], {k: v for k, v in body.items() if v is not None}
@@ -552,6 +562,7 @@ def _completion(body: Any, server: Server) -> _Completion:
         tools=tools,
         stream=bool(body.get("stream")),
         stream_usage=bool((body.get("stream_options") or {}).get("include_usage")),
+        images=shown,
         form=loaded.chat.form,
         thinking=loaded.chat.opens_thinking(text),
     )

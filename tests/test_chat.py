@@ -1,7 +1,15 @@
 import jinja2
 import pytest
 
-from leat.chat import ChatTemplate, Reply, parse_tool_calls, split_reply, tool_call_start
+from leat.chat import (
+    IMAGE,
+    ChatTemplate,
+    Reply,
+    images,
+    parse_tool_calls,
+    split_reply,
+    tool_call_start,
+)
 from leat.gguf import GGUF
 from leat.tokenizer import USER_DEFINED, Tokenizer
 from tests.helpers import ids, tiny_metadata
@@ -59,8 +67,29 @@ def test_openai_messages():
         {"role": "assistant", "content": "c", "tool_calls": None},
     ]
     assert c.render(messages) == "a\nb;Oslo;c;"
-    with pytest.raises(ValueError, match="only text"):
-        c.render([{"role": "user", "content": [{"type": "image_url", "image_url": {}}]}])
+    with pytest.raises(ValueError, match="text, image or image_url"):
+        c.render([{"role": "user", "content": [{"type": "input_audio"}]}])
+
+
+def test_images():
+    # an image part stands as IMAGE in the text, joined to its neighbours without a newline, and
+    # its tokens take its place; data: URLs give its bytes, other URLs none
+    c, tok = chat("{% for m in messages %}{{ m.content }};{% endfor %}")
+    png = {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0="}}
+    parts = [{"type": "text", "text": "a"}, png, {"type": "text", "text": f"b{IMAGE}"},
+             {"type": "text", "text": "c"}]  # fmt: skip
+    text = c.render([{"role": "user", "content": parts}])
+    assert text == f"a{IMAGE}b\nc;"
+    # transformers' image parts stand for images too, and text of its own holds no IMAGE
+    other = [{"type": "image"}, {"type": "text", "text": "d"}]
+    assert c.render([{"content": f"e{IMAGE}"}, {"content": other}]) == f"e;{IMAGE}d;"
+    assert c.tokens(text, [[-5, -5]]) == tok.encode("a") + [-5, -5] + tok.encode("b\nc;", bos=False)
+    with pytest.raises(ValueError, match="1 images, 0 are given"):
+        c.tokens(text)
+    assert images([{"role": "user", "content": parts}, {"content": "d"}]) == [b"\x89PNG\r"]
+    for url in ("https://example.com/a.png", "data:image/png;base64,not base64!"):
+        with pytest.raises(ValueError, match="data: URL|not base64"):
+            images([{"content": [{"type": "image_url", "image_url": {"url": url}}]}])
 
 
 def with_marker(marker: str) -> ChatTemplate:

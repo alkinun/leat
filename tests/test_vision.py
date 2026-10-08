@@ -1,6 +1,10 @@
+import base64
 import io
+from pathlib import Path
 
+import gguf
 import numpy as np
+import openai
 import pytest
 from PIL import Image as Picture
 
@@ -8,7 +12,7 @@ from leat import vision
 from leat.engine import Engine
 from leat.gguf import GGUF
 from leat.tokenizer import Tokenizer
-from leat.vision import Vision, _fit
+from leat.vision import Vision, _fit, beside, projector
 from tests.helpers import (
     CONTEXT,
     G_IMAGE,
@@ -18,6 +22,9 @@ from tests.helpers import (
     reference_image,
     reference_logits,
     write_tiny_mmproj,
+)
+from tests.helpers import (
+    _finish as finish,
 )
 from tests.test_model import prefill_starts
 
@@ -79,7 +86,7 @@ def test_encode_matches_reference(tiny, tiny_mmproj, size):
     image, expected = v.image(data), embeddings(tiny_mmproj[1], data)
     opened, closed = ids(tokenizer, G_IMAGE[0], G_IMAGE[2])
     assert image.key < 0 and image.tokens == [opened, *[image.key] * len(expected), closed]
-    got = v.encode(image.pixels, image.positions).numpy()
+    got = v.encode(*v.inputs(image)).numpy()
     assert got.shape == (TOKENS, D)
     np.testing.assert_allclose(got[: image.size], expected, rtol=1e-4, atol=1e-4)
 
@@ -91,7 +98,7 @@ def test_encode_on_matrix_cores(tiny, tiny_mmproj):
     v = Vision(GGUF.open(tiny_mmproj[0]), tokenizer, D)
     data = png(50, 20)
     image, expected = v.image(data), embeddings(tiny_mmproj[1], data)
-    got = v.encode(image.pixels, image.positions).numpy()[: image.size]
+    got = v.encode(*v.inputs(image)).numpy()[: image.size]
     cosine = (got * expected).sum(-1) / np.linalg.norm(got, axis=-1)
     assert (cosine / np.linalg.norm(expected, axis=-1) > 0.999).all()
 
@@ -102,14 +109,15 @@ def test_image_bytes(tiny, tiny_mmproj):
     assert v.image(png(30, 30)).key == v.image(png(30, 30)).key != v.image(png(30, 30, 1)).key
     clear = io.BytesIO()
     Picture.new("RGBA", (24, 24), (0, 0, 0, 0)).save(clear, "PNG")
-    image = v.image(clear.getvalue())
-    pixels = image.pixels.numpy()[(image.positions.numpy()[:, 0] >= 0)]
-    assert (pixels == 255).all()
+    pixels, positions = (t.numpy() for t in v.vision.inputs(v.image(clear.getvalue())))
+    assert (pixels[positions[:, 0] >= 0] == 255).all()
     turned, exif = io.BytesIO(), Picture.Exif()
     exif[0x0112] = 6  # rotated a quarter turn
     Picture.new("RGB", (48, 12)).save(turned, "JPEG", exif=exif)
-    positions = v.image(turned.getvalue()).positions.numpy()
+    _, positions = (t.numpy() for t in v.vision.inputs(v.image(turned.getvalue())))
     assert positions[:, 0].max() < positions[:, 1].max()  # taller than wide
+    with pytest.raises(ValueError, match="not an image"):
+        v.image(b"GIF89a, but not")
 
 
 @pytest.mark.usefixtures("reference_ops")
@@ -176,3 +184,54 @@ def test_warm_up_compiles_images(tiny, tiny_mmproj):
     image = e.image(png(30, 30))
     prompt = [5, *image.tokens, 7]
     assert list(e.generate(prompt, 4, images=[image])) == fresh(tiny, tiny_mmproj, prompt, image)
+
+
+def test_server_takes_images(tiny, tiny_mmproj):
+    # an image_url part of a data: URL generates as the engine does given its image; the model
+    # says it takes images, and one without a vision encoder refuses them
+    from tests.test_server import connect, serving
+
+    path, data = tiny("gemma4")[0], png(30, 30)
+    url = f"data:image/png;base64,{base64.b64encode(data).decode()}"
+    parts = [{"type": "text", "text": "a"}, {"type": "image_url", "image_url": {"url": url}}]
+    e = engine(tiny, tiny_mmproj, prefill_chunk=8)
+    image = e.image(data)
+    prompt = e.tokenizer.encode("a") + image.tokens  # the tiny model's template is the content
+    expected = e.tokenizer.decode(list(e.generate(prompt, 4, images=[image])))
+    with serving(path, max_context=CONTEXT, prefill_chunk=8, vision=tiny_mmproj[0]) as server:
+        server.load("tiny")
+        client = connect(server)
+        assert client.models.list().data[0].vision is True
+        messages = [{"role": "user", "content": parts}]
+        reply = client.chat.completions.create(
+            model="tiny", messages=messages, max_tokens=4, temperature=0
+        )
+        assert reply.choices[0].message.content == expected
+    with serving(path, max_context=CONTEXT) as server:
+        server.load("tiny")
+        with pytest.raises(openai.BadRequestError, match="takes no images"):
+            connect(server).chat.completions.create(model="tiny", messages=messages)
+
+
+def test_projector_beside(tmp_path):
+    # the projector for the model's embeddings whose name, or file name without one, holds the
+    # model's name but for case and punctuation, is its own
+    def write(name: str, general: str | None, dim: int = 8) -> Path:
+        kind = "mmproj" if projector(Path(name)) else "model"
+        w = gguf.GGUFWriter(tmp_path / name, arch="clip" if kind == "mmproj" else "llama")
+        if general:
+            w.add_name(general)
+        if kind == "mmproj":
+            w.add_string("clip.vision.projector_type", "gemma4v")
+            w.add_uint32("clip.vision.projection_dim", dim)
+        else:
+            w.add_uint32("llama.embedding_length", 8)
+        finish(w)
+        return tmp_path / name
+
+    model = write("Gemma-3-4b-it-Q4_K_M.gguf", "Gemma 3 4b It")
+    write("mmproj-a.gguf", "Qwen3.6 35B A3B")
+    write("mmproj-b.gguf", "gemma-3-4b-it", dim=16)
+    assert beside(model) is None
+    own = write("mmproj-google_gemma-3-4b-it-f16.gguf", None)
+    assert beside(model) == own and not projector(model)
