@@ -168,6 +168,12 @@ class _Handler(BaseHTTPRequestHandler):
                 if found is None:
                     raise NotFound(f"there is no list {match[1]}")
                 self._json(200, lists.add(agent, found["name"], [_text(body, "text")]).info)
+            elif match := _PERSON.fullmatch(path):  # whether they are a child
+                _owner(me)
+                if not isinstance(child := body.get("child"), bool):
+                    raise ValueError("child must be a boolean")
+                household.set_child(int(match[1]), child)
+                self._json(200, {})
             elif (match := _REQUEST.fullmatch(path)) and match[2]:
                 _owner(me)
                 to = body.get("person")

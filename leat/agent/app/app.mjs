@@ -488,6 +488,14 @@ function renderHousehold() {
       return item;
     }));
     const heading = element("h3", "", p.owner ? `${p.name} (owner)` : p.name);
+    if (!p.owner) { // whether a child, whose new chats keep to a child's rules
+      const child = element("label", "child"), box = element("input");
+      Object.assign(box, { type: "checkbox", checked: Boolean(p.child) });
+      box.onchange = () => post(`/api/people/${p.id}`, { child: box.checked }).catch((e) => status(e.message, true));
+      child.append(box, " a child");
+      child.title = "Leat keeps to what suits a child, in every new chat";
+      heading.append(" ", child);
+    }
     if (!p.owner) {
       const remover = element("button", "", "Remove");
       remover.onclick = () => confirm(`Remove ${p.name}, with all their chats, memories and tasks?`)
