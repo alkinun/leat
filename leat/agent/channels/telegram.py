@@ -51,7 +51,8 @@ class Telegram:
 
     def __init__(self, agent: Agent, api: str = API):
         self.agent, self.api = agent, api
-        self.started: dict[str, int] = {}  # the conversations whose turns a chat began, its id
+        # the conversations whose turns a chat began: its id, and of a group's, the message asking
+        self.started: dict[str, tuple[int, int | None]] = {}
         self._wake = threading.Event()  # set when the token changes
         self._lock = threading.Lock()
 
@@ -137,8 +138,10 @@ class Telegram:
 
     def _handle(self, message: dict[str, Any]) -> None:
         # a message of a private chat: from someone allowed, sent the agent; from someone not, a
-        # request for the app
-        if message.get("chat", {}).get("type") != "private":
+        # request for the app. One of a group, to the agent, from someone allowed: asked of it.
+        if (kind := message.get("chat", {}).get("type")) in ("group", "supergroup"):
+            return self._asked(message)
+        if kind != "private":
             return
         person, chat = message["from"], message["chat"]["id"]
         settings = self._settings()
@@ -169,11 +172,42 @@ class Telegram:
             with self._lock:
                 id = self.agent.send(conversation, text or "(The files attached.)",
                                      attached=attached, via="telegram", person=whose)  # fmt: skip
-                self.started[id] = chat
+                self.started[id] = (chat, None)
         except Busy:
             return self._send(chat, "I'm still working on a reply here: /stop stops it.")
         if id != conversation:
             self._change(lambda s: s | {"chats": s.get("chats", {}) | {str(chat): id}})
+        self._call("sendChatAction", chat_id=chat, action="typing")
+
+    def _asked(self, message: dict[str, Any]) -> None:
+        # a group's message that names the bot, or answers it, from someone allowed: asked of the
+        # agent, with the message it answers, as "@leat is this true?" under another; each
+        # person's a conversation of their own in the group, knowing none of theirs. Anyone else
+        # the bot answers nothing, as a group is no place to ask to join.
+        settings, sender, chat = self._settings(), message["from"], message["chat"]["id"]
+        allowed, bot = settings.get("allowed", {}).get(str(sender["id"])), settings.get("bot")
+        text = (message.get("text") or message.get("caption") or "").strip()
+        answered = message.get("reply_to_message") or {}
+        theirs = answered.get("from", {}).get("username") == bot
+        if allowed is None or not bot or not (f"@{bot}".lower() in text.lower() or theirs):
+            return
+        question = re.sub(rf"@{re.escape(bot)}\b", "", text, flags=re.I).strip() or "Is it true?"
+        if (quoted := answered.get("text") or answered.get("caption")) and not theirs:
+            author = _name(answered.get("from") or {}) or "Someone"
+            question = f"{author} wrote in the group:\n> {quoted}\n\n{question}"
+        whose, key = allowed.get("person"), f"{chat}:{sender['id']}"
+        conversation = settings.get("chats", {}).get(key)
+        if (c := self.agent.store.conversation(conversation or "")) is None or c["person"] != whose:
+            conversation = None
+        try:
+            with self._lock:
+                id = self.agent.send(conversation, question, via="telegram", person=whose,
+                                     shared=True)  # fmt: skip
+                self.started[id] = (chat, message["message_id"])
+        except Busy:
+            return
+        if id != conversation:
+            self._change(lambda s: s | {"chats": s.get("chats", {}) | {key: id}})
         self._call("sendChatAction", chat_id=chat, action="typing")
 
     def _command(
@@ -227,7 +261,7 @@ class Telegram:
         if time.monotonic() - typed < TYPING:
             return typed
         with self._lock:
-            waiting = set(self.started.values())
+            waiting = {chat for chat, _ in self.started.values()}
         for chat in waiting:
             self._call("sendChatAction", chat_id=chat, action="typing")
         return time.monotonic()
@@ -236,24 +270,27 @@ class Telegram:
         kind, id = event.get("type"), str(event.get("conversation"))
         if kind == "conversation" and not event["conversation"]["running"]:
             with self._lock:
-                chat = self.started.pop(event["conversation"]["id"], None)
-            if chat is not None:
-                self._reply(event["conversation"]["id"], chat)
-        elif kind == "done":  # a task's turn
-            chats = {v: int(c) for c, v in self._settings().get("chats", {}).items()}
+                started = self.started.pop(event["conversation"]["id"], None)
+            if started is not None:
+                self._reply(event["conversation"]["id"], *started)
+        elif kind == "done":  # a task's turn, of a private chat's conversation
+            chats = {
+                v: int(c) for c, v in self._settings().get("chats", {}).items() if ":" not in c
+            }
             if id in chats:
                 self._reply(id, chats[id])
         elif kind == "error":
             with self._lock:
-                chat = self.started.pop(id, None)
-            if chat is not None:
-                self._send(chat, f"Sorry, that failed: {event['error']}")
+                started = self.started.pop(id, None)
+            if started is not None:
+                self._send(started[0], f"Sorry, that failed: {event['error']}")
         elif kind == "deleted":  # in the app, as its turn ran: nothing to wait for
             with self._lock:
                 self.started.pop(event["id"], None)
 
-    def _reply(self, id: str, chat: int) -> None:
-        # the last turn's answer, then the files it made
+    def _reply(self, id: str, chat: int, asked: int | None = None) -> None:
+        # the last turn's answer, then the files it made; in a group, as an answer to the message
+        # that asked
         messages = self.agent.store.messages(id)
         start = max(i for i, m in enumerate(messages) if m["role"] == "user")
         turn = messages[start + 1 :]
@@ -265,11 +302,12 @@ class Telegram:
         if info.get("cut"):
             text += "\n\n(Cut off: the conversation is out of room. /new begins another.)"
         sources = {n: url for url, n in numbered(messages).items()}
-        for part in _parts(text.strip() or "(No answer.)"):
+        for i, part in enumerate(_parts(text.strip() or "(No answer.)")):
+            reply = {"reply_parameters": {"message_id": asked}} if asked and not i else {}
             try:
-                self._send(chat, to_html(part, sources), parse_mode="HTML")
+                self._send(chat, to_html(part, sources), parse_mode="HTML", **reply)
             except TelegramError:  # of formatting Telegram cannot read: as it is
-                self._send(chat, part)
+                self._send(chat, part, **reply)
         made = [
             name for m in turn if m["role"] == "tool" for name in m.get("info", {}).get("files", [])
         ]

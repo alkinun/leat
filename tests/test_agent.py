@@ -150,7 +150,8 @@ def test_turn(agent, engine, events):
     seen = until(events, ended)
     assert [e["type"] for e in seen[:3]] == ["conversation", "message", "message"]
     assert seen[0]["conversation"] | {"updated": 0} == {
-        "id": id, "title": "Hi", "updated": 0, "running": True, "character": None}  # fmt: skip
+        "id": id, "title": "Hi", "updated": 0, "running": True, "character": None,
+        "shared": False}  # fmt: skip
     user = {"role": "user", "content": "Hi\nand more",
             "info": {"think": False, "at": pytest.approx(time.time(), abs=5)}}  # fmt: skip
     assert seen[1]["message"] == user

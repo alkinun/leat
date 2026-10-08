@@ -42,10 +42,9 @@ class FakeBots(ThreadingHTTPServer):
 
     def update(self, sender: dict, **message: Any) -> None:
         self.count += 1
-        chat = {"id": sender["id"], "type": message.pop("chat", "private")}
-        self.updates.put(
-            {"update_id": self.count, "message": {"from": sender, "chat": chat} | message}
-        )
+        chat = {"id": message.pop("chat_id", sender["id"]), "type": message.pop("chat", "private")}
+        sent = {"message_id": self.count, "from": sender, "chat": chat} | message
+        self.updates.put({"update_id": self.count, "message": sent})
 
     def drain(self) -> None:
         """Waits for the bot to have handled every update given: it asks for more once it has."""
@@ -251,6 +250,39 @@ def test_api(bot, bots):
         assert [(p["id"], p["person"]) for p in bot.state()["allowed"]] == [(9, 1)]  # the owner
         assert request(f"{url}/people/9", "DELETE")[0] == 200
         assert request(url, "DELETE")[0] == 200 and bot.state()["bot"] is None
+
+
+def test_group(bot, bots, engine):
+    # in a group, the bot answers the household's people alone, when they name it or answer it:
+    # each a conversation of their own there, with the message they answer, knowing none of
+    # theirs, and the web's tools alone; its answer an answer to their message
+    bot.connect(TOKEN)
+    bots.next("setMyCommands")
+    settings = bot.agent.store.setting(telegram.KEY)
+    allowed = {"7": {"id": 7, "name": "Alkın (@alkinun)", "person": None}}
+    bot.agent.store.set_setting(telegram.KEY, settings | {"allowed": allowed})
+    bot.agent.remember("The user lives in Izmir.", "about")
+    family = -100
+    bots.update(ME, chat="supergroup", chat_id=family, text="Lunch at 1?")  # not to the bot
+    bots.update(STRANGER, chat="supergroup", chat_id=family, text="@leat_bot hi")  # a stranger
+    bots.drain()
+    assert bots.calls.empty() and bot.agent.conversations() == []
+    engine.replies.put([{"content": "It is not true [1]."}])
+    claim = {"message_id": 41, "from": STRANGER, "text": "The moon is made of cheese."}
+    bots.update(ME, chat="supergroup", chat_id=family, text="@leat_bot is this true?",
+                reply_to_message=claim)  # fmt: skip
+    sent = bots.next("sendMessage")
+    assert (sent["chat_id"], sent["text"]) == (family, "It is not true [1].")
+    assert sent["reply_parameters"]["message_id"] == bots.count
+    asked = engine.requests[-1]
+    assert "asked in a group chat" in asked["messages"][0]["content"]
+    assert "Izmir" not in asked["messages"][0]["content"]
+    assert asked["messages"][1]["content"].endswith(
+        "Eve wrote in the group:\n> The moon is made of cheese.\n\nis this true?"
+    )
+    assert {t["function"]["name"] for t in asked.get("tools", [])} <= {"search", "fetch", "weather"}
+    (conversation,) = bot.agent.conversations()
+    assert bot.agent.store.conversation(conversation["id"])["shared"] == 1
 
 
 ONE, TWO = '<a href="https://one.org">[1]</a>', '<a href="https://two.org">[2]</a>'

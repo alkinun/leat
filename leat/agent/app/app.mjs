@@ -738,7 +738,7 @@ function renderList() {
       remove(c);
     };
     const title = element("span", "", c.title), played = characters.find((p) => p.id === c.character);
-    if (played) title.prepend(element("span", "with", `${played.name} · `));
+    if (played || c.shared) title.prepend(element("span", "with", `${played?.name ?? "In a group"} · `));
     item.append(title, remover);
     item.onclick = () => open(c.id);
     return item;

@@ -164,10 +164,14 @@ _MIGRATIONS = [
       created REAL NOT NULL
     );
     """,
+    # a conversation in a group chat, whose words are not the user's alone
+    """
+    ALTER TABLE conversations ADD COLUMN shared INTEGER NOT NULL DEFAULT 0;
+    """,
 ]
 _SEARCHED = ("user", "assistant")  # the roles of the messages search finds
 # a conversation's columns as the apps list it
-_SUMMARY = "id, title, created, updated, person, character"
+_SUMMARY = "id, title, created, updated, person, character, shared"
 # the memories a person knows: their own, and the household's
 _KNOWN = "(person IS ? OR category = 'household')"
 
@@ -199,19 +203,20 @@ class Store:
 
     def create(
         self, title: str, messages: list[dict[str, Any]], person: int | None = None,
-        character: int | None = None,
+        character: int | None = None, shared: bool = False,
     ) -> dict[str, Any]:  # fmt: skip
-        """A new conversation of a person's, with a character if given, of these messages."""
+        """A new conversation of a person's, with a character if given, in a group chat if
+        `shared`, of these messages."""
         id, now = uuid.uuid4().hex[:12], time.time()
         with self._lock, self._db:
             self._db.execute("BEGIN")
-            sql = (
-                "INSERT INTO conversations (id, title, created, updated, person, character) VALUES"
-            )
-            self._db.execute(f"{sql} (?, ?, ?, ?, ?, ?)", (id, title, now, now, person, character))
+            self._db.execute(
+                "INSERT INTO conversations (id, title, created, updated, person, character, shared)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)", (id, title, now, now, person, character, shared),
+            )  # fmt: skip
             self._insert(id, 0, messages)
         return {"id": id, "title": title, "created": now, "updated": now, "person": person,
-                "character": character}  # fmt: skip
+                "character": character, "shared": int(shared)}  # fmt: skip
 
     def context(self, id: str) -> dict[str, Any]:
         rows = self._query("SELECT context FROM conversations WHERE id = ?", id)
