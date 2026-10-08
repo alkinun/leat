@@ -103,8 +103,10 @@ class Engine:
     KEEP_BACK tokens before its last prompt's end.
 
     With a vision encoder, prompts hold images: each at as many positions as it has embeddings,
-    which run in a chunk of their own, the image's whole, and see each other, as Gemma's do. The
-    image is encoded when its chunk runs, and not again where the cache holds it.
+    which run in a chunk of their own, the image's whole, and see each other, as Gemma's do, or
+    are read causally, as Mistral's and Qwen's. The image is encoded when its chunk runs, and not
+    again where the cache holds it. Of M-RoPE, as Qwen3.5's, an image takes fewer of RoPE's
+    positions than of the cache's: each slot's RoPE moves on by as many as the images before.
     """
 
     def __init__(

@@ -199,7 +199,8 @@ def _run(args: argparse.Namespace) -> None:
             return
         if line.startswith("/image "):
             try:  # shown before the next message's text
-                attached.append(engine.image(Path(line[7:].strip()).expanduser().read_bytes()))
+                path = Path(line[7:].strip().strip("'\"")).expanduser()  # as terminals quote one
+                attached.append(engine.image(path.read_bytes()))
             except (OSError, ValueError) as e:  # as of a model without a vision encoder
                 print(f"[no image: {e}]")
             continue

@@ -498,7 +498,8 @@ def _mrope(
     axes = [1 if j % 3 == 1 and j < 3 * sections[1] else 2 if j % 3 == 2 and j < 3 * sections[2]
             else 0 for j in range(half)]  # fmt: skip
     pick = Tensor.arange(3).reshape(1, 3, 1) == Tensor(axes).reshape(1, 1, half)
-    return tuple(pick.where(t[positions], 0.0).sum(1) for t in tables)  # type: ignore[return-value]
+    cos, sin = (pick.where(t[positions], 0.0).sum(1) for t in tables)
+    return cos, sin
 
 
 def _factors(rope: Rope, weights: dict[str, QTensor], max_context: int) -> Tensor | None:

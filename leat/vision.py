@@ -211,10 +211,10 @@ class Vision:
             v = ops.rms_norm(v, None, self.eps)
         scale = self.scale or head**-0.5
         if (out := self._flashed(q, k, v, mask, scale) if half else None) is None:
-            # products of f16 if half, the scores and their softmax f32: unscaled, they run to
-            # tens; v padded to whole tiles of the matrix cores, its product whole before the
-            # padding goes; q, k and v made first, as fused into the scores' product, the
-            # rotation runs once for each pair
+            # products of f16 if half, the scores and their softmax f32, as they run to tens; v
+            # padded to whole tiles of the matrix cores, its product whole before the padding
+            # goes; q, k and v made first, as fused into the scores' product, the rotation runs
+            # once for each pair
             v = v.pad_to((*v.shape[:-1], -(-head // 16) * 16))
             q, k, v = ((t.half() if half else t).contiguous() for t in (q * scale, k, v))
             weights = (q.dot(k.transpose(-1, -2), dtype=dtypes.float32) + mask).softmax(-1)
@@ -235,7 +235,7 @@ class Vision:
         # made first: fused into the stack of keys and values, their products run off the cores
         q, k, v = (t.contiguous().pad_to((1, heads, n, width)) for t in (q, k, v))
         padding = mask.reshape(1, 1, n, 1) < 0  # whose keys take only the dimension past
-        q, k = q + spare, padding.where(spare * -30000.0, k + spare * 0)
+        q, k = q + spare, padding.where(spare * -30000.0, k)
         cache = Tensor.stack(k, v).half().contiguous()  # as a slot's keys and values
         if not kernels.supports_flash_attention(q, cache):
             return None
@@ -557,7 +557,10 @@ def _within(width: int, height: int, side: int, cell: int, cells: int) -> tuple[
 
 def _resized(width: int, height: int, cell: int, least: int, most: int) -> tuple[int, int]:
     # as transformers' smart_resize: each side rounded to whole cells, then scaled, its aspect
-    # kept, to `least` pixels at least and `most` at most
+    # kept, to `least` pixels at least and `most` at most; a ValueError for a side 200 times the
+    # other, which it refuses too, as the cells would not fit
+    if max(width, height) > 200 * min(width, height):
+        raise ValueError(f"an image of {width} by {height} pixels is too thin: 200 to 1 at most")
     w, h = round(width / cell) * cell, round(height / cell) * cell
     if w * h > most:
         beta = math.sqrt(width * height / most)

@@ -113,3 +113,5 @@ def test_images():
     assert images >= 2 * context.IMAGE
     cleared = context.prompt(messages, {"cleared": 4})[3]
     assert cleared["content"] == context.CLEARED and "images" not in cleared
+    long = [*messages[:3], read | {"content": "x" * (context.KEEP + 1)}]  # cleared for its length
+    assert "images" not in context.prompt(long, {"cleared": 4})[3]

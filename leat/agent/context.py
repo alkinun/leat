@@ -202,7 +202,8 @@ def _view(messages: list[dict[str, Any]], state: State) -> list[dict[str, Any]]:
     # saying where one is saved, to read again
     view = [message(m) for m in messages]
     for m, v in zip(messages[: state.get("cleared", 0)], view, strict=False):
-        if v["role"] == "tool" and (len(v["content"]) > KEEP or v.pop("images", None)):
+        if v["role"] == "tool" and (len(v["content"]) > KEEP or v.get("images")):
+            v.pop("images", None)
             saved = m.get("info", {}).get("saved")
             v["content"] = SAVED.format(saved=saved) if saved else CLEARED
     return view

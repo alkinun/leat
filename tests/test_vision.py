@@ -129,6 +129,8 @@ def test_fit(size, tokens, expected):
 )  # fmt: skip
 def test_resized(size, expected):
     assert _resized(*size, 32, 64 * 64, 1024 * 1024) == expected
+    with pytest.raises(ValueError, match="too thin"):  # as transformers refuses
+        _resized(2010, 10, 32, 64 * 64, 1024 * 1024)
 
 
 @pytest.mark.usefixtures("reference_ops")
