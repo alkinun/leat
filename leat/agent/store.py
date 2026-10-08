@@ -390,9 +390,10 @@ class Store:
                 keys = ("memory", "text", "category", "until", "created", "person")
                 values: tuple[Any, ...] = (*(old[k] for k in keys), time.time())
             else:
-                sql = ("UPDATE memories SET text = ?, category = ?, until = ?, confirmed = ?"
-                       " WHERE id = ?")  # fmt: skip
-                values = (old["text"], old["category"], old["until"], time.time(), old["memory"])
+                sql = ("UPDATE memories SET text = ?, category = ?, until = ?, person = ?,"
+                       " confirmed = ? WHERE id = ?")  # fmt: skip
+                values = (old["text"], old["category"], old["until"], old["person"], time.time(),
+                          old["memory"])  # fmt: skip
             if not self._db.execute(sql, values).rowcount:
                 return None
             self._db.execute("DELETE FROM forgotten WHERE id = ?", (id,))

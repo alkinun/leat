@@ -372,13 +372,18 @@ class Agent:
     def restore(self, id: int, person: int | None = None) -> dict[str, Any]:
         """Undoes the forgetting or change of a memory of a person's or the household's, by its
         number among the forgotten, and returns the memory. Raises NotFound if it cannot be: if
-        it is not there, or the memory changed was forgotten since."""
+        it is not there, or the memory changed was forgotten since, or is another's now, as a
+        household's one made someone's own."""
         with self._lock:
-            if id not in [f["id"] for f in self.store.forgotten(person, limit=-1)]:
+            known = {f["id"]: f for f in self.store.forgotten(person, limit=-1)}
+            if (old := known.get(id)) is None:
                 raise NotFound(f"there is nothing to restore as {id}")
+            mine = [m["id"] for m in self.store.memories(person)]
+            if old["change"] != "forgotten" and old["memory"] not in mine:
+                raise NotFound(f"the memory changed as {id} is no longer yours to restore")
             if (m := self.store.restore(id)) is None:
                 raise NotFound(f"there is nothing to restore as {id}")
-            self._memories_changed(m["person"])
+            self._memories_changed(None)  # everyone's, as it may be another's than it was
         return m
 
     def files_changed(self) -> None:

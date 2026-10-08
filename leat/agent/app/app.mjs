@@ -184,7 +184,7 @@ function gate(empty) {
 async function waitToJoin(id) {
   for (;;) {
     await new Promise((resolve) => setTimeout(resolve, 2000));
-    const response = await fetch(`/api/pairings/${id}`).catch(() => null);
+    const response = await fetch(`/api/pairings/${id}`, { method: "POST" }).catch(() => null);
     if (response?.status === 200) return location.reload();
     if (response?.status === 404) {
       $("join").querySelector(".row").hidden = false;

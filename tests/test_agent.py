@@ -429,6 +429,17 @@ def test_forgotten(agent, events):
         agent.restore(forgotten["id"])
     event = agent.memories_event()
     assert event["type"] == "memories" and event["forgotten"] == []
+    # a household's memory one person made their own: its old text, everyone's to see, no other
+    # may restore over theirs; they may, the household's again
+    ada, bo = (agent.store.add_person(name)["id"] for name in ("Ada", "Bo"))
+    shared = agent.remember("The family has a dog.", "household")
+    agent.remember("I walk the dog.", "about", replaces=shared["id"], person=ada)
+    (old,) = agent.store.forgotten(bo)
+    with pytest.raises(NotFound, match="no longer yours"):
+        agent.restore(old["id"], person=bo)
+    assert agent.memories(ada)[-1]["text"] == "I walk the dog."
+    restored = agent.restore(old["id"], person=ada)
+    assert (restored["text"], restored["person"]) == ("The family has a dog.", None)
 
 
 def test_household(agent, engine, events):
@@ -1277,11 +1288,12 @@ def test_joining(server, agent, engine, events):
     (request_,) = json.loads(line[6:])["requests"]
     assert (request_["name"], request_["code"]) == ("Ada", asked["code"])
     connection.close()
-    assert ask(f"/api/pairings/{asked['id']}")[0] == 202  # waiting
+    assert ask(f"/api/pairings/{asked['id']}")[0] == 401  # asked after by a POST alone
+    assert ask(f"/api/pairings/{asked['id']}", "POST")[0] == 202  # waiting
     status, ada = request(f"{server}/api/pairings/{asked['id']}/allow", "POST", {})
     assert status == 200 and json.loads(ada)["name"] == "Ada"
-    assert ask(f"/api/pairings/{asked['id']}")[0] == 200  # its cookie, taken once
-    assert ask(f"/api/pairings/{asked['id']}")[0] == 404
+    assert ask(f"/api/pairings/{asked['id']}", "POST")[0] == 200  # its cookie, taken once
+    assert ask(f"/api/pairings/{asked['id']}", "POST")[0] == 404
     assert ask("/api/me") == (200, {"person": 2, "name": "Ada", "owner": False, "device": 2})
     # Ada's own alone: her events tell of her conversations, not the owner's
     adas = "; ".join(f"{c.name}={c.value}" for c in jar.cookiejar)
@@ -1314,8 +1326,15 @@ def test_joining(server, agent, engine, events):
     # unpaired by the owner, it must ask again; and removed, with all that is hers, and the
     # Telegram people who talked as her
     (device,) = [d["id"] for d in agent.store.devices() if d["person"] == 2]
+    connection = http.client.HTTPConnection(server.replace("http://", ""), timeout=5)
+    connection.request("GET", "/api/events", headers={"Cookie": adas})
+    stream = connection.getresponse()
     assert request(f"{server}/api/devices/{device}", "DELETE")[0] == 200
     assert ask("/api/me")[0] == 401
+    time.sleep(1.1)  # the stream open before ends, at the next event past a second
+    agent.events.publish({"type": "files", "files": [], "to": "owner"})
+    assert stream.read().endswith(b"\n\n")  # to its end, which the server closed
+    connection.close()
     allowed = {"9": {"id": 9, "name": "Ada", "person": 2}, "7": {"id": 7, "name": "A", "person": 1}}
     agent.store.set_setting("telegram", {"allowed": allowed})
     assert request(f"{server}/api/people/2", "DELETE")[0] == 200

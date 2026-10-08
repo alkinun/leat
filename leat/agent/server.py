@@ -21,6 +21,7 @@ import queue
 import re
 import socket
 import sys
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -119,8 +120,6 @@ class _Handler(BaseHTTPRequestHandler):
         if path[1:] in _FILES:
             file = APP / path[1:]
             return self._send(200, _TYPES[file.suffix], file.read_bytes())
-        if (match := _REQUEST.fullmatch(path)) and not match[2]:
-            return self._joined(match[1])
         with self._answering():
             me = self._device()
             if path == "/api/me":
@@ -143,6 +142,9 @@ class _Handler(BaseHTTPRequestHandler):
             return self._error(403, "requests from other sites' pages are refused")
         path, agent = urllib.parse.urlsplit(self.path).path, self.server.agent
         household, telegram = self.server.household, self.server.telegram
+        if (match := _REQUEST.fullmatch(path)) and not match[2]:
+            # a POST, of this server's page alone: a link another gave could log a browser in
+            return self._joined(match[1])
         with self._answering():
             body = json.loads(self.rfile.read(self._length()))
             if not isinstance(body, dict):
@@ -308,6 +310,14 @@ class _Handler(BaseHTTPRequestHandler):
             raise _Unpaired
         return device
 
+    def _still(self, person: int | None) -> bool:
+        # whether the request's device is still paired, as the person's: unpaired, or its person
+        # removed, an open stream of events ends
+        try:
+            return self._device()["person"] == person
+        except _Unpaired:
+            return False
+
     def _joined(self, id: str) -> None:
         # a request to join, asked after: its device's secret once the owner let it in
         try:
@@ -361,10 +371,17 @@ class _Handler(BaseHTTPRequestHandler):
                 if self.server.telegram is not None:
                     self._event(self.server.telegram.state())
             self._event(agent.models_event())
+            checked = time.monotonic()
             while True:
                 try:
                     event = events.get(timeout=_KEEP_ALIVE)
                 except queue.Empty:
+                    event = None
+                if time.monotonic() - checked > 1:  # the device still paired, as the person's
+                    if not self._still(person):
+                        return
+                    checked = time.monotonic()
+                if event is None:
                     self.wfile.write(b": keep-alive\n\n")
                     continue
                 to = event.get("to", person)
