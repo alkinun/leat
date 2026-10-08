@@ -131,6 +131,11 @@ def until(events: queue.SimpleQueue, done: Callable[[dict], bool]) -> list[dict]
     return seen
 
 
+def stamped(agent: Agent, id: str, index: int) -> str:
+    """The time a stored message of the user's begins with, as the model reads it."""
+    return context.stamp(agent.store.messages(id)[index]["info"]["at"]) + "\n"
+
+
 def ended(event: dict) -> bool:
     # the end of a turn: its conversation no longer running, or gone
     c = event.get("conversation")
@@ -154,14 +159,14 @@ def test_turn(agent, engine, events):
     assert [e["type"] for e in seen[:3]] == ["conversation", "message", "message"]
     assert seen[0]["conversation"] | {"updated": 0} == {
         "id": id, "title": "Hi", "updated": 0, "running": True}  # fmt: skip
-    user = {"role": "user", "content": "Hi\nand more", "info": {"think": False}}
+    user = {"role": "user", "content": "Hi\nand more",
+            "info": {"think": False, "at": pytest.approx(time.time(), abs=5)}}  # fmt: skip
     assert seen[1]["message"] == user
     assert seen[2]["index"] == 2 and seen[2]["message"]["content"] == ""
     messages = agent.store.messages(id)
     system, user, reply = messages
-    today = datetime.date.today()
     assert system["role"] == "system"
-    assert f"Today is {today:%A}, {today.day} {today:%B %Y}." in system["content"]
+    assert "Each of the user's messages begins with the date and time" in system["content"]
     assert (reply["reasoning_content"], reply["content"]) == ("Hmm.", "Hello there.")
     info = reply["info"]
     assert info["model"] == "fake" and info["tokens"] == 5 and info["rate"] == pytest.approx(40.0)
@@ -172,6 +177,7 @@ def test_turn(agent, engine, events):
     # recommends then
     (request,) = engine.requests
     assert request["messages"] == [_api(m) for m in messages[:2]] and request["stream"] is True
+    assert request["messages"][1]["content"] == stamped(agent, id, 1) + "Hi\nand more"
     assert request["chat_template_kwargs"] == {"enable_thinking": False, "preserve_thinking": True}
     assert request["temperature"] == 0.7 and request["presence_penalty"] == 1.5
 
@@ -184,7 +190,7 @@ def test_think(agent, engine, events):
     assert engine.requests[-1]["chat_template_kwargs"] == {
         "enable_thinking": True, "preserve_thinking": True}  # fmt: skip
     assert engine.requests[-1]["temperature"] == 1.0
-    assert agent.store.messages(id)[1]["info"] == {"think": True}
+    assert agent.store.messages(id)[1]["info"]["think"] is True
 
 
 def test_deltas(agent, engine, events):
@@ -209,7 +215,7 @@ def test_next_turn(agent, engine, events):
     until(events, ended)
     sent = engine.requests[-1]["messages"]
     assert [m["role"] for m in sent] == ["system", "user", "assistant", "user"]
-    assert sent[1] == {"role": "user", "content": "Hi"}
+    assert sent[1] == {"role": "user", "content": stamped(agent, id, 1) + "Hi"}
     assert sent[2] == {"role": "assistant", "content": "Hello there.", "reasoning_content": "Hmm."}
     assert [m["content"] for m in agent.store.messages(id)][3:] == ["How are you?", "Fine."]
     # and the conversations, the latest updated first, are kept for the next run
@@ -287,15 +293,26 @@ def test_stop_in_call(agent, engine, events):
 
 
 def test_rounds(agent, engine, events, monkeypatch):
-    # a turn's last reply is offered no tools, so that it answers
+    # a turn's last reply is told to answer, the tools still declared so that its prompt extends
+    # the last; one that calls them anyway is redone without them
     monkeypatch.setattr("leat.agent.agent.ROUNDS", 3)
     for _ in range(2):
         engine.replies.put([{"tool_calls": [call("echo", {"text": "again"})]}])
     engine.replies.put([{"content": "Done."}])
-    agent.send(None, "Hi")
+    id = agent.send(None, "Hi")
     until(events, ended)
-    assert ["tools" in request for request in engine.requests] == [True, True, False]
+    assert ["tools" in request for request in engine.requests] == [True, True, True]
     assert engine.requests[-1]["messages"][-1] == {"role": "user", "content": LAST}
+    previous = engine.requests[-2]["messages"]
+    assert engine.requests[-1]["messages"][: len(previous)] == previous
+    for _ in range(3):
+        engine.replies.put([{"tool_calls": [call("echo", {"text": "again"})]}])
+    engine.replies.put([{"content": "Done at last."}])
+    agent.send(id, "Again")
+    until(events, ended)
+    assert ["tools" in request for request in engine.requests[3:]] == [True, True, True, False]
+    *_, calls, answer = agent.store.messages(id)
+    assert calls["role"] == "tool" and answer["content"] == "Done at last."
 
 
 def test_memory(agent, engine, events):
@@ -382,9 +399,8 @@ def test_name(agent, engine, events):
     background.name(agent, id)
     asked = engine.requests[-1]["messages"]
     assert asked[0]["content"] == background.NAME
-    assert (
-        asked[1]["content"] == "User: When should I plant tulip bulbs?\n\nAssistant: Hello there."
-    )
+    said = "When should I plant tulip bulbs?\n\nAssistant: Hello there."
+    assert asked[1]["content"] == f"User: {stamped(agent, id, 1)}{said}"
     assert agent.conversations()[0]["title"] == "Planting tulip bulbs"
     assert agent.store.unnamed() == []
     assert until(events, lambda e: e["type"] == "conversation")[-1]["conversation"]["title"] == (
@@ -416,7 +432,7 @@ def test_review(agent, engine, events):
     )
     assert (
         first["messages"][1]["content"]
-        == "User: I'm Sam, a nurse.\n\nAssistant: Nice to meet you, Sam."
+        == f"User: {stamped(agent, id, 1)}I'm Sam, a nurse.\n\nAssistant: Nice to meet you, Sam."
     )
     assert [t["function"]["name"] for t in first["tools"]] == ["remember", "forget"]
     assert [m["content"] for m in second["messages"][3:]] == ["Remembered, as [2].",
@@ -563,10 +579,10 @@ def test_summary(agent, engine, events):
         until(seen, ended)
     summarizing, reply = engine.requests[1:]
     assert summarizing["messages"][0]["content"] == context.SUMMARIZE
-    assert "User: " + "a" * 3000 in summarizing["messages"][1]["content"]
+    assert f"User: {stamped(agent, id, 1)}" + "a" * 3000 in summarizing["messages"][1]["content"]
     system, last = reply["messages"]
     assert system["content"].endswith("go on from the summary:\n\nGoal: the user writes long.")
-    assert last == {"role": "user", "content": "b" * 3000}
+    assert last == {"role": "user", "content": stamped(agent, id, 3) + "b" * 3000}
     assert compacted["summarized"] == 3 == agent.conversation(id)["summarized"]
 
 
@@ -646,7 +662,7 @@ def test_task_runs(agent, engine, events):
     asked = engine.requests[-1]["messages"][-1]
     assert asked == {
         "role": "user",
-        "content": "(Your scheduled task [1] is due now: Give the weather)",
+        "content": stamped(agent, id, 3) + "(Your scheduled task [1] is due now: Give the weather)",
     }
     (task,) = agent.tasks()
     assert task["next"] == (yesterday + datetime.timedelta(days=2)).timestamp()

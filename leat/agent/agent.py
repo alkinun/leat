@@ -35,8 +35,8 @@ SAMPLING = {
 }
 # the system prompt, fixed when a conversation starts so that every prompt after extends the last
 SYSTEM = """\
-You are Leat, an assistant that runs on a computer in the user's home: private, and theirs. Today \
-is {date}.
+You are Leat, an assistant that runs on a computer in the user's home: private, and theirs. Each \
+of the user's messages begins with the date and time they sent it.
 
 When a question needs facts you may not know, or that may have changed since you learned them, \
 call search, then fetch the few pages most likely to answer, three or so, more only if they fall \
@@ -164,7 +164,9 @@ class Agent:
         reads of the files `attached`, in the workspace. A message of a scheduled task names it,
         and one sent by a messaging app, `via`, that. Raises NotFound if there is no such
         conversation or file, Busy if a turn runs in the conversation."""
-        info: dict[str, Any] = {"think": think} | ({"task": task} if task else {})
+        info: dict[str, Any] = {"think": think, "at": time.time()}
+        if task:
+            info["task"] = task
         if via:
             info["via"] = via
         if attached:
@@ -382,14 +384,15 @@ class _Turn:
             self._take_back(f"the turn failed: {e!r}")
             raise
 
-    def _reply(self, last: bool = False) -> list[dict[str, Any]]:
+    def _reply(self, last: bool = False, tools: bool = True) -> list[dict[str, Any]]:
         # streams a reply of the model's into the conversation and keeps it; returns the calls it
-        # makes of the agent's tools, offered them but for the turn's `last` reply. The prompt is
-        # made smaller first if it outgrows its share of the context, and again, the reply redone,
-        # if the context cuts the reply off.
+        # makes of the agent's tools. The turn's `last` reply is told to answer, the tools still
+        # declared, so that its prompt extends the last; if it calls them anyway, it is redone
+        # without `tools`. The prompt is made smaller first if it outgrows its share of the
+        # context, and again, the reply redone, if the context cuts the reply off.
         a = self.agent
         messages, state = a.store.messages(self.id), a.store.context(self.id)
-        declared = [] if last else [tool.declaration() for tool in a.tools.values()]
+        declared = [tool.declaration() for tool in a.tools.values()] if tools else []
         extra = len(json.dumps(declared))
         if self.limit and context.estimate(messages, state, extra) > context.COMPACT * self.limit:
             state = self._compact(messages, state, extra)
@@ -405,7 +408,7 @@ class _Turn:
         body["chat_template_kwargs"] = {"enable_thinking": self.think, "preserve_thinking": True}
         if declared:
             body["tools"] = declared
-        elif last and a.tools:
+        if last and a.tools:
             read.append({"role": "user", "content": LAST})
         started, finish = time.monotonic(), None
         self.completion = a.engine.complete(body)
@@ -433,7 +436,11 @@ class _Turn:
                 self.redone = True
                 with a._lock:
                     self.live.remove(reply)
-                return self._reply(last)
+                return self._reply(last, tools)
+        if last and declared and reply.get("tool_calls") and not self.stopped.is_set():
+            with a._lock:
+                self.live.remove(reply)
+            return self._reply(last, tools=False)
         with a._lock:
             if self.stopped.is_set():
                 info["stopped"] = True
@@ -594,12 +601,10 @@ class _Deleted(Exception):
 def _system(memories: list[dict[str, Any]], workspace: bool) -> dict[str, Any]:
     # the system prompt of a conversation begun now, which knows these memories, and the
     # workspace's tools if `workspace`
-    today = datetime.date.today()
-    date = f"{today:%A}, {today.day} {today:%B %Y}"
     remembered = memory.listing(memories)
     skills = "\n".join(f"- {path}: {about}" for path, about in files.skills())
     space = WORKSPACE.format(skills=skills) if workspace else ""
-    content = SYSTEM.format(date=date, memories=remembered, workspace=space)
+    content = SYSTEM.format(memories=remembered, workspace=space)
     return {"role": "system", "content": content}
 
 

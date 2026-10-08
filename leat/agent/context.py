@@ -12,6 +12,7 @@ and between changes every prompt extends the last. The tokens a prompt takes are
 counted for the last reply, and an estimate of the messages since.
 """
 
+import datetime
 import json
 from collections.abc import Callable
 from typing import Any
@@ -49,14 +50,24 @@ State = dict[str, Any]  # "cleared": tools' answers before this message's index 
 
 def message(m: dict[str, Any]) -> dict[str, Any]:
     """A message as the model reads it: without what only people see, nor an empty reasoning, but
-    with the files the user attached named, and a scheduled task's said to be one. The reasoning
-    is sent back, which templates such as Qwen3.5's show the steps of an agent's turn."""
+    with the files the user attached named, a scheduled task's said to be one, and a user's
+    begun with when it was sent, which is how the model knows the time as it answers. The
+    reasoning is sent back, which templates such as Qwen3.5's show the steps of an agent's turn."""
     api = {k: v for k, v in m.items() if k != "info" and (v or k != "reasoning_content")}
-    if task := m.get("info", {}).get("task"):
+    info = m.get("info", {})
+    if task := info.get("task"):
         api["content"] = f"(Your scheduled task [{task}] is due now: {api['content']})"
-    if attached := m.get("info", {}).get("files"):
+    if attached := info.get("files"):
         api["content"] += f"\n\n(Attached, in the workspace: {', '.join(attached)})"
+    if m["role"] == "user" and (at := info.get("at")):
+        api["content"] = f"{stamp(at)}\n{api['content']}"
     return api
+
+
+def stamp(at: float) -> str:
+    """A time as a user's message begins with it: "[Thursday 8 October 2026, 14:05]"."""
+    t = datetime.datetime.fromtimestamp(at)
+    return f"[{t:%A} {t.day} {t:%B %Y}, {t:%H:%M}]"
 
 
 def prompt(messages: list[dict[str, Any]], state: State) -> list[dict[str, Any]]:
