@@ -1146,6 +1146,8 @@ def test_app(server):
             assert response.headers["Content-Type"] == "text/javascript; charset=utf-8"
     with urllib.request.urlopen(f"{server}/vendor/temml/Temml.woff2") as response:
         assert response.headers["Content-Type"] == "font/woff2"
+    with urllib.request.urlopen(f"{server}/logo.svg") as response:
+        assert response.headers["Content-Type"] == "image/svg+xml"
     for path in ("/server.py", "/vendor/temml/LICENSE", "/../store.py", "/api/nothing"):
         assert request(f"{server}{path}")[0] == 404
 

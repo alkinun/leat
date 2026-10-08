@@ -92,6 +92,12 @@ main.empty { justify-content: center; padding-bottom: 12vh; }
 main.empty header { position: absolute; top: 0; }
 main.empty #log { display: none; }
 main.empty #greeting { display: block; margin-bottom: calc(28px * var(--density)); }
+/* leat's mark, over the greeting and the gate's welcome, in the theme's text color */
+#greeting::before, #join h1::before {
+  content: ""; display: block; width: 32px; height: 32px; margin: 0 auto 20px;
+  background: currentColor; mask: url(/logo.svg) center / contain no-repeat;
+}
+#join h1::before { margin-left: 0; }
 
 /* a page, as the memory's, in place of a conversation */
 .page { display: none; flex: 1; overflow-y: auto; padding: calc(16px * var(--density)) max(24px, calc(50% - 368px)); }
@@ -319,7 +325,7 @@ pre code { padding: 0; background: none; }
 /* the gate of a device not yet the household's: setting up the home, or asking to join it */
 #gate { display: none; }
 body.gated > nav, body.gated > main { display: none; }
-body.gated #gate { display: grid; place-items: center; min-height: 100vh; padding: 24px; }
+body.gated #gate { display: grid; flex: 1; place-items: center; min-height: 100vh; padding: 24px; }
 #join { width: min(420px, 100%); }
 #join h1 { margin: 0 0 8px; font: var(--display-weight) 1.875rem/1.3 var(--font-display); }
 #join p { color: var(--muted); line-height: 1.5; }

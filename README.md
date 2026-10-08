@@ -1,3 +1,5 @@
+<img src="leat/agent/app/logo.svg" alt="" width="48">
+
 # leat
 
 A minimal, fast LLM inference engine built on [tinygrad](https://github.com/tinygrad/tinygrad).
