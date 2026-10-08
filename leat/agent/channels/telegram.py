@@ -30,6 +30,7 @@ POLL = 30  # seconds a poll waits for messages
 TYPING = 4  # seconds between signs of typing, which Telegram shows for 5
 LONGEST = 4096  # characters of a message
 FILES = 20 << 20  # bytes of a file the Bot API lets a bot download
+TRIES, WAIT = 3, 60  # times a request is sent, and seconds waited at most, when sent too fast
 KEY = "telegram"  # of the settings: its token, its bot, the people allowed and asking, its chats
 WELCOME = "Hi! I'm Leat, your assistant. Write to me as to anyone; /new begins a new conversation."
 REFUSED = (
@@ -129,10 +130,11 @@ class Telegram:
                 self._wake.wait(5)
                 self._wake.clear()
                 continue
-            for update in updates:
-                offset = update["update_id"] + 1
+            if updates:
+                offset = updates[-1]["update_id"] + 1
+            for message in _albums([update.get("message") or {} for update in updates]):
                 try:
-                    self._handle(update.get("message") or {})
+                    self._handle(message)
                 except Exception:  # a bug's: said, and the next message read
                     traceback.print_exc()
 
@@ -153,19 +155,21 @@ class Telegram:
                 )
                 self._send(chat, REFUSED)
             return
-        text = (message.get("text") or message.get("caption") or "").strip()
+        album = [message, *message.get("album", [])]
+        text = next((t for m in album if (t := m.get("text") or m.get("caption"))), "").strip()
         whose = allowed.get("person")  # of the household's people
         conversation = settings.get("chats", {}).get(str(chat))
         if (c := self.agent.store.conversation(conversation or "")) is None or c["person"] != whose:
             conversation = None  # deleted, or another's since the person was changed
         if (command := (text.split() or [""])[0].split("@")[0]) in ("/start", "/new", "/stop"):
             return self._command(command, chat, conversation, whose)
-        sent = message.get("document") or (message.get("photo") or [None])[-1]
-        if sent is not None and sent.get("file_size", 0) > FILES:
+        # a document, or a photo's largest size, of each
+        sent = [f for m in album if (f := m.get("document") or (m.get("photo") or [None])[-1])]
+        if any(f.get("file_size", 0) > FILES for f in sent):
             return self._send(
                 chat, f"That file is too big: Telegram lets me take {FILES >> 20} MB at most."
             )
-        attached = [self._download(sent)] if sent and self.agent.workspace else []
+        attached = [self._download(f) for f in sent] if self.agent.workspace else []
         if not text and not attached:
             return self._send(chat, "I read text and files, but not that yet.")
         try:  # the chat known before the turn can end, which delivering it waits for
@@ -344,17 +348,22 @@ class Telegram:
         request = urllib.request.Request(
             f"{self.api}/bot{token}/{method}", body, {"Content-Type": kind}
         )
-        try:
-            with urllib.request.urlopen(request, timeout=POLL + 10) as response:
-                answer = json.loads(response.read())
-        except urllib.error.HTTPError as e:
+        for tried in range(1, TRIES + 1):  # again after the wait it asks, if sent too fast
             try:
-                said = json.loads(e.read()).get("description", str(e))
-            except ValueError:
-                said = str(e)
-            raise TelegramError(said) from e
-        except (OSError, ValueError) as e:
-            raise Unreachable(f"Telegram is not reachable: {e}") from e
+                with urllib.request.urlopen(request, timeout=POLL + 10) as response:
+                    answer = json.loads(response.read())
+                break
+            except urllib.error.HTTPError as e:
+                try:
+                    refused = json.loads(e.read())
+                except ValueError:
+                    refused = {}
+                wait = refused.get("parameters", {}).get("retry_after")
+                if e.code != 429 or not isinstance(wait, int) or wait > WAIT or tried == TRIES:
+                    raise TelegramError(refused.get("description", str(e))) from e
+                time.sleep(wait)
+            except (OSError, ValueError) as e:
+                raise Unreachable(f"Telegram is not reachable: {e}") from e
         if not answer.get("ok"):
             raise TelegramError(answer.get("description", "refused"))
         return answer["result"]
@@ -367,6 +376,22 @@ class Telegram:
         with self._lock:
             self.agent.store.set_setting(KEY, change(self._settings()))
         self.agent.events.publish(self.state() | {"to": "owner"})
+
+
+def _albums(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    # the messages, each album's as its first, with the rest as its "album": Telegram sends an
+    # album's photos and files as messages of their own, one after another
+    firsts: dict[tuple[Any, str], dict[str, Any]] = {}
+    out = []
+    for message in messages:
+        if (group := message.get("media_group_id")) is None:
+            out.append(message)
+        elif (first := firsts.get(key := (message.get("chat", {}).get("id"), group))) is None:
+            firsts[key] = message
+            out.append(message)
+        else:
+            first.setdefault("album", []).append(message)
+    return out
 
 
 def to_html(markdown: str, sources: dict[int, str] | None = None) -> str:

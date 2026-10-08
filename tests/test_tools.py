@@ -55,13 +55,16 @@ class _Site(BaseHTTPRequestHandler):
             where = "http://10.0.0.1/" if path == "/away" else "ftp://127.0.0.1:9/secret"
             self.send_header("Location", where)
             return self.end_headers()
+        if path == "/legacy":  # of a charset its page says, as old pages do, its headers not
+            page = '<meta http-equiv="Content-Type" content="text/html; charset=windows-1254">'
+            return self._send("text/html", (page + "<p>İzmir'de güneşli</p>").encode("cp1254"))
         kinds = {"/page": "text/html", "/article": "text/html", "/long": "text/html",
                  "/text": "text/plain", "/odd": "text/plain; charset=klingon"}  # fmt: skip
         body = {"/page": PAGE, "/article": ARTICLE, "/long": LONG}.get(path, "Plain text.")
         self._send(kinds.get(path, "application/pdf"), body)
 
-    def _send(self, kind: str, body: str) -> None:
-        data = body.encode()
+    def _send(self, kind: str, body: str | bytes) -> None:
+        data = body if isinstance(body, bytes) else body.encode()
         self.send_response(200)
         self.send_header("Content-Type", kind)
         self.send_header("Content-Length", str(len(data)))
@@ -119,6 +122,7 @@ def test_fetch(site, monkeypatch):
     assert result.info == {"url": f"{site}/page", "title": "A page", "n": 1}
     assert web.fetch(f"{site}/text").content == f"{site}/text\n\nPlain text."
     assert web.fetch(f"{site}/odd").content.endswith("Plain text.")  # as UTF-8
+    assert web.fetch(f"{site}/legacy").content.endswith("İzmir'de güneşli")
     with pytest.raises(ValueError, match="not a page of text but application/pdf"):
         web.fetch(f"{site}/pdf")
 

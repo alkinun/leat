@@ -33,18 +33,26 @@ class FakeBots(ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self) -> None:
-        self.updates: queue.SimpleQueue[dict] = queue.SimpleQueue()
+        self.updates: queue.SimpleQueue[list[dict]] = queue.SimpleQueue()  # each poll's
         self.calls: queue.SimpleQueue[tuple[str, Any]] = queue.SimpleQueue()
         self.count = 0
         self.polls = 0  # getUpdates answered
         self.offsets: list[tuple[str, int]] = []  # each getUpdates's token and offset
+        self.limited = 0  # sendMessage calls to refuse, as sent too fast
         super().__init__(("127.0.0.1", 0), _Bots)
 
     def update(self, sender: dict, **message: Any) -> None:
+        self.updates.put([self._update(sender, message)])
+
+    def album(self, sender: dict, *messages: dict) -> None:
+        """Messages that come at once, as an album's photos do."""
+        self.updates.put([self._update(sender, dict(message)) for message in messages])
+
+    def _update(self, sender: dict, message: dict) -> dict:
         self.count += 1
         chat = {"id": message.pop("chat_id", sender["id"]), "type": message.pop("chat", "private")}
         sent = {"message_id": self.count, "from": sender, "chat": chat} | message
-        self.updates.put({"update_id": self.count, "message": sent})
+        return {"update_id": self.count, "message": sent}
 
     def drain(self) -> None:
         """Waits for the bot to have handled every update given: it asks for more once it has."""
@@ -77,6 +85,10 @@ class _Bots(BaseHTTPRequestHandler):
         if bot.removeprefix("bot") not in (TOKEN, OTHER):
             return self._answer({"ok": False, "description": "Unauthorized"}, 401)
         body = json.loads(data) if self.headers["Content-Type"] == "application/json" else data
+        if method == "sendMessage" and self.server.limited:
+            self.server.limited -= 1
+            refused = {"ok": False, "description": "Too Many Requests: retry after 0"}
+            return self._answer(refused | {"parameters": {"retry_after": 0}}, 429)
         if method != "getUpdates":
             self.server.calls.put((method, body))
         results = {"getMe": {"username": "leat_bot"}, "getFile": {"file_path": "docs/1.pdf"}}
@@ -84,7 +96,7 @@ class _Bots(BaseHTTPRequestHandler):
             self.server.offsets.append((bot.removeprefix("bot"), body["offset"]))
             updates = []
             with contextlib.suppress(queue.Empty):
-                updates.append(self.server.updates.get(timeout=0.2))
+                updates += self.server.updates.get(timeout=0.2)
             self.server.polls += 1
             return self._answer({"ok": True, "result": updates})
         self._answer({"ok": True, "result": results.get(method, True)})
@@ -195,6 +207,21 @@ def test_deleted(bot, bots, engine):
     # a file too big for a bot to take is said to be
     bots.update(ME, document={"file_id": "f", "file_name": "big.iso", "file_size": 30 << 20})
     assert bots.next("sendMessage")["text"].startswith("That file is too big")
+
+
+def test_album(bot, bots, engine):
+    # an album's photos are one message's files, its reply sent though Telegram asks to wait
+    bot.connect(TOKEN)
+    bot.agent.store.set_setting(telegram.KEY, bot.agent.store.setting(telegram.KEY) | {
+        "allowed": {"7": {"id": 7, "name": "Alkın (@alkinun)"}}})  # fmt: skip
+    engine.replies.put([{"content": "Two cats."}])
+    bots.limited = 2
+    photo = {"media_group_id": "1", "photo": [{"file_id": "small"}, {"file_id": "large"}]}
+    bots.album(ME, photo | {"caption": "What are these?"}, photo)
+    assert bots.next("sendMessage")["text"] == "Two cats."
+    (c,) = bot.agent.conversations()
+    asked = bot.agent.store.messages(c["id"])[1]
+    assert "What are these?" in asked["content"] and len(asked["info"]["files"]) == 2
 
 
 def test_chat(bot, bots, engine):

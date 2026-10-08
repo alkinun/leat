@@ -55,6 +55,8 @@ READ = 2 << 20  # bytes of a response read at most: a page's first characters ar
 TIMEOUT = 15  # seconds a request may take
 # the types of what fetch reads: the web's text, and its pages' kinds beside text/*
 TEXTS = ("application/xhtml+xml", "application/json", "application/xml")
+# a page's charset as its <meta charset="..."> or <meta http-equiv content="...; charset=..."> says
+_CHARSET = re.compile(rb"""<meta[^>]*charset\s*=\s*["']?([\w.:-]+)""", re.IGNORECASE)
 LANGUAGE = "en"  # of the results: SearXNG's engines would answer in the box's country's otherwise
 # elements whose text is not a page's content: code, and the menus around it
 HIDDEN = {"script", "style", "noscript", "template", "svg", "nav", "header", "footer", "aside"}
@@ -136,9 +138,11 @@ def fetch(
         kind, final = response.headers.get_content_type(), response.url
         if not kind.startswith("text/") and kind not in TEXTS:
             raise ValueError(f"not a page of text but {kind}")
-        data, charset = response.read(READ), response.headers.get_content_charset() or "utf-8"
+        data, charset = response.read(READ), response.headers.get_content_charset()
+    if charset is None and "html" in kind and (meta := _CHARSET.search(data[:4096])):
+        charset = meta[1].decode()  # as the page says it, if its headers do not
     try:
-        text = data.decode(charset, "replace")
+        text = data.decode(charset or "utf-8", "replace")
     except LookupError:  # a charset of no name Python knows
         text = data.decode("utf-8", "replace")
     title = ""
