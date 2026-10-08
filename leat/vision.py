@@ -6,7 +6,9 @@ every image padded to as many patches as its largest, so that one compiled graph
 - Gemma 3's, SigLIP over the image scaled to 896 by 896 pixels, its patches pooled 4 by 4 into 256
   embeddings;
 - Gemma 4's, of 2D RoPE over the image scaled, its aspect kept, to as many patches of 16 by 16
-  pixels as fit IMAGE_TOKENS embeddings, each of 3 by 3 patches pooled.
+  pixels as fit IMAGE_TOKENS embeddings, each of 3 by 3 patches pooled;
+- Mistral Small 3's, Pixtral, of 2D RoPE over the image scaled, its aspect kept, to whole cells
+  of 2 by 2 patches of 14 pixels, each merged into an embedding, PIXTRAL_TOKENS at most.
 """
 
 import array
@@ -32,6 +34,8 @@ from leat.tokenizer import Tokenizer
 # the embeddings an image of Gemma 4 takes at most: of its budgets, 70, 140, 280, 560 or 1120, its
 # processor's default
 IMAGE_TOKENS = 280
+# those of Mistral Small 3's, but for its breaks, as llama.cpp's: an image of 896 by 896 pixels
+PIXTRAL_TOKENS = 1024
 KEPT = 16  # images kept, made of their bytes, to be given again
 
 
@@ -119,18 +123,26 @@ class Vision:
         raise NotImplementedError
 
     def _patches(
-        self, picture: Picture.Image, width: int, height: int, resample: Picture.Resampling
-    ) -> tuple[bytes, bytes]:
-        # the picture scaled to width by height, as its patches' pixels and positions, padded
+        self, picture: Picture.Image, width: int, height: int, resample: Picture.Resampling,
+        merge: int = 1,
+    ) -> tuple[bytes, bytes]:  # fmt: skip
+        # the picture scaled to width by height, as its patches' pixels and positions, padded:
+        # row by row, or of windows of merge by merge patches row by row, each's row by row
         raw = picture.resize((width, height), resample).tobytes()
         lines = [raw[3 * width * y : 3 * width * (y + 1)] for y in range(height)]
         p, columns, rows = self.patch, width // self.patch, height // self.patch
-        pixels = b"".join(  # each patch's lines of RGB, the patches row by row
-            lines[y * p + i][3 * p * x : 3 * p * (x + 1)]
-            for y in range(rows) for x in range(columns) for i in range(p)
+        order = [
+            (y * merge + i, x * merge + j)
+            for y in range(rows // merge)
+            for x in range(columns // merge)
+            for i in range(merge)
+            for j in range(merge)
+        ]
+        pixels = b"".join(  # each patch's lines of RGB
+            lines[y * p + i][3 * p * x : 3 * p * (x + 1)] for y, x in order for i in range(p)
         )  # fmt: skip
         pad = self.patches - columns * rows
-        places = [c for y in range(rows) for x in range(columns) for c in (x, y)] + [-1] * 2 * pad
+        places = [c for y, x in order for c in (x, y)] + [-1] * 2 * pad
         return pixels + bytes(pad * 3 * p * p), array.array("i", places).tobytes()
 
     def _embedded(self, pixels: Tensor) -> Tensor:
@@ -297,9 +309,9 @@ class Gemma4(Vision):
         column, row = (positions[:, i].maximum(0) for i in (0, 1))
         x = self._embedded(pixels)
         x = x + ops.embedding(column.stack(row + self.columns), self.table).sum(0)
-        tables = [self._rope(at) for at in (column, row)]
+        tables = [_angles(at, self.freqs) for at in (column, row)]
         mask = valid.where(0.0, -math.inf).reshape(1, 1, 1, n)
-        x = self._encoder(x, mask, half, lambda t: self._rotated(t, tables))
+        x = self._encoder(x, mask, half, lambda t: _rotated(t, tables, True))
         # each embedding the mean of its patches, padding none's, scaled by sqrt(width)
         k = self.pool
         cell = (column // k + (column.max() + 1) // k * (row // k)).reshape(n, 1)
@@ -316,20 +328,67 @@ class Gemma4(Vision):
         size = width * height // (self.patch * self.pool) ** 2
         return Image(key, [self.open, *[key] * size, self.close], pixels, positions)
 
-    def _rope(self, at: Tensor) -> tuple[Tensor, Tensor]:
-        # cos and sin (patches, head / 4) of the angles of each patch's column or row
-        angles = at.float().reshape(-1, 1) * self.freqs.reshape(1, -1)
-        return angles.cos(), angles.sin()
 
-    def _rotated(self, t: Tensor, tables: list[tuple[Tensor, Tensor]]) -> Tensor:
-        half = int(t.shape[-1]) // 2
-        parts = (t[..., :half], t[..., half:])
-        return Tensor.cat(*(ops.rotary(p, *r, True) for p, r in zip(parts, tables, strict=True)),
-                          dim=-1)  # fmt: skip
+class Pixtral(Vision):
+    """Mistral Small 3's: the image scaled, its aspect kept, to at most image_size a side and
+    PIXTRAL_TOKENS embeddings, each side to whole cells of merge by merge patches, up; its
+    patches rotated, the first half of each head's dimensions by row and the other by column, of
+    RoPE's even frequencies and its odd ones, as q and k are of adjacent pairs in the GGUF; each
+    cell's patches merged into an embedding, projected, and each row of them but the last ended by
+    [IMG_BREAK]'s embedding; read causally, the image closed by [IMG_END]."""
+
+    causal = True
+
+    def __init__(self, m: dict[str, Any], w: dict[str, QTensor], tokenizer: Tokenizer):
+        super().__init__(m, w, tokenizer)
+        self.side, self.merge = m["image_size"], m.get("spatial_merge_size", 1)
+        self.cells = PIXTRAL_TOKENS  # embeddings of patches at most
+        self.patches = -(-self.cells * self.merge**2 // 64) * 64
+        self.tokens = 2 * self.cells - 1  # and of breaks, as a column of cells has most
+        head = self.width // self.heads
+        freqs = [m.get("rope.freq_base", 10000.0) ** (-2 * i / head) for i in range(head // 2)]
+        self.freqs = Tensor(freqs[0::2]), Tensor(freqs[1::2])  # of rows, and of columns
+        self.close = self._special("[IMG_END]")
+        self.fill = self._special("[IMG]")
+
+    def encode(self, pixels: Tensor, positions: Tensor) -> Tensor:
+        n, half, k = self.patches, ops.halved(pixels), self.merge
+        valid = positions[:, 0] >= 0
+        column, row = (positions[:, i].maximum(0) for i in (0, 1))
+        tables = [_angles(at, f) for at, f in zip((row, column), self.freqs, strict=True)]
+        mask = valid.where(0.0, -math.inf).reshape(1, 1, 1, n)
+        x = self._encoder(self._embedded(pixels), mask, half, lambda t: _rotated(t, tables, False))
+        x = ops.rms_norm(x, self.w["mm.input_norm.weight"].dequant(), self.eps)
+        # each cell's patches, which come together, as one row of their channels' patches
+        x = x.reshape(n // k**2, k**2, self.width).permute(0, 2, 1).reshape(1, n // k**2, -1)
+        x = _linear(x, self.w["mm.patch_merger.weight"], half)
+        x = self._projected(x, "mm.1", half)
+        x = self._projected(0.5 * x * (1 + (x / math.sqrt(2)).erf()), "mm.2", half)
+        x = x[0].contiguous()  # a product of its own, not fused into the rows that follow
+        # the embeddings row by row, each row ended by a break but the last: of the cells' and
+        # the break's, after them
+        columns = (column.max() + 1) // k
+        at, cells = Tensor.arange(self.tokens), n // k**2
+        line, place = at // (columns + 1), at % (columns + 1)
+        source = (place == columns).where(cells, (line * columns + place).minimum(cells - 1))
+        breaks = self.w["v.token_embd.img_break"].dequant().reshape(1, -1)
+        return x.cat(breaks)[source]
+
+    def _image(self, picture: Picture.Image, key: int) -> Image:
+        cell = self.patch * self.merge
+        width, height = _within(*picture.size, self.side, cell, self.cells)
+        bicubic = Picture.Resampling.BICUBIC
+        pixels, positions = self._patches(picture, width, height, bicubic, self.merge)
+        rows, columns = height // cell, width // cell
+        return Image(key, [*[key] * (rows * (columns + 1) - 1), self.close], pixels, positions)
+
+    def _projected(self, x: Tensor, name: str, half: bool) -> Tensor:
+        out = _linear(x, self.w[f"{name}.weight"], half)
+        return out + self.w[f"{name}.bias"].dequant() if f"{name}.bias" in self.w else out
 
 
 # the encoders leat runs, by the projector types of llama.cpp's GGUFs
-PROJECTORS: dict[str, type[Vision]] = {"gemma3": Gemma3, "gemma4v": Gemma4}
+PROJECTORS: dict[str, type[Vision]] = {"gemma3": Gemma3, "gemma4v": Gemma4, "pixtral": Pixtral}
 
 
 def load(path: str | Path, tokenizer: Tokenizer, dim: int) -> Vision:
@@ -362,6 +421,33 @@ def _picture(data: bytes) -> Picture.Image:
         rgba = picture.convert("RGBA")
         picture = Picture.alpha_composite(Picture.new("RGBA", rgba.size, "white"), rgba)
     return picture.convert("RGB")
+
+
+def _angles(at: Tensor, freqs: Tensor) -> tuple[Tensor, Tensor]:
+    # cos and sin (patches, frequencies) of the angles of each patch's position on an axis
+    angles = at.float().reshape(-1, 1) * freqs.reshape(1, -1)
+    return angles.cos(), angles.sin()
+
+
+def _rotated(t: Tensor, tables: list[tuple[Tensor, Tensor]], halves: bool) -> Tensor:
+    # each half of each head's dimensions of t rotated by its table, of i with i + R/2 if halves,
+    # else of adjacent pairs, as ops.rotary rotates them
+    half = int(t.shape[-1]) // 2
+    parts = (t[..., :half], t[..., half:])
+    rotated = (ops.rotary(p, *r, halves) for p, r in zip(parts, tables, strict=True))
+    return Tensor.cat(*rotated, dim=-1)
+
+
+def _within(width: int, height: int, side: int, cell: int, cells: int) -> tuple[int, int]:
+    # as transformers' Pixtral: scaled down, its aspect kept, to `side` at most a side, then each
+    # side up to whole cells; and down again, as llama.cpp, to `cells` at most
+    ratio = max(width / side, height / side, math.sqrt(width * height / (cells * cell**2)))
+    if ratio > 1:
+        width, height = max(int(width / ratio), 1), max(int(height / ratio), 1)
+    w, h = -(-width // cell) * cell, -(-height // cell) * cell
+    while (w // cell) * (h // cell) > cells:  # rounded up past the budget: a cell less
+        w, h = (w - cell, h) if w >= h else (w, h - cell)
+    return w, h
 
 
 def _linear(x: Tensor, w: QTensor, half: bool) -> Tensor:

@@ -555,7 +555,9 @@ class Engine:
         seen = self._generated(tokens, slots, decode)
         if len(pairs) == 1:
             (slot, start), length = pairs[0], tokens.shape[1]
-            spans = [Span(slot, start, length, causal=image is None)]
+            # an image's embeddings see each other, but a vision encoder's read causally
+            causal = image is None or self.vision is not None and self.vision.causal
+            spans = [Span(slot, start, length, causal=causal)]
             if image is None:
                 hidden = self.model.run(tokens, spans)
             else:  # the embeddings as they are, not scaled as the tokens' are

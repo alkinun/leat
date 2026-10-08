@@ -1,6 +1,7 @@
 # Test data shared across test files: quantized blocks, tokenizer metadata and tiny models.
 
 import functools
+import math
 from pathlib import Path
 
 import gguf
@@ -99,7 +100,8 @@ def write_tiny_model(path: Path, arch: str = "llama") -> dict[str, np.ndarray]:
         return _write_gemma4(path, experts=arch == "gemma4")
     if arch in _WRITERS:
         return _WRITERS[arch](path)
-    w, weights, add = _writer(path, arch)
+    # llama's vocab with the tokens of Mistral Small 3's images, as it is of the llama kind
+    w, weights, add = _writer(path, arch, ("[IMG]", "[IMG_END]") if arch == "llama" else ())
     for key, value in [("block_count", LAYERS),
                        ("embedding_length", D), ("feed_forward_length", HIDDEN),
                        ("attention.head_count", HEADS), ("attention.head_count_kv", KV_HEADS),
@@ -262,7 +264,7 @@ def reference_logits(
     def mixture(h, router, gate, up, down):
         return experts(h, h @ router.T, lambda e, x: mlp(x, gate[e], up[e], down[e]))
 
-    x = w["token_embd.weight"][tokens].astype(np.float64)
+    x = _embedded(w, tokens, images, 1.0)  # images' too, read causally, as Mistral Small 3's
     causal = np.triu(np.full((T, T), -np.inf), 1)
     for i in range(LAYERS):
         lw = {n: w[f"blk.{i}.{n}.weight"] for n in ATTENTION + (MOE if arch == "qwen3moe" else MLP)}
@@ -350,13 +352,14 @@ def _gemma4_rope(dim: int, sliding: bool, positions: np.ndarray, factors: np.nda
 
 
 def _embedded(
-    w: dict[str, np.ndarray], tokens: list[int], images: dict[int, np.ndarray] | None
-) -> np.ndarray:
-    # the tokens' embeddings scaled by sqrt(D), and images' (n, D) by key in place of the tokens
-    # that hold them, as they are
+    w: dict[str, np.ndarray], tokens: list[int], images: dict[int, np.ndarray] | None,
+    scale: float = np.sqrt(D),
+) -> np.ndarray:  # fmt: skip
+    # the tokens' embeddings times `scale`, Gemma's sqrt(D), and images' (n, D) by key in place of
+    # the tokens that hold them, as they are
     return np.stack([
         images[t][tokens[:i].count(t) % len(images[t])] if images and t < 0
-        else w["token_embd.weight"][t] * np.sqrt(D)
+        else w["token_embd.weight"][t] * scale
         for i, t in enumerate(tokens)
     ]).astype(np.float64)  # fmt: skip
 
@@ -502,6 +505,9 @@ def reference_drafts(
 V_WIDTH, V_HEADS, V_HIDDEN, V_PATCH, V_LAYERS, V_COLUMNS = 32, 2, 64, 4, 2, 64
 V_EPS = 1e-6
 G3_IMAGE = 16  # the side of Gemma 3's tiny SigLIP's images: 4 by 4 patches, 2 by 2 embeddings
+# the longest side of Pixtral's tiny images, and their normalization, CLIP's
+P_IMAGE = 16
+P_MEAN, P_STD = (0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)
 
 
 def write_tiny_mmproj(path: Path, kind: str = "gemma4v") -> dict[str, np.ndarray]:
@@ -577,6 +583,95 @@ def write_tiny_mmproj(path: Path, kind: str = "gemma4v") -> dict[str, np.ndarray
         add("mm.input_projection.weight", (D, V_WIDTH), 0.2)
     _finish(w)
     return {n: v.astype(np.float64) for n, v in weights.items()}
+
+
+def write_tiny_pixtral(path: Path) -> dict[str, np.ndarray]:
+    # Mistral Small 3's Pixtral over images of up to 4 by 4 patches, of 2 by 2 cells each merged
+    rng = np.random.default_rng(2)
+    w = gguf.GGUFWriter(path, arch="clip")
+    w.add_string("clip.projector_type", "pixtral")
+    for key, value in [("patch_size", V_PATCH), ("embedding_length", V_WIDTH),
+                       ("feed_forward_length", V_HIDDEN), ("block_count", V_LAYERS),
+                       ("attention.head_count", V_HEADS), ("projection_dim", D),
+                       ("image_size", P_IMAGE), ("spatial_merge_size", 2)]:  # fmt: skip
+        w.add_uint32(f"clip.vision.{key}", value)
+    w.add_float32("clip.vision.attention.layer_norm_epsilon", V_EPS)
+    w.add_bool("clip.use_silu", True)
+    w.add_array("clip.vision.image_mean", list(P_MEAN))
+    w.add_array("clip.vision.image_std", list(P_STD))
+    weights: dict[str, np.ndarray] = {}
+
+    def add(name: str, shape: tuple[int, ...], scale: float = 0.0) -> None:
+        # matrices f16, normal times `scale`; vectors f32, uniform from 0.5 to 1.5
+        values = rng.standard_normal(shape) * scale if scale else rng.uniform(0.5, 1.5, shape)
+        weights[name] = values.astype(np.float16 if scale else np.float32)
+        w.add_tensor(name, weights[name])
+
+    add("v.patch_embd.weight", (V_WIDTH, 3, V_PATCH, V_PATCH), 0.2)
+    add("v.pre_ln.weight", (V_WIDTH,))
+    for i in range(V_LAYERS):
+        b = f"v.blk.{i}."
+        for name in ("attn_q", "attn_k", "attn_v", "attn_out"):
+            add(b + name + ".weight", (V_WIDTH, V_WIDTH), 0.2)
+        add(b + "ffn_gate.weight", (V_HIDDEN, V_WIDTH), 0.2)
+        add(b + "ffn_up.weight", (V_HIDDEN, V_WIDTH), 0.2)
+        add(b + "ffn_down.weight", (V_WIDTH, V_HIDDEN), 0.2)
+        add(b + "ln1.weight", (V_WIDTH,))
+        add(b + "ln2.weight", (V_WIDTH,))
+    add("mm.input_norm.weight", (V_WIDTH,))
+    add("mm.patch_merger.weight", (V_WIDTH, 4 * V_WIDTH), 0.1)
+    add("mm.1.weight", (D, V_WIDTH), 0.2)
+    add("mm.2.weight", (D, D), 0.1)
+    weights["v.token_embd.img_break"] = rng.standard_normal(D).astype(np.float32)
+    w.add_tensor("v.token_embd.img_break", weights["v.token_embd.img_break"])
+    _finish(w)
+    return {n: v.astype(np.float64) for n, v in weights.items()}
+
+
+def reference_pixtral(w: dict[str, np.ndarray], pixels: np.ndarray) -> np.ndarray:
+    # the embeddings of an image's pixels (H, W, 3), as transformers' Mistral 3: its patches,
+    # normalized and projected, RMSNormed, through the layers, whose q and k, of adjacent pairs
+    # in the GGUF, turn the first half of each head's pairs by the patch's row at RoPE's even
+    # frequencies and the others by its column at the odd; each cell's 2 by 2 patches, normed, as
+    # a row of their channels' patches, merged and projected; each row of cells ended by a break
+    # but the last
+    rows, columns = pixels.shape[0] // V_PATCH, pixels.shape[1] // V_PATCH
+    patches = pixels.reshape(rows, V_PATCH, columns, V_PATCH, 3).transpose(0, 2, 1, 3, 4)
+    x = (patches.reshape(rows * columns, -1, 3) / 255 - P_MEAN) / P_STD
+    x = x.reshape(rows * columns, -1) @ w["v.patch_embd.weight"].transpose(0, 2, 3, 1).reshape(
+        V_WIDTH, -1).T  # fmt: skip
+
+    def rms(z, weight):
+        return z / np.sqrt((z * z).mean(-1, keepdims=True) + V_EPS) * weight
+
+    head = V_WIDTH // V_HEADS
+    freqs = 10000.0 ** (-np.arange(0, head, 2) / head)  # a pair's
+    row, column = np.repeat(np.arange(rows), columns), np.tile(np.arange(columns), rows)
+    pairs = head // 2  # the first half's turned by row, the second's by column
+    angles = np.concatenate([row[:, None] * freqs[0::2], column[:, None] * freqs[1::2]], -1)
+    assert angles.shape[-1] == pairs
+    cos, sin = np.cos(angles)[:, None], np.sin(angles)[:, None]
+
+    def rope(z):
+        a, b = z[..., 0::2], z[..., 1::2]
+        out = np.empty_like(z)
+        out[..., 0::2], out[..., 1::2] = a * cos - b * sin, a * sin + b * cos
+        return out
+
+    x = rms(x, w["v.pre_ln.weight"])
+    for i in range(V_LAYERS):
+        lw = _layer({k[2:]: v for k, v in w.items() if k.startswith("v.")}, i)
+        h = rms(x, lw["ln1"])
+        q, k, v = ((h @ lw[f"attn_{c}"].T).reshape(-1, V_HEADS, head) for c in "qkv")
+        x = x + _full_attention(rope(q), rope(k), v, head**-0.5) @ lw["attn_out"].T
+        x = x + mlp(rms(x, lw["ln2"]), lw["ffn_gate"], lw["ffn_up"], lw["ffn_down"])
+    grid = rms(x, w["mm.input_norm.weight"]).reshape(rows // 2, 2, columns // 2, 2, V_WIDTH)
+    cells = grid.transpose(0, 2, 4, 1, 3).reshape((rows // 2) * (columns // 2), -1)
+    x = cells @ w["mm.patch_merger.weight"].T @ w["mm.1.weight"].T
+    x = 0.5 * x * (1 + np.vectorize(math.erf)(x / np.sqrt(2))) @ w["mm.2.weight"].T
+    lines = x.reshape(rows // 2, columns // 2, D)
+    breaks = np.broadcast_to(w["v.token_embd.img_break"], (rows // 2, 1, D))
+    return np.concatenate([lines, breaks], 1).reshape(-1, D)[:-1]
 
 
 def reference_siglip(w: dict[str, np.ndarray], pixels: np.ndarray) -> np.ndarray:

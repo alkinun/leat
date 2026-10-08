@@ -12,18 +12,21 @@ from leat import vision
 from leat.engine import Engine
 from leat.gguf import GGUF
 from leat.tokenizer import Tokenizer
-from leat.vision import _fit, beside, projector
+from leat.vision import _fit, _within, beside, projector
 from tests.helpers import (
     CONTEXT,
     G3_IMAGE,
     G_IMAGE,
+    P_IMAGE,
     V_PATCH,
     D,
     ids,
     reference_image,
     reference_logits,
+    reference_pixtral,
     reference_siglip,
     write_tiny_mmproj,
+    write_tiny_pixtral,
 )
 from tests.helpers import (
     _finish as finish,
@@ -35,7 +38,7 @@ G3_TOKENS = ("<start_of_image>", "<end_of_image>")
 
 
 # each projector's tiny model
-FAMILIES = {"gemma4v": "gemma4", "gemma3": "gemma3"}
+FAMILIES = {"gemma4v": "gemma4", "gemma3": "gemma3", "pixtral": "llama"}
 
 
 @pytest.fixture(scope="session")
@@ -46,7 +49,8 @@ def projectors(tmp_path_factory):
     def projector(kind: str) -> tuple[Path, dict]:
         if kind not in made:
             path = tmp_path_factory.mktemp(kind) / "mmproj.gguf"
-            made[kind] = path, write_tiny_mmproj(path, kind)
+            made[kind] = path, (write_tiny_pixtral(path) if kind == "pixtral" else
+                                write_tiny_mmproj(path, kind))  # fmt: skip
         return made[kind]
 
     return projector
@@ -60,6 +64,7 @@ def tiny_mmproj(projectors):
 @pytest.fixture(autouse=True)
 def _budget(monkeypatch):
     monkeypatch.setattr(vision, "IMAGE_TOKENS", TOKENS)
+    monkeypatch.setattr(vision, "PIXTRAL_TOKENS", TOKENS)
 
 
 def png(width: int, height: int, seed: int = 0, mode: str = "RGB") -> bytes:
@@ -73,6 +78,11 @@ def png(width: int, height: int, seed: int = 0, mode: str = "RGB") -> bytes:
 def embeddings(weights: dict, data: bytes, kind: str = "gemma4v") -> np.ndarray:
     # the f64 reference's embeddings of an image, scaled as its kind's encoder scales it
     picture = Picture.open(io.BytesIO(data)).convert("RGB")
+    if kind == "pixtral":
+        size = _within(*picture.size, P_IMAGE, 2 * V_PATCH, TOKENS)
+        return reference_pixtral(
+            weights, np.asarray(picture.resize(size, Picture.Resampling.BICUBIC))
+        )
     if kind == "gemma3":
         square = picture.resize((G3_IMAGE, G3_IMAGE), Picture.Resampling.BILINEAR)
         return reference_siglip(weights, np.asarray(square))
@@ -96,6 +106,21 @@ def engine(tiny, mmproj, kind: str = "gemma4v", **options) -> Engine:
 )  # fmt: skip
 def test_fit(size, tokens, expected):
     assert _fit(*size, 16, 3, tokens) == expected
+
+
+@pytest.mark.usefixtures("reference_ops")
+@pytest.mark.parametrize("size", [(16, 16), (30, 12), (5, 40)])
+def test_pixtral_matches_reference(tiny, projectors, size):
+    # Mistral Small 3's: the image scaled to whole cells, its embeddings those the f64 reference
+    # gives, each row of cells ended by a break but the last, and the image by [IMG_END]
+    path, weights = projectors("pixtral")
+    tokenizer = Tokenizer(GGUF.open(tiny("llama")[0]).metadata)
+    v = vision.load(path, tokenizer, D)
+    data = png(*size)
+    image, expected = v.image(data), embeddings(weights, data, "pixtral")
+    assert image.tokens == [*[image.key] * len(expected), *ids(tokenizer, "[IMG_END]")]
+    got = v.encode(*v.inputs(image)).numpy()
+    np.testing.assert_allclose(got[: image.size], expected, rtol=1e-4, atol=1e-4)
 
 
 @pytest.mark.usefixtures("reference_ops")
