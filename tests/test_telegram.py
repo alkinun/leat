@@ -174,6 +174,18 @@ def test_people(bot, bots, engine):
     assert bot.agent.store.messages(conversation["id"])[1]["info"]["via"] == "telegram"
     bot.refuse(9)
     assert bot.state()["allowed"] == []
+    # let in as a person of the household's, whose conversation the chat's becomes, a new one
+    bot.agent.store.add_person("Alkın")  # the owner, whose all before becomes
+    ada = bot.agent.store.add_person("Ada")["id"]
+    bots.update(STRANGER, text="Hi again")
+    bots.next("sendMessage")
+    bot.allow(9, ada)
+    bots.next("sendMessage")
+    engine.replies.put([{"content": "Hello Ada."}])
+    bots.update(STRANGER, text="Hi")
+    assert bots.next("sendMessage")["text"] == "Hello Ada."
+    (adas,) = bot.agent.conversations(ada)
+    assert adas["id"] != conversation["id"]
 
 
 def test_deleted(bot, bots, engine):
