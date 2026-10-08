@@ -89,7 +89,7 @@ def forgot(pattern: str) -> Check:
 
 def unsure(o: Outcome) -> str | None:
     # an answer that says it does not know, rather than one made up
-    known = r"(n't|not)( \w+){0,2} (know|have|remember|told|mention)|not sure"
+    known = r"(n['’]t|not)( \w+){0,2} (know|have|remember|told|mention)|not sure"
     return None if re.search(known, o.answer, re.I) else "did not say it does not know"
 
 
@@ -121,6 +121,8 @@ CASES = [
     Case("news", "What's in the news today about space exploration?", [called("search")]),
     Case("reads pages", "When does the British Museum open tomorrow? Check its website.",
          [called("fetch")]),
+    Case("research", "Research the pros and cons of heat pumps for a house in a cold climate.",
+         [called("search", 2), called("fetch", 4), says(r"\[\d+\]")]),
     Case("weather", "Will I need an umbrella in London tomorrow?",
          [called("weather"), uncalled("fetch")]),
     Case("introduction", "Hi! I'm Sam, I work as a nurse, and my kids are called Mia and Leo.",
