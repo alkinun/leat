@@ -72,6 +72,12 @@ $("character").onsubmit = async (event) => {
 };
 $("attach").onclick = () => pick(attach);
 $("upload").onclick = () => pick(upload);
+$("input").onpaste = (event) => { // images pasted, as a screenshot, attached to the next message
+  const pasted = [...event.clipboardData.files];
+  if (!pasted.length) return;
+  event.preventDefault();
+  pasted.forEach(attach);
+};
 window.ondragover = (event) => event.preventDefault();
 window.ondrop = (event) => { // files dropped, attached to the next message, or on their page uploaded
   event.preventDefault();
@@ -852,6 +858,7 @@ async function attach(file) {
 function renderAttached() {
   $("attached").replaceChildren(...attached.map((a) => {
     const chip = element("span", "chip", a.uploading ? `${a.name}…` : a.name);
+    if (!a.uploading && PICTURE.test(a.name)) chip.prepend(picture(a.name));
     const remover = element("button", "", "×");
     remover.title = "Remove";
     remover.onclick = () => {
@@ -1120,6 +1127,7 @@ function what(m) {
   }
   if (m.name === "recall" && conversations?.length) return [listed(conversations.map(conversationLink))];
   if (m.name === "write" || m.name === "edit") return [fileLink(args.path)];
+  if (m.info?.images) return [cards(m.info.images)]; // an image read, which the model saw
   if (m.name === "run") {
     const code = element("div");
     markdown(code, `\`\`\`python\n${args?.code ?? ""}\n\`\`\``);
@@ -1145,12 +1153,33 @@ function made(m) {
   return names;
 }
 
-// a file's card, which opens or downloads it
+// a file's card, which opens or downloads it: an image's, the image
 function card(name) {
   const a = fileLink(name);
+  if (PICTURE.test(name)) {
+    a.className = "picture";
+    a.title = name;
+    a.replaceChildren(picture(name));
+    return a;
+  }
   a.className = "card";
   a.prepend(icon("read"));
   return a;
+}
+
+function cards(names) {
+  const shown = element("div", "cards");
+  shown.append(...names.map(card));
+  return shown;
+}
+
+// the files a page shows as images, by their names
+const PICTURE = /\.(png|jpe?g|gif|webp)$/i;
+
+function picture(name) {
+  const img = element("img");
+  Object.assign(img, { src: `/files/${encodeURIComponent(name)}`, alt: name, loading: "lazy" });
+  return img;
 }
 
 function fileLink(name) {

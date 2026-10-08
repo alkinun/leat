@@ -4,6 +4,7 @@ them in the sandbox. read reads the skills too, the guides to making documents, 
 from pathlib import Path
 from typing import Any
 
+from leat.agent.context import picture
 from leat.agent.tools import Result, Tool, strings
 from leat.agent.workspace import Workspace
 
@@ -12,7 +13,6 @@ SKILLS = Path(__file__).parent.parent / "skills"
 LIBRARIES = "python-docx, openpyxl, python-pptx, fpdf2, pypdf, matplotlib, pandas"
 # the kinds of file read by parsing them, in the sandbox, and those that cannot be read as text
 DOCUMENTS = (".pdf", ".docx", ".xlsx", ".pptx")
-IMAGES = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".heic")
 # reads the document at sys.argv[1] as markdown, which keeps its headings, lists and tables, as
 # markitdown reads one, in the sandbox, with its libraries
 _EXTRACT = """
@@ -133,8 +133,10 @@ def read(workspace: Workspace, path: str, start: int | str = 0) -> Result:
     if not file.is_file():
         raise FileNotFoundError(f"there is no file {path}")
     suffix = file.suffix.lower()
-    if suffix in IMAGES:
-        raise ValueError(f"{path} is an image, which you cannot see")
+    if picture(path):  # which the agent shows the model, if it sees images
+        return Result(f"The image {path}.", {"file": path, "images": [path]})
+    if suffix in (".heic", ".heif"):
+        raise ValueError(f"{path} is an image of a kind you cannot see: convert it to a PNG")
     if suffix in DOCUMENTS:
         name = f"/workspace/{file.relative_to(workspace.root).as_posix()}"
         ran = workspace.run(_EXTRACT, name, kept=None)  # read on in parts, below

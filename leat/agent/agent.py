@@ -10,10 +10,12 @@ Every change is made, and its event published, under one lock: an app that reads
 and watches the events after misses nothing, and an event it gets twice changes nothing more.
 """
 
+import base64
 import contextlib
 import copy
 import datetime
 import json
+import mimetypes
 import queue
 import threading
 import time
@@ -110,7 +112,8 @@ UNREMEMBERING = ("remember", "forget")
 # of the system prompt, when the agent has a workspace
 WORKSPACE = """
 The user's files are in a workspace, where you read, write and edit them, and run Python among \
-them in a sandbox without the network; the files they attach are named in their message. To make \
+them in a sandbox without the network; the files they attach are named in their message, and the \
+images among them shown, as those you read are, when you can see images. To make \
 a document, first read the skill for its kind, then make it with run, and name its file in your \
 answer, without a link: the app shows the user the files you make. The skills:
 {skills}
@@ -459,8 +462,11 @@ class Agent:
 
     def limit(self) -> int | None:
         """The loaded model's context, in tokens, if the engine says. Raises EngineError."""
-        loaded = [m for m in self.models() if m.get("status") == "loaded"]
-        return loaded[0].get("max_context") if loaded else None
+        return self.loaded().get("max_context")
+
+    def loaded(self) -> dict[str, Any]:
+        """The loaded model, as the engine lists it, or {} if none is. Raises EngineError."""
+        return next((m for m in self.models() if m.get("status") == "loaded"), {})
 
     def load(self, model: str) -> None:
         """Loads a model in the engine, telling every app as it starts and once it is done."""
@@ -538,6 +544,7 @@ class _Turn:
         self.stopped = threading.Event()
         self.completion: Completion | None = None
         self.limit: int | None = None  # the model's context, once the turn asks
+        self.vision = False  # whether the model sees images, once the turn asks
         self.redone = False  # a reply the context cut off, after the prompt was made smaller
         self.sources: dict[str, int] = {}  # the conversation's, by address, numbered for citing
 
@@ -548,7 +555,8 @@ class _Turn:
 
     def run(self) -> None:
         try:
-            self.limit = self.agent.limit()
+            loaded = self.agent.loaded()
+            self.limit, self.vision = loaded.get("max_context"), bool(loaded.get("vision"))
             self.sources = numbered(self.agent.store.messages(self.id))
             for n in range(ROUNDS):
                 calls = self._reply(last=n == ROUNDS - 1)
@@ -587,7 +595,7 @@ class _Turn:
         reply["info"] = info
         (index,) = self._show(reply)
         read = context.prompt(messages, state)
-        body: dict[str, Any] = {"messages": read, **SAMPLING[self.think]}
+        body: dict[str, Any] = {"messages": self._seen(read), **SAMPLING[self.think]}
         # as Qwen3's templates take them, and others ignore: the replies of turns before rendered
         # as they were, their reasoning kept, so that the prompt of a message after a turn that
         # called tools extends the last, which the engine's cache holds, rather than changing it
@@ -595,7 +603,7 @@ class _Turn:
         if declared:
             body["tools"] = declared
         if last and self.tools:
-            read.append({"role": "user", "content": LAST})
+            body["messages"].append({"role": "user", "content": LAST})
         started, finish = time.monotonic(), None
         self.completion = a.engine.complete(body)
         if self.stopped.is_set():  # before the completion was there to close
@@ -674,7 +682,8 @@ class _Turn:
         if context.estimate(messages, state, extra) + asking + tokens < self.limit:
             note = {"role": "user", "content": context.IN_PLACE}
             body = {
-                "messages": [*context.prompt(messages, state), note], "max_tokens": tokens,
+                "messages": [*self._seen(context.prompt(messages, state)), note],
+                "max_tokens": tokens,
                 "temperature": 0.3, "tools": [t.declaration() for t in self.tools.values()],
                 "chat_template_kwargs": {"enable_thinking": False, "preserve_thinking": True},
             }  # fmt: skip
@@ -693,6 +702,31 @@ class _Turn:
             "chat_template_kwargs": {"enable_thinking": False},
         }  # fmt: skip
         return self.agent.engine.reply(body)["content"].strip() or (before or "")
+
+    def _seen(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        # the prompt's messages, each image a message shows before its text as a data: URL if
+        # the model sees images, or else a tool's said to be unseen, as the user's are named
+        for m in messages:
+            if not (names := m.pop("images", None)):
+                continue
+            urls = [url for name in names if (url := self._url(name))] if self.vision else []
+            if urls:
+                parts = [{"type": "image_url", "image_url": {"url": url}} for url in urls]
+                m["content"] = [*parts, {"type": "text", "text": m.get("content") or ""}]
+            elif m["role"] == "tool":
+                m["content"] += " You cannot see it: the model takes no images."
+        return messages
+
+    def _url(self, name: str) -> str | None:
+        # a workspace's image as a data: URL, or None if it is gone
+        if (space := self.agent.workspace) is None:
+            return None
+        try:
+            data = space.path(name).read_bytes()
+        except (OSError, ValueError):
+            return None
+        kind = mimetypes.guess_type(name)[0] or "image/png"
+        return f"data:{kind};base64,{base64.b64encode(data).decode()}"
 
     def _call(self, calls: list[dict[str, Any]]) -> None:
         # runs the calls at once, each on a thread, and keeps their answers once all have answered,

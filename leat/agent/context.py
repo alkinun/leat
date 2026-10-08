@@ -21,6 +21,7 @@ COMPACT = 0.6  # of the context, past which a prompt is made smaller
 TAIL = 0.2  # of the context, of the latest messages kept whole, as Hermes Agent keeps its
 KEEP = 200  # characters of a tool's answer kept whole, however old
 CHARS = 3  # characters to a token, as an estimate that errs long
+IMAGE = 300  # tokens of an image the model sees, as an estimate that errs long: Gemma 4's take 280
 CLEARED = "[This old answer was cleared to make room; call the tool again if you need it.]"
 # of an answer saved in the workspace, as a page read
 SAVED = "[This old answer was cleared to make room; read {saved} if you need it again.]"
@@ -64,10 +65,14 @@ State = dict[str, Any]  # "cleared": tools' answers before this message's index 
 def message(m: dict[str, Any]) -> dict[str, Any]:
     """A message as the model reads it: without what only people see, nor an empty reasoning, but
     with the files the user attached named, a scheduled task's said to be one, and a user's
-    begun with when it was sent, which is how the model knows the time as it answers. The
-    reasoning is sent back, which templates such as Qwen3.5's show the steps of an agent's turn."""
+    begun with when it was sent, which is how the model knows the time as it answers; and with
+    `images`, the names of the workspace's images it shows, those the user attached or a tool
+    read, which the agent shows the model if it sees images. The reasoning is sent back, which
+    templates such as Qwen3.5's show the steps of an agent's turn."""
     api = {k: v for k, v in m.items() if k != "info" and (v or k != "reasoning_content")}
     info = m.get("info", {})
+    if images := [*info.get("images", []), *(f for f in info.get("files", []) if picture(f))]:
+        api["images"] = images
     if (task := info.get("task")) and (quiet := info.get("quiet")) and info.get("trial"):
         check = api["content"].rstrip(" .")
         api["content"] = (
@@ -87,6 +92,13 @@ def message(m: dict[str, Any]) -> dict[str, Any]:
     if m["role"] == "user" and (at := info.get("at")):
         api["content"] = f"{stamp(at)}\n{api['content']}"
     return api
+
+
+def picture(name: str) -> bool:
+    """Whether a file is an image, of a kind the engine reads, by its name."""
+    return name.lower().endswith(
+        (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff")
+    )
 
 
 def stamp(at: float) -> str:
@@ -183,7 +195,7 @@ def _view(messages: list[dict[str, Any]], state: State) -> list[dict[str, Any]]:
     # saying where one is saved, to read again
     view = [message(m) for m in messages]
     for m, v in zip(messages[: state.get("cleared", 0)], view, strict=False):
-        if v["role"] == "tool" and len(v["content"]) > KEEP:
+        if v["role"] == "tool" and (len(v["content"]) > KEEP or v.pop("images", None)):
             saved = m.get("info", {}).get("saved")
             v["content"] = SAVED.format(saved=saved) if saved else CLEARED
     return view
@@ -201,5 +213,5 @@ def _tail(view: list[dict[str, Any]], limit: int) -> int:
 
 
 def _tokens(m: dict[str, Any]) -> int:
-    # of a message as the model reads it
-    return len(json.dumps(m)) // CHARS
+    # of a message as the model reads it, its images seen
+    return len(json.dumps(m)) // CHARS + IMAGE * len(m.get("images", []))

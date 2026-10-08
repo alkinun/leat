@@ -17,7 +17,8 @@ from leat.agent.context import message as _api
 from leat.agent.store import Store
 from leat.agent.tools import files
 from leat.agent.workspace import Workspace
-from tests.test_agent import serving
+from tests.test_agent import call as calling
+from tests.test_agent import ended, serving, until
 
 
 def _sandboxes() -> bool:
@@ -85,9 +86,15 @@ def test_read_write_edit(workspace):
     assert files.read(workspace, "long.txt", files.READ).content == "x" * 10
     # what is not text
     (workspace.root / "photo.jpg").write_bytes(b"\xff\xd8")
+    (workspace.root / "photo.heic").write_bytes(b"\0")
     (workspace.root / "blob").write_bytes(b"\0\1\2")
-    with pytest.raises(ValueError, match="an image, which you cannot see"):
-        files.read(workspace, "photo.jpg")
+    seen = files.read(workspace, "photo.jpg")  # for the agent to show the model
+    assert (seen.content, seen.info) == (
+        "The image photo.jpg.",
+        {"file": "photo.jpg", "images": ["photo.jpg"]},
+    )
+    with pytest.raises(ValueError, match="convert it to a PNG"):
+        files.read(workspace, "photo.heic")
     with pytest.raises(ValueError, match="not a file of text"):
         files.read(workspace, "blob")
     with pytest.raises(FileNotFoundError):
@@ -176,6 +183,31 @@ def test_attached(agent, workspace):
         assert events.get(timeout=1)["files"][0]["name"] == "plan.md"
         agent.files_changed()  # unchanged: nothing
         assert events.empty()
+
+
+@pytest.mark.parametrize("vision", [True, False])
+def test_images_seen(engine, workspace, tmp_path, vision):
+    # an image the user attaches, and one a tool reads, the model sees as data: URLs before their
+    # text, if it sees images; if not, the user's are named, and a tool's said to be unseen
+    engine.vision = vision
+    store = Store(tmp_path / "leat.db")
+    agent = Agent(store, Client(engine.url), files.tools(workspace), workspace)
+    (workspace.root / "cat.png").write_bytes(b"\x89PNG cat")
+    engine.replies.put([{"tool_calls": [calling("read", {"path": "cat.png"})]}])
+    engine.replies.put([{"content": "A cat."}])
+    with agent.events.watch() as events:
+        agent.send(None, "What is it?", attached=["cat.png"])
+        until(events, ended)
+    first, second = engine.requests
+    user, tool = first["messages"][1]["content"], second["messages"][-1]["content"]
+    url = {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORyBjYXQ="}}
+    if vision:
+        assert user[0] == url and user[1]["text"].endswith("(Attached, in the workspace: cat.png)")
+        assert tool == [url, {"type": "text", "text": "The image cat.png."}]
+    else:
+        assert user.endswith("(Attached, in the workspace: cat.png)")
+        assert tool == "The image cat.png. You cannot see it: the model takes no images."
+    assert "images" not in second["messages"][1]
 
 
 def test_system_prompt(agent, tmp_path):

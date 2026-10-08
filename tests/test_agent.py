@@ -42,6 +42,7 @@ class FakeEngine(ThreadingHTTPServer):
         self.loads: list[str] = []
         self.context: int | None = None  # the model's, said only if set
         self.status = "loaded"  # the model's
+        self.vision = False  # whether it sees images
         super().__init__(("127.0.0.1", 0), _FakeHandler)
 
     @property
@@ -57,6 +58,8 @@ class _FakeHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         model = {"id": "fake", "status": self.server.status}
+        if self.server.vision:
+            model["vision"] = True
         if self.server.context:
             model["max_context"] = self.server.context
         self._json(200, {"object": "list", "data": [model]})

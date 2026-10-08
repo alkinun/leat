@@ -97,3 +97,19 @@ def test_transcript():
         "fetch answered: xxxxxxxxxx …\n\n"
         "Assistant: Read."
     )
+
+
+def test_images():
+    # the images a message shows, attached or read, named for the agent to show, each estimated
+    # as IMAGE tokens; a tool's old answer of one cleared as a long one is
+    user = {"role": "user", "content": "What is it?", "info": {"files": ["cat.png", "plan.md"]}}
+    read = {"role": "tool", "tool_call_id": "a", "name": "read", "content": "The image a.jpg.",
+            "info": {"images": ["a.jpg"]}}  # fmt: skip
+    messages = [SYSTEM, user, MESSAGES[2] | {"tool_calls": [CALL]}, read]
+    view = context.prompt(messages, {})
+    assert view[1]["images"] == ["cat.png"] and view[3]["images"] == ["a.jpg"]
+    plain = [m | {"info": {}} for m in messages]
+    images = context.estimate(messages, {}) - context.estimate(plain, {})
+    assert images >= 2 * context.IMAGE
+    cleared = context.prompt(messages, {"cleared": 4})[3]
+    assert cleared["content"] == context.CLEARED and "images" not in cleared

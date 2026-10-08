@@ -243,6 +243,12 @@ div.math { margin: 12px 0; overflow-x: auto; overflow-y: hidden; }
 }
 .message a.card:hover { background: var(--side); }
 .card svg { width: 16px; height: 16px; flex: none; color: var(--accent); }
+.message a.picture { display: block; line-height: 0; }
+.picture img {
+  max-width: min(100%, 320px); max-height: 240px; border: 1px solid var(--line);
+  border-radius: var(--round);
+}
+.message.tool .cards { margin-top: 0; }
 /* a citation, [1], linked to its source */
 sup.cite { margin: 0 1px; color: var(--muted); font-size: 0.6875rem; line-height: 0; }
 .message sup.cite a {
@@ -295,6 +301,9 @@ pre code { padding: 0; background: none; }
   border-radius: var(--round-large); background: var(--bubble); font-size: 0.8125rem;
 }
 .chip button { padding: 0 6px; color: var(--muted); }
+.chip img {
+  width: 22px; height: 22px; margin: 0 6px 0 -8px; object-fit: cover; border-radius: var(--round);
+}
 #input {
   flex: 1; max-height: 240px; padding: 6px 0; resize: none; overflow-y: hidden;
   border: none; outline: none; background: none;

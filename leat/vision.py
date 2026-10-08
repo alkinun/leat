@@ -28,6 +28,7 @@ from leat.tokenizer import Tokenizer
 # the embeddings an image takes at most: of Gemma 4's budgets, 70, 140, 280, 560 or 1120, its
 # processor's default
 IMAGE_TOKENS = 280
+KEPT = 16  # images kept, made of their bytes, to be given again
 PROJECTORS = {"gemma4v"}  # the vision encoders leat runs, as llama.cpp's projector types name them
 _LAYER = ("ln1", "attn_q", "attn_k", "attn_v", "attn_q_norm", "attn_k_norm", "attn_out",
           "attn_post_norm", "ln2", "ffn_gate", "ffn_up", "ffn_down", "ffn_post_norm")  # fmt: skip
@@ -66,6 +67,7 @@ class Vision:
         self.heads, self.eps = m["attention.head_count"], m["attention.layer_norm_epsilon"]
         self.pool = m.get("projector.scale_factor", 3)  # patches a side of each embedding pools
         self.tokens = IMAGE_TOKENS
+        self._kept: dict[int, Image] = {}  # the latest images, by key, the latest used last
         # the patches an image takes at most, padded to whole tiles of the matrix cores
         self.patches = -(-self.tokens * self.pool**2 // 64) * 64
         w = gguf.load(names=[n for n in gguf.tensors if n.startswith(("v.", "mm."))])
@@ -96,7 +98,12 @@ class Vision:
     def image(self, data: bytes) -> Image:
         """An image of its file's bytes, in any format Pillow reads, upright as its EXIF has it,
         and transparency over white; a ValueError for bytes of no image, or of one so large it
-        may be a decompression bomb. Of the host alone, so that any thread may call it."""
+        may be a decompression bomb. Of the host alone, so that any thread may call it. The
+        latest are kept, as a conversation sends its images again with every message."""
+        key = -1 - int.from_bytes(hashlib.sha256(data).digest()[:7], "little")
+        if (kept := self._kept.pop(key, None)) is not None:
+            self._kept[key] = kept  # the latest used, last
+            return kept
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("error", Picture.DecompressionBombWarning)
@@ -119,10 +126,12 @@ class Vision:
         pad = self.patches - columns * rows
         pixels += bytes(pad * 3 * p * p)
         places = [c for y in range(rows) for x in range(columns) for c in (x, y)] + [-1] * 2 * pad
-        key = -1 - int.from_bytes(hashlib.sha256(data).digest()[:7], "little")
         size = columns * rows // self.pool**2
         tokens = [self.open, *[key] * size, self.close]
-        return Image(key, tokens, pixels, array.array("i", places).tobytes())
+        image = self._kept[key] = Image(key, tokens, pixels, array.array("i", places).tobytes())
+        while len(self._kept) > KEPT:
+            self._kept.pop(next(iter(self._kept)), None)
+        return image
 
     def inputs(self, image: Image) -> tuple[Tensor, Tensor]:
         """An image's pixels and positions on the device, as encode() takes them."""
