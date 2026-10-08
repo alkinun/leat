@@ -235,7 +235,8 @@ def test_tools(agent, engine, events):
     }  # fmt: skip
     assert reply["content"] == "It said hi."
     first, second = engine.requests
-    names = ["remember", "forget", "recall", "schedule", "unschedule", "tasks", "echo"]
+    names = ["remember", "forget", "recall", "schedule", "unschedule", "tasks", "add_to_list",
+             "check_off", "lists", "echo"]  # fmt: skip
     assert [tool["function"]["name"] for tool in first["tools"]] == names
     assert second["messages"][-1] == _api(answer)
 
@@ -518,6 +519,25 @@ def test_character(agent, engine, events):
                     lambda: agent.send(None, "Hi", character=tutor["id"])):  # fmt: skip
         with pytest.raises(NotFound):
             removed()
+
+
+def test_lists(agent, events):
+    # the household's lists: made as things are added, each once, whatever their case; checked
+    # off by name or by the one that holds it; every app told
+    from leat.agent.tools import lists
+
+    added = lists.add(agent, "shopping list", ["Milk", "2 kg of apples", "milk", " "])
+    assert added.content == "Added to Shopping: Milk, 2 kg of apples. It has 2 things."
+    assert events.get(timeout=1)["lists"][0]["name"] == "Shopping"
+    assert lists.add(agent, "Shopping", "bread, MILK").content.startswith(
+        "Added to Shopping: bread."
+    )
+    done = lists.check_off(agent, "shopping", ["apples", "eggs"])
+    assert done.content == "Checked off 2 kg of apples. Not on Shopping: eggs."
+    assert lists.show(agent, "SHOPPING").content == "Shopping:\n- Milk\n- bread"
+    assert lists.show(agent).content == "The lists: Shopping (2)."
+    with pytest.raises(LookupError, match="there is no list 'chores'"):
+        lists.check_off(agent, "chores", ["dishes"])
 
 
 def test_recall_by_time(agent, engine, events):
@@ -1125,6 +1145,19 @@ def test_api_characters(server, agent, engine, events):
     assert request(f"{server}/characters")[0] == 200  # the app's page of them
 
 
+def test_api_lists(server, agent):
+    from leat.agent.tools import lists
+
+    assert request(f"{server}/api/lists", "POST", {"name": "Chores"})[0] == 200
+    (chores,) = agent.store.lists()
+    assert request(f"{server}/api/lists/{chores['id']}/items", "POST", {"text": "Dishes"})[0] == 200
+    (item,) = lists.find(agent, "chores")["items"]
+    assert request(f"{server}/api/lists/items/{item['id']}", "DELETE")[0] == 200
+    assert request(f"{server}/api/lists/items/{item['id']}", "DELETE")[0] == 404
+    assert request(f"{server}/api/lists/{chores['id']}", "DELETE")[0] == 200
+    assert agent.store.lists() == [] and request(f"{server}/lists")[0] == 200
+
+
 def test_api_tasks(server, agent):
     in_an_hour = datetime.datetime.now() + datetime.timedelta(hours=1)
     task = agent.schedule("Remind the user to stretch", in_an_hour, "daily", person=1)
@@ -1224,6 +1257,7 @@ def test_events(server, agent, engine):
     assert event() == {"type": "files", "files": []}
     assert event() == {"type": "tasks", "tasks": []}
     assert event() == {"type": "characters", "characters": []}
+    assert event() == {"type": "lists", "lists": []}
     assert event()["type"] == "household"  # the owner's
     assert event()["type"] == "models"
     engine.replies.put(REPLY)

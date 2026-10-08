@@ -30,6 +30,9 @@
   <button id="timed" class="place">
     <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Tasks
   </button>
+  <button id="listed" class="place">
+    <svg viewBox="0 0 24 24"><path d="M9 6h12M9 12h12M9 18h12"/><path d="m3 6 1.5 1.5L7 5M3 12l1.5 1.5L7 11M3 18l1.5 1.5L7 17"/></svg>Lists
+  </button>
   <button id="cast" class="place">
     <svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="4"/><path d="M2 21a7 7 0 0 1 14 0"/><path d="M16 4a4 4 0 0 1 0 8M19 21a7 7 0 0 0-3-5.7"/></svg>Characters
   </button>
@@ -75,6 +78,16 @@
     <p>What Leat does later, once or again and again: ask it to remind you of something, or to
       brief you every morning. <span id="notifying"></span></p>
     <ul id="scheduled"></ul>
+  </section>
+  <section id="lists" class="page">
+    <h1>Lists</h1>
+    <p>Lists everyone at home shares, as the shopping. Ask Leat to add to them, in any chat or on
+      Telegram, or add here; tick off what is bought or done.</p>
+    <div id="shared"></div>
+    <form id="new-list">
+      <input id="list-name" placeholder="A new list, as Packing" autocomplete="off" maxlength="120">
+      <button>Add</button>
+    </form>
   </section>
   <section id="characters" class="page">
     <h1>Characters</h1>

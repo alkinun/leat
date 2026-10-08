@@ -24,7 +24,7 @@ from leat.agent import context
 from leat.agent.background import Background
 from leat.agent.client import Client, Completion, EngineError
 from leat.agent.store import Store
-from leat.agent.tools import Context, Result, Tool, arguments, files, memory, numbered
+from leat.agent.tools import Context, Result, Tool, arguments, files, lists, memory, numbered
 from leat.agent.tools import tasks as scheduling
 from leat.agent.workspace import Workspace
 
@@ -56,7 +56,8 @@ with a report: what you found, in sections, and what stays unsure. Cite what you
 numbers the tools give their sources, as [1] or [2][3], after the words they support.
 
 When the user wants something done later, once or again and again, as a reminder or a morning's \
-briefing, call schedule.
+briefing, call schedule. The household's lists, as its shopping, are everyone's: add to them and \
+check things off as anyone asks.
 {workspace}
 What you remember of the user, each by its number and dated when it was last confirmed:
 {memories}"""
@@ -143,7 +144,7 @@ class Agent:
         workspace: Workspace | None = None,
     ):  # fmt: skip
         self.store, self.engine, self.workspace, self.events = store, engine, workspace, Events()
-        own = [*memory.tools(self), *scheduling.tools(self)]
+        own = [*memory.tools(self), *scheduling.tools(self), *lists.tools(self)]
         self.tools = {tool.name: tool for tool in [*own, *(tools or [])]}
         self._files: list[dict[str, Any]] | None = None  # the files the apps were last told of
         self._models: Event | None = None  # the engine's models, as the apps were last told

@@ -46,6 +46,7 @@ class Outcome:
     tasks: list[str]  # each its prompt and how often it repeats, as "Call Ada (once)"
     seconds: float
     cached: float  # of the prompts' tokens, the share the engine's cache held
+    lists: list[str]  # each thing on the household's lists, as "Shopping: milk"
 
 
 Check = Callable[[Outcome], str | None]  # why an outcome fails, or None if it passes
@@ -76,6 +77,11 @@ def makes(pattern: str) -> Check:
 
 def remembers_nothing(o: Outcome) -> str | None:
     return f"remembers {o.memories}" if o.memories else None
+
+
+def lists(pattern: str) -> Check:
+    found = lambda o: any(re.search(pattern, t, re.I) for t in o.lists)  # noqa: E731
+    return lambda o: None if found(o) else f"listed nothing /{pattern}/ but {o.lists}"
 
 
 def schedules(pattern: str) -> Check:
@@ -149,6 +155,8 @@ CASES = [
          [called("schedule"), schedules(r"trash.*\(once\)")]),
     Case("briefing", "Every weekday at 7:30, give me the weather in London.",
          [called("schedule"), schedules(r"weather.*London.*\(weekdays\)")]),
+    Case("shopping", "We're out of milk and eggs, put them on the shopping list.",
+         [called("add_to_list"), lists(r"shopping: .*milk"), lists(r"shopping: .*eggs")]),
     Case("noticed", "I'm planning my daughter Ada's 7th birthday party for next Saturday. Suggest "
          "5 party games.", [remembers("Ada")], reviewed=True),
     Case("no junk", "What's 2^2^2^2?", [remembers_nothing], reviewed=True),
@@ -244,7 +252,8 @@ def _run(case: Case, args: argparse.Namespace) -> Outcome:
         infos = [m["info"] for m in messages if m["role"] == "assistant" and "read" in m["info"]]
         held, read = sum(i["cached"] or 0 for i in infos), sum(i["read"] for i in infos)
         share = held / (held + read) if held + read else 0.0
-        return Outcome(tools_called, answer or "", memories, names, tasks, seconds, share)
+        listed = [f"{li['name']}: {i['text']}" for li in agent.store.lists() for i in li["items"]]
+        return Outcome(tools_called, answer or "", memories, names, tasks, seconds, share, listed)
 
 
 def _wait(agent: Agent, id: str, person: int | None) -> list[dict]:

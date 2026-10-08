@@ -17,6 +17,7 @@ let telegram = null; // its bot, if connected, and the people allowed and asking
 let me = null; // the person whose this device is: {person, name, owner, device}
 let household = null; // the owner's to manage: its people and their devices, and those asking
 let characters = []; // the household's, which a new chat may be with
+let lists = []; // the household's, each with its items: {id, name, items: [{id, text}]}
 let cast = null; // the character the next new chat is with, if one
 // the conversations whose turns ended while another was shown, as this device saw them
 const unread = new Set(JSON.parse(localStorage.getItem("leat.unread") ?? "[]"));
@@ -26,9 +27,9 @@ let think = localStorage.getItem("leat.think") === "true"; // as the user last c
 let views = []; // the shown messages' elements, by their indexes
 const opened = new Map(); // whether each turn's work is open, as the user left it
 // the pages beside the conversations, each a section of its own name, and their titles
-const PAGES = ["memory", "files", "tasks", "characters", "settings"];
-const TITLES = { memory: "Memory", files: "Files", tasks: "Tasks", characters: "Characters",
-  settings: "Settings" };
+const PAGES = ["memory", "files", "tasks", "lists", "characters", "settings"];
+const TITLES = { memory: "Memory", files: "Files", tasks: "Tasks", lists: "Lists",
+  characters: "Characters", settings: "Settings" };
 
 $("new").onclick = () => {
   cast = null;
@@ -41,6 +42,18 @@ $("filed").onclick = () => turnTo("files");
 $("timed").onclick = () => turnTo("tasks");
 $("set").onclick = () => turnTo("settings");
 $("cast").onclick = () => turnTo("characters");
+$("listed").onclick = () => turnTo("lists");
+$("new-list").onsubmit = async (event) => {
+  event.preventDefault();
+  const name = $("list-name").value.trim();
+  if (!name) return;
+  try {
+    await post("/api/lists", { name });
+    $("list-name").value = "";
+  } catch (error) {
+    status(error.message, true);
+  }
+};
 $("character").onsubmit = async (event) => {
   event.preventDefault();
   const name = $("character-name").value.trim(), about = $("character-about").value.trim();
@@ -216,6 +229,10 @@ function handle(event) {
       characters = event.characters;
       renderCharacters();
       break;
+    case "lists":
+      lists = event.lists;
+      renderLists();
+      return;
     case "household":
       household = event;
       renderHousehold();
@@ -483,6 +500,34 @@ function renderHousehold() {
   requests.append(...asking);
   const how = element("p", "meta", "To add someone, open Leat on their device: it asks to join, and shows here.");
   box.replaceChildren(...(asking.length ? [requests] : []), ...people, how);
+}
+
+// the household's lists: each its things, to tick off, and a line to add one
+function renderLists() {
+  $("shared").replaceChildren(...lists.flatMap((list) => {
+    const heading = element("h2", "", list.name), remover = element("button", "", "Remove");
+    remover.onclick = () => confirm(`Remove the list ${list.name}?`)
+      && fetch(`/api/lists/${list.id}`, { method: "DELETE" });
+    heading.append(remover);
+    const items = element("ul");
+    items.append(...list.items.map((item) => {
+      const row = element("li"), tick = element("button", "tick");
+      tick.title = "Tick off";
+      tick.onclick = () => fetch(`/api/lists/items/${item.id}`, { method: "DELETE" });
+      row.append(tick, element("span", "", item.text));
+      return row;
+    }));
+    const adding = element("form"), input = element("input");
+    Object.assign(input, { placeholder: `Add to ${list.name}`, maxLength: 120, autocomplete: "off" });
+    adding.append(input);
+    adding.onsubmit = async (event) => {
+      event.preventDefault();
+      if (!input.value.trim()) return;
+      await post(`/api/lists/${list.id}/items`, { text: input.value }).catch((e) => status(e.message, true));
+      input.value = "";
+    };
+    return [heading, items, adding];
+  }));
 }
 
 // characters one may add in a click, as a start
@@ -773,6 +818,9 @@ const DID = {
   schedule: ["scheduled a task", (n) => `scheduled ${n} tasks`],
   unschedule: ["cancelled a task", (n) => `cancelled ${n} tasks`],
   tasks: ["looked at the tasks", () => "looked at the tasks"],
+  add_to_list: ["added to a list", (n) => `added to lists ${n} times`],
+  check_off: ["checked things off", () => "checked things off"],
+  lists: ["looked at the lists", () => "looked at the lists"],
 };
 
 // what a turn's calls did, in a few words, in the order it began them; those that failed not
@@ -885,6 +933,12 @@ const LINES = {
     "Couldn't schedule"],
   unschedule: (a, i) => ["Cancelling…", `Cancelled: ${i.task?.prompt}`, "Couldn't cancel"],
   tasks: () => ["Looking at the tasks…", "Looked at the tasks", "Couldn't look at the tasks"],
+  add_to_list: (a, i) => [`Adding to ${a.list}…`, `Added to ${i.list ?? a.list}: ${(i.added ?? []).join(", ")}`,
+    `Couldn't add to ${a.list}`],
+  check_off: (a, i) => [`Checking off ${a.list}…`, `Checked off ${(i.done ?? []).join(", ")}`,
+    `Couldn't check off ${a.list}`],
+  lists: (a) => ["Looking at the lists…", a.list ? `Looked at ${a.list}` : "Looked at the lists",
+    "Couldn't look at the lists"],
   run: (a, i) => ["Running code…", i.status === 0 ? "Ran code"
     : i.status === null ? "Ran code, out of time" : "Ran code, which failed", "Couldn't run code"],
 };
@@ -1053,6 +1107,9 @@ const ICONS = {
   schedule: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
   unschedule: '<circle cx="12" cy="12" r="9"/><path d="m9 9 6 6m0-6-6 6"/>',
   tasks: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
+  add_to_list: '<path d="M9 6h12M9 12h12M9 18h6M3 6h.01M3 12h.01M18 15v6M15 18h6"/>',
+  check_off: '<path d="M9 6h12M9 12h12M9 18h12"/><path d="m3 12 1.5 1.5L7 11"/>',
+  lists: '<path d="M9 6h12M9 12h12M9 18h12M3 6h.01M3 12h.01M3 18h.01"/>',
   weather: '<path d="M17.5 19H9a7 7 0 1 1 6.7-9h1.8a4.5 4.5 0 1 1 0 9z"/>',
   forget: '<path d="M6 3h12v18l-6-4-6 4z"/><path d="m10 8 4 4m0-4-4 4"/>',
   tool: '<circle cx="12" cy="12" r="3"/>',

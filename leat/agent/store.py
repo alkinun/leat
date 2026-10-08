@@ -18,9 +18,10 @@ wall clock its repeats keep; one done for good is deleted. Settings are values b
 as a messaging app's connection.
 
 The household is its people, the first its owner, and the devices paired to each, known by the hash
-of a secret each holds; and its characters, whom a conversation may be with. A conversation, a
-memory and a task are each a person's; a memory of the household category is everyone's. Before the
-household has its first person, everything is no one's, and becomes the owner's.
+of a secret each holds; its characters, whom a conversation may be with; and its lists, as its
+shopping, everyone's. A conversation, a memory and a task are each a person's; a memory of the
+household category is everyone's. Before the household has its first person, everything is no one's,
+and becomes the owner's.
 """
 
 import json
@@ -148,6 +149,20 @@ _MIGRATIONS = [
       removed REAL
     );
     ALTER TABLE conversations ADD COLUMN character INTEGER REFERENCES characters (id);
+    """,
+    # the household's lists, as its shopping, and their items
+    """
+    CREATE TABLE lists (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      created REAL NOT NULL
+    );
+    CREATE TABLE items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      list INTEGER NOT NULL REFERENCES lists (id) ON DELETE CASCADE,
+      text TEXT NOT NULL,
+      created REAL NOT NULL
+    );
     """,
 ]
 _SEARCHED = ("user", "assistant")  # the roles of the messages search finds
@@ -442,6 +457,27 @@ class Store:
         with them."""
         sql = "UPDATE characters SET removed = ? WHERE id = ? AND removed IS NULL RETURNING id"
         return bool(self._query(sql, time.time(), id))
+
+    def lists(self) -> list[dict[str, Any]]:
+        """The household's lists, the oldest first, each with its items, the oldest first."""
+        rows = self._query("SELECT * FROM items ORDER BY id")
+        return [dict(row) | {"items": [dict(i) for i in rows if i["list"] == row["id"]]}
+                for row in self._query("SELECT * FROM lists ORDER BY id")]  # fmt: skip
+
+    def add_list(self, name: str) -> dict[str, Any]:
+        sql = "INSERT INTO lists (name, created) VALUES (?, ?) RETURNING *"
+        return dict(self._query(sql, name, time.time())[0]) | {"items": []}
+
+    def remove_list(self, id: int) -> bool:
+        return bool(self._query("DELETE FROM lists WHERE id = ? RETURNING id", id))
+
+    def add_item(self, list: int, text: str) -> dict[str, Any]:
+        sql = "INSERT INTO items (list, text, created) VALUES (?, ?, ?) RETURNING *"
+        return dict(self._query(sql, list, text, time.time())[0])
+
+    def remove_item(self, id: int) -> dict[str, Any] | None:
+        rows = self._query("DELETE FROM items WHERE id = ? RETURNING *", id)
+        return dict(rows[0]) if rows else None
 
     def people(self) -> list[dict[str, Any]]:
         """The household's people, the owner first."""
