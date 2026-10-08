@@ -121,17 +121,38 @@ def compact(
     if clearing old answers or summarizing old messages can make it, or the most they can; one
     smaller anyway if `force`, as for a reply the context cut off. `summarize` gives a summary of
     messages, with the last one, in some tokens at most. Messages are summarized only if they take
-    twice those tokens: the summary must save more than it costs."""
-    tail = _tail(_view(messages, state), limit)
-    cleared = state | {"cleared": max(state.get("cleared", 0), tail), "used": None}
+    twice those tokens: the summary must save more than it costs.
+
+    What came before the turn running is made smaller first, and its own answers only if that is
+    not enough, so that a turn reading many pages keeps what it found to answer from."""
+    view = _view(messages, state)
+    tail = _tail(view, limit)
+    turn = next((i for i in range(len(view) - 1, 0, -1) if view[i]["role"] == "user"), tail)
+    smaller = state
+    for edge in dict.fromkeys((min(turn, tail), tail)):
+        smaller = _compact_to(messages, smaller, limit, extra, summarize, edge, force)
+        if smaller is not state and (
+            force or estimate(messages, smaller, extra) <= COMPACT * limit
+        ):
+            return smaller
+    return smaller
+
+
+def _compact_to(
+    messages: list[dict[str, Any]], state: State, limit: int, extra: int,
+    summarize: Callable[[str | None, list[dict[str, Any]], int], str], edge: int, force: bool,
+) -> State:  # fmt: skip
+    # the state made smaller up to the message at `edge`: the tools' answers before it cleared,
+    # and if that is not enough, the messages before it summarized
+    cleared = state | {"cleared": max(state.get("cleared", 0), edge), "used": None}
     small = estimate(messages, cleared, extra) <= COMPACT * limit
     if cleared["cleared"] > state.get("cleared", 0) and (small or force):
         return cleared
     start, tokens = state.get("summarized", 1), summary_tokens(limit)
-    if sum(_tokens(m) for m in _view(messages, cleared)[start:tail]) <= 2 * tokens:
-        return cleared
-    summary = summarize(state.get("summary"), messages[start:tail], tokens)
-    return cleared | {"summary": summary, "summarized": tail}
+    if edge <= start or sum(_tokens(m) for m in _view(messages, cleared)[start:edge]) <= 2 * tokens:
+        return cleared if cleared["cleared"] > state.get("cleared", 0) else state
+    summary = summarize(state.get("summary"), messages[start:edge], tokens)
+    return cleared | {"summary": summary, "summarized": edge}
 
 
 def summary_tokens(limit: int) -> int:

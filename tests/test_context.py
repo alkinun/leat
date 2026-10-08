@@ -61,11 +61,33 @@ def test_compact():
     state = context.compact(messages, {}, 600, 0, summarize)
     assert state["cleared"] == 4 and summarized == []
     assert context.compact(messages, state, 600, 0, summarize, force=True) == state | {"used": None}
-    # a long stretch, summarized, with the summary before
+    # a long stretch, summarized, with the summary before, to the turn running
     long = [SYSTEM] + [{"role": r, "content": "y" * 600} for r in ("user", "assistant") * 4]
     state = context.compact(long, {"summary": "Before."}, 1000, 0, summarize)
-    assert state["summary"] == "Goal: it." and state["summarized"] == len(long) - 1
-    assert summarized[-1] == long[1:-1]
+    assert state["summary"] == "Goal: it." and state["summarized"] == len(long) - 2
+    assert summarized[-1] == long[1:-2]
+
+
+def test_compact_keeps_the_turn():
+    # the turn running keeps the answers it found, the earlier turns' cleared first; and its own
+    # are cleared when that is not enough
+    def page(i: int) -> list[dict]:
+        call = {"id": f"c{i}", "type": "function", "function": {"name": "fetch", "arguments": "{}"}}
+        return [
+            {"role": "assistant", "content": "", "tool_calls": [call]},
+            {"role": "tool", "tool_call_id": f"c{i}", "name": "fetch", "content": "p" * 900},
+        ]
+
+    earlier = [SYSTEM, {"role": "user", "content": "One"}, *page(1), *page(2),
+               {"role": "assistant", "content": "Done."}]  # fmt: skip
+    running = [*earlier, {"role": "user", "content": "Two"}, *page(3), *page(4), *page(5)]
+    state = context.compact(running, {}, 2600, 0, lambda *a: "Goal: it.")
+    view = context.prompt(running, state)
+    assert [m["content"] for m in view if m["role"] == "tool"] == [context.CLEARED] * 2 + [
+        "p" * 900
+    ] * 3
+    state = context.compact(running, {}, 1500, 0, lambda *a: "Goal: it.")
+    assert context.prompt(running, state)[-3]["content"] == context.CLEARED  # its own, at last
 
 
 def test_transcript():
