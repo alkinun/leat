@@ -60,10 +60,11 @@ class Telegram:
         threading.Thread(target=self._deliver, name="leat telegram replies", daemon=True).start()
 
     def state(self) -> dict[str, Any]:
-        """What the app shows: the bot, the people allowed and those asking; not the token."""
+        """What the owner's app shows: the bot, the people allowed, each as a person of the
+        household's, and those asking; not the token."""
         s = self._settings()
-        people = ("allowed", "requests")
-        return {"type": KEY, "bot": s.get("bot")} | {k: list(s.get(k, {}).values()) for k in people}
+        people = {k: list(s.get(k, {}).values()) for k in ("allowed", "requests")}
+        return {"type": KEY, "bot": s.get("bot")} | people
 
     def connect(self, token: str) -> dict[str, Any]:
         """Takes a bot's token, which Telegram must know. Raises TelegramError if it does not."""
@@ -85,14 +86,14 @@ class Telegram:
         self._change(lambda s: {k: v for k, v in s.items() if k not in ("token", "bot")})
         self._wake.set()
 
-    def allow(self, id: int) -> None:
-        """Lets in a person who asked, and tells them."""
+    def allow(self, id: int, person: int | None = None) -> None:
+        """Lets in someone who asked, as a person of the household, by its id, and tells them."""
 
         def allowed(s: dict[str, Any]) -> dict[str, Any]:
-            person = s.get("requests", {}).pop(str(id), None)
-            if person is None:
+            asked = s.get("requests", {}).pop(str(id), None)
+            if asked is None:
                 raise NotFound(f"no one with the id {id} asked")
-            return s | {"allowed": s.get("allowed", {}) | {str(id): person}}
+            return s | {"allowed": s.get("allowed", {}) | {str(id): asked | {"person": person}}}
 
         self._change(allowed)
         self._send(id, "You're in! Write to me as to anyone.")
@@ -141,7 +142,7 @@ class Telegram:
             return
         person, chat = message["from"], message["chat"]["id"]
         settings = self._settings()
-        if str(person["id"]) not in settings.get("allowed", {}):
+        if (allowed := settings.get("allowed", {}).get(str(person["id"]))) is None:
             if str(person["id"]) not in settings.get("requests", {}):
                 who = {"id": person["id"], "name": _name(person), "asked": time.time()}
                 self._change(
@@ -150,9 +151,12 @@ class Telegram:
                 self._send(chat, REFUSED)
             return
         text = (message.get("text") or message.get("caption") or "").strip()
+        whose = allowed.get("person")  # of the household's people
         conversation = settings.get("chats", {}).get(str(chat))
+        if (c := self.agent.store.conversation(conversation or "")) is None or c["person"] != whose:
+            conversation = None  # deleted, or another's since the person was changed
         if (command := (text.split() or [""])[0].split("@")[0]) in ("/start", "/new", "/stop"):
-            return self._command(command, chat, conversation)
+            return self._command(command, chat, conversation, whose)
         sent = message.get("document") or (message.get("photo") or [None])[-1]
         if sent is not None and sent.get("file_size", 0) > FILES:
             return self._send(
@@ -161,12 +165,10 @@ class Telegram:
         attached = [self._download(sent)] if sent and self.agent.workspace else []
         if not text and not attached:
             return self._send(chat, "I read text and files, but not that yet.")
-        if conversation is not None and self.agent.store.conversation(conversation) is None:
-            conversation = None
         try:  # the chat known before the turn can end, which delivering it waits for
             with self._lock:
                 id = self.agent.send(conversation, text or "(The files attached.)",
-                                     attached=attached, via="telegram")  # fmt: skip
+                                     attached=attached, via="telegram", person=whose)  # fmt: skip
                 self.started[id] = chat
         except Busy:
             return self._send(chat, "I'm still working on a reply here: /stop stops it.")
@@ -174,13 +176,15 @@ class Telegram:
             self._change(lambda s: s | {"chats": s.get("chats", {}) | {str(chat): id}})
         self._call("sendChatAction", chat_id=chat, action="typing")
 
-    def _command(self, command: str, chat: int, conversation: str | None) -> None:
+    def _command(
+        self, command: str, chat: int, conversation: str | None, person: int | None
+    ) -> None:
         if command == "/new":
             self._change(lambda s: s | {"chats": {c: v for c, v in s.get("chats", {}).items()
                                                   if c != str(chat)}})  # fmt: skip
             self._send(chat, "A new conversation begins.")
         elif command == "/stop" and conversation is not None:
-            self.agent.stop(conversation)
+            self.agent.stop(conversation, person)
         elif command == "/start":
             self._send(chat, WELCOME)
 
@@ -324,7 +328,7 @@ class Telegram:
         # changes the settings, telling the apps what they show of them
         with self._lock:
             self.agent.store.set_setting(KEY, change(self._settings()))
-        self.agent.events.publish(self.state())
+        self.agent.events.publish(self.state() | {"to": "owner"})
 
 
 def to_html(markdown: str, sources: dict[int, str] | None = None) -> str:

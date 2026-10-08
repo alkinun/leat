@@ -1,6 +1,7 @@
 import contextlib
 import datetime
 import http.client
+import http.cookiejar
 import json
 import queue
 import socket
@@ -12,6 +13,7 @@ import urllib.request
 from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+from unittest.mock import ANY
 
 import pytest
 
@@ -956,12 +958,34 @@ def test_engine_stuck(tmp_path, monkeypatch):
         assert time.monotonic() - start < 2
 
 
+@contextlib.contextmanager
+def serving(agent: Agent, telegram: Any = None) -> Iterator[str]:
+    """The agent's server, its household's owner set up, whose cookie urllib's requests send from
+    then on, as a browser's do."""
+    with Server(agent, port=0, telegram=telegram) as server:
+        threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True).start()
+        url = f"http://127.0.0.1:{server.server_port}"
+        processor = urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
+        urllib.request.install_opener(urllib.request.build_opener(processor))
+        try:
+            assert request(f"{url}/api/setup", "POST", {"name": "Alkın"})[0] == 200
+            yield url
+        finally:
+            urllib.request.install_opener(None)  # type: ignore[arg-type]
+            server.shutdown()
+
+
+def cookie() -> str:
+    """The Cookie header of the device serving() set up."""
+    opener = urllib.request._opener  # type: ignore[attr-defined]
+    jar = next(h.cookiejar for h in opener.handlers if hasattr(h, "cookiejar"))
+    return "; ".join(f"{c.name}={c.value}" for c in jar)
+
+
 @pytest.fixture
 def server(agent) -> Iterator[str]:
-    with Server(agent, port=0) as server:
-        threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True).start()
-        yield f"http://127.0.0.1:{server.server_port}"
-        server.shutdown()
+    with serving(agent) as url:
+        yield url
 
 
 def request(url: str, method: str = "GET", body: Any = None, **headers: str) -> tuple[int, bytes]:
@@ -990,7 +1014,7 @@ def test_api(server, engine, agent, events):
     engine.replies.put(REPLY)
     status, body = request(f"{server}/api/conversations", "POST", {"content": "Hi"})
     id = json.loads(body)["id"]
-    assert status == 200 and agent.conversation(id) is not None
+    assert status == 200 and agent.conversation(id, 1) is not None  # the owner's
     until(events, ended)
     # what is wrong with a request, said
     assert request(f"{server}/api/conversations", "POST", {"content": " "})[0] == 400
@@ -1002,7 +1026,7 @@ def test_api(server, engine, agent, events):
     status, body = request(f"{server}/api/conversations/{id}")
     assert status == 200 and json.loads(body)["messages"][1]["content"] == "Hi"
     assert request(f"{server}/api/conversations/{id}", "DELETE")[0] == 200
-    assert agent.conversations() == []
+    assert agent.conversations(1) == []
 
 
 def test_api_busy(server, engine, events):
@@ -1020,20 +1044,85 @@ def test_api_memories(server, agent):
     url = f"{server}/api/memories"
     status, body = request(url, "POST", {"text": " Lives in Izmir. "})
     assert status == 200 and json.loads(body)["text"] == "Lives in Izmir."
-    assert [m["text"] for m in agent.memories()] == ["Lives in Izmir."]
+    assert [m["text"] for m in agent.memories(1)] == ["Lives in Izmir."]
     assert request(url, "POST", {"text": ""})[0] == 400
     assert request(f"{url}/{json.loads(body)['id']}", "DELETE")[0] == 200
-    assert request(f"{url}/7", "DELETE")[0] == 404 and agent.memories() == []
+    assert request(f"{url}/7", "DELETE")[0] == 404 and agent.memories(1) == []
+    (forgotten,) = agent.store.forgotten(1)
+    assert request(f"{url}/restore", "POST", {"id": forgotten["id"]})[0] == 200
+    assert [m["text"] for m in agent.memories(1)] == ["Lives in Izmir."]
     assert request(url, "POST", {"text": "Likes tea.", "category": "drinks"})[0] == 400
     assert request(f"{server}/memory")[0] == 200  # the app's page of them
 
 
 def test_api_tasks(server, agent):
     in_an_hour = datetime.datetime.now() + datetime.timedelta(hours=1)
-    task = agent.schedule("Remind the user to stretch", in_an_hour, "daily")
+    task = agent.schedule("Remind the user to stretch", in_an_hour, "daily", person=1)
     assert request(f"{server}/api/tasks/{task['id']}", "DELETE")[0] == 200
     assert request(f"{server}/api/tasks/{task['id']}", "DELETE")[0] == 404
     assert request(f"{server}/tasks")[0] == 200  # the app's page of them
+
+
+def test_joining(server, agent, engine, events):
+    # a device asks to join, showing a code the owner's device shows too; let in as a new person,
+    # it sees their own alone, may not do what the owner alone may, and is unpaired by the owner
+    jar = urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
+    phone = urllib.request.build_opener(jar)
+
+    def ask(path: str, method: str = "GET", body: Any = None) -> tuple[int, Any]:
+        data = None if body is None else json.dumps(body).encode()
+        try:
+            with phone.open(urllib.request.Request(f"{server}{path}", data, method=method)) as r:
+                return r.status, json.loads(r.read() or b"{}")
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    assert ask("/api/me") == (401, {"error": {"message": ANY}, "empty": False})
+    assert ask("/api/setup", "POST", {"name": "Eve"})[0] == 400  # the household has its owner
+    status, asked = ask("/api/pairings", "POST", {"name": "Ada"})
+    assert status == 200 and len(asked["code"]) == 6
+    connection = http.client.HTTPConnection(server.replace("http://", ""))
+    connection.request("GET", "/api/events", headers={"Cookie": cookie()})
+    response = connection.getresponse()
+    while not (line := response.readline()).startswith(b'data: {"type": "household"'):
+        pass
+    (request_,) = json.loads(line[6:])["requests"]
+    assert (request_["name"], request_["code"]) == ("Ada", asked["code"])
+    connection.close()
+    assert ask(f"/api/pairings/{asked['id']}")[0] == 202  # waiting
+    status, ada = request(f"{server}/api/pairings/{asked['id']}/allow", "POST", {})
+    assert status == 200 and json.loads(ada)["name"] == "Ada"
+    assert ask(f"/api/pairings/{asked['id']}")[0] == 200  # its cookie, taken once
+    assert ask(f"/api/pairings/{asked['id']}")[0] == 404
+    assert ask("/api/me") == (200, {"person": 2, "name": "Ada", "owner": False, "device": 2})
+    # Ada's own alone: her events tell of her conversations, not the owner's
+    adas = "; ".join(f"{c.name}={c.value}" for c in jar.cookiejar)
+    connection = http.client.HTTPConnection(server.replace("http://", ""))
+    connection.request("GET", "/api/events", headers={"Cookie": adas})
+    stream = connection.getresponse()
+    engine.replies.put(REPLY)
+    _, body = request(f"{server}/api/conversations", "POST", {"content": "Hi"})
+    until(events, ended)
+    assert ask(f"/api/conversations/{json.loads(body)['id']}")[0] == 404
+    engine.replies.put(REPLY)
+    _, mine = ask("/api/conversations", "POST", {"content": "Hello"})
+    until(events, ended)
+    told = []
+    while not told or told[-1].get("type") != "conversation":
+        if (line := stream.readline()).startswith(b"data: "):
+            told.append(json.loads(line[6:]))
+    assert told[0] == {"type": "conversations", "conversations": []}
+    assert told[-1]["conversation"]["id"] == mine["id"]  # the owner's never told
+    connection.close()
+    for path, body in [("/api/models/load", {"model": "fake"}), ("/api/telegram", {"token": "x"}),
+                       ("/api/pairings/0123456789abcdef/allow", {})]:  # fmt: skip
+        assert ask(path, "POST", body)[0] in (403, 404)
+    assert ask("/api/models/load", "POST", {"model": "fake"})[0] == 403
+    assert ask("/api/people/1", "DELETE")[0] == 403
+    # unpaired by the owner, it must ask again
+    (device,) = [d["id"] for d in agent.store.devices() if d["person"] == 2]
+    assert request(f"{server}/api/devices/{device}", "DELETE")[0] == 200
+    assert ask("/api/me")[0] == 401
 
 
 def test_trust(server, engine):
@@ -1051,7 +1140,7 @@ def test_trust(server, engine):
 def test_events(server, agent, engine):
     # what there is, then what changes
     connection = http.client.HTTPConnection(server.replace("http://", ""))
-    connection.request("GET", "/api/events")
+    connection.request("GET", "/api/events", headers={"Cookie": cookie()})
     response = connection.getresponse()
     assert response.headers["Content-Type"] == "text/event-stream"
 
@@ -1064,8 +1153,9 @@ def test_events(server, agent, engine):
     assert event() == {"type": "memories", "memories": [], "forgotten": []}
     assert event() == {"type": "files", "files": []}
     assert event() == {"type": "tasks", "tasks": []}
+    assert event()["type"] == "household"  # the owner's
     assert event()["type"] == "models"
     engine.replies.put(REPLY)
-    id = agent.send(None, "Hi")
+    id = agent.send(None, "Hi", person=1)
     assert event()["conversation"]["id"] == id
     connection.close()

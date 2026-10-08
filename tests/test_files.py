@@ -4,7 +4,6 @@ documents it reads LEAT_SANDBOX, an environment made of leat/agent/sandbox.txt."
 import json
 import os
 import shutil
-import threading
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
@@ -15,10 +14,10 @@ import pytest
 from leat.agent.agent import Agent, NotFound
 from leat.agent.client import Client
 from leat.agent.context import message as _api
-from leat.agent.server import Server
 from leat.agent.store import Store
 from leat.agent.tools import files
 from leat.agent.workspace import Workspace
+from tests.test_agent import serving
 
 
 def _sandboxes() -> bool:
@@ -190,10 +189,8 @@ def test_system_prompt(agent, tmp_path):
 
 @pytest.fixture
 def server(agent) -> Iterator[str]:
-    with Server(agent, port=0) as server:
-        threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True).start()
-        yield f"http://127.0.0.1:{server.server_port}"
-        server.shutdown()
+    with serving(agent) as url:
+        yield url
 
 
 def call(url: str, method: str = "GET", data: bytes | None = None):

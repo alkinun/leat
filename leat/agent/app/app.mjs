@@ -1,5 +1,7 @@
 // leat agent's app. It keeps nothing of its own: it shows the conversations on the box as the
-// agent's events change them, the turns running there too, and sends what the user writes.
+// agent's events change them, the turns running there too, and sends what the user writes. A device
+// is one of the household's, its person's, once paired: the first sets the home up, any other asks
+// the owner to let it in.
 
 import { markdown } from "/markdown.mjs";
 
@@ -12,6 +14,8 @@ let files = []; // the workspace's, the latest changed first: {name, size, modif
 let attached = []; // the files the next message attaches: {name, uploading}
 let tasks = []; // the scheduled, the next due first: {id, prompt, schedule, conversation}
 let telegram = null; // its bot, if connected, and the people allowed and asking
+let me = null; // the person whose this device is: {person, name, owner, device}
+let household = null; // the owner's to manage: its people and their devices, and those asking
 // the conversations whose turns ended while another was shown, as this device saw them
 const unread = new Set(JSON.parse(localStorage.getItem("leat.unread") ?? "[]"));
 let models = [], loading = null, unreachable = null; // the engine's, a model it loads, or why not
@@ -69,19 +73,71 @@ $("input").onkeydown = (event) => {
 };
 window.onpopstate = route;
 
-const events = new EventSource("/api/events");
-events.onmessage = (event) => handle(JSON.parse(event.data));
-events.onerror = () => {
-  lost = true;
-  status("Reconnecting to the box…", true);
-};
-events.onopen = () => {
-  if (!lost) return;
-  lost = false;
-  status("");
-  if (shown) open(shown.id, false); // what changed meanwhile
-};
-route();
+start();
+
+// the app, of the person whose this device is; or, of a device not yet the household's, the gate
+async function start() {
+  const response = await fetch("/api/me");
+  if (response.status === 401) return gate((await response.json()).empty);
+  me = await response.json();
+  document.body.classList.toggle("owner", me.owner);
+  renderHousehold();
+  const events = new EventSource("/api/events");
+  events.onmessage = (event) => handle(JSON.parse(event.data));
+  events.onerror = async () => {
+    lost = true;
+    status("Reconnecting to the box…", true);
+    const response = await fetch("/api/me").catch(() => null);
+    if (response?.status === 401) location.reload(); // unpaired: the gate
+  };
+  events.onopen = () => {
+    if (!lost) return;
+    lost = false;
+    status("");
+    if (shown) open(shown.id, false); // what changed meanwhile
+  };
+  route();
+}
+
+// the gate of a device not yet the household's: its first person sets the home up, and is its
+// owner; any other asks to join, showing a code the owner's device shows too
+function gate(empty) {
+  document.body.classList.add("gated");
+  $("welcome").textContent = empty
+    ? "Welcome! This Leat is new. What's your name? You'll be the one who lets the others in."
+    : "This device is not one of your home's yet. What's your name?";
+  $("joining").textContent = empty ? "Start" : "Ask to join";
+  $("join").onsubmit = async (event) => {
+    event.preventDefault();
+    const name = $("who").value.trim();
+    if (!name) return;
+    $("refusal").textContent = "";
+    try {
+      if (empty) return (await post("/api/setup", { name }), location.reload());
+      const { id, code } = await (await post("/api/pairings", { name })).json();
+      $("join").querySelector(".row").hidden = true;
+      $("code").replaceChildren("Ask whoever set Leat up to let this device in, in its Settings, " +
+        "where they will see this code:", element("b", "", `${code.slice(0, 3)} ${code.slice(3)}`));
+      await waitToJoin(id);
+    } catch (error) {
+      $("refusal").textContent = error.message;
+    }
+  };
+}
+
+// asks after a request to join until it is answered: the app once let in
+async function waitToJoin(id) {
+  for (;;) {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    const response = await fetch(`/api/pairings/${id}`).catch(() => null);
+    if (response?.status === 200) return location.reload();
+    if (response?.status === 404) {
+      $("join").querySelector(".row").hidden = false;
+      $("code").replaceChildren();
+      throw new Error("The request was turned down, or waited too long: ask again.");
+    }
+  }
+}
 
 // shows what the address names: a page, as the memory's, a conversation, or a new one
 function route() {
@@ -138,6 +194,11 @@ function handle(event) {
       return;
     case "telegram":
       telegram = event;
+      renderTelegram();
+      return;
+    case "household":
+      household = event;
+      renderHousehold();
       renderTelegram();
       return;
     case "done": // a scheduled task's turn, ended
@@ -283,7 +344,7 @@ function turnTo(name, push = true) {
 
 // the memories by category, each its own list, and how full their room is
 const CATEGORIES = { about: "About you", preferences: "Preferences", people: "People",
-  work: "Work", plans: "Plans" };
+  work: "Work", plans: "Plans", household: "Our home, everyone's" };
 const ROOM = 3000; // characters, as the agent bounds them
 function renderMemories() {
   const used = memories.reduce((n, m) => n + m.text.length, 0);
@@ -349,6 +410,59 @@ function renderTasks() {
   }
 }
 
+// the household's people, their devices, and the devices asking to join, which the owner lets in
+// as a person known or new, once the code they show is the one their device shows; for any other,
+// who they are here
+function renderHousehold() {
+  const box = $("household");
+  const unpair = element("button", "", "Unpair this device");
+  unpair.onclick = () => confirm("Unpair this device? Using Leat on it again takes asking to join.")
+    && fetch(`/api/devices/${me.device}`, { method: "DELETE" }).then(() => location.reload());
+  const you = element("p", "meta", `You are ${me?.name ?? ""} here. `);
+  you.append(unpair);
+  if (!me?.owner || !household) return box.replaceChildren(you);
+  const asking = household.requests.map((r) => {
+    const item = element("li"), about = element("div");
+    const code = element("b", "", `${r.code.slice(0, 3)} ${r.code.slice(3)}`);
+    const meta = element("span", "meta", `${r.device} · code `);
+    meta.append(code);
+    about.append(element("span", "", `${r.name} asks to join`), meta);
+    const as = element("select");
+    as.append(new Option(`as someone new, ${r.name}`, ""),
+      ...household.people.map((p) => new Option(`as ${p.name}`, p.id)));
+    const allow = element("button", "allow", "Let in"), no = element("button", "", "×");
+    allow.onclick = () => post(`/api/pairings/${r.id}/allow`, as.value ? { person: Number(as.value) } : {})
+      .catch((error) => status(error.message, true));
+    no.title = "Turn down";
+    no.onclick = () => fetch(`/api/pairings/${r.id}`, { method: "DELETE" });
+    item.append(about, as, allow, no);
+    return item;
+  });
+  const people = household.people.flatMap((p) => {
+    const devices = element("ul");
+    devices.append(...p.devices.map((d) => {
+      const item = element("li"), remover = element("button", "", "×");
+      remover.title = "Unpair";
+      remover.hidden = d.id === me.device;
+      remover.onclick = () => fetch(`/api/devices/${d.id}`, { method: "DELETE" });
+      item.append(element("span", "", d.name), element("span", "meta", `seen ${day(d.seen)}`), remover);
+      return item;
+    }));
+    const heading = element("h3", "", p.owner ? `${p.name} (owner)` : p.name);
+    if (!p.owner) {
+      const remover = element("button", "", "Remove");
+      remover.onclick = () => confirm(`Remove ${p.name}, with all their chats, memories and tasks?`)
+        && fetch(`/api/people/${p.id}`, { method: "DELETE" });
+      heading.append(" ", remover);
+    }
+    return [heading, devices];
+  });
+  const requests = element("ul");
+  requests.append(...asking);
+  const how = element("p", "meta", "To add someone, open Leat on their device: it asks to join, and shows here.");
+  box.replaceChildren(...(asking.length ? [requests] : []), ...people, how);
+}
+
 // Telegram's settings: how to make a bot and connect it, or the bot connected, and its people
 function renderTelegram() {
   const box = $("telegram");
@@ -376,20 +490,26 @@ function renderTelegram() {
   unlink.onclick = () => fetch("/api/telegram", { method: "DELETE" });
   const connected = element("p", "", "Connected as ");
   connected.append(bot, ". Only the people you allow can talk to it. ", unlink);
-  const person = (p, asking) => {
+  const people = household?.people ?? [];
+  const whose = (id) => people.find((p) => p.id === id)?.name ?? "no one yet";
+  const person = (p, asking) => { // one asking is let in as a person of the household's
     const item = element("li"), about = element("div");
-    about.append(element("span", "", p.name), element("span", "meta", asking ? "asks to talk to Leat" : "allowed"));
+    about.append(element("span", "", p.name),
+      element("span", "meta", asking ? "asks to talk to Leat" : `talks as ${whose(p.person)}`));
+    const as = element("select");
+    as.append(...people.map((q) => new Option(`as ${q.name}`, q.id)));
     const yes = element("button", "allow", "Allow"), no = element("button", "", "×");
-    yes.onclick = () => post("/api/telegram/people", { id: p.id });
+    yes.onclick = () => post("/api/telegram/people", { id: p.id, person: Number(as.value) })
+      .catch((error) => status(error.message, true));
     no.title = asking ? "Turn down" : "Remove";
     no.onclick = () => fetch(`/api/telegram/people/${p.id}`, { method: "DELETE" });
-    item.append(about, ...(asking ? [yes] : []), no);
+    item.append(about, ...(asking ? [as, yes] : []), no);
     return item;
   };
-  const people = element("ul");
-  people.append(...telegram.requests.map((p) => person(p, true)), ...telegram.allowed.map((p) => person(p, false)));
+  const list = element("ul");
+  list.append(...telegram.requests.map((p) => person(p, true)), ...telegram.allowed.map((p) => person(p, false)));
   const none = element("p", "meta", `No one yet: write to @${telegram.bot}, then allow yourself here.`);
-  box.replaceChildren(connected, telegram.requests.length + telegram.allowed.length ? people : none);
+  box.replaceChildren(connected, telegram.requests.length + telegram.allowed.length ? list : none);
 }
 
 // says a scheduled task is done, in the page, and the system's notification if allowed and the
@@ -606,7 +726,7 @@ function controls() {
   const uploading = attached.some((a) => a.uploading);
   $("send").disabled = !running && !(model && input.value.trim() && !uploading);
   $("model").value = loading ?? model ?? "";
-  $("model").disabled = loading !== null || conversations.some((c) => c.running);
+  $("model").disabled = !me?.owner || loading !== null || conversations.some((c) => c.running);
 }
 
 function status(text, error = false) {

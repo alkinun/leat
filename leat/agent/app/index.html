@@ -10,6 +10,18 @@
 <script type="module" src="/app.mjs"></script>
 </head>
 <body>
+<section id="gate">
+  <form id="join">
+    <h1>Leat</h1>
+    <p id="welcome"></p>
+    <div class="row">
+      <input id="who" placeholder="Your name" autocomplete="given-name" maxlength="40">
+      <button id="joining"></button>
+    </div>
+    <p id="code"></p>
+    <p id="refusal" class="error"></p>
+  </form>
+</section>
 <nav>
   <button id="new">
     <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>New chat
@@ -49,7 +61,7 @@
       <select id="category">
         <option value="about">About me</option><option value="preferences">Preferences</option>
         <option value="people">People</option><option value="work">Work</option>
-        <option value="plans">Plans</option>
+        <option value="plans">Plans</option><option value="household">Our home, shared</option>
       </select>
       <button>Add</button>
     </form>
@@ -63,8 +75,12 @@
   </section>
   <section id="settings" class="page">
     <h1>Settings</h1>
-    <h2>Telegram</h2>
-    <div id="telegram"></div>
+    <h2>People and devices</h2>
+    <div id="household"></div>
+    <div class="owned">
+      <h2>Telegram</h2>
+      <div id="telegram"></div>
+    </div>
   </section>
   <section id="files" class="page">
     <h1>Files</h1>

@@ -15,11 +15,10 @@ from leat.agent.agent import Agent, NotFound
 from leat.agent.channels import telegram
 from leat.agent.channels.telegram import Telegram, TelegramError, to_html
 from leat.agent.client import Client
-from leat.agent.server import Server
 from leat.agent.store import Store
 from leat.agent.tools import files
 from leat.agent.workspace import Workspace
-from tests.test_agent import HOLD, FakeEngine, call, request, until
+from tests.test_agent import HOLD, FakeEngine, call, request, serving, until
 
 TOKEN, OTHER = "123:ok", "789:ok"  # two bots' tokens
 ME, STRANGER = (
@@ -235,9 +234,8 @@ def test_chat(bot, bots, engine):
 
 def test_api(bot, bots):
     # the app's settings of the bot, through the agent's API
-    with Server(bot.agent, port=0, telegram=bot) as server:
-        threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True).start()
-        url = f"http://127.0.0.1:{server.server_port}/api/telegram"
+    with serving(bot.agent, bot) as server:
+        url = f"{server}/api/telegram"
         status, body = request(url, "POST", {"token": "456:bad"})
         assert status == 400 and b"Telegram refused it: it does not know that token" in body
         assert request(url, "POST", {"token": " "})[0] == 400
@@ -247,10 +245,9 @@ def test_api(bot, bots):
         bots.next("sendMessage")
         assert request(f"{url}/people", "POST", {"id": 8})[0] == 404
         assert request(f"{url}/people", "POST", {"id": 9})[0] == 200
-        assert [p["id"] for p in bot.state()["allowed"]] == [9]
+        assert [(p["id"], p["person"]) for p in bot.state()["allowed"]] == [(9, 1)]  # the owner
         assert request(f"{url}/people/9", "DELETE")[0] == 200
         assert request(url, "DELETE")[0] == 200 and bot.state()["bot"] is None
-        server.shutdown()
 
 
 ONE, TWO = '<a href="https://one.org">[1]</a>', '<a href="https://two.org">[2]</a>'
