@@ -1,7 +1,8 @@
 // The app's themes: each the few things that make it look as it does, its fonts, its corners, how
 // much room it leaves, and its colors, light and dark. A theme of one scheme alone is always that;
-// whatever a theme leaves out is Leat's own, the first. Anyone may make one: a file of JSON, as
-// these would be written, opened in Settings.
+// whatever a theme leaves out is Leat's own, the first. Leat comes with a few looks of its own;
+// colors come of the themes people already have, VS Code's and shadcn/ui's, which Settings opens,
+// as it opens Leat's own JSON, as these would be written.
 
 // a theme's fonts, sizes and corners, in pixels, and what each must be
 const SHAPE = {
@@ -114,103 +115,6 @@ export const THEMES = [LEAT, ...[
       shadow: "4px 4px 0 #e9e4d8",
     },
   },
-  { // Nord's palette, its Snow Storm and Polar Night
-    name: "Nord",
-    font: `"Inter", ${SANS}`, displayFont: `"Inter", ${SANS}`, displayWeight: 600,
-    radius: 8, radiusLarge: 16,
-    light: {
-      page: "#eceff4", side: "#e5e9f0", card: "#f8f9fb", bubble: "#dde3ec", line: "#d3d9e3",
-      text: "#2e3440", muted: "#5e6a80", accent: "#5e81ac", onAccent: "#fff", error: "#bf616a",
-      keyword: "#81659b", string: "#5f8040", number: "#c0703a",
-      shadow: "0 4px 16px rgb(46 52 64 / 0.08)",
-    },
-    dark: {
-      page: "#2e3440", side: "#2a2f3a", card: "#3b4252", bubble: "#434c5e", line: "#434c5e",
-      text: "#eceff4", muted: "#9aa3b5", accent: "#88c0d0", onAccent: "#2e3440", error: "#d57780",
-      keyword: "#81a1c1", string: "#a3be8c", number: "#b48ead",
-      shadow: "0 4px 16px rgb(0 0 0 / 0.2)",
-    },
-  },
-  { // Solarized's sixteen colors
-    name: "Solarized",
-    font: `"Source Sans 3", "Source Sans Pro", ${SANS}`,
-    displayFont: `"Source Serif 4", "Source Serif Pro", ui-serif, Georgia, serif`, displayWeight: 600,
-    codeFont: `"Source Code Pro", ${MONO}`, radius: 6, radiusLarge: 14,
-    light: {
-      page: "#fdf6e3", side: "#eee8d5", card: "#fffbef", bubble: "#eee8d5", line: "#ddd6c1",
-      text: "#586e75", muted: "#93a1a1", accent: "#268bd2", onAccent: "#fdf6e3", error: "#dc322f",
-      keyword: "#859900", string: "#2aa198", number: "#d33682",
-      shadow: "0 2px 10px rgb(0 43 54 / 0.08)",
-    },
-    dark: {
-      page: "#002b36", side: "#00252f", card: "#073642", bubble: "#0b4150", line: "#0e4452",
-      text: "#93a1a1", muted: "#657b83", accent: "#268bd2", onAccent: "#fdf6e3", error: "#dc322f",
-      keyword: "#859900", string: "#2aa198", number: "#d33682",
-      shadow: "0 2px 10px rgb(0 0 0 / 0.25)",
-    },
-  },
-  { // Catppuccin's Latte and Mocha: pastel, soft and round
-    name: "Catppuccin",
-    font: `"Nunito", "Quicksand", ${SANS}`, displayFont: `"Nunito", "Quicksand", ${SANS}`,
-    displayWeight: 700, radius: 14, radiusLarge: 28, density: 1.05,
-    light: {
-      page: "#eff1f5", side: "#e6e9ef", card: "#f8f9fb", bubble: "#dce0e8", line: "#ccd0da",
-      text: "#4c4f69", muted: "#6c6f85", accent: "#8839ef", onAccent: "#eff1f5", error: "#d20f39",
-      keyword: "#8839ef", string: "#40a02b", number: "#fe640b",
-      shadow: "0 4px 20px rgb(136 57 239 / 0.08)",
-    },
-    dark: {
-      page: "#1e1e2e", side: "#181825", card: "#292a3c", bubble: "#383a4e", line: "#45475a",
-      text: "#cdd6f4", muted: "#a6adc8", accent: "#cba6f7", onAccent: "#1e1e2e", error: "#f38ba8",
-      keyword: "#cba6f7", string: "#a6e3a1", number: "#fab387",
-      shadow: "0 4px 20px rgb(0 0 0 / 0.25)",
-    },
-  },
-  { // gruvbox's retro browns and oranges, tightly set
-    name: "Gruvbox",
-    font: `"IBM Plex Sans", ${SANS}`, displayFont: `"IBM Plex Serif", ui-serif, Georgia, serif`,
-    displayWeight: 500, codeFont: `"IBM Plex Mono", ${MONO}`, radius: 4, radiusLarge: 10,
-    density: 0.95,
-    light: {
-      page: "#fbf1c7", side: "#f2e5bc", card: "#f9f5d7", bubble: "#ebdbb2", line: "#d5c4a1",
-      text: "#3c3836", muted: "#7c6f64", accent: "#af3a03", onAccent: "#fbf1c7", error: "#9d0006",
-      keyword: "#9d0006", string: "#79740e", number: "#8f3f71",
-      shadow: "0 2px 0 #d5c4a1",
-    },
-    dark: {
-      page: "#282828", side: "#1d2021", card: "#32302f", bubble: "#3c3836", line: "#504945",
-      text: "#ebdbb2", muted: "#a89984", accent: "#fe8019", onAccent: "#282828", error: "#fb4934",
-      keyword: "#fb4934", string: "#b8bb26", number: "#d3869b",
-      shadow: "0 2px 0 #1d2021",
-    },
-  },
-  { // dark alone: Dracula's purples and pinks
-    name: "Dracula",
-    displayWeight: 600, radius: 8, radiusLarge: 18,
-    dark: {
-      page: "#282a36", side: "#21222c", card: "#343746", bubble: "#44475a", line: "#3c3f51",
-      text: "#f8f8f2", muted: "#9ea3c4", accent: "#bd93f9", onAccent: "#282a36", error: "#ff5555",
-      keyword: "#ff79c6", string: "#f1fa8c", number: "#bd93f9",
-      shadow: "0 4px 24px rgb(0 0 0 / 0.3)",
-    },
-  },
-  { // Rosé Pine's Dawn and its night: muted, with an italic serif
-    name: "Rosé Pine",
-    displayFont: `"Cormorant Garamond", "EB Garamond", ui-serif, Georgia, serif`, displayWeight: 500,
-    radius: 10, radiusLarge: 20,
-    light: {
-      page: "#faf4ed", side: "#f2e9de", card: "#fffaf3", bubble: "#f2e9e1", line: "#dfdad9",
-      text: "#575279", muted: "#797593", accent: "#d7827e", onAccent: "#fffaf3", error: "#b4637a",
-      keyword: "#907aa9", string: "#56949f", number: "#ea9d34",
-      shadow: "0 4px 20px rgb(87 82 121 / 0.08)",
-    },
-    dark: {
-      page: "#191724", side: "#1f1d2e", card: "#1f1d2e", bubble: "#2a273f", line: "#403d52",
-      text: "#e0def4", muted: "#908caa", accent: "#ebbcba", onAccent: "#191724", error: "#eb6f92",
-      keyword: "#c4a7e7", string: "#9ccfd8", number: "#f6c177",
-      shadow: "0 4px 20px rgb(0 0 0 / 0.3)",
-    },
-  },
 ].map(complete)];
 
 // a theme as a file has it, checked, and what it leaves out Leat's; or why it cannot be one
@@ -251,8 +155,116 @@ export function complete(theme) {
 // whether a value is one of a property's, and nothing more: as a browser parses it, where there is
 // one to ask, and never ending its declaration
 function valid(property, value) {
-  if (typeof value !== "string" || value.length > 200 || /[;{}<>\\]|url\(/i.test(value)) return false;
+  if (typeof value !== "string" || value.length > 400 || /[;{}<>\\]|url\(|var\(/i.test(value)) return false;
   return globalThis.CSS?.supports(property, value) ?? true;
+}
+
+// a theme of a file, `named` so: Leat's own, a VS Code color theme, or one of shadcn/ui's, as
+// tweakcn makes them, CSS or a registry's JSON; or why it is none. What a theme of VS Code's or
+// shadcn's has that cannot be one of Leat's is left out, as what it does not have
+export function read(text, named) {
+  const name = titled(named.replace(/\.[^.]*$/, ""));
+  if (!/^\s*[[{]/.test(text)) return complete(shadcn(stylesheetVariables(text), name));
+  const json = parse(text);
+  if (json?.cssVars) {
+    const { theme, light, dark } = json.cssVars;
+    const schemes = { light: { ...theme, ...light }, ...(dark && { dark: { ...theme, ...light, ...dark } }) };
+    return complete(shadcn(schemes, json.name ? titled(json.name) : name));
+  }
+  if (json?.colors || json?.tokenColors) return complete(code(json, name));
+  if (!Object.keys(json ?? {}).some((key) => Object.hasOwn(SHAPE, key) || SCHEMES.includes(key))) {
+    throw new Error("it is no theme of Leat's, VS Code's or shadcn/ui's");
+  }
+  return complete(json);
+}
+
+// a name as a file's or a registry's: "neo-brutalism", "Neo Brutalism"
+function titled(name) {
+  return name.replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()).trim().slice(0, 40);
+}
+
+// JSON, with the comments and trailing commas VS Code's themes are often written with
+function parse(text) {
+  const string = /"(?:\\.|[^"\\])*"/.source;
+  return JSON.parse(text
+    .replace(new RegExp(`(${string})|//[^\\n]*|/\\*[\\s\\S]*?\\*/`, "g"), (_, kept) => kept ?? "")
+    .replace(new RegExp(`(${string})|,(?=\\s*[}\\]])`, "g"), (_, kept) => kept ?? ""));
+}
+
+// a stylesheet's custom properties: :root's light, and .dark's dark, over :root's
+function stylesheetVariables(text) {
+  const own = { light: {} };
+  for (const [, selector, body] of text.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/([^{}]*)\{([^{}]*)\}/g)) {
+    const scheme = /\.dark\b/.test(selector) ? "dark" : /:root/.test(selector) ? "light" : null;
+    if (!scheme) continue;
+    own[scheme] ??= {};
+    for (const [, key, value] of body.matchAll(/--([\w-]+)\s*:\s*([^;]+)/g)) own[scheme][key] = value.trim();
+  }
+  if (!Object.keys(own.light).length) throw new Error("it has no :root of shadcn/ui's variables");
+  return { light: own.light, ...(own.dark && { dark: { ...own.light, ...own.dark } }) };
+}
+
+// a value of an imported theme's, if it is one of the property's
+function usable(property, value) {
+  return valid(property, value) ? value : undefined;
+}
+
+// a theme of shadcn/ui's variables, each scheme's: its fonts, its radius, the larger as Leat's
+// are to its own, its spacing, and its colors, with Leat's code's
+function shadcn(schemes, name) {
+  const first = schemes.light ?? schemes.dark;
+  const pixels = (length) => parseFloat(length) * (/rem\s*$/.test(length) ? 16 : 1);
+  const radius = Math.min(40, Math.round(pixels(first.radius ?? "0.625rem"))) || 0;
+  const colors = (v) => {
+    const color = (key, property = "color") => {
+      const value = v[key]?.replace(/var\(--([\w-]+)\)/g, (match, other) => v[other] ?? match);
+      // Tailwind 3's hues, saturations and lightnesses, bare
+      return usable(property, /^[\d.]+\s+[\d.]+%\s+[\d.]+%(\s*\/\s*[\d.]+%?)?$/.test(value ?? "") ? `hsl(${value})` : value);
+    };
+    return { page: color("background"), side: color("sidebar") ?? color("sidebar-background"),
+      card: color("card"), bubble: color("muted"), line: color("border"), text: color("foreground"),
+      muted: color("muted-foreground"), accent: color("primary"), onAccent: color("primary-foreground"),
+      error: color("destructive"), shadow: color("shadow-lg", "box-shadow") ?? color("shadow", "box-shadow") };
+  };
+  const spacing = first.spacing && pixels(first.spacing) / 4;
+  return {
+    name, font: usable("font-family", first["font-sans"]), displayFont: usable("font-family", first["font-sans"]),
+    displayWeight: 600, codeFont: usable("font-family", first["font-mono"]), radius,
+    radiusLarge: Math.min(40, Math.round(radius * 2.4)),
+    density: spacing ? Math.min(1.5, Math.max(0.75, spacing)) : undefined,
+    ...Object.fromEntries(Object.entries(schemes).map(([scheme, v]) => [scheme, colors(v)])),
+  };
+}
+
+// a theme of a VS Code color theme's, which is of one scheme and colors alone: its editor's, its
+// sidebar's, inputs', hovers', borders', buttons' and errors', what is not said mixed of its text
+// and its page, and its keywords', strings' and numbers' of its token colors
+function code(theme, name) {
+  const c = theme.colors ?? {};
+  const color = (...keys) => keys.map((key) => usable("color", c[key])).find(Boolean);
+  const bright = (hex) => /^#[0-9a-f]{6}/i.test(hex ?? "")
+    && [1, 3, 5].reduce((sum, at, i) => sum + parseInt(hex.slice(at, at + 2), 16) * [0.3, 0.59, 0.11][i], 0) > 128;
+  const scheme = theme.type ? (/light/i.test(theme.type) ? "light" : "dark")
+    : bright(c["editor.background"]) ? "light" : "dark";
+  const page = color("editor.background") ?? (scheme === "light" ? "#fff" : "#1e1e1e");
+  const text = color("editor.foreground", "foreground") ?? (scheme === "light" ? "#333" : "#ccc");
+  const mix = (share) => `color-mix(in srgb, ${text} ${share}%, ${page})`;
+  const rules = Array.isArray(theme.tokenColors) ? theme.tokenColors : [];
+  const scopes = (rule) => [rule.scope ?? []].flat().flatMap((s) => String(s).split(",")).map((s) => s.trim());
+  const token = (scope) => {
+    const colored = (match) => rules.find((r) => usable("color", r.settings?.foreground) && scopes(r).some(match));
+    return (colored((s) => s === scope) ?? colored((s) => s.startsWith(`${scope}.`)))?.settings.foreground;
+  };
+  return { name: typeof theme.name === "string" ? titled(theme.name) : name, [scheme]: {
+    page, side: color("sideBar.background") ?? mix(3), card: color("input.background") ?? mix(5),
+    bubble: color("list.hoverBackground") ?? mix(8),
+    line: color("panel.border", "sideBar.border", "editorGroup.border") ?? mix(14), text,
+    muted: color("descriptionForeground") ?? mix(60),
+    accent: color("button.background", "focusBorder", "textLink.foreground"),
+    onAccent: color("button.foreground"), error: color("errorForeground", "editorError.foreground"),
+    keyword: token("keyword"), string: token("string"), number: token("constant.numeric"),
+    shadow: color("widget.shadow") && `0 4px 20px ${color("widget.shadow")}`,
+  } };
 }
 
 // the scheme a theme is shown in: its one, or as the mode says, "system" the device's

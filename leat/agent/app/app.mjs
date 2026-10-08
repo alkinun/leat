@@ -4,7 +4,7 @@
 // the owner to let it in.
 
 import { markdown } from "/markdown.mjs";
-import { THEMES, complete, file, properties, scheme, stylesheet } from "/themes.mjs";
+import { THEMES, complete, file, properties, read, scheme, stylesheet } from "/themes.mjs";
 
 const $ = (id) => document.getElementById(id);
 let conversations = []; // the latest updated first: {id, title, updated, running}
@@ -216,10 +216,11 @@ function dress() {
   renderAppearance();
 }
 
-// a theme from a file, kept and chosen; one of Leat's own names is theirs alone
+// a theme from a file, Leat's, VS Code's or shadcn/ui's, kept and chosen; one of Leat's own
+// names is theirs alone
 async function wear(picked) {
   try {
-    const theme = complete(JSON.parse(await picked.text()));
+    const theme = read(await picked.text(), picked.name);
     if (THEMES.some((t) => t.name === theme.name)) {
       throw new Error(`${theme.name} is one of Leat's own; give yours a name of its own`);
     }

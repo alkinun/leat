@@ -1,4 +1,5 @@
-"""The app's themes as themes.mjs checks and completes them, run by Node: every case in one run."""
+"""The app's themes as themes.mjs checks, completes and reads them of VS Code's and shadcn/ui's, run
+by Node: every case in one run."""
 
 import json
 import re
@@ -32,22 +33,64 @@ REFUSED = [
     ({"name": "Odd", "dark": "black"}, "dark is an object of colors"),
 ]
 
+# files of others' themes, and what they read as
+CODE = """{
+  // Solarized's, which says not whether it is light or dark
+  "name": "Sunny (light)",
+  "colors": {
+    "editor.background": "#FDF6E3", "editor.foreground": "#657B83", "button.background": "#2AA198",
+    "textLink.foreground": "https://x.io/not-a-comment", "input.background": "var(--x)",
+  },
+  /* its syntax's */
+  "tokenColors": [
+    {"settings": {"foreground": "#657B83"}},
+    {"scope": "keyword.control, storage", "settings": {"foreground": "#859900"}},
+    {"scope": ["string.quoted", "string"], "settings": {"foreground": "#2AA198"}},
+  ],
+}"""
+REGISTRY = {
+    "name": "neo-brutalism",
+    "cssVars": {
+        "theme": {"font-sans": "DM Sans, sans-serif", "radius": "0px"},
+        "light": {"background": "oklch(1 0 0)", "primary": "oklch(0.65 0.24 27)",
+                  "spacing": "0.3rem", "shadow-lg": "4px 4px 0px 0px hsl(0 0% 0% / 1)"},
+        "dark": {"background": "oklch(0 0 0)"},
+    },
+}  # fmt: skip
+CSS = """@layer base {
+  :root { --background: 0 0% 100%; --foreground: 222.2 84% 4.9%; --radius: 0.5rem; }
+  /* dark, as Tailwind 3's were */
+  .dark { --background: 222.2 84% 4.9%; --muted: var(--background); }
+}"""
+READ = [
+    (CODE, "sunny.json"),
+    (json.dumps(REGISTRY), "theme.json"),
+    (CSS, "slate-blue.css"),
+    ('{"a": 1}', "package.json"),
+    ("body { color: red }", "plain.css"),
+]
+
 
 @pytest.fixture(scope="module")
 def run():
+    module = json.dumps((APP / "themes.mjs").as_uri())
     script = f"""
     import {{ readFileSync }} from "fs";
-    import {{ THEMES, complete, stylesheet }} from {json.dumps((APP / "themes.mjs").as_uri())};
-    const refused = JSON.parse(readFileSync(0, "utf8")).map((theme) => {{
+    import {{ THEMES, complete, read, stylesheet }} from {module};
+    const given = JSON.parse(readFileSync(0, "utf8"));
+    const refused = given.refused.map((theme) => {{
       try {{ complete(theme); return null; }} catch (error) {{ return error.message; }}
+    }});
+    const opened = given.read.map(([text, name]) => {{
+      try {{ return read(text, name); }} catch (error) {{ return error.message; }}
     }});
     const mint = complete({{ name: " Mint ", radius: 4, light: {{ accent: "#0f9d76" }} }});
     console.log(JSON.stringify({{ themes: THEMES, again: THEMES.map(complete), refused, mint,
-      system: stylesheet(THEMES[0], "system"), dark: stylesheet(THEMES[0], "dark"),
+      read: opened, system: stylesheet(THEMES[0], "system"), dark: stylesheet(THEMES[0], "dark"),
       alone: stylesheet(mint, "dark") }}));
     """
-    refused = json.dumps([theme for theme, _ in REFUSED])
-    run = subprocess.run([NODE, "--input-type=module", "-e", script], input=refused,
+    given = json.dumps({"refused": [theme for theme, _ in REFUSED], "read": READ})
+    run = subprocess.run([NODE, "--input-type=module", "-e", script], input=given,
                          capture_output=True, text=True, check=True)  # fmt: skip
     return json.loads(run.stdout)
 
@@ -55,13 +98,13 @@ def run():
 def test_themes(run):
     themes = run["themes"]
     names = [t["name"] for t in themes]
-    assert names[0] == "Leat" and len(set(names)) == len(names) >= 10
+    assert names == ["Leat", "Graphite", "Void", "Hermes", "Newsprint"]
     assert run["again"] == themes  # each complete already, as a file saved of it would be
     assert all("light" in t or "dark" in t for t in themes)
-    assert [t["name"] for t in themes if "light" not in t] == ["Void", "Dracula"]  # dark alone
+    assert [t["name"] for t in themes if "light" not in t] == ["Void"]  # dark alone
 
 
-@pytest.mark.parametrize(("index", "error"), enumerate(error for _, error in REFUSED))
+@pytest.mark.parametrize(("index", "error"), list(enumerate(error for _, error in REFUSED)))
 def test_refused(run, index, error):
     message = run["refused"][index]
     assert message is None if error is None else message.startswith(error)
@@ -105,3 +148,38 @@ def test_defaults(run):
         "--density": str(leat["density"]),
     }
     assert declared(root).items() >= shape.items()
+
+
+def test_code(run):
+    # VS Code's: of one scheme, its own by its editor's background; what it lacks of its text and
+    # page, or Leat's, and what cannot be one of Leat's left out; its syntax of its scopes
+    theme, leat = run["read"][0], run["themes"][0]
+    assert theme["name"] == "Sunny (Light)" and "dark" not in theme
+    light = theme["light"]
+    assert (
+        light["page"] == "#FDF6E3" and light["text"] == "#657B83" and light["accent"] == "#2AA198"
+    )
+    assert light["card"] == "color-mix(in srgb, #657B83 5%, #FDF6E3)"
+    assert light["keyword"] == "#859900" and light["string"] == "#2AA198"
+    assert light["number"] == leat["light"]["number"] and theme["font"] == leat["font"]
+
+
+def test_shadcn(run):
+    # shadcn/ui's, of tweakcn's registry: its fonts, corners, spacing, shadow, and dark over light
+    theme = run["read"][1]
+    assert theme["name"] == "Neo Brutalism" and theme["font"] == "DM Sans, sans-serif"
+    assert theme["radius"] == theme["radiusLarge"] == 0 and theme["density"] == pytest.approx(1.2)
+    assert theme["light"]["accent"] == "oklch(0.65 0.24 27)" == theme["dark"]["accent"]
+    assert theme["light"]["shadow"] == "4px 4px 0px 0px hsl(0 0% 0% / 1)"
+    assert theme["dark"]["page"] == "oklch(0 0 0)"
+    # of a stylesheet: Tailwind 3's bare colors, and .dark's over :root's
+    theme = run["read"][2]
+    assert theme["name"] == "Slate Blue" and theme["radius"] == 8 and theme["radiusLarge"] == 19
+    assert theme["light"]["page"] == "hsl(0 0% 100%)"
+    assert theme["dark"]["page"] == theme["dark"]["bubble"] == "hsl(222.2 84% 4.9%)"
+    assert theme["dark"]["text"] == "hsl(222.2 84% 4.9%)"  # :root's
+
+
+def test_unread(run):
+    assert run["read"][3] == "it is no theme of Leat's, VS Code's or shadcn/ui's"
+    assert run["read"][4] == "it has no :root of shadcn/ui's variables"
