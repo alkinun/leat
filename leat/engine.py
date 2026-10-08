@@ -20,6 +20,7 @@ from leat.ops import Span
 from leat.sampler import GREEDY, Sampling, sample
 from leat.tokenizer import Tokenizer
 from leat.vision import Image, Vision, blank
+from leat.vision import load as load_vision
 
 # prompt tokens up to which a chunk takes a graph bound to that many, whose kernels size their
 # work for so few: the matrix kernels take tiles of 16 tokens
@@ -133,7 +134,7 @@ class Engine:
         self.drafter: Drafter | None = None if draft is None else load_drafter(draft, self.model)
         self.vision: Vision | None = None
         if vision is not None:
-            self.vision = Vision(GGUF.open(vision), self.tokenizer, self.config.dim)
+            self.vision = load_vision(vision, self.tokenizer, self.config.dim)
             self._image_len = UOp.variable("image_len", 1, self.vision.tokens)
             self._encode, self._image_chunk = graph(self.vision.encode), graph(self._step)
         # speculative steps of 1 sequence or more, as many as the drafter takes, each drafting a

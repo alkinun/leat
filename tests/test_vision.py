@@ -12,15 +12,17 @@ from leat import vision
 from leat.engine import Engine
 from leat.gguf import GGUF
 from leat.tokenizer import Tokenizer
-from leat.vision import Vision, _fit, beside, projector
+from leat.vision import _fit, beside, projector
 from tests.helpers import (
     CONTEXT,
+    G3_IMAGE,
     G_IMAGE,
     V_PATCH,
     D,
     ids,
     reference_image,
     reference_logits,
+    reference_siglip,
     write_tiny_mmproj,
 )
 from tests.helpers import (
@@ -29,12 +31,30 @@ from tests.helpers import (
 from tests.test_model import prefill_starts
 
 TOKENS = 4  # the embeddings an image takes at most, a budget the tiny model's context holds
+G3_TOKENS = ("<start_of_image>", "<end_of_image>")
+
+
+# each projector's tiny model
+FAMILIES = {"gemma4v": "gemma4", "gemma3": "gemma3"}
 
 
 @pytest.fixture(scope="session")
-def tiny_mmproj(tmp_path_factory):
-    path = tmp_path_factory.mktemp("mmproj") / "mmproj.gguf"
-    return path, write_tiny_mmproj(path)
+def projectors(tmp_path_factory):
+    # projectors(kind): a random projector of a kind and its weights, written once per session
+    made: dict[str, tuple[Path, dict]] = {}
+
+    def projector(kind: str) -> tuple[Path, dict]:
+        if kind not in made:
+            path = tmp_path_factory.mktemp(kind) / "mmproj.gguf"
+            made[kind] = path, write_tiny_mmproj(path, kind)
+        return made[kind]
+
+    return projector
+
+
+@pytest.fixture(scope="session")
+def tiny_mmproj(projectors):
+    return projectors("gemma4v")
 
 
 @pytest.fixture(autouse=True)
@@ -50,15 +70,18 @@ def png(width: int, height: int, seed: int = 0, mode: str = "RGB") -> bytes:
     return out.getvalue()
 
 
-def embeddings(weights: dict, data: bytes) -> np.ndarray:
-    # the f64 reference's embeddings of an image, scaled as Vision scales it
+def embeddings(weights: dict, data: bytes, kind: str = "gemma4v") -> np.ndarray:
+    # the f64 reference's embeddings of an image, scaled as its kind's encoder scales it
     picture = Picture.open(io.BytesIO(data)).convert("RGB")
+    if kind == "gemma3":
+        square = picture.resize((G3_IMAGE, G3_IMAGE), Picture.Resampling.BILINEAR)
+        return reference_siglip(weights, np.asarray(square))
     size = _fit(*picture.size, V_PATCH, 3, TOKENS)
     return reference_image(weights, np.asarray(picture.resize(size, Picture.Resampling.BICUBIC)))
 
 
-def engine(tiny, mmproj, **options) -> Engine:
-    return Engine(tiny("gemma4")[0], max_context=CONTEXT, vision=mmproj[0], **options)
+def engine(tiny, mmproj, kind: str = "gemma4v", **options) -> Engine:
+    return Engine(tiny(FAMILIES[kind])[0], max_context=CONTEXT, vision=mmproj[0], **options)
 
 
 # transformers' sizes for Gemma 4's patches and pools, at budgets of 280 and 70 embeddings: images
@@ -76,12 +99,27 @@ def test_fit(size, tokens, expected):
 
 
 @pytest.mark.usefixtures("reference_ops")
+def test_siglip_matches_reference(tiny, projectors):
+    # Gemma 3's: the image squashed square, its embeddings those the f64 reference gives, shown
+    # between newlines
+    path, weights = projectors("gemma3")
+    tokenizer = Tokenizer(GGUF.open(tiny("gemma3")[0]).metadata)
+    v = vision.load(path, tokenizer, D)
+    data = png(40, 25)
+    image, expected = v.image(data), embeddings(weights, data, "gemma3")
+    lines, (opened, closed) = tokenizer.encode("\n\n", bos=False), ids(tokenizer, *G3_TOKENS)
+    assert image.tokens == [*lines, opened, *[image.key] * len(expected), closed, *lines]
+    got = v.encode(*v.inputs(image)).numpy()
+    np.testing.assert_allclose(got, expected, rtol=1e-4, atol=1e-4)
+
+
+@pytest.mark.usefixtures("reference_ops")
 @pytest.mark.parametrize("size", [(30, 30), (50, 20), (9, 70)])
 def test_encode_matches_reference(tiny, tiny_mmproj, size):
     # an image scaled to whole cells of 3 by 3 patches: its embeddings those the f64 reference
     # gives, padding after them, and its tokens those that open and close an image around its key
     tokenizer = Tokenizer(GGUF.open(tiny("gemma4")[0]).metadata)
-    v = Vision(GGUF.open(tiny_mmproj[0]), tokenizer, D)
+    v = vision.load(tiny_mmproj[0], tokenizer, D)
     data = png(*size)
     image, expected = v.image(data), embeddings(tiny_mmproj[1], data)
     opened, closed = ids(tokenizer, G_IMAGE[0], G_IMAGE[2])
@@ -95,7 +133,7 @@ def test_encode_matches_reference(tiny, tiny_mmproj, size):
 def test_encode_on_matrix_cores(tiny, tiny_mmproj):
     # in f16 on the matrix cores, the embeddings point where the f64 reference's do
     tokenizer = Tokenizer(GGUF.open(tiny("gemma4")[0]).metadata)
-    v = Vision(GGUF.open(tiny_mmproj[0]), tokenizer, D)
+    v = vision.load(tiny_mmproj[0], tokenizer, D)
     data = png(50, 20)
     image, expected = v.image(data), embeddings(tiny_mmproj[1], data)
     got = v.encode(*v.inputs(image)).numpy()[: image.size]
@@ -121,38 +159,43 @@ def test_image_bytes(tiny, tiny_mmproj):
 
 
 @pytest.mark.usefixtures("reference_ops")
-def test_generate_with_images(tiny, tiny_mmproj, monkeypatch):
+@pytest.mark.parametrize("kind", FAMILIES)
+def test_generate_with_images(tiny, projectors, monkeypatch, kind):
     # an image between tokens, its embeddings in their place, which see each other, generates as
     # the f64 reference does; a text chunk stops short of it, and it runs whole
-    path, weights = tiny("gemma4")
-    e = engine(tiny, tiny_mmproj, prefill_chunk=3, slots=2)
+    arch, mmproj = FAMILIES[kind], projectors(kind)
+    path, weights = tiny(arch)
+    e = engine(tiny, mmproj, kind, prefill_chunk=3, slots=2)
     data = png(30, 30)
     image, shown = e.image(data), {}
-    shown[image.key] = embeddings(tiny_mmproj[1], data)
+    shown[image.key] = embeddings(mmproj[1], data, kind)
     starts = prefill_starts(e, monkeypatch)
     prompt = [5, 77, *image.tokens, 120, 3, *image.tokens, 9]  # the same image twice
     out = list(e.generate(prompt, 6, images=[image]))
-    expected = reference_logits(weights, prompt + out, "gemma4", shown)
+    expected = reference_logits(weights, prompt + out, arch, shown)
     assert out == expected[len(prompt) - 1 :].argmax(-1)[: len(out)].tolist()
-    assert starts == [0, 3, 7, 10, 11, 15]  # [5, 77, open], image, [close, 120, 3], [open], ...
+    first = [i for i, t in enumerate(prompt) if t == image.key and prompt[i - 1] != t]
+    within = [i for i in starts if prompt[i] == image.key and prompt[i - 1] == image.key]
+    assert set(first) <= set(starts) and not within
 
     # a prompt that goes on from it runs only its new tokens; one of another image after the
     # same tokens runs from that image on, the first image's keys and values copied
     longer = prompt + out[:2] + [7]
     starts.clear()
-    assert list(e.generate(longer, 4, images=[image])) == fresh(tiny, tiny_mmproj, longer, image)
+    got = list(e.generate(longer, 4, images=[image]))
+    assert got == fresh(tiny, mmproj, kind, longer, image)
     assert starts == [len(prompt) + 2]
     other = e.image(png(30, 30, 1))
-    branch = prompt[:10] + other.tokens + [9]
+    branch = prompt[: first[1]] + other.tokens[other.tokens.index(other.key) :] + [9]
     starts.clear()
     got = list(e.generate(branch, 4, images=[image, other]))
-    assert got == fresh(tiny, tiny_mmproj, branch, image, other)
-    assert starts[0] == 11
+    assert got == fresh(tiny, mmproj, kind, branch, image, other)
+    assert starts[0] == first[1]
 
 
-def fresh(tiny, mmproj, prompt: list[int], *images) -> list[int]:
+def fresh(tiny, mmproj, kind: str, prompt: list[int], *images) -> list[int]:
     # what an engine with nothing cached generates
-    return list(engine(tiny, mmproj, prefill_chunk=8).generate(prompt, 4, images=images))
+    return list(engine(tiny, mmproj, kind, prefill_chunk=8).generate(prompt, 4, images=images))
 
 
 @pytest.mark.usefixtures("reference_ops")
@@ -183,7 +226,9 @@ def test_warm_up_compiles_images(tiny, tiny_mmproj):
     assert e._encode.captured is not None and e._image_chunk.captured is not None
     image = e.image(png(30, 30))
     prompt = [5, *image.tokens, 7]
-    assert list(e.generate(prompt, 4, images=[image])) == fresh(tiny, tiny_mmproj, prompt, image)
+    assert list(e.generate(prompt, 4, images=[image])) == fresh(
+        tiny, tiny_mmproj, "gemma4v", prompt, image
+    )
 
 
 def test_server_takes_images(tiny, tiny_mmproj):

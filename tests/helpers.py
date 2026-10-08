@@ -239,6 +239,8 @@ def reference_logits(
     # Gemma 4, images' embeddings by key in place of the tokens that hold it
     if arch.startswith("gemma4"):
         return _reference_gemma4(w, tokens, images)
+    if arch == "gemma3":
+        return _reference_gemma3(w, tokens, images)
     if arch in _REFERENCES:
         return _REFERENCES[arch](w, tokens)
 
@@ -347,21 +349,32 @@ def _gemma4_rope(dim: int, sliding: bool, positions: np.ndarray, factors: np.nda
     return np.cos(angles), np.sin(angles)
 
 
+def _embedded(
+    w: dict[str, np.ndarray], tokens: list[int], images: dict[int, np.ndarray] | None
+) -> np.ndarray:
+    # the tokens' embeddings scaled by sqrt(D), and images' (n, D) by key in place of the tokens
+    # that hold them, as they are
+    return np.stack([
+        images[t][tokens[:i].count(t) % len(images[t])] if images and t < 0
+        else w["token_embd.weight"][t] * np.sqrt(D)
+        for i, t in enumerate(tokens)
+    ]).astype(np.float64)  # fmt: skip
+
+
+def _same_image(tokens: list[int]) -> np.ndarray:
+    # (T, T): whether two positions are of the same image, counted along the prompt
+    run = np.cumsum([t < 0 and (i == 0 or tokens[i - 1] != t) for i, t in enumerate(tokens)])
+    run = np.where(np.array(tokens) < 0, run, -1)
+    return (run[:, None] == run) & (run[:, None] >= 0)
+
+
 def _gemma4_hidden(
     w: dict[str, np.ndarray], tokens: list[int], images: dict[int, np.ndarray] | None = None
 ):  # fmt: skip
     # the normed hidden states (T, D) and each layer's keys and values, as in the cache; images'
     # embeddings (n, D) by key in place of the tokens that hold it, which see each other
     T, positions, cache = len(tokens), np.arange(len(tokens)), []
-    x = np.stack([
-        images[t][tokens[:i].count(t) % len(images[t])] if t < 0
-        else w["token_embd.weight"][t] * np.sqrt(D)
-        for i, t in enumerate(tokens)
-    ]).astype(np.float64)  # fmt: skip
-    # each position's image, counted along the prompt, -1 for a token
-    run = np.cumsum([t < 0 and (i == 0 or tokens[i - 1] != t) for i, t in enumerate(tokens)])
-    run = np.where(np.array(tokens) < 0, run, -1)
-    image = (run[:, None] == run) & (run[:, None] >= 0)
+    x, image = _embedded(w, tokens, images), _same_image(tokens)
     for i, (dim, kv_heads, sliding) in enumerate(
         zip(G_DIMS, G_KV_HEADS, (True, False), strict=True)
     ):
@@ -488,12 +501,16 @@ def reference_drafts(
 # pixels whose embeddings each pool 3 by 3
 V_WIDTH, V_HEADS, V_HIDDEN, V_PATCH, V_LAYERS, V_COLUMNS = 32, 2, 64, 4, 2, 64
 V_EPS = 1e-6
+G3_IMAGE = 16  # the side of Gemma 3's tiny SigLIP's images: 4 by 4 patches, 2 by 2 embeddings
 
 
-def write_tiny_mmproj(path: Path) -> dict[str, np.ndarray]:
+def write_tiny_mmproj(path: Path, kind: str = "gemma4v") -> dict[str, np.ndarray]:
+    # Gemma 4's encoder, or Gemma 3's SigLIP of an image of 4 by 4 patches pooled 2 by 2, its
+    # metadata of the older keys and its MLP's matrices named the other way round, as real ones
     rng = np.random.default_rng(1)
     w = gguf.GGUFWriter(path, arch="clip")
-    w.add_string("clip.vision.projector_type", "gemma4v")
+    siglip = kind == "gemma3"
+    w.add_string("clip.projector_type" if siglip else "clip.vision.projector_type", kind)
     for key, value in [("patch_size", V_PATCH), ("embedding_length", V_WIDTH),
                        ("feed_forward_length", V_HIDDEN), ("block_count", V_LAYERS),
                        ("attention.head_count", V_HEADS), ("projection_dim", D)]:  # fmt: skip
@@ -502,34 +519,106 @@ def write_tiny_mmproj(path: Path) -> dict[str, np.ndarray]:
     weights: dict[str, np.ndarray] = {}
 
     def add(name: str, shape: tuple[int, ...], scale: float = 0.0) -> None:
-        # matrices f16, normal times `scale`, and vectors f32 uniform from 0.5 to 1.5
+        # matrices f16, normal times `scale`; biases f32, normal times 0.1; and other vectors f32
+        # uniform from 0.5 to 1.5
         if scale:
             weights[name] = (rng.standard_normal(shape) * scale).astype(np.float16)
+        elif name.endswith(".bias"):
+            weights[name] = (rng.standard_normal(shape) * 0.1).astype(np.float32)
         else:
             weights[name] = rng.uniform(0.5, 1.5, shape).astype(np.float32)
         w.add_tensor(name, weights[name])
 
+    def matrix(name: str, shape: tuple[int, ...]) -> None:  # with a bias, in SigLIP
+        add(name + ".weight", shape, 0.2)
+        if siglip:
+            add(name + ".bias", shape[:1])
+
     head = V_WIDTH // V_HEADS
-    add("v.patch_embd.weight", (V_WIDTH, 3, V_PATCH, V_PATCH), 0.2)
-    weights["v.position_embd.weight"] = rng.standard_normal((2, V_COLUMNS, V_WIDTH)).astype(
-        np.float32)  # fmt: skip
+    matrix("v.patch_embd", (V_WIDTH, 3, V_PATCH, V_PATCH))
+    if siglip:
+        w.add_uint32("clip.vision.image_size", G3_IMAGE)
+        w.add_uint32("clip.vision.projector.scale_factor", 2)
+        w.add_array("clip.vision.image_mean", [0.5] * 3)
+        w.add_array("clip.vision.image_std", [0.5] * 3)
+        positions = (G3_IMAGE // V_PATCH) ** 2
+        weights["v.position_embd.weight"] = rng.standard_normal((positions, V_WIDTH)).astype(
+            np.float32)  # fmt: skip
+    else:
+        weights["v.position_embd.weight"] = rng.standard_normal((2, V_COLUMNS, V_WIDTH)).astype(
+            np.float32)  # fmt: skip
     w.add_tensor("v.position_embd.weight", weights["v.position_embd.weight"])
     for i in range(V_LAYERS):
         b = f"v.blk.{i}."
         for name in ("attn_q", "attn_k", "attn_v", "attn_out"):
-            add(b + name + ".weight", (V_WIDTH, V_WIDTH), 0.2)
-        add(b + "ffn_gate.weight", (V_HIDDEN, V_WIDTH), 0.2)
-        add(b + "ffn_up.weight", (V_HIDDEN, V_WIDTH), 0.2)
-        add(b + "ffn_down.weight", (V_WIDTH, V_HIDDEN), 0.2)
-        for name in ("ln1", "attn_post_norm", "ln2", "ffn_post_norm"):
+            matrix(b + name, (V_WIDTH, V_WIDTH))
+        if siglip:  # fc1 named down, fc2 up
+            matrix(b + "ffn_down", (V_HIDDEN, V_WIDTH))
+            matrix(b + "ffn_up", (V_WIDTH, V_HIDDEN))
+        else:
+            matrix(b + "ffn_gate", (V_HIDDEN, V_WIDTH))
+            matrix(b + "ffn_up", (V_HIDDEN, V_WIDTH))
+            matrix(b + "ffn_down", (V_WIDTH, V_HIDDEN))
+        for name in ("ln1", "ln2") if siglip else ("ln1", "attn_post_norm", "ln2", "ffn_post_norm"):
             add(b + name + ".weight", (V_WIDTH,))
-        add(b + "attn_q_norm.weight", (head,))
-        add(b + "attn_k_norm.weight", (head,))
-    add("v.std_bias", (V_WIDTH,))
-    add("v.std_scale", (V_WIDTH,))
-    add("mm.input_projection.weight", (D, V_WIDTH), 0.2)
+            if siglip:
+                add(b + name + ".bias", (V_WIDTH,))
+        if not siglip:
+            add(b + "attn_q_norm.weight", (head,))
+            add(b + "attn_k_norm.weight", (head,))
+    if siglip:
+        add("v.post_ln.weight", (V_WIDTH,))
+        add("v.post_ln.bias", (V_WIDTH,))
+        add("mm.soft_emb_norm.weight", (V_WIDTH,))
+        add("mm.input_projection.weight", (V_WIDTH, D), 0.2)  # (width, dim), as Gemma 3's
+    else:
+        add("v.std_bias", (V_WIDTH,))
+        add("v.std_scale", (V_WIDTH,))
+        add("mm.input_projection.weight", (D, V_WIDTH), 0.2)
     _finish(w)
     return {n: v.astype(np.float64) for n, v in weights.items()}
+
+
+def reference_siglip(w: dict[str, np.ndarray], pixels: np.ndarray) -> np.ndarray:
+    # the embeddings (tokens, D) of an image's pixels (G3_IMAGE square, 3), as transformers'
+    # Gemma 3: SigLIP over its patches, normalized to [-1, 1], with a learned position each, then
+    # pooled 2 by 2, RMSNormed and projected
+    side = G3_IMAGE // V_PATCH
+    patches = pixels.reshape(side, V_PATCH, side, V_PATCH, 3).transpose(0, 2, 1, 3, 4)
+    x = (patches.reshape(side * side, -1) / 255 - 0.5) / 0.5
+    kernel = w["v.patch_embd.weight"].transpose(0, 2, 3, 1).reshape(V_WIDTH, -1)
+    x = x @ kernel.T + w["v.patch_embd.bias"] + w["v.position_embd.weight"]
+    head = V_WIDTH // V_HEADS
+
+    def layernorm(z, name):
+        z = (z - z.mean(-1, keepdims=True)) / np.sqrt(z.var(-1, keepdims=True) + V_EPS)
+        return z * w[f"{name}.weight"] + w[f"{name}.bias"]
+
+    def linear(z, name):
+        return z @ w[f"{name}.weight"].T + w[f"{name}.bias"]
+
+    for i in range(V_LAYERS):
+        b = f"v.blk.{i}."
+        h = layernorm(x, b + "ln1")
+        q, k, v = (linear(h, b + f"attn_{c}").reshape(-1, V_HEADS, head) for c in "qkv")
+        out = _full_attention(q, k, v, head**-0.5)
+        x = x + linear(out, b + "attn_out")
+        g = linear(layernorm(x, b + "ln2"), b + "ffn_down")  # fc1
+        x = x + linear(glu("gelu", g, 1.0), b + "ffn_up")
+    x = layernorm(x, "v.post_ln")
+    x = x.reshape(side // 2, 2, side // 2, 2, V_WIDTH).mean((1, 3)).reshape(-1, V_WIDTH)
+    x = x / np.sqrt((x * x).mean(-1, keepdims=True) + V_EPS) * w["mm.soft_emb_norm.weight"]
+    return x @ w["mm.input_projection.weight"]
+
+
+def _full_attention(q, k, v, scale):
+    # every position attending over every other, in f64: (n, heads * head)
+    out = []
+    for hd in range(q.shape[1]):
+        scores = q[:, hd] @ k[:, hd].T * scale
+        p = np.exp(scores - scores.max(-1, keepdims=True))
+        out.append(p / p.sum(-1, keepdims=True) @ v[:, hd])
+    return np.concatenate(out, -1)
 
 
 def reference_image(w: dict[str, np.ndarray], pixels: np.ndarray, pool: int = 3) -> np.ndarray:
@@ -560,12 +649,8 @@ def reference_image(w: dict[str, np.ndarray], pixels: np.ndarray, pool: int = 3)
         h = vnorm(x, lw["ln1"])
         q, k, v = ((h @ lw[f"attn_{c}"].T).reshape(n, V_HEADS, head) for c in "qkv")
         q, k = rope(vnorm(q, lw["attn_q_norm"])), rope(vnorm(k, lw["attn_k_norm"]))
-        out = []
-        for hd in range(V_HEADS):
-            scores = q[:, hd] @ k[:, hd].T
-            p = np.exp(scores - scores.max(-1, keepdims=True))
-            out.append(p / p.sum(-1, keepdims=True) @ vnorm(v[:, hd]))
-        x = x + vnorm(np.concatenate(out, -1) @ lw["attn_out"].T, lw["attn_post_norm"])
+        out = _full_attention(q, k, vnorm(v), 1.0)
+        x = x + vnorm(out @ lw["attn_out"].T, lw["attn_post_norm"])
         out = mlp(vnorm(x, lw["ln2"]), lw["ffn_gate"], lw["ffn_up"], lw["ffn_down"], "gelu")
         x = x + vnorm(out, lw["ffn_post_norm"])
     cells = x.reshape(rows // pool, pool, columns // pool, pool, V_WIDTH).mean((1, 3))
@@ -591,7 +676,7 @@ G3_LAYERS, G3_WINDOW, G3_THETAS, G3_SCALE = 6, 4, (10000.0, 1e6), 8.0
 
 
 def _write_gemma3(path: Path) -> dict[str, np.ndarray]:
-    w, weights, add = _writer(path, "gemma3")
+    w, weights, add = _writer(path, "gemma3", ("<start_of_image>", "<end_of_image>"))
     a = "gemma3."
     for key, value in [("block_count", G3_LAYERS), ("embedding_length", D),
                        ("feed_forward_length", HIDDEN), ("attention.head_count", HEADS),
@@ -616,9 +701,11 @@ def _write_gemma3(path: Path) -> dict[str, np.ndarray]:
     return weights
 
 
-def _reference_gemma3(w: dict[str, np.ndarray], tokens: list[int]) -> np.ndarray:
+def _reference_gemma3(
+    w: dict[str, np.ndarray], tokens: list[int], images: dict[int, np.ndarray] | None = None
+) -> np.ndarray:
     T, positions = len(tokens), np.arange(len(tokens))
-    x = w["token_embd.weight"][tokens].astype(np.float64) * np.sqrt(D)
+    x, image = _embedded(w, tokens, images), _same_image(tokens)
     for i in range(G3_LAYERS):
         sliding = i % 6 < 5
         lw = _layer(w, i)
@@ -631,7 +718,8 @@ def _reference_gemma3(w: dict[str, np.ndarray], tokens: list[int]) -> np.ndarray
         q, k = (
             rotate_halves(norm(z, lw[f"attn_{n}_norm"]), cos, sin) for z, n in ((q, "q"), (k, "k"))
         )
-        out = attention(q, k, v, _mask(T, G3_WINDOW if sliding else 0), 1 / np.sqrt(HEAD_DIM))
+        mask = _mask(T, G3_WINDOW if sliding else 0, image)
+        out = attention(q, k, v, mask, 1 / np.sqrt(HEAD_DIM))
         x = x + norm(out @ lw["attn_output"].T, lw["post_attention_norm"])
         out = mlp(norm(x, lw["ffn_norm"]), lw["ffn_gate"], lw["ffn_up"], lw["ffn_down"], "gelu")
         x = x + norm(out, lw["post_ffw_norm"])
@@ -959,10 +1047,12 @@ def _layer(w: dict[str, np.ndarray], i: int) -> dict[str, np.ndarray]:
     }
 
 
-def _mask(T: int, window: int) -> np.ndarray:
-    # causal, and over the last `window` positions if given
+def _mask(T: int, window: int, image: np.ndarray | None = None) -> np.ndarray:
+    # causal but for the positions of the same image, as `image` (T, T) says, which see each
+    # other; and over the last `window` positions if given
     back = np.arange(T)[:, None] - np.arange(T)
-    return np.where((back < 0) | (window > 0) & (back >= window), -np.inf, 0)
+    later = (back < 0) & ~image if image is not None else back < 0
+    return np.where(later | (window > 0) & (back >= window), -np.inf, 0)
 
 
 _WRITERS = {
@@ -970,6 +1060,6 @@ _WRITERS = {
     "qwen35moe": _write_qwen35moe,
 }  # fmt: skip
 _REFERENCES = {
-    "gemma3": _reference_gemma3, "gpt-oss": _reference_gpt_oss, "phi3": _reference_phi3,
+    "gpt-oss": _reference_gpt_oss, "phi3": _reference_phi3,
     "qwen35moe": _reference_qwen35moe,
 }  # fmt: skip
