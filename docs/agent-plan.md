@@ -273,7 +273,7 @@ you test it before the next.
 | 9. Characters | personas and their chats | roleplay; a tutor |
 | 10. Voice and photos | with the engine's work on them | talking to it; sending a photo |
 
-Done: steps 1 to 7, with memory v3 and the context's fixes of [research.md](research.md).
+Done: steps 1 to 9, with memory v3, the context's fixes and readers of [research.md](research.md); beside them, of its list of what people use: the household's lists, checks that tell only when they find something, children's rules, and Leat in a Telegram group. Next: step 10, voice and photos, with the engine's work; and in the engine, recurrent states kept at more points and slots kept in memory, so that a change to a prompt, or another conversation, costs less.
 
 Alongside, the box track: first boot and setup, `leat.local` on the network, HTTPS on the home
 network (a phone's microphone, notifications and home-screen install all need it), updates, and
