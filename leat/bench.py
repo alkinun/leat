@@ -139,7 +139,7 @@ def chat_speed(
 def perplexity(
     engine: Engine, text: str, ctx: int = 512, chunks: int | None = None, decode: bool = False
 ) -> Quality:
-    _check(ctx, chunks)
+    _check(engine, ctx, chunks)
     tokens = engine.tokenizer.encode(text)
     n = min(len(tokens) // ctx, len(tokens) if chunks is None else chunks)
     if n < 1:
@@ -163,13 +163,9 @@ def kl_divergence(
     """Compares against logits saved by `llama-perplexity --kl-divergence-base`."""
     with open(base, "rb") as f:
         ctx, vocab, n_chunks = _header(f, base)
-        _check(ctx, chunks)
+        _check(engine, ctx, chunks)
         if vocab != engine.config.vocab_size:
             raise ValueError(f"{base} has a vocab of {vocab}, the model {engine.config.vocab_size}")
-        if ctx > engine.max_context:
-            raise ValueError(
-                f"{base} has chunks of {ctx} tokens, over max_context {engine.max_context}"
-            )
         tokens = list(memoryview(f.read(4 * ctx * n_chunks)).cast("i"))
         first, row = ctx // 2, 2 * ((vocab + 1) // 2) + 4  # uint16s per position
         nll, same, kls, score = 0.0, 0, list[float](), _scorer(engine, ctx, decode)
@@ -190,10 +186,12 @@ def kl_divergence(
     return Quality(math.exp(nll / n), sum(kls) / n, _percentile(kls, 0.99), kls[-1], same / n)
 
 
-def _check(ctx: int, chunks: int | None) -> None:
-    # chunks of at least one position scored, and at least one of them
+def _check(engine: Engine, ctx: int, chunks: int | None) -> None:
+    # chunks of at least one position scored, that the engine's context holds, and at least one
     if ctx < 3:
         raise ValueError(f"chunks of {ctx} tokens score none: they take 3 or more")
+    if ctx > engine.max_context:
+        raise ValueError(f"chunks of {ctx} tokens are over max_context {engine.max_context}")
     if chunks is not None and chunks < 1:
         raise ValueError(f"chunks must be at least 1, got {chunks}")
 

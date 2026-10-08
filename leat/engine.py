@@ -381,7 +381,7 @@ class Engine:
         # runs the next chunk of the sequence's prompt: an image whole, or else up to `size`
         # tokens before the next, up to FEW_TOKENS in the graph bound to that many, more in the
         # one bound to prefill_chunk. Returns the token sampled after the prompt's last chunk.
-        cached, mark = self._cached[sequence.slot], len(sequence.prompt) - KEEP_BACK
+        cached, mark = self._cached[sequence.slot], _keeping(sequence.prompt)
         pos = len(cached)
         row = self._slot_vars[0].bind(sequence.slot), self._pos_vars[0].bind(pos)
         self._turn(sequence, pos)
@@ -570,8 +570,9 @@ class Engine:
     def _copy_slot(self, source: UOp, slot: UOp) -> None:
         # slot `source`'s cache and states, and what the drafter holds of it, to slot `slot`
         self.model.copy(source, slot)
-        if self.drafter is not None:
+        if self.drafter is not None:  # the hidden state of its last token, if all is copied
             self.drafter.copy(source, slot)
+            self._hidden[slot : slot + 1].assign(self._hidden[source : source + 1]).realize()
 
     def _check(self, sequence: Sequence) -> None:
         # ends a sequence at end of generation, at max_tokens, or with the cache full
@@ -692,6 +693,13 @@ def _shared(prompt: list[int], cached: list[int]) -> int:
     while 0 < n < len(prompt) and prompt[n] < 0 and prompt[n - 1] == prompt[n]:
         n -= 1
     return n
+
+
+def _keeping(prompt: list[int]) -> int:
+    # where a prompt's recurrent state is kept: KEEP_BACK tokens before its end, which the next
+    # turn renders again, or the start of an image there, which runs whole
+    mark = len(prompt) - KEEP_BACK
+    return next((start for start, end in _images(prompt) if start < mark < end), mark)
 
 
 def _images(prompt: list[int]) -> Generator[tuple[int, int], None, None]:

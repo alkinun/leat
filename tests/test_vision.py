@@ -261,6 +261,25 @@ def test_generate_with_images(tiny, projectors, monkeypatch, kind):
     assert starts[0] == first[1] or arch == "qwen35moe"
 
 
+@pytest.mark.usefixtures("reference_ops")
+def test_state_kept_before_an_image(tiny, projectors, monkeypatch):
+    # a model with recurrent state keeps it KEEP_BACK tokens before a prompt's end, which the next
+    # turn renders again, or where an image there starts, as it runs whole; the next turn resumes
+    # from there
+    monkeypatch.setattr("leat.engine.KEEP_BACK", 4)
+    mmproj = projectors("qwen3vl_merger")
+    e = engine(tiny, mmproj, "qwen3vl_merger", prefill_chunk=8)
+    image = e.image(png(30, 20))
+    prompt = [5] * 6 + image.tokens + [120, 3]  # 4 before the end is within the image
+    list(e.generate(prompt, 3, images=[image]))
+    turn, start = prompt[:-2] + [7, 1, 2], prompt.index(image.key)
+    assert len(prompt) - 4 > start and e.cached_prefix(turn) == start
+    starts = prefill_starts(e, monkeypatch)
+    got = list(e.generate(turn, 4, images=[image]))
+    assert got == fresh(tiny, mmproj, "qwen3vl_merger", turn, image)
+    assert starts[0] == start
+
+
 def fresh(tiny, mmproj, kind: str, prompt: list[int], *images) -> list[int]:
     # what an engine with nothing cached generates
     return list(engine(tiny, mmproj, kind, prefill_chunk=8).generate(prompt, 4, images=images))

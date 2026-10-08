@@ -9,6 +9,7 @@ import pytest
 from leat import bench
 from leat.chat import ChatTemplate
 from leat.cli import main
+from leat.engine import Engine
 from leat.gguf import GGUF
 from leat.tokenizer import Tokenizer
 from tests.helpers import reference_logits
@@ -109,6 +110,8 @@ def test_perplexity_arguments(tiny_model, tmp_path, monkeypatch, capsys):
     assert "must be at least 1, got 0" in capsys.readouterr().err
     with pytest.raises(ValueError, match="chunks of 2 tokens score none"):
         main(["perplexity", str(path), "--text", str(text), "--ctx", "2"])
+    with pytest.raises(ValueError, match="chunks of 16 tokens are over max_context 8"):
+        bench.perplexity(Engine(path, max_context=8), TEXT, ctx=16)
     read = []
     monkeypatch.setattr(bench, "perplexity", lambda e, t, *_: read.append(t) or bench.Quality(1))
     main(["perplexity", str(path), "--text", str(text), "--ctx", str(CTX)])
