@@ -7,6 +7,9 @@
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="/vendor/temml/Temml-Latin-Modern.css">
 <link rel="stylesheet" href="/style.css">
+<!-- the theme chosen on this device, as it was last, so that the first paint is already in it -->
+<style id="theme"></style>
+<script>document.getElementById("theme").textContent = localStorage.getItem("leat.theme.css");</script>
 <script type="module" src="/app.mjs"></script>
 </head>
 <body>
@@ -106,6 +109,14 @@
   </section>
   <section id="settings" class="page">
     <h1>Settings</h1>
+    <h2>Appearance</h2>
+    <div id="appearance">
+      <div id="modes"></div>
+      <div id="themes"></div>
+      <p>Each device has its own. To make one, save a theme as a file, change its fonts, corners
+        and colors, and open it here.</p>
+      <div class="row"><button id="save">Save this one</button><button id="open">Open a theme</button></div>
+    </div>
     <h2>People and devices</h2>
     <div id="household"></div>
     <div class="owned">

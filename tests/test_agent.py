@@ -1141,8 +1141,9 @@ def test_app(server):
         with urllib.request.urlopen(f"{server}{path}") as response:
             assert response.headers["Content-Type"] == "text/html; charset=utf-8"
             assert b"<title>leat</title>" in response.read()
-    with urllib.request.urlopen(f"{server}/app.mjs") as response:
-        assert response.headers["Content-Type"] == "text/javascript; charset=utf-8"
+    for path in ("/app.mjs", "/themes.mjs"):
+        with urllib.request.urlopen(f"{server}{path}") as response:
+            assert response.headers["Content-Type"] == "text/javascript; charset=utf-8"
     with urllib.request.urlopen(f"{server}/vendor/temml/Temml.woff2") as response:
         assert response.headers["Content-Type"] == "font/woff2"
     for path in ("/server.py", "/vendor/temml/LICENSE", "/../store.py", "/api/nothing"):

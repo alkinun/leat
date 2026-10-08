@@ -4,6 +4,7 @@
 // the owner to let it in.
 
 import { markdown } from "/markdown.mjs";
+import { THEMES, complete, file, properties, scheme, stylesheet } from "/themes.mjs";
 
 const $ = (id) => document.getElementById(id);
 let conversations = []; // the latest updated first: {id, title, updated, running}
@@ -24,6 +25,9 @@ const unread = new Set(JSON.parse(localStorage.getItem("leat.unread") ?? "[]"));
 let models = [], loading = null, unreachable = null; // the engine's, a model it loads, or why not
 let lost = false; // the events' connection, until it is back
 let think = localStorage.getItem("leat.think") === "true"; // as the user last chose
+// the themes of this device, Leat's own and those opened here, and the mode they are in
+let themes = [...THEMES, ...kept()];
+let mode = localStorage.getItem("leat.mode") ?? "system";
 let views = []; // the shown messages' elements, by their indexes
 const opened = new Map(); // whether each turn's work is open, as the user left it
 const quietly = new Set(); // the conversations a check withdrew its turn from, finding nothing
@@ -102,7 +106,17 @@ $("input").onkeydown = (event) => {
   }
 };
 window.onpopstate = route;
+$("save").onclick = () => {
+  const theme = chosen(), a = element("a");
+  Object.assign(a, { download: `${theme.name}.json`,
+    href: URL.createObjectURL(new Blob([file(theme)], { type: "application/json" })) });
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href));
+};
+$("open").onclick = () => pick(wear);
+matchMedia("(prefers-color-scheme: dark)").onchange = renderAppearance; // the samples', in "system"
 
+dress();
 start();
 
 // the app, of the person whose this device is; or, of a device not yet the household's, the gate
@@ -172,6 +186,96 @@ async function waitToJoin(id) {
       throw new Error("The request was turned down, or waited too long: ask again.");
     }
   }
+}
+
+// the themes opened on this device, those that still are
+function kept() {
+  return JSON.parse(localStorage.getItem("leat.themes") ?? "[]").flatMap((theme) => {
+    try {
+      return [complete(theme)];
+    } catch {
+      return [];
+    }
+  });
+}
+
+// keeps the themes opened here, for the loads to come
+function keep() {
+  localStorage.setItem("leat.themes", JSON.stringify(themes.filter((t) => !THEMES.includes(t))));
+}
+
+function chosen() {
+  return themes.find((t) => t.name === localStorage.getItem("leat.theme")) ?? THEMES[0];
+}
+
+// makes the app the theme chosen, in its mode, from the next load's first paint on too
+function dress() {
+  const css = stylesheet(chosen(), mode);
+  $("theme").textContent = css;
+  localStorage.setItem("leat.theme.css", css);
+  renderAppearance();
+}
+
+// a theme from a file, kept and chosen; one of Leat's own names is theirs alone
+async function wear(picked) {
+  try {
+    const theme = complete(JSON.parse(await picked.text()));
+    if (THEMES.some((t) => t.name === theme.name)) {
+      throw new Error(`${theme.name} is one of Leat's own; give yours a name of its own`);
+    }
+    themes = [...themes.filter((t) => t.name !== theme.name), theme];
+    keep();
+    localStorage.setItem("leat.theme", theme.name);
+    status("");
+    dress();
+  } catch (error) {
+    status(`${picked.name} is no theme: ${error.message}`, true);
+  }
+}
+
+// the modes, and the themes, each a sample of itself: a sidebar, a greeting, a message, the
+// reply's lines and the composer, in its own fonts, corners and colors
+function renderAppearance() {
+  const theme = chosen(), alone = !theme.light || !theme.dark;
+  $("modes").title = alone ? `${theme.name} is ${theme.light ? "light" : "dark"} alone` : "";
+  $("modes").replaceChildren(...["system", "light", "dark"].map((m) => {
+    const button = element("button", m === mode && !alone ? "on" : "", m[0].toUpperCase() + m.slice(1));
+    button.disabled = alone;
+    button.onclick = () => {
+      mode = m;
+      localStorage.setItem("leat.mode", m);
+      dress();
+    };
+    return button;
+  }));
+  $("themes").replaceChildren(...themes.map((t) => {
+    const item = element("div", t === theme ? "theme chosen" : "theme");
+    const sample = element("button", "sample"), chat = element("span", "chat");
+    const box = element("span", "box"), name = element("span", "name", t.name);
+    for (const [property, value] of Object.entries(properties(t, scheme(t, mode)))) {
+      sample.style.setProperty(property, value);
+    }
+    box.append(element("span", "send"));
+    chat.append(element("span", "hello", "Aa"), element("span", "ask"), element("span", "said"),
+      element("span", "said"), box);
+    sample.append(element("span", "strip"), chat);
+    sample.onclick = () => {
+      localStorage.setItem("leat.theme", t.name);
+      dress();
+    };
+    if (!THEMES.includes(t)) { // one opened here, to forget
+      const remover = element("button", "", "×");
+      remover.title = "Remove";
+      remover.onclick = () => {
+        themes = themes.filter((other) => other !== t);
+        keep();
+        dress();
+      };
+      name.append(remover);
+    }
+    item.append(sample, name);
+    return item;
+  }));
 }
 
 // shows what the address names: a page, as the memory's, a conversation, or a new one

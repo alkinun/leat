@@ -111,6 +111,20 @@ Context: a conversation's prompt is fit to the model's context, which leat serve
 
 Files: the user's are in a workspace, `~/.local/share/leat/workspace` by default, which they upload to and attach to messages in the app, and whose Files page lists them. The model reads them, PDFs and Word, Excel and PowerPoint files as markdown that keeps their headings, lists and tables, as markitdown reads them, writes and edits them, and runs Python among them, in bubblewrap's sandbox: it sees `/usr`, the workspace and the environment of `leat/agent/sandbox.txt`'s libraries, and no network, in 4 GB and 120 s. Documents are parsed there too, so that a file made to attack a parser attacks the sandbox. To make a document it first reads a skill, a guide to its kind with a template, of `leat/agent/skills`. The app shows the files a message attached and those its answer made, served sandboxed, and downloaded but for images, PDFs and plain text, which no page can act in. The app is a page with no dependencies, its Markdown and math rendered by `leat/agent/app/markdown.mjs`. The agent answers its own machine and network alone: a request must name it by an address or a `.local` name, which a site's page cannot by DNS rebinding, and a write must come from its own page.
 
+Themes: the app's look is a theme's, chosen in Settings on each device, light, dark or as the system is. A theme is the few things that make it: its fonts, of the text, of the greeting and titles, and of code, the text's size and the titles' weight, its corners, of the controls and of the messages and composer, how much room it leaves, and its colors, light and dark, fourteen of each, the composer's shadow one. Leat's own comes first, then Graphite's grays and pills and Void's black, after ChatGPT's and Grok's; Hermes, a terminal's gold on black after Hermes Agent's; Newsprint, square and serif, in black rules and red ink; and Nord, Solarized, Catppuccin, Gruvbox, Dracula and Rosé Pine. A theme is a file of JSON, as Settings saves one, to change and open there; whatever a theme leaves out is Leat's, and one of a single scheme is always that one. Fonts are named, not served, so each device uses the fonts it has, falling back to the next named:
+
+```json
+{
+  "name": "Mint",
+  "font": "Inter, system-ui, sans-serif", "displayFont": "Georgia, serif", "displayWeight": 400,
+  "codeFont": "ui-monospace, monospace", "size": 16, "radius": 6, "radiusLarge": 18, "density": 1,
+  "light": {"page": "#f3fbf8", "accent": "#0f9d76", "shadow": "0 4px 20px rgb(0 0 0 / 0.06)"},
+  "dark": {"page": "#0f1a17", "accent": "#3ccf9f"}
+}
+```
+
+The colors are `page`, `side`, `card`, `bubble`, `line`, `text`, `muted`, `accent`, `onAccent`, `error`, `keyword`, `string` and `number`, with `shadow`; [leat/agent/app/themes.mjs](leat/agent/app/themes.mjs) says what each is, and has every theme Leat comes with.
+
 ## Measurements
 
 RTX 3090, one sequence, in tokens per second; Q4_K_M files but for gpt-oss's, MXFP4. llama.cpp is b11372 with CUDA, and b9691 for Qwen3.6. leat's numbers include sampling on the device and reading the token back: after the prompt for pp512, after every token for tg128.

@@ -41,6 +41,7 @@ _FILES = (
     "style.css",
     "app.mjs",
     "markdown.mjs",
+    "themes.mjs",
     "vendor/temml/temml.mjs",
     "vendor/temml/Temml-Latin-Modern.css",
     "vendor/temml/Temml.woff2",
