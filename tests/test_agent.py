@@ -1261,10 +1261,17 @@ def test_joining(server, agent, engine, events):
     assert request(f"{server}/api/people/2", "POST", {"child": True})[0] == 200
     assert request(f"{server}/api/people/1", "POST", {"child": True})[0] == 404  # the owner
     assert agent.store.person(2)["child"] == 1
-    # unpaired by the owner, it must ask again
+    # unpaired by the owner, it must ask again; and removed, with all that is hers, and the
+    # Telegram people who talked as her
     (device,) = [d["id"] for d in agent.store.devices() if d["person"] == 2]
     assert request(f"{server}/api/devices/{device}", "DELETE")[0] == 200
     assert ask("/api/me")[0] == 401
+    allowed = {"9": {"id": 9, "name": "Ada", "person": 2}, "7": {"id": 7, "name": "A", "person": 1}}
+    agent.store.set_setting("telegram", {"allowed": allowed})
+    assert request(f"{server}/api/people/2", "DELETE")[0] == 200
+    assert agent.store.person(2) is None and agent.conversations(2) == []
+    assert list(agent.store.setting("telegram")["allowed"]) == ["7"]
+    assert request(f"{server}/api/people/1", "DELETE")[0] == 400  # the owner
 
 
 def test_trust(server, engine):

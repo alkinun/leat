@@ -219,10 +219,9 @@ class Agent:
         the household's characters if given, or in a group chat if `shared`; returns the
         conversation's id. The model thinks before it replies if `think`, which takes longer,
         and reads of the files `attached`, in the workspace. A message of a scheduled task names
-        it, and the condition of a check, `quiet`, that tells only if it holds; one sent by a
-        messaging app, `via`, that. Raises NotFound if there is no such
-        conversation of the person's, file or character, Busy if a turn runs in the
-        conversation."""
+        it, with the condition of a check, `quiet`, that tells only if it holds; one sent by a
+        messaging app, `via`, that. Raises NotFound if there is no such conversation of the
+        person's, file or character, Busy if a turn runs in the conversation."""
         info: dict[str, Any] = {"think": think, "at": time.time()}
         if task:
             info["task"] = task
@@ -246,10 +245,8 @@ class Agent:
                 if shared:  # knowing none of the user's
                     system = {"role": "system", "content": GROUP.format(name=name or "the user")}
                 else:
-                    system = _system(
-                        self.store.memories(person), self.workspace is not None, name,
-                        played if character is not None else None,
-                    )  # fmt: skip
+                    memories = self.store.memories(person)
+                    system = _system(memories, self.workspace is not None, name, played)
                 if who.get("child"):  # whose rules no character's wins over
                     system["content"] += CHILD
                 title = _title(content)

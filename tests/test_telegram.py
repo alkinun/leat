@@ -246,6 +246,7 @@ def test_api(bot, bots):
         bots.update(STRANGER, text="Hi")
         bots.next("sendMessage")
         assert request(f"{url}/people", "POST", {"id": 8})[0] == 404
+        assert request(f"{url}/people", "POST", {"id": 9, "person": 7})[0] == 404  # no such person
         assert request(f"{url}/people", "POST", {"id": 9})[0] == 200
         assert [(p["id"], p["person"]) for p in bot.state()["allowed"]] == [(9, 1)]  # the owner
         assert request(f"{url}/people/9", "DELETE")[0] == 200

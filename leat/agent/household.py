@@ -140,6 +140,7 @@ class Household:
         for c in self.store.conversations(id):
             self.agent.delete(c["id"], id)
         self.store.remove_person(id)
+        self._unlink_telegram(id)
         self._publish()
 
     def state(self) -> dict[str, Any]:
@@ -173,6 +174,15 @@ class Household:
         if settings := self.store.setting(telegram.KEY):
             allowed = {k: v | {"person": v.get("person") or owner}
                        for k, v in settings.get("allowed", {}).items()}  # fmt: skip
+            self.store.set_setting(telegram.KEY, settings | {"allowed": allowed})
+
+    def _unlink_telegram(self, person: int) -> None:
+        # turns out the people Telegram let in as a person removed, who must ask again
+        from leat.agent.channels import telegram  # which imports the agent
+
+        if settings := self.store.setting(telegram.KEY):
+            allowed = {k: v for k, v in settings.get("allowed", {}).items()
+                       if v.get("person") != person}  # fmt: skip
             self.store.set_setting(telegram.KEY, settings | {"allowed": allowed})
 
     def _publish(self) -> None:

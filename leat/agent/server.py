@@ -184,7 +184,10 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(200, telegram.connect(_text(body, "token")))
             elif path == "/api/telegram/people" and telegram is not None:
                 _owner(me)
-                telegram.allow(int(body.get("id", 0)), int(body.get("person") or person))
+                whose = int(body.get("person") or person)
+                if agent.store.person(whose) is None:
+                    raise NotFound(f"there is no person {whose}")
+                telegram.allow(int(body.get("id", 0)), whose)
                 self._json(200, {})
             elif path == "/api/models/load":
                 _owner(me)
