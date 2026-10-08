@@ -399,8 +399,10 @@ class _Turn:
         (index,) = self._show(reply)
         read = context.prompt(messages, state)
         body: dict[str, Any] = {"messages": read, **SAMPLING[self.think]}
-        # as Qwen3's templates take it, and others ignore
-        body["chat_template_kwargs"] = {"enable_thinking": self.think}
+        # as Qwen3's templates take them, and others ignore: the replies of turns before rendered
+        # as they were, their reasoning kept, so that the prompt of a message after a turn that
+        # called tools extends the last, which the engine's cache holds, rather than changing it
+        body["chat_template_kwargs"] = {"enable_thinking": self.think, "preserve_thinking": True}
         if declared:
             body["tools"] = declared
         elif last and a.tools:

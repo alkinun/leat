@@ -172,7 +172,7 @@ def test_turn(agent, engine, events):
     # recommends then
     (request,) = engine.requests
     assert request["messages"] == [_api(m) for m in messages[:2]] and request["stream"] is True
-    assert request["chat_template_kwargs"] == {"enable_thinking": False}
+    assert request["chat_template_kwargs"] == {"enable_thinking": False, "preserve_thinking": True}
     assert request["temperature"] == 0.7 and request["presence_penalty"] == 1.5
 
 
@@ -181,7 +181,8 @@ def test_think(agent, engine, events):
     engine.replies.put(REPLY)
     id = agent.send(None, "Prove it.", think=True)
     until(events, ended)
-    assert engine.requests[-1]["chat_template_kwargs"] == {"enable_thinking": True}
+    assert engine.requests[-1]["chat_template_kwargs"] == {
+        "enable_thinking": True, "preserve_thinking": True}  # fmt: skip
     assert engine.requests[-1]["temperature"] == 1.0
     assert agent.store.messages(id)[1]["info"] == {"think": True}
 
