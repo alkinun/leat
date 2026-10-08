@@ -1,3 +1,4 @@
+import collections
 import contextlib
 import json
 import socket
@@ -16,7 +17,7 @@ import pytest
 from leat.chat import ChatTemplate, Reply
 from leat.engine import Engine
 from leat.sampler import Sampling
-from leat.server import Server, _calls, _completion, _Writer
+from leat.server import Server, _calls, _completion, _Load, _Writer
 from tests.helpers import CONTEXT, Oracle, chat_template
 
 WEATHER = {
@@ -419,6 +420,8 @@ def test_text_is_not_a_tool_call(client, replies_with, stream, text, choice):
         ({"temperature": True}, "temperature must be a number from 0 to 2"),
         ({"extra_body": {"top_k": 1.5}}, "top_k must be an integer"),
         ({"max_tokens": 0}, "max_tokens must be a positive integer"),
+        ({"stop": "x" * 257}, "stop must be a string or a list of 16 strings at most"),
+        ({"stop": ["x"] * 17}, "stop must be a string or a list of 16 strings at most"),
         ({"tools": [WEATHER], "tool_choice": "required"}, "tool_choice='required' is not"),
         ({"messages": []}, "messages must be a non-empty list of objects"),
         ({"messages": [{"role": "user", "content": "x" * CONTEXT}]}, "the prompt has 64 tokens"),
@@ -437,17 +440,18 @@ def test_bad_request(client, kwargs, error):
         client.chat.completions.create(**request)
 
 
-def test_other_sites_pages_are_refused(server):
-    # a page of another site may not make the server generate or load models; the app may
+def test_web_pages_are_refused(server):
+    # a page may not make the server generate or load models, even one whose name was made this
+    # address's, as DNS rebinding does; a client of no browser may
     url = f"http://127.0.0.1:{server.server_port}"
     body = json.dumps({"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1}).encode()
+    rebound = {"Origin": "http://evil.example:8080", "Host": "evil.example:8080"}
     for path, data in (("/v1/chat/completions", body), ("/v1/models/load", b'{"model": "tiny"}')):
-        request = urllib.request.Request(url + path, data, {"Origin": "https://evil.example"})
-        with pytest.raises(urllib.error.HTTPError, match="403"):
-            urllib.request.urlopen(request)
-    request = urllib.request.Request(url + "/v1/chat/completions", body, {"Origin": url})
-    with urllib.request.urlopen(request) as response:
-        assert response.status == 200
+        for headers in ({"Origin": "https://evil.example"}, rebound):
+            with pytest.raises(urllib.error.HTTPError, match="403"):
+                urllib.request.urlopen(urllib.request.Request(url + path, data, headers))
+    with urllib.request.urlopen(urllib.request.Request(url + "/v1/chat/completions", body)) as r:
+        assert r.status == 200
 
 
 def test_unknown_route(client, server):
@@ -546,6 +550,28 @@ def test_worker_error(client, monkeypatch):
     with pytest.raises(openai.InternalServerError, match="a bug"):
         chat(client, "hello", max_tokens=4)
     assert complete(client, "hello", max_tokens=2)[1] == "length"
+
+
+def test_worker_error_ends_a_waiting_load(server):
+    # completions waiting for a load the error ended go on, rather than waiting forever
+    server.ready.clear()
+    load = _Load("tiny")
+    server._fail(KeyError("a bug"), collections.deque([load]), {})
+    assert isinstance(load.done.get(), KeyError) and server.ready.is_set()
+
+
+def test_loading_the_loaded_model_waits_for_nothing(client, server, monkeypatch):
+    # not even for the completions running, which a load of another model waits out
+    going, take = threading.Event(), _Writer.take
+    monkeypatch.setattr(_Writer, "take", lambda self, token: going.wait(5) and take(self, token))
+    reply = threading.Thread(target=chat, args=(client, "hello"), kwargs={"max_tokens": 2})
+    reply.start()
+    loading = threading.Thread(target=server.load, args=("tiny",))
+    loading.start()
+    loading.join(2)
+    assert not loading.is_alive()
+    going.set()
+    reply.join()
 
 
 @pytest.fixture(scope="module")

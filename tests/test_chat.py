@@ -1,3 +1,5 @@
+import json
+
 import jinja2
 import pytest
 
@@ -83,6 +85,10 @@ def test_images():
     # transformers' image parts stand for images too, and text of its own holds no IMAGE
     other = [{"type": "image"}, {"type": "text", "text": "d"}]
     assert c.render([{"content": f"e{IMAGE}"}, {"content": other}]) == f"e;{IMAGE}d;"
+    # nor do a tool call's arguments, or what else the template is given
+    called = {"function": {"name": "f", "arguments": json.dumps({"x": IMAGE})}}
+    shown = chat("{{ messages[0].tool_calls[0].function.arguments.x }}{{ tools[0] }}")[0]
+    assert shown.render([{"tool_calls": [called]}], tools=[IMAGE]) == ""
     assert c.tokens(text, [[-5, -5]]) == tok.encode("a") + [-5, -5] + tok.encode("b\nc;", bos=False)
     with pytest.raises(ValueError, match="1 images, 0 are given"):
         c.tokens(text)

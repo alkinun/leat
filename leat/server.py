@@ -12,7 +12,6 @@ import gc
 import itertools
 import json
 import queue
-import select
 import socket
 import sys
 import threading
@@ -54,6 +53,8 @@ def _tool(v: Any) -> bool:
     )
 
 
+_STOP = 256  # characters a stop string has at most, each checked against the text's end per token
+
 # the request fields leat reads, when present: what makes them valid, and how to say so
 _FIELDS: dict[str, tuple[Callable[[Any], bool], str]] = {
     "messages": (lambda v: isinstance(v, list) and bool(v) and all(isinstance(m, dict) for m in v),
@@ -66,8 +67,9 @@ _FIELDS: dict[str, tuple[Callable[[Any], bool], str]] = {
     "max_tokens": (lambda v: _integer(v) and v > 0, "a positive integer"),
     "max_completion_tokens": (lambda v: _integer(v) and v > 0, "a positive integer"),
     "seed": (_integer, "an integer"),
-    "stop": (lambda v: isinstance(v, str) or isinstance(v, list)
-             and all(isinstance(s, str) for s in v), "a string or a list of strings"),
+    "stop": (lambda v: isinstance(v, str) and len(v) <= _STOP or isinstance(v, list)
+             and len(v) <= 16 and all(isinstance(s, str) and len(s) <= _STOP for s in v),
+             f"a string or a list of 16 strings at most, each of {_STOP} characters at most"),
     "stream": (lambda v: isinstance(v, bool), "a boolean"),
     "stream_options": (lambda v: isinstance(v, dict), "an object"),
     "tools": (lambda v: isinstance(v, list) and all(_tool(t) for t in v),
@@ -224,6 +226,8 @@ class Server(ThreadingHTTPServer):
             writer.c.out.put(error)
         for request in waiting:
             (request.done if isinstance(request, _Load) else request.out).put(error)
+            if isinstance(request, _Load):  # completions waiting for it go on, with no load
+                self.ready.set()
         running.clear()
         waiting.clear()
 
@@ -265,8 +269,8 @@ class Server(ThreadingHTTPServer):
     def _start(self, request: _Completion | _Load, running: dict[Sequence, "_Writer"]) -> bool:
         # starts a request, or ends it if it never can: a completion while a slot is free, a load
         # once no completion runs. False if it must wait.
-        if isinstance(request, _Load):
-            if running:
+        if isinstance(request, _Load):  # the loaded model's needs no wait
+            if running and (self.loaded is None or self.loaded.name != request.name):
                 return False
             self._load(request)
             return True
@@ -388,8 +392,9 @@ class _Handler(BaseHTTPRequestHandler):
         routes = {"/v1/chat/completions": self._complete, "/v1/models/load": self._load}
         if (route := routes.get(self.path)) is None:
             return self._error(404, f"there is no POST {self.path}")
-        if not self._same_origin():
-            return self._error(403, "requests from other sites' pages are refused")
+        if "Origin" in self.headers:  # a browser's: this server has no pages, and another
+            # site's may not make it generate or load models, its name made this address's or not
+            return self._error(403, "requests from web pages are refused")
         try:
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
         except (ValueError, RecursionError) as e:  # not JSON, or nested too deep to parse
@@ -479,17 +484,12 @@ class _Handler(BaseHTTPRequestHandler):
             self._event(self._head(c, "chat.completion.chunk") | usage)
         self._event("[DONE]")
 
-    def _same_origin(self) -> bool:
-        # a request of no browser, which sends no Origin, or of a page of this address: another
-        # site's page may not make it generate or load models
-        origin = self.headers.get("Origin")
-        return origin is None or urllib.parse.urlsplit(origin).netloc == self.headers.get("Host")
-
     def _hung_up(self) -> bool:
         # whether the client closed the connection: it reads as ready, with nothing to read
         try:
-            ready, _, _ = select.select([self.connection], [], [], 0)
-            return bool(ready) and not self.connection.recv(1, socket.MSG_PEEK)
+            return not self.connection.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
+        except BlockingIOError:  # nothing to read yet
+            return False
         except OSError:
             return True
 
@@ -497,7 +497,8 @@ class _Handler(BaseHTTPRequestHandler):
         # as OpenAI lists it, with its status, and its context once loaded, which clients such as
         # leat agent fit their prompts to
         s = self.server
-        loaded = s.loaded if s.loaded is not None and s.loaded.name == name else None
+        loaded = s.loaded  # once, as a load may change it meanwhile
+        loaded = loaded if loaded is not None and loaded.name == name else None
         status = "loaded" if loaded else "loading" if s.loading == name else "unloaded"
         model = {"id": name, "object": "model", "created": s.created, "owned_by": "leat"}
         if loaded:  # and if it takes images, the tokens an image takes at most
@@ -599,7 +600,7 @@ def _calls(
         return content, calls
     names, calls = {tool.get("function", {}).get("name") for tool in tools}, []
     for call in reply.calls:
-        with contextlib.suppress(ValueError):
+        with contextlib.suppress(ValueError, RecursionError):
             arguments = json.loads(call["arguments"])
             if call["name"] in names and isinstance(arguments, dict):
                 calls.append({"name": call["name"], "arguments": arguments})

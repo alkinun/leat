@@ -63,11 +63,11 @@ class ChatTemplate:
         self, messages: list[dict[str, Any]], add_generation_prompt: bool = True, **kwargs
     ) -> str:
         return self._template.render(
-            messages=[_message(m) for m in messages],
+            messages=[_message(_plain(m)) for m in messages],
             add_generation_prompt=add_generation_prompt,
             bos_token=self._bos,
             eos_token=self._eos,
-            **kwargs,
+            **_plain(kwargs),
         )
 
     def encode(
@@ -320,19 +320,16 @@ def images(messages: list[dict[str, Any]]) -> list[bytes]:
 
 def _message(message: dict[str, Any]) -> dict[str, Any]:
     # an OpenAI message as templates read it: content as one string, its text parts joined by
-    # newlines and its images, `image_url` parts or transformers' `image` ones, IMAGE, which text
-    # never holds; and tool calls only where there are some, with their arguments as objects
-    # rather than JSON text
+    # newlines and its images, `image_url` parts or transformers' `image` ones, IMAGE; and tool
+    # calls only where there are some, with their arguments as objects rather than JSON text
     message = dict(message)
-    if isinstance(content := message.get("content"), str):
-        message["content"] = content.replace(IMAGE, "")
-    elif isinstance(content, list):
+    if isinstance(content := message.get("content"), list):
         kinds = ("text", "image", "image_url")
         if any(not isinstance(part, dict) or part.get("type") not in kinds for part in content):
             raise ValueError("content parts must be text, image or image_url")
         if any(p["type"] == "text" and not isinstance(p.get("text"), str) for p in content):
             raise ValueError("a text part's text must be a string")
-        pieces = [p["text"].replace(IMAGE, "") if p["type"] == "text" else IMAGE for p in content]
+        pieces = [p["text"] if p["type"] == "text" else IMAGE for p in content]
         message["content"] = "".join(
             p if i == 0 or IMAGE in (p, pieces[i - 1]) else "\n" + p for i, p in enumerate(pieces)
         )
@@ -345,11 +342,22 @@ def _message(message: dict[str, Any]) -> dict[str, Any]:
     return message
 
 
+def _plain(value: Any) -> Any:
+    # a value as given, with no IMAGE in its strings: there, only images stand for it
+    if isinstance(value, str):
+        return value.replace(IMAGE, "")
+    if isinstance(value, list):
+        return [_plain(v) for v in value]
+    if isinstance(value, dict):
+        return {_plain(k): _plain(v) for k, v in value.items()}
+    return value
+
+
 def _decoded(call: dict[str, Any]) -> dict[str, Any]:
     # arguments that are already an object, or not JSON, reach the template as they are
     function = dict(call["function"])
     with contextlib.suppress(TypeError, ValueError, RecursionError):
-        function["arguments"] = json.loads(function["arguments"])
+        function["arguments"] = _plain(json.loads(function["arguments"]))  # "\ufffc" in JSON
     return {**call, "function": function}
 
 
