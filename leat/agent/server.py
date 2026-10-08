@@ -31,7 +31,7 @@ from leat.agent.household import Household
 
 APP = Path(__file__).parent / "app"
 # the app's files, each served at its path in app/, and their types; the app's pages, /c/<id> one
-# conversation's, /memory, /files, /tasks and /settings, are index.html
+# conversation's, /memory, /files, /tasks, /characters and /settings, are index.html
 _FILES = (
     "index.html",
     "style.css",
@@ -42,7 +42,7 @@ _FILES = (
     "vendor/temml/Temml.woff2",
     "vendor/temml/latinmodernmath.woff2",
 )
-_PAGES = ("/", "/memory", "/files", "/tasks", "/settings")
+_PAGES = ("/", "/memory", "/files", "/tasks", "/characters", "/settings")
 _TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
@@ -66,6 +66,7 @@ _TELEGRAM = re.compile(r"/api/telegram/people/(-?[0-9]+)")
 _REQUEST = re.compile(r"/api/pairings/([0-9a-f]{16})(/allow)?")
 _DEVICE = re.compile(r"/api/devices/([0-9]+)")
 _PERSON = re.compile(r"/api/people/([0-9]+)")
+_CHARACTER = re.compile(r"/api/characters/([0-9]+)")
 _FILE = re.compile(r"/(?:api/)?files/(.+)")
 
 
@@ -138,8 +139,10 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._json(200, household.ask(_text(body, "name"), _device(self.headers)))
             me = self._device()
             person, match = me["person"], _CONVERSATION.fullmatch(path)
-            if path == "/api/conversations":
-                self._json(200, {"id": agent.send(None, *_message(body), person=person)})
+            if path == "/api/conversations":  # with one of the household's characters, if given
+                played = int(body["character"]) if body.get("character") else None
+                id = agent.send(None, *_message(body), person=person, character=played)
+                self._json(200, {"id": id})
             elif match and match[2] == "/messages":
                 self._json(200, {"id": agent.send(match[1], *_message(body), person=person)})
             elif match and match[2] == "/stop":
@@ -151,6 +154,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(200, agent.remember(_text(body, "text"), category, person=person))
             elif path == "/api/memories/restore":
                 self._json(200, agent.restore(int(body.get("id", 0)), person))
+            elif path == "/api/characters":
+                self._json(200, agent.add_character(_text(body, "name"), _text(body, "about")))
             elif (match := _REQUEST.fullmatch(path)) and match[2]:
                 _owner(me)
                 to = body.get("person")
@@ -184,6 +189,8 @@ class _Handler(BaseHTTPRequestHandler):
                 agent.forget(int(match[1]), person=person)
             elif match := _TASK.fullmatch(path):
                 agent.unschedule(int(match[1]), person)
+            elif match := _CHARACTER.fullmatch(path):
+                agent.remove_character(int(match[1]))
             elif path.startswith("/api/files/") and agent.workspace is not None:
                 agent.workspace.delete(urllib.parse.unquote(path.removeprefix("/api/files/")))
                 agent.files_changed()
@@ -298,6 +305,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._event(agent.memories_event(person))
             self._event(agent.files_event())
             self._event(agent.tasks_event(person))
+            self._event(agent.characters_event())
             if me["owner"]:
                 self._event(self.server.household.state())
                 if self.server.telegram is not None:

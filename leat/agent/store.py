@@ -18,9 +18,9 @@ wall clock its repeats keep; one done for good is deleted. Settings are values b
 as a messaging app's connection.
 
 The household is its people, the first its owner, and the devices paired to each, known by the hash
-of a secret each holds. A conversation, a memory and a task are each a person's; a memory of the
-household category is everyone's. Before the household has its first person, everything is no
-one's, and becomes the owner's.
+of a secret each holds; and its characters, whom a conversation may be with. A conversation, a
+memory and a task are each a person's; a memory of the household category is everyone's. Before the
+household has its first person, everything is no one's, and becomes the owner's.
 """
 
 import json
@@ -137,9 +137,22 @@ _MIGRATIONS = [
     ALTER TABLE forgotten ADD COLUMN person INTEGER;
     ALTER TABLE tasks ADD COLUMN person INTEGER REFERENCES people (id);
     """,
+    # the household's characters, each a conversation's to play; one removed is retired, its
+    # conversations its still
+    """
+    CREATE TABLE characters (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      about TEXT NOT NULL,
+      created REAL NOT NULL,
+      removed REAL
+    );
+    ALTER TABLE conversations ADD COLUMN character INTEGER REFERENCES characters (id);
+    """,
 ]
 _SEARCHED = ("user", "assistant")  # the roles of the messages search finds
-_SUMMARY = "id, title, created, updated, person"  # a conversation's columns as the apps list it
+# a conversation's columns as the apps list it
+_SUMMARY = "id, title, created, updated, person, character"
 # the memories a person knows: their own, and the household's
 _KNOWN = "(person IS ? OR category = 'household')"
 
@@ -170,16 +183,20 @@ class Store:
         return dict(rows[0]) if rows else None
 
     def create(
-        self, title: str, messages: list[dict[str, Any]], person: int | None = None
-    ) -> dict[str, Any]:
-        """A new conversation of a person's, of these messages."""
+        self, title: str, messages: list[dict[str, Any]], person: int | None = None,
+        character: int | None = None,
+    ) -> dict[str, Any]:  # fmt: skip
+        """A new conversation of a person's, with a character if given, of these messages."""
         id, now = uuid.uuid4().hex[:12], time.time()
         with self._lock, self._db:
             self._db.execute("BEGIN")
-            sql = "INSERT INTO conversations (id, title, created, updated, person) VALUES"
-            self._db.execute(f"{sql} (?, ?, ?, ?, ?)", (id, title, now, now, person))
+            sql = (
+                "INSERT INTO conversations (id, title, created, updated, person, character) VALUES"
+            )
+            self._db.execute(f"{sql} (?, ?, ?, ?, ?, ?)", (id, title, now, now, person, character))
             self._insert(id, 0, messages)
-        return {"id": id, "title": title, "created": now, "updated": now, "person": person}
+        return {"id": id, "title": title, "created": now, "updated": now, "person": person,
+                "character": character}  # fmt: skip
 
     def context(self, id: str) -> dict[str, Any]:
         rows = self._query("SELECT context FROM conversations WHERE id = ?", id)
@@ -406,6 +423,25 @@ class Store:
     def delete_task(self, id: int) -> dict[str, Any] | None:
         rows = self._query("DELETE FROM tasks WHERE id = ? RETURNING *", id)
         return dict(rows[0]) if rows else None
+
+    def characters(self) -> list[dict[str, Any]]:
+        """The household's characters, but those removed, the oldest first."""
+        sql = "SELECT * FROM characters WHERE removed IS NULL ORDER BY id"
+        return [dict(row) for row in self._query(sql)]
+
+    def character(self, id: int) -> dict[str, Any] | None:
+        rows = self._query("SELECT * FROM characters WHERE id = ?", id)
+        return dict(rows[0]) if rows else None
+
+    def add_character(self, name: str, about: str) -> dict[str, Any]:
+        sql = "INSERT INTO characters (name, about, created) VALUES (?, ?, ?) RETURNING *"
+        return dict(self._query(sql, name, about, time.time())[0])
+
+    def remove_character(self, id: int) -> bool:
+        """Removes a character from those a conversation may begin with; its conversations go on
+        with them."""
+        sql = "UPDATE characters SET removed = ? WHERE id = ? AND removed IS NULL RETURNING id"
+        return bool(self._query(sql, time.time(), id))
 
     def people(self) -> list[dict[str, Any]]:
         """The household's people, the owner first."""

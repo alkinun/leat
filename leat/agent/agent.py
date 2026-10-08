@@ -60,6 +60,28 @@ briefing, call schedule.
 {workspace}
 What you remember of the user, each by its number and dated when it was last confirmed:
 {memories}"""
+# the system prompt of a conversation with one of the household's characters, who knows the user's
+# memories but changes none, as a roleplay's facts are not the user's
+CHARACTER = """\
+You are {name}, a character that Leat plays: Leat is an assistant that runs on a computer in \
+{home} private, and theirs. Each of the user's messages begins with the date and time they sent it.
+
+Who {name} is, as the household wrote it:
+{about}
+
+Talk as {name} would, in their voice and manner, keeping to who they are. If the user asks whether \
+you are a person, say you are a character that Leat, an AI, plays.
+
+When a question needs facts you may not know, or that may have changed since you learned them, \
+call search, then fetch the few pages most likely to answer, at once, each with the question you \
+want it to answer. Cite what you use by the numbers the tools give their sources, as [1].
+{workspace}
+What you know of the user, each by its number:
+{memories}"""
+NAME = 40  # characters of a character's name at most
+ABOUT = 2000  # characters of who a character is at most
+# the memory's tools a conversation with a character has not
+UNREMEMBERING = ("remember", "forget")
 # of the system prompt, when the agent has a workspace
 WORKSPACE = """
 The user's files are in a workspace, where you read, write and edit them, and run Python among \
@@ -166,12 +188,14 @@ class Agent:
     def send(
         self, id: str | None, content: str, think: bool = False, attached: list[str] | None = None,
         task: int | None = None, via: str | None = None, person: int | None = None,
+        character: int | None = None,
     ) -> str:  # fmt: skip
-        """Starts a turn of a person's message, in a new conversation without an id; returns the
-        conversation's id. The model thinks before it replies if `think`, which takes longer, and
-        reads of the files `attached`, in the workspace. A message of a scheduled task names it,
-        and one sent by a messaging app, `via`, that. Raises NotFound if there is no such
-        conversation of the person's, or file, Busy if a turn runs in the conversation."""
+        """Starts a turn of a person's message, in a new conversation without an id, with one of
+        the household's characters if given; returns the conversation's id. The model thinks
+        before it replies if `think`, which takes longer, and reads of the files `attached`, in
+        the workspace. A message of a scheduled task names it, and one sent by a messaging app,
+        `via`, that. Raises NotFound if there is no such conversation of the person's, file or
+        character, Busy if a turn runs in the conversation."""
         info: dict[str, Any] = {"think": think, "at": time.time()}
         if task:
             info["task"] = task
@@ -186,16 +210,23 @@ class Agent:
         with self._lock:
             if id is None:
                 name = (self.store.person(person) or {}).get("name") if person else None
-                system = _system(self.store.memories(person), self.workspace is not None, name)
-                id = self.store.create(_title(content), [system, message], person)["id"]
-                start = 1
+                played = self.store.character(character) if character is not None else None
+                if character is not None and (played is None or played["removed"]):
+                    raise NotFound(f"there is no character {character}")
+                system = _system(
+                    self.store.memories(person), self.workspace is not None, name,
+                    played if character is not None else None,
+                )  # fmt: skip
+                c = self.store.create(_title(content), [system, message], person, character)
+                id, start = c["id"], 1
             else:
-                self._own(id, person)
+                c = self._own(id, person)
                 if id in self._turns:
                     raise Busy("a reply is already running")
                 start = len(self.store.messages(id))
                 self.store.append(id, message)
-            turn = self._turns[id] = _Turn(self, id, person, start, content, think, task)
+            turn = _Turn(self, id, person, start, content, think, task, c["character"])
+            self._turns[id] = turn
             self._publish_summary(id)
             self._publish_message(id, person, start, message)
         threading.Thread(target=turn.run, name=f"turn {id}", daemon=True).start()
@@ -217,6 +248,34 @@ class Agent:
                 turn.stop()
             self.store.delete(id)
             self.events.publish({"type": "deleted", "id": id, "to": person})
+
+    def characters(self) -> list[dict[str, Any]]:
+        """The household's characters, the oldest first."""
+        return self.store.characters()
+
+    def add_character(self, name: str, about: str) -> dict[str, Any]:
+        """Adds a character to the household's, whom a conversation may be with. Raises ValueError
+        if a name or who they are is none, or too long."""
+        name, about = " ".join(name.split()), about.strip()
+        if not name or not about:
+            raise ValueError("a character needs a name, and who they are")
+        if len(name) > NAME or len(about) > ABOUT:
+            raise ValueError(
+                f"a character's name is {NAME} characters at most, who they are {ABOUT}"
+            )
+        character = self.store.add_character(name, about)
+        self.events.publish(self.characters_event())
+        return character
+
+    def remove_character(self, id: int) -> None:
+        """Removes a character from those a conversation may begin with; its conversations go on
+        with them. Raises NotFound if there is no such character."""
+        if not self.store.remove_character(id):
+            raise NotFound(f"there is no character {id}")
+        self.events.publish(self.characters_event())
+
+    def characters_event(self) -> Event:
+        return {"type": "characters", "characters": self.store.characters()}
 
     def memories(self, person: int | None = None) -> list[dict[str, Any]]:
         """What the agent remembers of a person, and of the household, the oldest first."""
@@ -386,8 +445,8 @@ class Agent:
             self.events.publish(self.memories_event(person))
 
     def _summary(self, c: dict[str, Any]) -> dict[str, Any]:
-        running = c["id"] in self._turns
-        return {"id": c["id"], "title": c["title"], "updated": c["updated"], "running": running}
+        running, keys = c["id"] in self._turns, ("id", "title", "updated", "character")
+        return {k: c[k] for k in keys} | {"running": running}
 
     def _publish_summary(self, id: str) -> None:
         if (c := self.store.conversation(id)) is not None:
@@ -406,10 +465,13 @@ class _Turn:
 
     def __init__(
         self, agent: Agent, id: str, person: int | None, start: int, content: str, think: bool,
-        task: int | None,
+        task: int | None, character: int | None = None,
     ):  # fmt: skip
         self.agent, self.id, self.start, self.content, self.think = agent, id, start, content, think
         self.person = person
+        # the tools the model calls: of a conversation with a character, not the memory's
+        played = character is not None
+        self.tools = {n: t for n, t in agent.tools.items() if not played or n not in UNREMEMBERING}
         self.task = task  # the scheduled task the message is of, if any
         self.state = agent.store.context(id)  # the prompt's, as it was, to take the turn back to
         self.kept = start + 1  # the conversation's messages kept
@@ -454,7 +516,7 @@ class _Turn:
         # context, and again, the reply redone, if the context cuts the reply off.
         a = self.agent
         messages, state = a.store.messages(self.id), a.store.context(self.id)
-        declared = [tool.declaration() for tool in a.tools.values()] if tools else []
+        declared = [tool.declaration() for tool in self.tools.values()] if tools else []
         extra = len(json.dumps(declared))
         if self.limit and context.estimate(messages, state, extra) > context.COMPACT * self.limit:
             state = self._compact(messages, state, extra)
@@ -470,7 +532,7 @@ class _Turn:
         body["chat_template_kwargs"] = {"enable_thinking": self.think, "preserve_thinking": True}
         if declared:
             body["tools"] = declared
-        if last and a.tools:
+        if last and self.tools:
             read.append({"role": "user", "content": LAST})
         started, finish = time.monotonic(), None
         self.completion = a.engine.complete(body)
@@ -581,7 +643,7 @@ class _Turn:
         # runs a call's tool, and puts its answer in its message, unless the turn stopped first
         a = self.agent
         try:
-            if (tool := a.tools.get(message["name"])) is None:
+            if (tool := self.tools.get(message["name"])) is None:
                 raise ValueError(f"there is no tool {message['name']!r}")
             called = arguments(message["info"]["arguments"])
             result = tool.run(Context(self.id, self._cite, person=self.person), **called)
@@ -661,13 +723,21 @@ class _Deleted(Exception):
     """The turn's conversation was deleted."""
 
 
-def _system(memories: list[dict[str, Any]], workspace: bool, name: str | None = None) -> dict:
+def _system(
+    memories: list[dict[str, Any]], workspace: bool, name: str | None = None,
+    character: dict[str, Any] | None = None,
+) -> dict[str, Any]:  # fmt: skip
     # the system prompt of a conversation begun now with the user, of a `name` if the household
-    # has people, which knows these memories, and the workspace's tools if `workspace`
+    # has people, which knows these memories, and the workspace's tools if `workspace`; Leat's, or
+    # a character's
     remembered = memory.listing(memories)
     skills = "\n".join(f"- {path}: {about}" for path, about in files.skills())
     space = WORKSPACE.format(skills=skills) if workspace else ""
     home = f"the home of the user, {name}:" if name else "the user's home:"
+    if character is not None:
+        content = CHARACTER.format(name=character["name"], about=character["about"], home=home,
+                                   memories=remembered, workspace=space)  # fmt: skip
+        return {"role": "system", "content": content}
     content = SYSTEM.format(home=home, memories=remembered, workspace=space)
     return {"role": "system", "content": content}
 
