@@ -25,6 +25,10 @@ def test_prompt():
     assert read[0]["content"] == "You are Leat." + context.SUMMARY.format(summary="Goal: it.")
     assert read[1] == {"role": "user", "content": context.GOING_ON}
     assert read[3]["content"] == context.CLEARED and len(read) == 5
+    # one saved in the workspace says where, to read again
+    saved = [*MESSAGES[:3], MESSAGES[3] | {"info": {"saved": ".web/a.md"}}, *MESSAGES[4:]]
+    read = context.prompt(saved, {"cleared": 4})
+    assert read[3]["content"] == context.SAVED.format(saved=".web/a.md")
     assert MESSAGES[3]["content"] == "x" * 900  # the conversation's own, untouched
 
 

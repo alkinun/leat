@@ -217,7 +217,9 @@ def test_fetch_readable(site, monkeypatch, tmp_path):
     assert "Home" not in result.content and "Copyright" not in result.content
     assert "# The story\n\nThe council met on Tuesday" in result.content
     assert result.content.endswith(f"from [the spring]({site}/spring).")
-    assert [p.name for p in workspace.path(web.SAVED).iterdir()] == []  # the HTML gone
+    # the page kept, to read again, as result.info names it; the HTML gone
+    assert [p.suffix for p in workspace.path(web.SAVED).iterdir()] == [".md"]
+    assert workspace.path(result.info["saved"]).read_text().startswith("# The story")
     # a long one too, whole, its start read and the rest saved
     content = web.fetch(f"{site}/long", workspace).content
     assert "# The story" in content and "(The page goes on" in content

@@ -22,6 +22,8 @@ TAIL = 0.25  # of the context, of the latest messages kept whole
 KEEP = 200  # characters of a tool's answer kept whole, however old
 CHARS = 3  # characters to a token, as an estimate that errs long
 CLEARED = "[This old answer was cleared to make room; call the tool again if you need it.]"
+# of an answer saved in the workspace, as a page read
+SAVED = "[This old answer was cleared to make room; read {saved} if you need it again.]"
 SUMMARY = """
 
 Earlier parts of this conversation were summarized to make room; go on from the summary:
@@ -133,11 +135,13 @@ def transcript(messages: list[dict[str, Any]], shown: int = 1000) -> str:
 
 
 def _view(messages: list[dict[str, Any]], state: State) -> list[dict[str, Any]]:
-    # each message as the model reads it, but for a summary: the tools' old long answers cleared
+    # each message as the model reads it, but for a summary: the tools' old long answers cleared,
+    # saying where one is saved, to read again
     view = [message(m) for m in messages]
-    for m in view[: state.get("cleared", 0)]:
-        if m["role"] == "tool" and len(m["content"]) > KEEP:
-            m["content"] = CLEARED
+    for m, v in zip(messages[: state.get("cleared", 0)], view, strict=False):
+        if v["role"] == "tool" and len(v["content"]) > KEEP:
+            saved = m.get("info", {}).get("saved")
+            v["content"] = SAVED.format(saved=saved) if saved else CLEARED
     return view
 
 

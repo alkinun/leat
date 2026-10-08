@@ -7,8 +7,9 @@ one and the connection with another.
 
 A page is read as Hermes Agent reads one: its content alone, as markdown, which trafilatura finds in
 the sandbox, where a page made to attack a parser attacks nothing else, or of its text without its
-menus, without the sandbox's environment; whole up to a budget, or its start, the rest saved in the
-workspace to read on. Each source is numbered, across the conversation, for the model to cite.
+menus, without the sandbox's environment; whole up to a budget, or its start. The page is saved in
+the workspace, to read on, or again once the conversation has cleared it to make room. Each source
+is numbered, across the conversation, for the model to cite.
 """
 
 import hashlib
@@ -115,12 +116,12 @@ def fetch(url: str, workspace: Workspace | None = None, context: Context | None 
         title, text = _readable(text, final, workspace)
     text = _absolute(text.strip(), final) or "The page has no text."
     n = context.cite(final, title) if context else 0
+    saved = _save(workspace, final, text) if workspace is not None else None
     if (rest := len(text) - PAGE) > 0:
-        saved = _save(workspace, final, text) if workspace is not None else None
         more = f": read {saved} from start={PAGE} for them" if saved else ""
         text = f"{text[:PAGE]}\n\n(The page goes on, {rest} characters more{more}.)"
     head = f"[{n}] {title}" if n else title
-    info = {"url": final, "title": title, "n": n}
+    info = {"url": final, "title": title, "n": n} | ({"saved": saved} if saved else {})
     return Result(f"{head}\n{final}\n\n{text}".strip(), info)
 
 
