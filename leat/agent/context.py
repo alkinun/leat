@@ -18,7 +18,7 @@ from collections.abc import Callable
 from typing import Any
 
 COMPACT = 0.6  # of the context, past which a prompt is made smaller
-TAIL = 0.25  # of the context, of the latest messages kept whole
+TAIL = 0.2  # of the context, of the latest messages kept whole, as Hermes Agent keeps its
 KEEP = 200  # characters of a tool's answer kept whole, however old
 CHARS = 3  # characters to a token, as an estimate that errs long
 CLEARED = "[This old answer was cleared to make room; call the tool again if you need it.]"
