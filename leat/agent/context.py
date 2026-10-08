@@ -163,13 +163,14 @@ def _compact_to(
     # the state made smaller up to the message at `edge`: the tools' answers before it cleared,
     # and if that is not enough, the messages before it summarized
     cleared = state | {"cleared": max(state.get("cleared", 0), edge), "used": None}
-    small = estimate(messages, cleared, extra, image) <= COMPACT * limit
-    if cleared["cleared"] > state.get("cleared", 0) and (small or force):
+    after = estimate(messages, cleared, extra, image)
+    saves = after < estimate(messages, state | {"used": None}, extra, image)  # a cleared answer
+    if saves and (after <= COMPACT * limit or force):
         return cleared
     start, tokens = state.get("summarized", 1), summary_tokens(limit)
     spanned = sum(_tokens(m, image) for m in _view(messages, cleared)[start:edge])
     if edge <= start or spanned <= 2 * tokens:
-        return cleared if cleared["cleared"] > state.get("cleared", 0) else state
+        return cleared if saves else state
     summary = summarize(state.get("summary"), messages[start:edge], tokens)
     return cleared | {"summary": summary, "summarized": edge}
 

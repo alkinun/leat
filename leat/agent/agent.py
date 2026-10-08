@@ -19,12 +19,12 @@ import mimetypes
 import queue
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from typing import Any
 
 from leat.agent import context
 from leat.agent.background import Background
-from leat.agent.client import Client, Completion, EngineError
+from leat.agent.client import Client, Completion, EngineError, whole
 from leat.agent.store import Store
 from leat.agent.tools import Context, Result, Tool, arguments, files, lists, memory, numbered
 from leat.agent.tools import tasks as scheduling
@@ -404,14 +404,14 @@ class Agent:
         `repeat` says, in a conversation; a check, which tells the user only if its `condition`
         holds, if it has one. Raises ValueError if it may not be one, as at a time passed."""
         now = datetime.datetime.now()
-        at = scheduling.first(at, repeat, now)
+        asked, at = at, scheduling.first(at, repeat, now)
         prompt = scheduling.checked(prompt, at, repeat, now)
         condition = scheduling.condition(condition)
         with self._lock:
             if len(self.store.tasks(person)) >= scheduling.MOST:
                 raise ValueError(f"{scheduling.MOST} tasks are scheduled, the most: cancel one")
-            task = self.store.add_task(
-                prompt, repeat, at.timestamp(), conversation, person, condition
+            task = self.store.add_task(  # first as asked, whose day a monthly one keeps to
+                prompt, repeat, asked.timestamp(), conversation, person, condition, at.timestamp()
             )
             self.events.publish(self.tasks_event(person))
         if self.background is not None:
@@ -438,7 +438,10 @@ class Agent:
             conversation = None
         sent = self.send(conversation, task["prompt"], task=id, person=person,
                          quiet=task["condition"], trial=True)  # fmt: skip
-        self.ran(id, task["next"], sent)
+        with self._lock:  # its next time as it is now, which a run due meanwhile may have moved
+            if (task := self.store.task(id)) is not None:
+                self.store.advance(id, task["next"], sent)
+                self.events.publish(self.tasks_event(person))
         return sent
 
     def tasks(self, person: int | None = None) -> list[dict[str, Any]]:
@@ -610,10 +613,12 @@ class _Turn:
         if last and self.tools:
             body["messages"].append({"role": "user", "content": LAST})
         started, finish = time.monotonic(), None
-        self.completion = a.engine.complete(body)
-        if self.stopped.is_set():  # before the completion was there to close
-            self.completion.close()
-        for chunk in self.completion:
+        chunks: Iterable[dict[str, Any]] = ()
+        if not self.stopped.is_set():  # as it may be, while the prompt was made smaller
+            chunks = self.completion = a.engine.complete(body)
+            if self.stopped.is_set():  # before the completion was there to close
+                self.completion.close()
+        for chunk in chunks:
             choice = chunk["choices"][0] if chunk.get("choices") else {}
             delta, finish = choice.get("delta") or {}, choice.get("finish_reason") or finish
             with a._lock:
@@ -663,7 +668,10 @@ class _Turn:
             return self._summarize(before, span, tokens, messages, state, extra)
 
         image = self.image or context.IMAGE
-        smaller = context.compact(messages, state, self.limit, extra, summarize, force, image)
+        try:
+            smaller = context.compact(messages, state, self.limit, extra, summarize, force, image)
+        except _Stopped:  # while summarizing: the turn ends as it is
+            return state
         keys = ("cleared", "summarized")
         if [smaller.get(k) for k in keys] == [state.get(k) for k in keys]:
             return state
@@ -693,7 +701,7 @@ class _Turn:
                 "temperature": 0.3, "tools": [t.declaration() for t in self.tools.values()],
                 "chat_template_kwargs": {"enable_thinking": False, "preserve_thinking": True},
             }  # fmt: skip
-            reply = self.agent.engine.reply(body)
+            reply = self._whole(body)
             if (summary := reply["content"].strip()) and not reply.get("tool_calls"):
                 return summary
         text, so_far = context.transcript(span), f"The summary so far:\n{before}\n\n"
@@ -707,7 +715,17 @@ class _Turn:
             "max_tokens": tokens, "temperature": 0.3,
             "chat_template_kwargs": {"enable_thinking": False},
         }  # fmt: skip
-        return self.agent.engine.reply(body)["content"].strip() or (before or "")
+        return self._whole(body)["content"].strip() or (before or "")
+
+    def _whole(self, body: dict[str, Any]) -> dict[str, Any]:
+        # the model's reply to body, whole, which a stop cuts short: raises _Stopped then
+        self.completion = self.agent.engine.complete(body)
+        if self.stopped.is_set():  # before the completion was there to close
+            self.completion.close()
+        reply = whole(self.completion)
+        if self.stopped.is_set():
+            raise _Stopped
+        return reply
 
     def _seen(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         # the prompt's messages, each image a message shows before its text as a data: URL if
@@ -851,6 +869,10 @@ class _Turn:
 
 class _Deleted(Exception):
     """The turn's conversation was deleted."""
+
+
+class _Stopped(Exception):
+    """The turn was stopped while the model answered other than in its reply."""
 
 
 def _system(

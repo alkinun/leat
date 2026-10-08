@@ -810,6 +810,24 @@ def test_summary(agent, engine, events):
     assert compacted["summarized"] == 3 == agent.conversation(id)["summarized"]
 
 
+def test_stop_while_summarizing(agent, engine, events):
+    # a stop ends the turn as the model summarizes, keeping no summary it cut short, nor asking
+    # for the reply
+    engine.context = 3000
+    engine.replies.put([{"content": "Noted."}])
+    id = agent.send(None, "a" * 3000)
+    until(events, ended)
+    engine.replies.put([{"content": "Goal: the user"}, HOLD, {"content": " writes long."}])
+    agent.send(id, "b" * 3000)
+    while len(engine.requests) < 2:  # the summary asked for
+        time.sleep(0.01)
+    agent.stop(id)
+    until(events, ended)
+    engine.released.set()
+    assert len(engine.requests) == 2 and "summary" not in agent.store.context(id)
+    assert agent.store.messages(id)[-1]["info"]["stopped"]
+
+
 def test_summary_in_place(agent, engine, events):
     # a summary asked at the end of the conversation's prompt, as the engine's cache holds it,
     # when the prompt and the summary fit the context; its tools declared, that it extends the last
@@ -883,6 +901,11 @@ def test_schedule(agent, engine, events):
     assert agent.store.messages(id)[3]["content"] == f"Scheduled, as task [1]: {task['schedule']}."
     with pytest.raises(ValueError, match="that time has passed: it is"):
         agent.schedule("Too late", datetime.datetime.now(), "once", id)
+    # a monthly one keeps to the day asked for, past the shorter months it may first run in
+    rent = agent.schedule("Pay the rent", datetime.datetime(2025, 1, 31, 9), "monthly", id)
+    assert rent["first"] == datetime.datetime(2025, 1, 31, 9).timestamp() < time.time()
+    assert "every month on the 31st" in rent["schedule"] and rent["next"] > time.time()
+    assert agent.unschedule(rent["id"])["prompt"] == "Pay the rent"
     assert agent.unschedule(1)["prompt"] == "Remind the user to call Ada" and agent.tasks() == []
     with pytest.raises(NotFound):
         agent.unschedule(1)

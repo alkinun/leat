@@ -61,6 +61,9 @@ def test_compact():
     state = context.compact(messages, {}, 600, 0, summarize)
     assert state["cleared"] == 4 and summarized == []
     assert context.compact(messages, state, 600, 0, summarize, force=True) == state | {"used": None}
+    # nor, forced, is one with no answer to clear: it would be no smaller
+    short = [SYSTEM, *({"role": r, "content": "Hi"} for r in ("user", "assistant", "user"))]
+    assert context.compact(short, {}, 600, 0, summarize, force=True) == {}
     # a long stretch, summarized, with the summary before, to the turn running
     long = [SYSTEM] + [{"role": r, "content": "y" * 600} for r in ("user", "assistant") * 4]
     state = context.compact(long, {"summary": "Before."}, 1000, 0, summarize)

@@ -222,4 +222,3 @@ def test_hard_texts_parse_quickly():
                          check=True, timeout=60)  # fmt: skip
     times = dict(zip(HARD, json.loads(run.stdout), strict=True))
     assert all(ms < 300 for ms in times.values()), times  # each takes 30 ms at most here
-

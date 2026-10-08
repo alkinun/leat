@@ -13,8 +13,9 @@ message it was reviewed to, and named by the model once.
 A conversation's context is the state of what its prompt keeps of it, as leat.agent.context fits it
 to the model's.
 
-A task is a prompt the agent runs at its next time, in a conversation, first at its first, whose
-wall clock its repeats keep; one done for good is deleted. Settings are values by name, of JSON,
+A task is a prompt the agent runs at its next time, in a conversation, first at its first, the
+time asked for, or the first of its repeats after, whose wall clock and day of the month its repeats
+keep; one done for good is deleted. Settings are values by name, of JSON,
 as a messaging app's connection.
 
 The household is its people, the first its owner, and the devices paired to each, known by the hash
@@ -426,13 +427,15 @@ class Store:
 
     def add_task(
         self, prompt: str, repeat: str, first: float, conversation: str | None,
-        person: int | None = None, condition: str | None = None,
+        person: int | None = None, condition: str | None = None, next: float | None = None,
     ) -> dict[str, Any]:  # fmt: skip
-        """A task of a person's, a check if it has a condition."""
+        """A task of a person's, a check if it has a condition, next at its first time or at
+        `next`, one of its repeats after."""
         rows = self._query(
             "INSERT INTO tasks (prompt, repeat, first, next, conversation, created, person,"
             " condition) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *",
-            prompt, repeat, first, first, conversation, time.time(), person, condition,
+            prompt, repeat, first, first if next is None else next, conversation, time.time(),
+            person, condition,
         )  # fmt: skip
         return dict(rows[0])
 

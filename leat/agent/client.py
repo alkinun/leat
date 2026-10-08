@@ -75,13 +75,7 @@ class Client:
 
     def reply(self, body: dict[str, Any]) -> dict[str, Any]:
         """A chat completion's reply to `body`, whole: its content, and its tool calls if any."""
-        reply: dict[str, Any] = {"role": "assistant", "content": ""}
-        for chunk in self.complete(body):
-            delta = chunk["choices"][0]["delta"] if chunk["choices"] else {}
-            reply["content"] += delta.get("content") or ""
-            if calls := delta.get("tool_calls"):
-                reply["tool_calls"] = [{k: c[k] for k in ("id", "type", "function")} for c in calls]
-        return reply
+        return whole(self.complete(body))
 
     def _json(
         self, method: str, path: str, body: dict[str, Any] | None = None,
@@ -119,6 +113,18 @@ class Client:
         finally:
             _close(sock, response)
         raise EngineError(message)
+
+
+def whole(completion: Completion) -> dict[str, Any]:
+    """A completion's reply, whole, to its end or a close(): its content, and its tool calls if
+    any."""
+    reply: dict[str, Any] = {"role": "assistant", "content": ""}
+    for chunk in completion:
+        delta = chunk["choices"][0]["delta"] if chunk["choices"] else {}
+        reply["content"] += delta.get("content") or ""
+        if calls := delta.get("tool_calls"):
+            reply["tool_calls"] = [{k: c[k] for k in ("id", "type", "function")} for c in calls]
+    return reply
 
 
 def _close(sock: socket.socket, response: http.client.HTTPResponse) -> None:
