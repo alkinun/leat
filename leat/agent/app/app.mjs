@@ -107,7 +107,12 @@ start();
 
 // the app, of the person whose this device is; or, of a device not yet the household's, the gate
 async function start() {
-  const response = await fetch("/api/me");
+  const response = await fetch("/api/me").catch(() => null);
+  if (!response?.ok && response?.status !== 401) { // the box away: tried again, in a while
+    status("Reconnecting to the box…", true);
+    return setTimeout(start, 3000);
+  }
+  status("");
   if (response.status === 401) return gate((await response.json()).empty);
   me = await response.json();
   document.body.classList.toggle("owner", me.owner);
