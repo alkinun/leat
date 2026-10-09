@@ -41,6 +41,7 @@ class FakeEngine(ThreadingHTTPServer):
         self.context: int | None = None  # the model's, said only if set
         self.status = "loaded"  # the model's
         self.vision = False  # whether it sees images
+        self.authorized: list[str | None] = []  # each request's Authorization header
         super().__init__(("127.0.0.1", 0), _FakeHandler)
 
     @property
@@ -55,6 +56,7 @@ class _FakeHandler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self) -> None:
+        self.server.authorized.append(self.headers.get("Authorization"))
         model = {"id": "fake", "status": self.server.status}
         if self.server.vision:
             model |= {"vision": True, "image_tokens": 300}
@@ -653,6 +655,13 @@ def test_models(agent, engine, events):
     engine.status = "loading"
     agent.models_changed()
     assert events.get(timeout=1)["models"] == [{"id": "fake", "status": "loading"}]
+
+
+def test_engine_key(engine):
+    # the engine's API key, if it asks for one, with every request
+    Client(engine.url, "leat-secret").models()
+    Client(engine.url).models()
+    assert engine.authorized == ["Bearer leat-secret", None]
 
 
 def test_engine_stuck(tmp_path, monkeypatch):

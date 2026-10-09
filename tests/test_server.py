@@ -16,6 +16,7 @@ import pytest
 
 from leat.chat import ChatTemplate, Reply
 from leat.engine import Engine
+from leat.keys import Keys
 from leat.sampler import Sampling
 from leat.server import Server, _calls, _completion, _Load, _Writer
 from tests.helpers import CONTEXT, Oracle, chat_template
@@ -467,6 +468,72 @@ def test_unknown_route(client, server):
         urllib.request.urlopen(urllib.request.Request(f"{url}/v1/chat/completions", b"{"))
     with urllib.request.urlopen(f"{url}/v1/models?x=1") as response:  # the path, its query aside
         assert response.status == 200
+
+
+def metrics(server: Server, key: str | None = None) -> dict[str, float]:
+    """/metrics' samples, by their names and labels as written."""
+    url, headers = f"http://127.0.0.1:{server.server_port}/metrics", {}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    request = urllib.request.Request(url, None, headers)
+    with urllib.request.urlopen(request) as response:
+        assert response.headers["Content-Type"].startswith("text/plain; version=0.0.4")
+        lines = response.read().decode().splitlines()
+    return {k: float(v) for k, v in (line.rsplit(" ", 1) for line in lines if line[0] != "#")}
+
+
+def test_metrics(client, server):
+    # each completion's tokens and time counted, its requests by path and status, and the slots
+    # and model of now; with no keys, of no key's
+    before = metrics(server)
+    _, reason = complete(client, "hello", max_tokens=3, temperature=0)
+    after = metrics(server)
+    grown = lambda name: after.get(name, 0) - before.get(name, 0)  # noqa: E731
+    assert grown('leat_completion_tokens_total{key=""}') == 3
+    assert grown('leat_completions_total{finish="length",key=""}') == 1 and reason == "length"
+    assert grown('leat_prompt_tokens_total{key=""}') > 0
+    assert grown('leat_decode_seconds_total{key=""}') > 0
+    ok = 'leat_requests_total{key="",path="/v1/chat/completions",status="200"}'
+    assert grown(ok) == 1
+    assert grown('leat_requests_total{key="",path="/metrics",status="200"}') == 1
+    assert after["leat_slots"] == 2 and after["leat_slots_busy"] == 0
+    assert after["leat_completions_waiting"] == 0
+    assert after['leat_model_loaded{model="tiny"}'] == CONTEXT
+
+
+def test_keys(tiny_model, tmp_path):
+    # given keys, every request must hold one, as OpenAI's clients send it or Anthropic's, and
+    # each key's use is counted apart; a key removed is refused from the next request on
+    keys = Keys(tmp_path / "keys.json")
+    alkin, agent = keys.add("alkin"), keys.add("agent")
+    with serving(tiny_model[0], max_context=CONTEXT, prefill_chunk=8, keys=keys) as server:
+        server.load("tiny")
+        url = f"http://127.0.0.1:{server.server_port}"
+        for headers in ({}, {"Authorization": "Bearer leat-wrong"}, {"x-api-key": alkin[:-1]}):
+            for path in ("/v1/models", "/metrics"):
+                with pytest.raises(urllib.error.HTTPError) as refused:
+                    urllib.request.urlopen(urllib.request.Request(url + path, None, headers))
+                assert refused.value.code == 401
+                assert refused.value.headers["WWW-Authenticate"].startswith("Bearer")
+                error = json.loads(refused.value.read())["error"]
+                assert error["code"] == "invalid_api_key"
+        with pytest.raises(openai.AuthenticationError):
+            complete(connect(server), "hello", max_tokens=1)
+        client = openai.OpenAI(base_url=f"{url}/v1", api_key=alkin, max_retries=0)
+        assert complete(client, "hello", max_tokens=2, temperature=0)[1] == "length"
+        body = json.dumps({"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1})
+        anthropic = {"x-api-key": agent, "Content-Type": "application/json"}
+        request = urllib.request.Request(f"{url}/v1/chat/completions", body.encode(), anthropic)
+        with urllib.request.urlopen(request) as response:
+            assert response.status == 200
+        counted = metrics(server, agent)
+        assert counted['leat_completion_tokens_total{key="alkin"}'] == 2
+        assert counted['leat_completion_tokens_total{key="agent"}'] == 1
+        assert counted['leat_requests_total{key="",path="/v1/models",status="401"}'] == 3
+        keys.remove("alkin")
+        with pytest.raises(openai.AuthenticationError):
+            client.models.list()
+        server.shutdown()
 
 
 def test_concurrent_requests(client, server, engine, expected, monkeypatch):

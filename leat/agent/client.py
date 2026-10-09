@@ -53,13 +53,16 @@ LIST = 10
 
 
 class Client:
-    """leat serve at `url`, as http://127.0.0.1:8080."""
+    """leat serve at `url`, as http://127.0.0.1:8080, with its API key if it asks for one."""
 
-    def __init__(self, url: str):
+    def __init__(self, url: str, key: str | None = None):
         parts = urllib.parse.urlsplit(url)
         if parts.scheme != "http" or not parts.hostname:
             raise ValueError(f"the engine's URL must be http://host:port, not {url!r}")
         self.url, self._host, self._port = url.rstrip("/"), parts.hostname, parts.port or 80
+        self._headers = {"Content-Type": "application/json"}
+        if key:
+            self._headers["Authorization"] = f"Bearer {key}"
 
     def models(self) -> list[dict[str, Any]]:
         """The models it has, each with its status: "loaded", "loading" or "unloaded"."""
@@ -99,7 +102,7 @@ class Client:
         connection = http.client.HTTPConnection(self._host, self._port, timeout=timeout)
         try:
             data = None if body is None else json.dumps(body).encode()
-            connection.request(method, path, data, {"Content-Type": "application/json"})
+            connection.request(method, path, data, self._headers)
             sock, response = connection.sock, connection.getresponse()
         except OSError as e:
             connection.close()

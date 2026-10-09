@@ -87,6 +87,16 @@ Devices: any tinygrad backend runs the reference ops. NVIDIA GPUs (`DEV=NV` or `
 
 Server: `/v1/chat/completions`, whole or streamed, `/v1/models`, which gives the loaded model's `max_context`, and `/v1/models/load`; a POST from a page in a browser is refused, as the server has none, even of a name made its address's. Replies split into `reasoning_content`, as Qwen3's `<think>` blocks, Gemma 4's thought channel and gpt-oss's analysis channel, text, and tool calls in Llama 3's, Qwen's, Qwen3.5's, Gemma 4's and gpt-oss's syntax. Requests take stop strings, 16 of 256 characters at most, seeds and `chat_template_kwargs` such as `{"enable_thinking": false}`. Sampling, on the device, is greedy or by temperature, with `top_k`, `top_p` and `min_p`, which the kernels cut within a hundredth of a nat, and `presence_penalty` on the tokens a reply has generated; requests for other penalties, `logprobs` or several choices are refused. Each reply ends with `timings`, as llama.cpp's server sends them: the prompt's tokens past those cached and the reply's, each timed, from when the completion gets a slot, and their rates.
 
+Keys: given `--keys`, a file of API keys, `leat serve` answers only the requests that hold one, as OpenAI's clients send it, `Authorization: Bearer KEY`, or Anthropic's, `x-api-key: KEY`; to serve beyond this machine, as `--host 0.0.0.0`, it needs them. Each key is a person's or an app's, by its name: `leat keys add alkin` makes one and shows it once, `leat keys list` and `leat keys remove alkin` list and remove them, in `~/.local/share/leat/keys.json` by default, which keeps each key's SHA-256 alone and is its owner's alone to read. The server reads the file again as it changes, so that a key removed is refused from the next request on, without a restart. leat agent sends the key in `LEAT_ENGINE_KEY`, if the engine asks for one.
+
+```bash
+uv run leat keys add agent
+DEV=AMD uv run leat serve model.gguf --host 0.0.0.0 --keys
+LEAT_ENGINE_KEY=leat-… uv run leat agent
+```
+
+Metrics: `/metrics`, in Prometheus's text format, behind the same keys, counts since the server started each key's requests, by path and status, and its completions, by how they ended, their prompts' tokens, those cached, the tokens generated, and the seconds of prefill and of decoding; and says the slots, those busy, the completions waiting for one, and the model loaded, of its context.
+
 Concurrent requests: completions run together, one in each of `--slots` slots of the KV cache, 4 by default; more wait their turn. Each step prefills a chunk of one prompt, of 256 tokens at most while others decode, then decodes a token of every running completion in one batch, of up to 8, whose matrices read each weight once for all of them. A client that hangs up frees its slot at the next step. A slot past the others holds the padding of batches of 3, 5, 6 or 7, which run in the graphs of 4 and 8.
 
 Prefix caching: a conversation continues in its slot, and a prompt that shares a prefix with any slot, such as a system prompt, starts from a copy of it. Qwen3.5's recurrent state holds all a slot ran, so there a prompt shares a slot's tokens only when it shares all of them, or all those before the state the slot kept 16 tokens before its last prompt's end: where a chat's next turn, which renders the last turn anew, and an agent's next step go on.

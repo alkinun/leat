@@ -1,4 +1,5 @@
-"""Command line: `leat agent`, `leat run`, `leat serve`, `leat bench` and `leat perplexity`.
+"""Command line: `leat agent`, `leat run`, `leat serve`, `leat keys`, `leat bench` and
+`leat perplexity`.
 
 The engine's commands import it as they run, so that leat agent, which reaches the engine over HTTP
 alone, never loads it, nor tinygrad.
@@ -6,6 +7,7 @@ alone, never loads it, nor tinygrad.
 
 import argparse
 import contextlib
+import ipaddress
 import json
 import os
 import threading
@@ -20,6 +22,7 @@ from leat.agent.server import Server as AgentServer
 from leat.agent.store import Store
 from leat.agent.tools import files, web
 from leat.agent.workspace import Workspace
+from leat.keys import Keys
 
 if TYPE_CHECKING:
     from leat.chat import ChatTemplate
@@ -36,7 +39,10 @@ def main(argv: list[str] | None = None) -> None:
     agent = commands.add_parser(
         "agent", help="run leat agent, the assistant, and serve its app; models come of leat serve"
     )
-    agent.add_argument("--engine", default="http://127.0.0.1:8080", help="leat serve's address")
+    agent.add_argument(
+        "--engine", default="http://127.0.0.1:8080",
+        help="leat serve's address; its API key, if it asks for one, in LEAT_ENGINE_KEY",
+    )  # fmt: skip
     agent.add_argument(
         "--search", default="http://127.0.0.1:8888", help="a SearXNG's address, for web search"
     )
@@ -91,6 +97,16 @@ def main(argv: list[str] | None = None) -> None:
         help="a vision encoder's GGUF, of the one model; by default each model takes the "
         "projector beside it of its name, if any",
     )  # fmt: skip
+    serve.add_argument(
+        "--keys", type=Path, nargs="?", const=_data() / "keys.json",
+        help="a file of API keys, as `leat keys` makes it, one of which every request must hold; "
+        f"by default {_data() / 'keys.json'}. Needed to serve beyond this machine",
+    )  # fmt: skip
+
+    keys = commands.add_parser("keys", help="make, list and remove leat serve's API keys")
+    keys.add_argument("action", choices=("add", "list", "remove"))
+    keys.add_argument("name", nargs="?", help="the key's, a person's or an app's, as alkin")
+    keys.add_argument("--file", type=Path, default=_data() / "keys.json", help="the file of keys")
 
     speed = commands.add_parser("bench", help="measure prefill and decode speed")
     speed.add_argument("model", type=Path, help="GGUF file")
@@ -134,7 +150,8 @@ def main(argv: list[str] | None = None) -> None:
 
     args = parser.parse_args(argv)
     handlers = {
-        "agent": _agent, "run": _run, "serve": _serve, "bench": _bench, "perplexity": _perplexity
+        "agent": _agent, "run": _run, "serve": _serve, "keys": _keys, "bench": _bench,
+        "perplexity": _perplexity,
     }  # fmt: skip
     handlers[args.command](args)
 
@@ -155,7 +172,7 @@ def _agent(args: argparse.Namespace) -> None:
     args.data.mkdir(parents=True, exist_ok=True)
     environment = args.data / "sandbox"
     workspace = Workspace(args.data / "workspace", environment if environment.exists() else None)
-    engine = Client(args.engine)
+    engine = Client(args.engine, os.environ.get("LEAT_ENGINE_KEY"))
     tools = [*web.tools(args.search, workspace, engine), *files.tools(workspace)]
     agent = Agent(Store(args.data / "leat.db"), engine, tools, workspace)
     agent.start()
@@ -274,9 +291,16 @@ def _serve(args: argparse.Namespace) -> None:
     for flag in ("draft", "mmproj"):
         if getattr(args, flag) and len(models) > 1:
             raise SystemExit(f"--{flag} is of one model: serve that one alone")
+    if args.keys is None and not _loopback(args.host):
+        raise SystemExit(f"to serve beyond this machine, at {args.host}, give --keys: make one "
+                         "with `leat keys add NAME`")  # fmt: skip
+    if args.keys is not None and not args.keys.exists():
+        raise SystemExit(f"there are no keys at {args.keys}: make one with "
+                         f"`leat keys add NAME --file {args.keys}`")  # fmt: skip
     options = {"max_context": args.max_context, "slots": args.slots, "draft": args.draft,
                "vision": args.mmproj}  # fmt: skip
-    with Server(models, args.host, args.port, **options) as server:
+    keys = Keys(args.keys) if args.keys is not None else None
+    with Server(models, args.host, args.port, keys, **options) as server:
         # served at once, the model loading meanwhile, so that a client asking while it compiles
         # hears it is loading, its completions waiting for it, rather than no answer
         url, name = _url(args.host, server.server_port), models[0].stem
@@ -287,6 +311,33 @@ def _serve(args: argparse.Namespace) -> None:
             server.serve_forever()
         if failed:
             raise failed[0]
+
+
+def _loopback(host: str) -> bool:
+    # whether a host the server binds to is this machine's alone
+    with contextlib.suppress(ValueError):
+        return ipaddress.ip_address(host).is_loopback
+    return host == "localhost"
+
+
+def _keys(args: argparse.Namespace) -> None:
+    keys = Keys(args.file)
+    if args.action == "list":
+        for listed in keys.listed():
+            print(f"{listed['name']}\t{listed['created']}")
+        return
+    if not args.name:
+        raise SystemExit(f"leat keys {args.action} needs the key's name")
+    try:
+        if args.action == "add":
+            key = keys.add(args.name)
+            print(f"{key}\n\nThe key of {args.name}, shown this once: keep it where its app reads "
+                  f"it, as OPENAI_API_KEY. {args.file} keeps its hash alone.")  # fmt: skip
+        else:
+            keys.remove(args.name)
+            print(f"{args.name}'s key is removed: leat serve refuses it from the next request on.")
+    except (ValueError, LookupError) as e:
+        raise SystemExit(str(e)) from e
 
 
 def _start(server: "Server", name: str, failed: list[Exception]) -> None:

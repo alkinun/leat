@@ -172,16 +172,18 @@ def test_run_past_the_context(tiny_model, monkeypatch, capsys):
 
 def test_serve_directories(tiny_model, tmp_path, monkeypatch, capsys):
     # of directories alone, the first file found loads at start, served meanwhile; a server on
-    # every address is browsed at this machine's; a model that fails to load stops the server
+    # every address is browsed at this machine's, and needs keys; a model that fails to load stops
+    # the server
     (models := tmp_path / "models").mkdir()
     (models / "tiny.gguf").symlink_to(tiny_model[0])
-    loaded, failing = [], []
+    loaded, failing, keys = [], [], []
 
     class Fake:
         server_port = 8080
 
-        def __init__(self, files, host, port, **options):
+        def __init__(self, files, host, port, given, **options):
             self.files, self.stopped = files, threading.Event()
+            keys.append(given)
 
         def __enter__(self):
             return self
@@ -202,9 +204,17 @@ def test_serve_directories(tiny_model, tmp_path, monkeypatch, capsys):
             self.stopped.set()
 
     monkeypatch.setattr("leat.server.Server", Fake)
-    main(["serve", str(models), "--host", "0.0.0.0"])
+    with pytest.raises(SystemExit, match="to serve beyond this machine, at 0.0.0.0, give --keys"):
+        main(["serve", str(models), "--host", "0.0.0.0"])
+    with pytest.raises(SystemExit, match="there are no keys at"):
+        main(["serve", str(models), "--host", "0.0.0.0", "--keys", str(tmp_path / "keys.json")])
+    main(["keys", "add", "alkin", "--file", str(tmp_path / "keys.json")])
+    main(["serve", str(models), "--host", "0.0.0.0", "--keys", str(tmp_path / "keys.json")])
     out = capsys.readouterr().out
     assert loaded == ["tiny"] and "the API at http://127.0.0.1:8080/v1, compiling..." in out
+    assert keys[-1].path == tmp_path / "keys.json"
+    main(["serve", str(models), "--host", "::1"])  # this machine's alone: no keys needed
+    assert keys[-1] is None
     failing.append(True)
     with pytest.raises(RuntimeError, match="loading tiny failed"):
         main(["serve", str(models)])
@@ -213,6 +223,23 @@ def test_serve_directories(tiny_model, tmp_path, monkeypatch, capsys):
         main(["serve", str(empty)])
     with pytest.raises(SystemExit, match="--draft is of one model"):
         main(["serve", str(models), str(tiny_model[0]), "--draft", str(tiny_model[0])])
+
+
+def test_keys(tmp_path, capsys):
+    # a key made is shown once, listed by its name, and removed by it
+    file = str(tmp_path / "keys.json")
+    main(["keys", "add", "alkin", "--file", file])
+    key = capsys.readouterr().out.split("\n")[0]
+    assert key.startswith("leat-") and key not in (tmp_path / "keys.json").read_text()
+    main(["keys", "list", "--file", file])
+    assert capsys.readouterr().out.startswith("alkin\t20")
+    for args, error in ((["add", "alkin"], "already"), (["remove", "bo"], "no key named bo"),
+                        (["add"], "needs the key's name")):  # fmt: skip
+        with pytest.raises(SystemExit, match=error):
+            main(["keys", *args, "--file", file])
+    main(["keys", "remove", "alkin", "--file", file])
+    main(["keys", "list", "--file", file])
+    assert capsys.readouterr().out.endswith("from the next request on.\n")
 
 
 def test_agent(tmp_path, monkeypatch, capsys):

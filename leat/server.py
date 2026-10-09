@@ -1,9 +1,12 @@
-"""OpenAI-compatible HTTP server: chat completions, whole or streamed, the model list, and loading
-a model.
+"""OpenAI-compatible HTTP server: chat completions, whole or streamed, the model list, loading a
+model, and the metrics of what it did, in Prometheus's format.
 
 Handler threads parse requests, render prompts and write responses. One worker thread owns the
 engine: it runs completions together, one per slot, a token of each per batched step, and loads a
 model once the completions before have finished; the rest wait their turn in the order they arrive.
+
+Given keys, every request must hold one, as OpenAI's clients send it, `Authorization: Bearer KEY`,
+or as Anthropic's do, `x-api-key: KEY`; each key's requests, tokens and time are counted apart.
 """
 
 import collections
@@ -28,6 +31,7 @@ import jinja2
 
 from leat.chat import ChatTemplate, Reply, images, parse_tool_calls, split_reply, tool_call_start
 from leat.engine import Engine, Sequence
+from leat.keys import Keys
 from leat.sampler import Sampling
 from leat.tokenizer import Tokenizer
 from leat.vision import Image, beside
@@ -123,6 +127,7 @@ class _Completion:
     stream_usage: bool
     images: list[Image] = field(default_factory=list)  # those the prompt shows
     form: str | None = None  # how the reply marks its reasoning, as ChatTemplate.form
+    key: str = ""  # the name of the key it came with, if the server asks for keys
     thinking: bool = False  # the prompt opened a <think> block
     id: str = field(default_factory=lambda: f"chatcmpl-{uuid.uuid4().hex}")
     created: int = field(default_factory=lambda: int(time.time()))
@@ -152,7 +157,8 @@ class _Completion:
 
 
 class Server(ThreadingHTTPServer):
-    """Serves GGUF models at http://host:port, the API at /v1, until shut down.
+    """Serves GGUF models at http://host:port, the API at /v1 and its metrics at /metrics, until
+    shut down, to the requests that hold one of the `keys`, if given, and to any otherwise.
 
     One model is loaded at a time, none until load(), as Engine(path, **options); it answers every
     request, whatever model it names. A model's id is its file name without .gguf. Unless the
@@ -161,10 +167,12 @@ class Server(ThreadingHTTPServer):
 
     def __init__(
         self, models: Iterable[str | Path], host: str = "127.0.0.1", port: int = 8080,
-        **options: Any,
+        keys: Keys | None = None, **options: Any,
     ):  # fmt: skip
         self.models = {Path(path).stem: Path(path) for path in models}
-        self.options, self.created = options, int(time.time())
+        self.options, self.created, self.keys = options, int(time.time()), keys
+        self.metrics = _Metrics()
+        self.busy = self.queued = 0  # completions running, and waiting for a slot, as last stepped
         self.loaded: _Loaded | None = None
         self.loading: str | None = None  # the id of the model the worker is loading
         self.ready = threading.Event()  # clear from a load's request till it is done, which
@@ -214,6 +222,7 @@ class Server(ThreadingHTTPServer):
                     self._step(running)
             except Exception as e:  # a bug's, for every client, rather than a worker gone
                 self._fail(e, waiting, running)
+            self.busy, self.queued = len(running), sum(isinstance(r, _Completion) for r in waiting)
 
     def _fail(
         self, error: Exception, waiting: collections.deque[_Completion | _Load],
@@ -239,7 +248,7 @@ class Server(ThreadingHTTPServer):
         for sequence, writer in list(running.items()):
             if writer.c.cancelled.is_set():  # the client hung up
                 engine.cancel(sequence)
-                writer.finish("stop")
+                writer.finish("cancelled")
                 del running[sequence]
         if not running:
             return
@@ -293,7 +302,7 @@ class Server(ThreadingHTTPServer):
         except Exception as e:  # for the client; the server carries on
             request.out.put(e)
             return True
-        running[sequence] = _Writer(request, engine.tokenizer, cached, started)
+        running[sequence] = _Writer(request, engine.tokenizer, cached, started, self.metrics)
         return True
 
     def _load(self, load: _Load) -> None:
@@ -340,10 +349,14 @@ class Server(ThreadingHTTPServer):
 
 class _Writer:
     """Puts a completion's reply into its out queue piece by piece as tokens come: decoded, and
-    holding back any end of the text that may begin a stop string."""
+    holding back any end of the text that may begin a stop string; and counts it in `metrics` once
+    it ends."""
 
-    def __init__(self, c: _Completion, tokenizer: Tokenizer, cached: int, started: float):
-        self.c, self.tokenizer, self.cached = c, tokenizer, cached
+    def __init__(
+        self, c: _Completion, tokenizer: Tokenizer, cached: int, started: float,
+        metrics: "_Metrics",
+    ):  # fmt: skip
+        self.c, self.tokenizer, self.cached, self.metrics = c, tokenizer, cached, metrics
         self.decode, self.text, self.sent, self.count = tokenizer.stream(), "", 0, 0
         self.stopped = False  # by a stop string, the text cut where it begins
         # when generation started, after any wait for a slot, and when the first token came
@@ -367,7 +380,8 @@ class _Writer:
         return False
 
     def finish(self, reason: str) -> None:
-        """Puts the rest of the text, then how the reply ended."""
+        """Puts the rest of the text, then how the reply ended: "stop", "length", or "cancelled" as
+        its client hung up."""
         if not self.stopped:
             self.text += self.decode(None)
         if len(self.text) > self.sent:
@@ -376,31 +390,164 @@ class _Writer:
         first = self.first if self.count else end
         finish = _Finish(reason, self.cached, self.count, first - self.started, end - first)
         self.c.out.put(finish)
+        self.metrics.finished(self.c.key, len(self.c.prompt), finish)
+
+
+_Labels = tuple[tuple[str, str], ...]  # a sample's, by name
+_Gauge = tuple[str, str, dict[str, str], float]  # a gauge's name, help, labels and value
+
+
+class _Metrics:
+    """What the server did since it started, counted by key: its requests, and its completions'
+    tokens and time, which only grow, as Prometheus's counters do."""
+
+    COUNTERS = {
+        "leat_requests_total": "Requests answered, by key, path and status.",
+        "leat_completions_total": "Chat completions ended, by key and how: stop, length or "
+        "cancelled, as the client hung up.",
+        "leat_prompt_tokens_total": "Prompt tokens of the completions ended, the cached ones too.",
+        "leat_cached_tokens_total": "Prompt tokens the cache held, which were not computed again.",
+        "leat_completion_tokens_total": "Tokens generated.",
+        "leat_prefill_seconds_total": "Seconds from each completion's start to its first token.",
+        "leat_decode_seconds_total": "Seconds from each completion's first token to its last.",
+    }
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._values: dict[str, dict[_Labels, float]] = {name: {} for name in self.COUNTERS}
+
+    def add(self, name: str, value: float, **labels: str) -> None:
+        with self._lock:
+            samples, key = self._values[name], tuple(sorted(labels.items()))
+            samples[key] = samples.get(key, 0.0) + value
+
+    def finished(self, key: str, prompt: int, f: _Finish) -> None:
+        """Counts a completion that ended, of a prompt of `prompt` tokens."""
+        self.add("leat_completions_total", 1, key=key, finish=f.reason)
+        for name, value in (("prompt_tokens", prompt), ("cached_tokens", f.cached),
+                            ("completion_tokens", f.tokens), ("prefill_seconds", f.prefill_time),
+                            ("decode_seconds", f.decode_time)):  # fmt: skip
+            self.add(f"leat_{name}_total", value, key=key)
+
+    def text(self, gauges: list[_Gauge]) -> str:
+        """The counters, then the gauges, each of its name, its help, its labels and its value,
+        in Prometheus's text format."""
+        with self._lock:
+            metrics = [(name, help, "counter", list(self._values[name].items()))
+                       for name, help in self.COUNTERS.items()]  # fmt: skip
+        for name, help, named, value in gauges:
+            metrics.append((name, help, "gauge", [(tuple(named.items()), value)]))
+        lines = []
+        for name, help, kind, samples in metrics:
+            lines += [f"# HELP {name} {help}", f"# TYPE {name} {kind}"]
+            for labels, value in samples:
+                shown = ",".join(f'{k}="{_escaped(v)}"' for k, v in labels)
+                lines.append(f"{name}{{{shown}}} {_number(value)}" if shown
+                             else f"{name} {_number(value)}")  # fmt: skip
+        return "\n".join(lines) + "\n"
+
+
+def _number(value: float) -> str:
+    # a sample's value, whole if it is, else every digit of it
+    return str(int(value)) if float(value).is_integer() else repr(float(value))
+
+
+def _escaped(value: str) -> str:
+    # a label's value as Prometheus's text format quotes it
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
 class _Handler(BaseHTTPRequestHandler):
     server: Server
+    key = ""  # the name of the request's key, once it is known
+    status: int | None = None  # the status it was answered with, as the metrics count it
 
     def do_GET(self) -> None:
         self.path = urllib.parse.urlsplit(self.path).path  # without a query, ?v=2 say
-        if self.path != "/v1/models":
-            return self._error(404, f"there is no GET {self.path}")
-        self._json(200, {"object": "list", "data": [self._model(m) for m in self.server.models]})
+        routes = {"/v1/models": self._models, "/metrics": self._metrics}
+        with self._counted(self.path in routes):
+            if (route := routes.get(self.path)) is None:
+                return self._error(404, f"there is no GET {self.path}")
+            if self._authorized():
+                route()
 
     def do_POST(self) -> None:
         self.path = urllib.parse.urlsplit(self.path).path
         routes = {"/v1/chat/completions": self._complete, "/v1/models/load": self._load}
-        if (route := routes.get(self.path)) is None:
-            return self._error(404, f"there is no POST {self.path}")
-        if "Origin" in self.headers:  # a browser's: this server has no pages, and another
-            # site's may not make it generate or load models, its name made this address's or not
-            return self._error(403, "requests from web pages are refused")
+        with self._counted(self.path in routes):
+            if (route := routes.get(self.path)) is None:
+                return self._error(404, f"there is no POST {self.path}")
+            if "Origin" in self.headers:  # a browser's: this server has no pages, and another
+                # site's may not make it generate or load models, its name made this address's
+                return self._error(403, "requests from web pages are refused")
+            if not self._authorized():
+                return
+            try:
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+            except (ValueError, RecursionError) as e:  # not JSON, or nested too deep to parse
+                return self._error(400, str(e))
+            with contextlib.suppress(OSError):  # the client hung up, while a model loaded say
+                route(body)
+
+    def send_response(self, code: int, message: str | None = None) -> None:
+        self.status = code
+        super().send_response(code, message)
+
+    @contextlib.contextmanager
+    def _counted(self, routed: bool) -> Iterator[None]:
+        # counts the request once answered, by its key, its path, if it is one of the API's, and
+        # its status
         try:
-            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
-        except (ValueError, RecursionError) as e:  # not JSON, or nested too deep to parse
-            return self._error(400, str(e))
-        with contextlib.suppress(OSError):  # the client hung up, while a model loaded say
-            route(body)
+            yield
+        finally:
+            path = self.path if routed else "other"
+            status = str(self.status) if self.status is not None else "none"  # hung up first
+            self.server.metrics.add("leat_requests_total", 1, key=self.key, path=path,
+                                    status=status)  # fmt: skip
+
+    def _authorized(self) -> bool:
+        # whether the request holds one of the server's keys, if it has any, as OpenAI's clients
+        # send it or Anthropic's; if not, it is answered so
+        if (keys := self.server.keys) is None:
+            return True
+        given = self.headers.get("x-api-key")
+        bearer = self.headers.get("Authorization", "")
+        if given is None and bearer[:7].lower() == "bearer ":
+            given = bearer[7:].strip()
+        try:
+            self.key = keys.name(given) or ""
+        except ValueError as e:  # the file of keys is broken
+            self._error(500, str(e))
+            return False
+        if not self.key:
+            message = "this server needs an API key" if not given else "the API key is not valid"
+            self._error(401, message, {"WWW-Authenticate": 'Bearer realm="leat"'})
+        return bool(self.key)
+
+    def _models(self) -> None:
+        self._json(200, {"object": "list", "data": [self._model(m) for m in self.server.models]})
+
+    def _metrics(self) -> None:
+        # the counters, and the gauges of now: the slots, those busy, the completions waiting,
+        # and the model loaded
+        s, loaded = self.server, self.server.loaded
+        gauges: list[_Gauge] = [
+            ("leat_start_time_seconds", "When the server started, in seconds since 1970.", {},
+             s.created),
+            ("leat_slots", "Slots of the KV cache, each of a completion at a time.", {},
+             loaded.engine.slots if loaded else 0),
+            ("leat_slots_busy", "Slots a completion runs in.", {}, s.busy),
+            ("leat_completions_waiting", "Completions waiting for a slot.", {}, s.queued),
+        ]  # fmt: skip
+        if loaded is not None:
+            gauges.append(("leat_model_loaded", "The model loaded, of its context in tokens.",
+                           {"model": loaded.name}, loaded.engine.max_context))  # fmt: skip
+        data = s.metrics.text(gauges).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def _load(self, body: Any) -> None:
         name = body.get("model") if isinstance(body, dict) else None
@@ -418,6 +565,7 @@ class _Handler(BaseHTTPRequestHandler):
             completion = _completion(body, self.server)
         except (ValueError, TypeError, jinja2.TemplateError) as e:
             return self._error(400, str(e))
+        completion.key = self.key
         self.server.requests.put(completion)
         try:
             if completion.stream:
@@ -522,18 +670,23 @@ class _Handler(BaseHTTPRequestHandler):
         text = data if isinstance(data, str) else json.dumps(data)
         self.wfile.write(f"data: {text}\n\n".encode())
 
-    def _json(self, status: int, body: dict[str, Any]) -> None:
+    def _json(
+        self, status: int, body: dict[str, Any], headers: dict[str, str] | None = None
+    ) -> None:
         data = json.dumps(body).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(data)
 
-    def _error(self, status: int, message: str) -> None:
+    def _error(self, status: int, message: str, headers: dict[str, str] | None = None) -> None:
         kind = "invalid_request_error" if status < 500 else "server_error"
-        error = {"message": message, "type": kind, "param": None, "code": None}
-        self._json(status, {"error": error})
+        code = "invalid_api_key" if status == 401 else None
+        error = {"message": message, "type": kind, "param": None, "code": code}
+        self._json(status, {"error": error}, headers)
 
 
 def _completion(body: Any, server: Server) -> _Completion:
