@@ -7,8 +7,8 @@ description: Word documents, as letters, CVs and reports
 Make them with python-docx, in one run, and save them in the workspace under a name that says what
 they are. Fill in the user's own details; leave none of the template's.
 
-Write of the user only what they told you, or what you remember of them: never invent their
-experience, duties, results, courses or skill levels. Where the document wants more, leave a gap
+Write of the user only what they told you: never invent their experience, duties, results,
+courses or skill levels. Where the document wants more, leave a gap
 marked as "[your duties at Springfield General]", and say in your answer what they may add.
 
 ```python

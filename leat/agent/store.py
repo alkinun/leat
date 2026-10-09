@@ -1,28 +1,19 @@
-"""The agent's state, in one SQLite file: conversations and their messages, and memories.
+"""The agent's state, in one SQLite file: conversations and their messages, and the household.
 
 A message is a dict in OpenAI's chat format, as the model reads it, and its "info": what only people
 see of it, such as the model that wrote it and how fast. A conversation's messages are only ever
-appended, but for a turn taken back whole, so that each step's prompt extends the last's. What the
-user and the model said is indexed for full-text search, the tools' answers not.
-
-A memory is a short sentence about the user, of a category, which every conversation begun after
-it knows, dated when it was last confirmed, and a plan with its last day. What a change replaced or
-forgetting removed is kept, to undo. A conversation is reviewed for memories once idle, to the
-message it was reviewed to, and named by the model once.
+appended, but for a turn taken back whole, so that each step's prompt extends the last's. A
+conversation is named by the model once.
 
 A conversation's context is the state of what its prompt keeps of it, as leat.agent.context fits it
 to the model's.
 
-Settings are values by name, of JSON.
-
 The household is its people, the first its owner, and the devices paired to each, known by the hash
-of a secret each holds. A conversation and a memory are each a person's; a memory of the household
-category is everyone's. Before the household has its first person, everything is no one's,
-and becomes the owner's.
+of a secret each holds. A conversation is a person's. Before the household has its first person,
+every conversation is no one's, and becomes the owner's.
 """
 
 import json
-import re
 import sqlite3
 import threading
 import time
@@ -174,11 +165,8 @@ _MIGRATIONS = [
     ALTER TABLE tasks ADD COLUMN condition TEXT;
     """,
 ]
-_SEARCHED = ("user", "assistant")  # the roles of the messages search finds
 # a conversation's columns as the apps list it
 _SUMMARY = "id, title, created, updated, person"
-# the memories a person knows: their own, and the household's
-_KNOWN = "(person IS ? OR category = 'household')"
 
 
 class Store:
@@ -249,64 +237,13 @@ class Store:
         """Keeps a conversation's first n messages, taking back those after."""
         with self._lock, self._db:
             self._db.execute("BEGIN")
-            for table in ("messages", "search"):
-                sql = f"DELETE FROM {table} WHERE conversation = ? AND position >= ?"
-                self._db.execute(sql, (id, n))
+            sql = "DELETE FROM messages WHERE conversation = ? AND position >= ?"
+            self._db.execute(sql, (id, n))
 
     def delete(self, id: str) -> None:
         with self._lock, self._db:
             self._db.execute("BEGIN")
             self._db.execute("DELETE FROM conversations WHERE id = ?", (id,))
-            self._db.execute("DELETE FROM search WHERE conversation = ?", (id,))
-
-    def search(
-        self, query: str, person: int | None = None, exclude: str | None = None, since: float = 0,
-        limit: int = 8,
-    ) -> list[dict[str, Any]]:  # fmt: skip
-        """What a person and the model said in their conversations that matches any of the
-        query's words, the best first, of conversations updated since a time: each its
-        conversation's id, title and last update, its role and position, and the words around."""
-        if not (words := re.findall(r"\w+", query)):
-            return []
-        rows = self._query(
-            "SELECT s.conversation, c.title, c.updated, s.role, s.position,"
-            " snippet(search, 0, '', '', '…', 32) AS text"
-            " FROM search s JOIN conversations c ON c.id = s.conversation"
-            " WHERE search MATCH ? AND c.person IS ? AND s.conversation IS NOT ?"
-            " AND c.updated >= ? ORDER BY rank LIMIT ?",
-            " OR ".join(f'"{word}"' for word in words), person, exclude, since, limit,
-        )  # fmt: skip
-        return [dict(row) for row in rows]
-
-    def recent(
-        self, since: float, person: int | None = None, exclude: str | None = None, limit: int = 10
-    ) -> list[dict]:
-        """A person's conversations updated since a time, the latest first: each's id, title and
-        last update, and its first message of the user's."""
-        rows = self._query(
-            "SELECT c.id AS conversation, c.title, c.updated, m.message ->> '$.content' AS text"
-            " FROM conversations c JOIN messages m ON m.conversation = c.id AND m.position = 1"
-            " WHERE c.updated >= ? AND c.person IS ? AND c.id IS NOT ?"
-            " ORDER BY c.updated DESC LIMIT ?",
-            since, person, exclude, limit,
-        )  # fmt: skip
-        return [dict(row) for row in rows]
-
-    def idle(self, before: float) -> list[str]:
-        """The conversations last updated before a time with messages not yet reviewed."""
-        rows = self._query(
-            "SELECT c.id FROM conversations c WHERE c.updated < ? AND c.reviewed <"
-            " (SELECT count(*) FROM messages m WHERE m.conversation = c.id)", before
-        )  # fmt: skip
-        return [row["id"] for row in rows]
-
-    def reviewed(self, id: str) -> int:
-        rows = self._query("SELECT reviewed FROM conversations WHERE id = ?", id)
-        return rows[0]["reviewed"] if rows else 0
-
-    def mark_reviewed(self, id: str, n: int) -> None:
-        with self._lock:
-            self._db.execute("UPDATE conversations SET reviewed = ? WHERE id = ?", (n, id))
 
     def unnamed(self) -> list[str]:
         """The conversations the model has not named, the latest updated first."""
@@ -319,94 +256,6 @@ class Store:
             sql = "UPDATE conversations SET title = ?, named = 1 WHERE id = ?"
             self._db.execute(sql, (title, id))
 
-    def memories(self, person: int | None = None) -> list[dict[str, Any]]:
-        """The memories a person knows, their own and the household's, the oldest first."""
-        sql = f"SELECT * FROM memories WHERE {_KNOWN} ORDER BY id"
-        return [dict(row) for row in self._query(sql, person)]
-
-    def memory(self, id: int) -> dict[str, Any] | None:
-        rows = self._query("SELECT * FROM memories WHERE id = ?", id)
-        return dict(rows[0]) if rows else None
-
-    def add_memory(
-        self, text: str, category: str, until: str | None = None, person: int | None = None
-    ) -> dict[str, Any]:
-        """A new memory of a person's, or of no one's, the household's."""
-        rows = self._query(
-            "INSERT INTO memories (text, created, category, confirmed, until, person) VALUES"
-            " (?, ?, ?, ?, ?, ?) RETURNING *", text, now := time.time(), category, now, until,
-            person,
-        )  # fmt: skip
-        return dict(rows[0])
-
-    def replace_memory(
-        self, id: int, text: str, category: str, until: str | None, by: str,
-        person: int | None = None,
-    ) -> dict[str, Any] | None:  # fmt: skip
-        """Replaces a memory's text, category and last day, and whose it is, keeping what it was;
-        returns it as it is now, if it is there."""
-        return self._change(
-            id, "replaced", by, "UPDATE memories SET text = ?, category = ?, until = ?,"
-            " confirmed = ?, person = ? WHERE id = ? RETURNING *", text, category, until,
-            time.time(), person, id,
-        )  # fmt: skip
-
-    def confirm_memory(self, id: int) -> None:
-        """Dates a memory said again now."""
-        self._query("UPDATE memories SET confirmed = ? WHERE id = ?", time.time(), id)
-
-    def delete_memory(self, id: int, by: str) -> dict[str, Any] | None:
-        """Forgets a memory, keeping what it was; returns it, if it was there."""
-        sql = "DELETE FROM memories WHERE id = ? RETURNING *"
-        return self._change(id, "forgotten", by, sql, id)
-
-    def forgotten(self, person: int | None = None, limit: int = 20) -> list[dict[str, Any]]:
-        """The memories a person knew that were forgotten or changed, as they were, the latest
-        first."""
-        sql = f"SELECT * FROM forgotten WHERE {_KNOWN} ORDER BY id DESC LIMIT ?"
-        return [dict(row) for row in self._query(sql, person, limit)]
-
-    def forgetting(self, id: int) -> dict[str, Any] | None:
-        """A memory forgotten or changed, as it was, by its number among the forgotten."""
-        rows = self._query("SELECT * FROM forgotten WHERE id = ?", id)
-        return dict(rows[0]) if rows else None
-
-    def restore(self, id: int) -> dict[str, Any] | None:
-        """Puts back a memory as it was before it was forgotten or changed, by its number among
-        the forgotten; returns it, if it can be: not a change of a memory forgotten since."""
-        with self._lock, self._db:
-            self._db.execute("BEGIN")
-            if (old := self._row("SELECT * FROM forgotten WHERE id = ?", id)) is None:
-                return None
-            if old["change"] == "forgotten":
-                sql = ("INSERT OR IGNORE INTO memories (id, text, category, until, created, person,"
-                       " confirmed) VALUES (?, ?, ?, ?, ?, ?, ?)")  # fmt: skip
-                keys = ("memory", "text", "category", "until", "created", "person")
-                values: tuple[Any, ...] = (*(old[k] for k in keys), time.time())
-            else:
-                sql = ("UPDATE memories SET text = ?, category = ?, until = ?, person = ?,"
-                       " confirmed = ? WHERE id = ?")  # fmt: skip
-                values = (old["text"], old["category"], old["until"], old["person"], time.time(),
-                          old["memory"])  # fmt: skip
-            if not self._db.execute(sql, values).rowcount:
-                return None
-            self._db.execute("DELETE FROM forgotten WHERE id = ?", (id,))
-            return self._row("SELECT * FROM memories WHERE id = ?", old["memory"])
-
-    def setting(self, key: str) -> Any:
-        """A setting's value, or None if it has none."""
-        rows = self._query("SELECT value FROM settings WHERE key = ?", key)
-        return json.loads(rows[0]["value"]) if rows else None
-
-    def set_setting(self, key: str, value: Any) -> None:
-        """Sets a setting's value, or removes it, of None."""
-        with self._lock:
-            if value is None:
-                self._db.execute("DELETE FROM settings WHERE key = ?", (key,))
-            else:
-                sql = "INSERT OR REPLACE INTO settings VALUES (?, ?)"
-                self._db.execute(sql, (key, json.dumps(value, ensure_ascii=False)))
-
     def people(self) -> list[dict[str, Any]]:
         """The household's people, the owner first."""
         return [dict(row) for row in self._query("SELECT * FROM people ORDER BY id")]
@@ -416,8 +265,8 @@ class Store:
         return dict(rows[0]) if rows else None
 
     def add_person(self, name: str) -> dict[str, Any]:
-        """A new person of the household's; the first its owner, whose all that was no one's
-        becomes, but the household's memories."""
+        """A new person of the household's; the first its owner, whose every conversation that was
+        no one's becomes."""
         with self._lock, self._db:
             self._db.execute("BEGIN")
             first = self._db.execute("SELECT count(*) FROM people").fetchone()[0] == 0
@@ -429,24 +278,14 @@ class Store:
             if first:
                 sql = "UPDATE conversations SET person = ? WHERE person IS NULL"
                 self._db.execute(sql, (person["id"],))
-                for table in ("memories", "forgotten"):
-                    sql = f"UPDATE {table} SET person = ? WHERE person IS NULL"
-                    self._db.execute(f"{sql} AND category != 'household'", (person["id"],))
         return person
 
-    def rename_person(self, id: int, name: str) -> None:
-        self._query("UPDATE people SET name = ? WHERE id = ?", name, id)
-
     def remove_person(self, id: int) -> None:
-        """Removes a person who is not the owner, and all that is theirs: their conversations,
-        memories and devices."""
+        """Removes a person who is not the owner, and all that is theirs: their conversations and
+        devices."""
         with self._lock, self._db:
             self._db.execute("BEGIN")
-            for (conversation,) in self._db.execute(
-                "SELECT id FROM conversations WHERE person = ?", (id,)
-            ).fetchall():
-                self._db.execute("DELETE FROM search WHERE conversation = ?", (conversation,))
-            for table in ("conversations", "memories", "forgotten", "devices"):
+            for table in ("conversations", "devices"):
                 self._db.execute(f"DELETE FROM {table} WHERE person = ?", (id,))
             self._db.execute("DELETE FROM people WHERE id = ? AND NOT owner", (id,))
 
@@ -476,21 +315,6 @@ class Store:
     def remove_device(self, id: int) -> bool:
         return bool(self._query("DELETE FROM devices WHERE id = ? RETURNING id", id))
 
-    def _change(self, id: int, change: str, by: str, sql: str, *parameters: Any) -> dict | None:
-        # changes a memory by sql, keeping what it was in forgotten, `by` whom: the conversation,
-        # the review, or the user in the app; returns it as sql does, if it is there
-        with self._lock, self._db:
-            self._db.execute("BEGIN")
-            if (old := self._row("SELECT * FROM memories WHERE id = ?", id)) is None:
-                return None
-            self._db.execute(
-                "INSERT INTO forgotten (memory, text, category, until, created, person, change,"
-                " by, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (id, old["text"], old["category"], old["until"], old["created"], old["person"],
-                 change, by, time.time()),
-            )  # fmt: skip
-            return self._row(sql, *parameters)
-
     def _row(self, sql: str, *parameters: Any) -> dict[str, Any] | None:
         # the first row of sql, as a dict, in a transaction the caller holds the lock of
         cursor = self._db.execute(sql, parameters)
@@ -500,12 +324,6 @@ class Store:
     def _insert(self, id: str, start: int, messages: list[dict[str, Any]]) -> None:
         rows = [(id, start + i, json.dumps(m, ensure_ascii=False)) for i, m in enumerate(messages)]
         self._db.executemany("INSERT INTO messages VALUES (?, ?, ?)", rows)
-        searched = [
-            (m["content"], id, start + i, m["role"])
-            for i, m in enumerate(messages)
-            if m["role"] in _SEARCHED and isinstance(m.get("content"), str) and m["content"]
-        ]
-        self._db.executemany("INSERT INTO search VALUES (?, ?, ?, ?)", searched)
 
     def _query(self, sql: str, *parameters: Any) -> list[sqlite3.Row]:
         with self._lock:

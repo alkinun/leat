@@ -50,7 +50,7 @@ body.menu nav { display: none; } /* on a narrow screen, the menu shows it instea
 #conversations { flex: 1; overflow-y: auto; margin-top: calc(12px * var(--density)); }
 /* the pages beside the conversations, at the sidebar's foot */
 .place { display: flex; gap: 10px; align-items: center; padding: calc(8px * var(--density)) 10px; border-radius: var(--round); }
-.place:hover, body.memory #remembered, body.files #filed, body.settings #set {
+.place:hover, body.files #filed, body.settings #set {
   background: var(--bubble);
 }
 .conversation {
@@ -98,10 +98,10 @@ main.empty #greeting { display: block; margin-bottom: calc(28px * var(--density)
 }
 #join h1::before { margin-left: 0; }
 
-/* a page, as the memory's, in place of a conversation */
+/* a page, as the files', in place of a conversation */
 .page { display: none; flex: 1; overflow-y: auto; padding: calc(16px * var(--density)) max(24px, calc(50% - 368px)); }
-body.memory #memory, body.files #files, body.settings #settings { display: block; }
-body:is(.memory, .files, .settings) :is(#log, #composer, #greeting) {
+body.files #files, body.settings #settings { display: block; }
+body:is(.files, .settings) :is(#log, #composer, #greeting) {
   display: none;
 }
 .page h1 { margin: calc(24px * var(--density)) 0 calc(8px * var(--density)); font: var(--display-weight) 1.875rem/1.3 var(--font-display); }
@@ -115,7 +115,7 @@ body:is(.memory, .files, .settings) :is(#log, #composer, #greeting) {
   padding: 10px 20px; border-radius: var(--round-large); background: var(--accent); color: var(--on-accent);
 }
 .page ul { margin: 0; padding: 0; list-style: none; }
-#workspace:empty::before, #memories:empty::before { content: "Nothing yet."; color: var(--muted); }
+#workspace:empty::before { content: "Nothing yet."; color: var(--muted); }
 .page h2 { margin: calc(28px * var(--density)) 0 4px; font-size: 0.875rem; color: var(--muted); font-weight: 600; }
 .page form select {
   padding: 0 12px; border: 1px solid var(--line); border-radius: var(--round-large);
@@ -130,7 +130,6 @@ body:is(.memory, .files, .settings) :is(#log, #composer, #greeting) {
 .page li a:hover { text-decoration: underline; }
 .page .meta { color: var(--muted); font-size: 0.8125rem; white-space: nowrap; }
 .page li button { padding: 0 8px; color: var(--muted); font-size: 1.125rem; }
-.page li button.undo { font-size: 0.875rem; color: var(--accent); }
 .page li:not(:hover) button { visibility: hidden; }
 
 .message { margin-bottom: calc(28px * var(--density)); white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -324,7 +323,7 @@ body.gated #gate { display: grid; flex: 1; place-items: center; min-height: 100v
 #household h3 button { font-size: 0.8125rem; color: var(--muted); }
 #household .meta b { color: var(--text); letter-spacing: 1px; }
 #household select { border: 1px solid var(--line); border-radius: var(--round); background: var(--card); }
-#household li :is(button.allow, select), .page li button.undo { visibility: visible; }
+#household li :is(button.allow, select) { visibility: visible; }
 #household li button.allow {
   padding: 4px 12px; border-radius: var(--round); background: var(--accent); color: var(--on-accent);
   font-size: 0.875rem;

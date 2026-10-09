@@ -1,7 +1,7 @@
-"""Measures how the agent does what people ask of it: whether it calls the tools it should, says
-what it should, and remembers and forgets what it should, each case run several times, in a state
-of its own. Prints a Markdown table of each case's passes, mean time, and the share of the
-prompts' tokens the engine's cache held.
+"""Measures how the agent does what people ask of it: whether it calls the tools it should, and
+says and makes what it should, each case run several times, in a state of its own. Prints a
+Markdown table of each case's passes, mean time, and the share of the prompts' tokens the engine's
+cache held.
 
     uv run python scripts/evaluate.py [--engine http://127.0.0.1:8080] [-n 3] [--think] [-k name]
 
@@ -11,7 +11,6 @@ own untouched. A prompt's or a tool's change is measured here before it is kept.
 """
 
 import argparse
-import datetime
 import re
 import statistics
 import sys
@@ -24,7 +23,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from leat.agent import background  # noqa: E402
 from leat.agent.agent import Agent  # noqa: E402
 from leat.agent.client import Client  # noqa: E402
 from leat.agent.store import Store  # noqa: E402
@@ -36,12 +34,11 @@ TIMEOUT = 300  # seconds a turn may take
 
 @dataclass(frozen=True)
 class Outcome:
-    """What came of a case's message: the tools it called, the answer, the memories and the
-    workspace's files after."""
+    """What came of a case's message: the tools it called, the answer, and the workspace's files
+    after."""
 
     tools: list[str]
     answer: str
-    memories: list[str]
     files: list[str]
     seconds: float
     cached: float  # of the prompts' tokens, the share the engine's cache held
@@ -63,22 +60,9 @@ def says(pattern: str) -> Check:
     return lambda o: None if re.search(pattern, o.answer, re.I) else f"did not say /{pattern}/"
 
 
-def remembers(pattern: str) -> Check:
-    found = lambda o: any(re.search(pattern, m, re.I) for m in o.memories)  # noqa: E731
-    return lambda o: None if found(o) else f"does not remember /{pattern}/"
-
-
 def makes(pattern: str) -> Check:
     made = lambda o: any(re.search(pattern, name) for name in o.files)  # noqa: E731
     return lambda o: None if made(o) else f"made no file /{pattern}/"
-
-
-def remembers_nothing(o: Outcome) -> str | None:
-    return f"remembers {o.memories}" if o.memories else None
-
-
-def forgot(pattern: str) -> Check:
-    return lambda o: f"still remembers /{pattern}/" if remembers(pattern)(o) is None else None
 
 
 def unsure(o: Outcome) -> str | None:
@@ -87,48 +71,24 @@ def unsure(o: Outcome) -> str | None:
     return None if re.search(known, o.answer, re.I) else "did not say it does not know"
 
 
-def unsaid(pattern: str) -> Check:
-    return lambda o: f"said /{pattern}/" if re.search(pattern, o.answer, re.I) else None
-
-
 @dataclass(frozen=True)
 class Case:
     name: str
     message: str  # in a new conversation
     checks: list[Check]
-    # remembered before it: each a fact of "about", or a plan with its last day, days from today
-    memories: list[str | tuple[str, int]] = field(default_factory=list)
-    before: list[str] = field(default_factory=list)  # messages of earlier conversations, each one's
     files: dict[str, str] = field(default_factory=dict)  # the workspace's, by name, attached to it
-    reviewed: bool = False  # reviewed for memories after, as the agent does once it is idle
-    tidied: bool = False  # its memory tidied after, as the agent does each night
-    # remembered of another person of the household, whom the message's person is not
-    others: list[str] = field(default_factory=list)
 
 
-NONE = ("search", "fetch", "remember", "forget", "recall", "read", "run")
+NONE = ("search", "fetch", "read", "run")
 CASES = [
     Case("chat", "Write a haiku about autumn.", [uncalled(*NONE)]),
     Case("arithmetic", "What is 17 * 23?", [says(r"391"), uncalled(*NONE)]),
-    Case("known fact", "What is the capital of Australia?",
-         [says("Canberra"), uncalled("remember")]),
+    Case("known fact", "What is the capital of Australia?", [says("Canberra")]),
     Case("news", "What's in the news today about space exploration?", [called("search")]),
     Case("reads pages", "When does the British Museum open tomorrow? Check its website.",
          [called("fetch")]),
     Case("research", "Research the pros and cons of heat pumps for a house in a cold climate.",
          [called("search", 2), called("fetch", 4), says(r"\[\d+\]")]),
-    Case("introduction", "Hi! I'm Sam, I work as a nurse, and my kids are called Mia and Leo.",
-         [called("remember", 2), remembers("Sam"), remembers("nurse"), remembers("Mia|Leo")]),
-    Case("preference", "I'm vegetarian, keep that in mind for recipes.",
-         [called("remember"), remembers("vegetarian")]),
-    Case("knows", "What's my dog called?", [says("Rex"), uncalled("search", "recall")],
-         memories=["The user's dog is called Rex."]),
-    Case("forget", "Please forget about my dog.",
-         [called("forget"), forgot("Rex"), remembers("Izmir")],
-         memories=["The user's dog is called Rex.", "The user lives in Izmir."]),
-    Case("recall", "What did I ask you about tulips the other day?",
-         [called("recall"), says("plant")],
-         before=["When should I plant tulip bulbs? One sentence."]),
     Case("attachment", "What time does it start, and what should I bring?",
          [called("read"), says("7"), says("salad|dessert")],
          files={"invitation.txt": "You're invited to Mia's 30th! Saturday 18 October, 7 pm, at "
@@ -137,23 +97,7 @@ CASES = [
          [called("run"), makes(r"\.docx$")]),
     Case("spreadsheet", "Make an Excel budget: rent 900, food 350 and transport 80 a month, with "
          "yearly totals.", [called("run"), makes(r"\.xlsx$")]),
-    Case("noticed", "I'm planning my daughter Ada's 7th birthday party for next Saturday. Suggest "
-         "5 party games.", [remembers("Ada")], reviewed=True),
-    Case("no junk", "What's 2^2^2^2?", [remembers_nothing], reviewed=True),
-    Case("cleans up", "Thanks, that's all for today.", [forgot(r"2\^2"), remembers("Izmir")],
-         memories=["The user asked about the value of 2^2^2^2.", "The user lives in Izmir."],
-         reviewed=True),
-    Case("update", "By the way, I moved to Ankara last month.",
-         [called("remember"), remembers("Ankara"), forgot("Izmir")],
-         memories=["The user lives in Izmir."]),
-    Case("past plan", "Thanks!", [forgot(r"is flying|will fly"), remembers("daughter")],
-         memories=[("The user is flying to Rome next Tuesday.", -2), "The user has a daughter."],
-         tidied=True),
     Case("doesn't know", "What's my sister's name?", [unsure, uncalled("search")]),
-    Case("not from pages", "Who is Linus Torvalds? Look him up on the web.",
-         [called("search"), remembers_nothing], reviewed=True),
-    Case("keeps to its person", "What's my dog called?", [unsure, unsaid("Rex")],
-         others=["The user's dog is called Rex."]),
 ]  # fmt: skip
 
 
@@ -199,46 +143,26 @@ def _run(case: Case, args: argparse.Namespace) -> Outcome:
         engine = Client(args.engine)
         tools = [*web.tools(args.search, workspace, engine), *files.tools(workspace)]
         agent = Agent(Store(Path(data) / "leat.db"), engine, tools, workspace)
-        person = None  # no household, but where another person's memories are
-        if case.others:
-            person = agent.store.add_person("Sam")["id"]
-            other = agent.store.add_person("Ada")["id"]
-            for memory in case.others:
-                agent.remember(memory, "about", person=other)
-        for memory in case.memories:
-            if isinstance(memory, tuple):  # a plan, until days from today
-                until = datetime.date.today() + datetime.timedelta(days=memory[1])
-                agent.remember(memory[0], "plans", until=until.isoformat(), person=person)
-            else:
-                agent.remember(memory, "about", person=person)
-        for message in case.before:
-            _wait(agent, agent.send(None, message, args.think, person=person), person)
         for name, text in case.files.items():
             workspace.path(name).write_text(text)
         start = time.monotonic()
-        id = agent.send(None, case.message, args.think, list(case.files), person=person)
-        messages = _wait(agent, id, person)
-        if case.reviewed and messages:
-            background.review(agent, id)
-        if case.tidied:
-            background.tidy(agent, person)
+        messages = _wait(agent, agent.send(None, case.message, args.think, list(case.files)))
         seconds = time.monotonic() - start
         tools_called = [m["name"] for m in messages if m["role"] == "tool"]
         answer = messages[-1]["content"] if messages and messages[-1]["role"] == "assistant" else ""
-        memories = [m["text"] for m in agent.memories(person)]
         names = [f["name"] for f in workspace.files()]
         infos = [m["info"] for m in messages if m["role"] == "assistant" and "read" in m["info"]]
         held, read = sum(i["cached"] or 0 for i in infos), sum(i["read"] for i in infos)
         share = held / (held + read) if held + read else 0.0
-        return Outcome(tools_called, answer or "", memories, names, seconds, share)
+        return Outcome(tools_called, answer or "", names, seconds, share)
 
 
-def _wait(agent: Agent, id: str, person: int | None) -> list[dict]:
+def _wait(agent: Agent, id: str) -> list[dict]:
     # a conversation's messages once its turn has ended, or none if it failed and took it back
     end = time.monotonic() + TIMEOUT
-    while (c := agent.conversation(id, person)) is not None and c["running"]:
+    while (c := agent.conversation(id)) is not None and c["running"]:
         if time.monotonic() > end:
-            agent.stop(id, person)
+            agent.stop(id)
         time.sleep(0.1)
     return c["messages"] if c else []
 

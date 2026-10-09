@@ -25,7 +25,7 @@ from leat.agent import context
 from leat.agent.background import Background
 from leat.agent.client import Client, Completion, EngineError, whole
 from leat.agent.store import Store
-from leat.agent.tools import Context, Result, Tool, arguments, files, memory, numbered
+from leat.agent.tools import Context, Result, Tool, arguments, files, numbered
 from leat.agent.workspace import Workspace
 
 # sampling as Qwen3.6 recommends for general tasks, thinking first, then not
@@ -38,25 +38,13 @@ SYSTEM = """\
 You are Leat, an assistant that runs on a computer in {home} private, and theirs. Each of the \
 user's messages begins with the date and time they sent it.
 
-When the user tells you something about themselves worth knowing in later conversations, first \
-call remember, then reply: who they are, the people in their life, their work and plans, how they \
-like things done; each fact a memory of its own, written of "the user", as "The user's cat is \
-called Pamuk.", with the words they told you it in as its evidence, and a plan with its last day. \
-Only what they tell you: not what they asked about, or what you read or found. \
-When a memory changes, remember the new one in its place; when they ask you to forget something, \
-forget it. Never say you noted something unless you called remember. Use what you remember only \
-where it helps your answer, and what the user says now over it. To find what you talked about in \
-earlier conversations that your memory below does not hold, call recall.
-
 When a question needs facts you may not know, or that may have changed since you learned them, \
 call search, then fetch the few pages most likely to answer, three or so, at once, each with the \
 question you want it to answer, more only if they fall short. When the user asks you to research \
 something, search it in several ways and read the pages that matter, ten or so, before you answer \
 with a report: what you found, in sections, and what stays unsure. Cite what you use by the \
 numbers the tools give their sources, as [1] or [2][3], after the words they support.
-{workspace}
-What you remember of the user, each by its number and dated when it was last confirmed:
-{memories}"""
+{workspace}"""
 # of the system prompt, when the agent has a workspace
 WORKSPACE = """
 The user's files are in a workspace, where you read, write and edit them, and run Python among \
@@ -107,11 +95,11 @@ class Events:
 
 
 class Agent:
-    """The conversations and memories in `store`, the turns run by the model `engine` serves,
-    which calls the memory's tools and `tools`; and the user's files, in `workspace`, if any.
+    """The conversations in `store`, the turns run by the model `engine` serves, which calls
+    `tools`; and the user's files, in `workspace`, if any.
 
-    Each conversation and memory is a person's of the household, `person` by its id, and an
-    event that tells of one is to that person's apps alone: "to" says whose. Before the household
+    Each conversation is a person's of the household, `person` by its id, and an event that tells
+    of one is to that person's apps alone: "to" says whose. Before the household
     has its first person, all is no one's, None's."""
 
     def __init__(
@@ -119,8 +107,7 @@ class Agent:
         workspace: Workspace | None = None,
     ):  # fmt: skip
         self.store, self.engine, self.workspace, self.events = store, engine, workspace, Events()
-        own = memory.tools(self)
-        self.tools = {tool.name: tool for tool in [*own, *(tools or [])]}
+        self.tools = {tool.name: tool for tool in tools or []}
         self._files: list[dict[str, Any]] | None = None  # the files the apps were last told of
         self._models: Event | None = None  # the engine's models, as the apps were last told
         self.background: Background | None = None  # once started
@@ -128,9 +115,8 @@ class Agent:
         self._lock = threading.Lock()
 
     def start(self) -> None:
-        """Starts the agent's work in the background: naming conversations, reviewing them for
-        memories once idle, and telling the apps when the engine comes up or goes away, as
-        background.Background does."""
+        """Starts the agent's work in the background: naming conversations, and telling the apps
+        when the engine comes up or goes away, as background.Background does."""
         self.background = Background(self)
         self.background.start()
 
@@ -180,8 +166,7 @@ class Agent:
             if id is None:
                 who = (self.store.person(person) or {}) if person else {}
                 name = who.get("name")
-                memories = self.store.memories(person)
-                system = _system(memories, self.workspace is not None, name)
+                system = _system(self.workspace is not None, name)
                 title = _title(content)
                 id, start = self.store.create(title, [system, message], person)["id"], 1
             else:
@@ -214,75 +199,6 @@ class Agent:
             self.store.delete(id)
             self.events.publish({"type": "deleted", "id": id, "to": person})
 
-    def memories(self, person: int | None = None) -> list[dict[str, Any]]:
-        """What the agent remembers of a person, and of the household, the oldest first."""
-        return self.store.memories(person)
-
-    def remember(
-        self, text: str, category: str = "about", replaces: int | None = None,
-        until: str | None = None, by: str = "app", person: int | None = None,
-    ) -> dict[str, Any]:  # fmt: skip
-        """Remembers a fact of a person, or of the household, everyone's, in the conversations
-        begun from now on, in place of the memory `replaces` if given, a plan until its last
-        day, `by` whom: the app's user, a conversation's model or the review. Raises ValueError
-        if it may not be one, if it is one already, which is dated again, or if it does not fit
-        the memory's room, saying the memories least recently confirmed; NotFound if there is no
-        memory of the person's or the household's to replace."""
-        text, until = memory.checked(text, category, until)
-        whose = None if category == "household" else person
-        with self._lock:
-            known = self.store.memories(person)
-            if replaces is not None and replaces not in [m["id"] for m in known]:
-                raise NotFound(f"there is no memory {replaces}")
-            others = [m for m in known if m["id"] != replaces]
-            if same := [m for m in others if m["text"].lower() == text.lower()]:
-                self.store.confirm_memory(same[0]["id"])
-                self._memories_changed(same[0]["person"])
-                raise ValueError(f"that is remembered already, as [{same[0]['id']}]")
-            if (used := sum(len(m["text"]) for m in others)) + len(text) > memory.ROOM:
-                oldest = sorted(others, key=lambda m: m["confirmed"])[:5]
-                raise ValueError(
-                    f"the memory is full, {used} of its {memory.ROOM} characters: change or "
-                    "forget memories first, or make one of two. Those least recently "
-                    "confirmed: " + "; ".join(f"[{m['id']}] {m['text'][:80]}" for m in oldest)
-                )
-            if replaces is None:
-                m = self.store.add_memory(text, category, until, whose)
-            else:
-                old = next(m for m in known if m["id"] == replaces)
-                m = self.store.replace_memory(replaces, text, category, until, by, whose) or old
-                self._memories_changed(old["person"])
-            self._memories_changed(whose)
-        return m
-
-    def forget(self, id: int, by: str = "app", person: int | None = None) -> dict[str, Any]:
-        """Forgets a memory of a person's or the household's, `by` whom, and returns it; what it
-        was is kept, to restore. Raises NotFound if there is no such memory."""
-        with self._lock:
-            if id not in [m["id"] for m in self.store.memories(person)]:
-                raise NotFound(f"there is no memory {id}")
-            if (m := self.store.delete_memory(id, by)) is None:
-                raise NotFound(f"there is no memory {id}")
-            self._memories_changed(m["person"])
-        return m
-
-    def restore(self, id: int, person: int | None = None) -> dict[str, Any]:
-        """Undoes the forgetting or change of a memory of a person's or the household's, by its
-        number among the forgotten, and returns the memory. Raises NotFound if it cannot be: if
-        it is not there, or the memory changed was forgotten since, or is another's now, as a
-        household's one made someone's own."""
-        with self._lock:
-            known = {f["id"]: f for f in self.store.forgotten(person, limit=-1)}
-            if (old := known.get(id)) is None:
-                raise NotFound(f"there is nothing to restore as {id}")
-            mine = [m["id"] for m in self.store.memories(person)]
-            if old["change"] != "forgotten" and old["memory"] not in mine:
-                raise NotFound(f"the memory changed as {id} is no longer yours to restore")
-            if (m := self.store.restore(id)) is None:
-                raise NotFound(f"there is nothing to restore as {id}")
-            self._memories_changed(None)  # everyone's, as it may be another's than it was
-        return m
-
     def files_changed(self) -> None:
         """Tells the apps of the workspace's files, if they changed since they were last told."""
         with self._lock:
@@ -293,19 +209,9 @@ class Agent:
     def files_event(self) -> Event:
         return {"type": "files", "files": self.workspace.files() if self.workspace else []}
 
-    def memories_event(self, person: int | None = None) -> Event:
-        """A person's memories and the household's, and the latest forgotten or changed, as they
-        were, to restore."""
-        memories, forgotten = self.store.memories(person), self.store.forgotten(person)
-        return {"type": "memories", "memories": memories, "forgotten": forgotten, "to": person}
-
     def models(self) -> list[dict[str, Any]]:
         """The engine's models, as it lists them. Raises EngineError."""
         return self.engine.models()
-
-    def limit(self) -> int | None:
-        """The loaded model's context, in tokens, if the engine says. Raises EngineError."""
-        return self.loaded().get("max_context")
 
     def loaded(self) -> dict[str, Any]:
         """The loaded model, as the engine lists it, or {} if none is. Raises EngineError."""
@@ -340,12 +246,6 @@ class Agent:
         if (c := self.store.conversation(id)) is None or c["person"] != person:
             raise NotFound(f"there is no conversation {id}")
         return c
-
-    def _memories_changed(self, whose: int | None) -> None:
-        # tells a person's apps of their memories, or, of the household's, everyone's
-        people = [p["id"] for p in self.store.people()] or [None]
-        for person in people if whose is None else [whose]:
-            self.events.publish(self.memories_event(person))
 
     def _summary(self, c: dict[str, Any]) -> dict[str, Any]:
         running, keys = c["id"] in self._turns, ("id", "title", "updated")
@@ -614,7 +514,7 @@ class _Turn:
             if (tool := self.tools.get(message["name"])) is None:
                 raise ValueError(f"there is no tool {message['name']!r}")
             called = arguments(message["info"]["arguments"])
-            result = tool.run(Context(self.id, self._cite, person=self.person), **called)
+            result = tool.run(Context(self.id, self._cite), **called)
         except Exception as e:  # for the model, which may try again
             result = Result(f"error: {e}", {"error": str(e)})
         with a._lock:
@@ -693,16 +593,13 @@ class _Stopped(Exception):
     """The turn was stopped while the model answered other than in its reply."""
 
 
-def _system(
-    memories: list[dict[str, Any]], workspace: bool, name: str | None = None
-) -> dict[str, Any]:
+def _system(workspace: bool, name: str | None = None) -> dict[str, Any]:
     # the system prompt of a conversation begun now with the user, of a `name` if the household
-    # has people, which knows these memories, and the workspace's tools if `workspace`
-    remembered = memory.listing(memories)
+    # has people, and the workspace's tools if `workspace`
     skills = "\n".join(f"- {path}: {about}" for path, about in files.skills())
     space = WORKSPACE.format(skills=skills) if workspace else ""
     home = f"the home of the user, {name}:" if name else "the user's home:"
-    content = SYSTEM.format(home=home, memories=remembered, workspace=space)
+    content = SYSTEM.format(home=home, workspace=space)
     return {"role": "system", "content": content}
 
 

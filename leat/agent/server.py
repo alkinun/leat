@@ -7,7 +7,7 @@ from the app's own page, or from no browser, not from another site's page.
 
 Every request but for the app's own files, the household's setup and a device's request to join
 comes from a device of the household's, by the secret its cookie holds. A person sees and changes
-their own conversations and memories, and the household's memories and files; the owner
+their own conversations, and the household's files; the owner
 alone the household's people and devices, and the engine's model.
 """
 
@@ -32,7 +32,7 @@ from leat.agent.household import Household
 
 APP = Path(__file__).parent / "app"
 # the app's files, each served at its path in app/, and their types; the app's pages, /c/<id> one
-# conversation's, /memory, /files and /settings, are index.html
+# conversation's, /files and /settings, are index.html
 _FILES = (
     "index.html",
     "style.css",
@@ -45,7 +45,7 @@ _FILES = (
     "vendor/temml/Temml.woff2",
     "vendor/temml/latinmodernmath.woff2",
 )
-_PAGES = ("/", "/memory", "/files", "/settings")
+_PAGES = ("/", "/files", "/settings")
 _TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
@@ -61,11 +61,10 @@ _YEARS = 10 * 365 * 86400  # seconds a device keeps its cookie: till it is unpai
 # the types of the workspace's files a browser shows in the page; it downloads the others, as a page
 # the model wrote might act as the app's own
 _SHOWN = {"image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf", "text/plain"}
-# /api/conversations/<id>, and what to do there; /api/memories/<id>; a request to join's and
+# /api/conversations/<id>, and what to do there; a request to join's and
 # what to do with it, a device's and a person's; a file's name, of
 # /files/<name> to download it and of /api/files/<name> to upload or delete it
 _CONVERSATION = re.compile(r"/api/conversations/([0-9a-f]{12})(/messages|/stop)?")
-_MEMORY = re.compile(r"/api/memories/([0-9]+)")
 _REQUEST = re.compile(r"/api/pairings/([0-9a-f]{16})(/allow)?")
 _DEVICE = re.compile(r"/api/devices/([0-9]+)")
 _PERSON = re.compile(r"/api/people/([0-9]+)")
@@ -153,12 +152,6 @@ class _Handler(BaseHTTPRequestHandler):
             elif match and match[2] == "/stop":
                 agent.stop(match[1], person)
                 self._json(200, {})
-            elif path == "/api/memories":
-                category = body.get("category", "about")
-                category = category if isinstance(category, str) else ""
-                self._json(200, agent.remember(_text(body, "text"), category, person=person))
-            elif path == "/api/memories/restore":
-                self._json(200, agent.restore(int(body.get("id", 0)), person))
             elif (match := _REQUEST.fullmatch(path)) and match[2]:
                 _owner(me)
                 to = body.get("person")
@@ -181,8 +174,6 @@ class _Handler(BaseHTTPRequestHandler):
             person = me["person"]
             if (match := _CONVERSATION.fullmatch(path)) and not match[2]:
                 agent.delete(match[1], person)
-            elif match := _MEMORY.fullmatch(path):
-                agent.forget(int(match[1]), person=person)
             elif path.startswith("/api/files/") and agent.workspace is not None:
                 agent.workspace.delete(urllib.parse.unquote(path.removeprefix("/api/files/")))
                 agent.files_changed()
@@ -294,7 +285,6 @@ class _Handler(BaseHTTPRequestHandler):
         agent, person = self.server.agent, me["person"]
         with agent.events.watch() as events, contextlib.suppress(OSError):
             self._event({"type": "conversations", "conversations": agent.conversations(person)})
-            self._event(agent.memories_event(person))
             self._event(agent.files_event())
             if me["owner"]:
                 self._event(self.server.household.state())

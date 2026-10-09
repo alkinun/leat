@@ -9,8 +9,6 @@ import { THEMES, complete, file, properties, read, scheme, stylesheet } from "/t
 const $ = (id) => document.getElementById(id);
 let conversations = []; // the latest updated first: {id, title, updated, running}
 let shown = null; // the conversation shown, with its messages; null for a new one
-let memories = []; // what the agent remembers of the user, the oldest first
-let forgotten = []; // the memories forgotten or changed, as they were, the latest first
 let files = []; // the workspace's, the latest changed first: {name, size, modified}
 let attached = []; // the files the next message attaches: {name, uploading}
 let me = null; // the person whose this device is: {person, name, owner, device}
@@ -26,15 +24,14 @@ let mode = localStorage.getItem("leat.mode") ?? "system";
 let views = []; // the shown messages' elements, by their indexes
 const opened = new Map(); // whether each turn's work is open, as the user left it
 // the pages beside the conversations, each a section of its own name, and their titles
-const PAGES = ["memory", "files", "settings"];
-const TITLES = { memory: "Memory", files: "Files", settings: "Settings" };
+const PAGES = ["files", "settings"];
+const TITLES = { files: "Files", settings: "Settings" };
 
 $("new").onclick = () => {
   open(null);
   $("input").focus();
 };
 $("menu").onclick = () => document.body.classList.toggle("menu");
-$("remembered").onclick = () => turnTo("memory");
 $("filed").onclick = () => turnTo("files");
 $("set").onclick = () => turnTo("settings");
 $("attach").onclick = () => pick(attach);
@@ -51,17 +48,6 @@ window.ondrop = (event) => { // files dropped, attached to the next message, or 
   const dropped = [...event.dataTransfer.files];
   if (document.body.classList.contains("files")) dropped.forEach(upload);
   else dropped.forEach(attach);
-};
-$("remember").onsubmit = async (event) => {
-  event.preventDefault();
-  const text = $("memorable").value.trim();
-  if (!text) return;
-  try {
-    await post("/api/memories", { text, category: $("category").value });
-    $("memorable").value = "";
-  } catch (error) {
-    status(error.message, true);
-  }
 };
 $("think").onclick = () => {
   think = !think;
@@ -251,7 +237,7 @@ function renderAppearance() {
   }));
 }
 
-// shows what the address names: a page, as the memory's, a conversation, or a new one
+// shows what the address names: a page, as the files', a conversation, or a new one
 function route() {
   const name = location.pathname.slice(1);
   if (PAGES.includes(name)) turnTo(name, false);
@@ -295,10 +281,6 @@ function handle(event) {
         if (!$("input").value) $("input").value = event.content;
       }
       break;
-    case "memories":
-      ({ memories, forgotten } = event);
-      renderMemories();
-      return;
     case "files":
       files = event.files;
       renderFiles();
@@ -449,50 +431,6 @@ function turnTo(name, push = true) {
   document.title = TITLES[name];
 }
 
-// the memories by category, each its own list, and how full their room is
-const CATEGORIES = { about: "About you", preferences: "Preferences", people: "People",
-  work: "Work", plans: "Plans", household: "Our home, everyone's" };
-const ROOM = 3000; // characters, as the agent bounds them
-function renderMemories() {
-  const used = memories.reduce((n, m) => n + m.text.length, 0);
-  $("room").textContent = memories.length ? `It is ${Math.round((100 * used) / ROOM)}% full.` : "";
-  const lists = Object.entries(CATEGORIES).flatMap(([category, name]) => {
-    const of = memories.filter((m) => m.category === category);
-    if (!of.length) return [];
-    const list = element("ul");
-    list.append(...of.map((m) => {
-      const item = element("li"), remover = element("button", "", "×");
-      remover.title = "Forget";
-      remover.onclick = () => fetch(`/api/memories/${m.id}`, { method: "DELETE" });
-      item.append(element("span", "", m.text), element("span", "meta", dated(m)), remover);
-      return item;
-    }));
-    return [element("h2", "", name), list];
-  });
-  if (forgotten.length) { // what was forgotten or changed, as it was, to undo
-    const list = element("ul");
-    list.append(...forgotten.map((f) => {
-      const item = element("li"), undo = element("button", "undo", "Undo");
-      undo.onclick = () => post("/api/memories/restore", { id: f.id }).catch((e) => status(e.message, true));
-      const how = `${f.change === "replaced" ? "changed" : "forgotten"} ${BY[f.by] ?? ""}`;
-      item.append(element("span", "", f.text), element("span", "meta", `${how} · ${day(f.at)}`), undo);
-      return item;
-    }));
-    lists.push(element("h2", "", "Recently forgotten or changed"), list);
-  }
-  $("memories").replaceChildren(...lists);
-}
-
-// who forgot or changed a memory, in words
-const BY = { app: "by you", conversation: "in a chat", review: "after a chat", tidy: "while tidying" };
-
-// a memory's date: when it was last said, or of a plan, until when it holds, or that it passed
-function dated(m) {
-  if (!m.until) return day(m.confirmed ?? m.created);
-  const until = new Date(`${m.until}T23:59:59`);
-  return `${until < new Date() ? "passed" : "until"} ${day(until / 1000)}`;
-}
-
 // a time, in seconds, as a day people read
 function day(seconds) {
   return new Date(seconds * 1000).toLocaleDateString(undefined, { day: "numeric", month: "short" });
@@ -539,7 +477,7 @@ function renderHousehold() {
     const heading = element("h3", "", p.owner ? `${p.name} (owner)` : p.name);
     if (!p.owner) {
       const remover = element("button", "", "Remove");
-      remover.onclick = () => confirm(`Remove ${p.name}, with all their chats and memories?`)
+      remover.onclick = () => confirm(`Remove ${p.name}, with all their chats?`)
         && fetch(`/api/people/${p.id}`, { method: "DELETE" });
       heading.append(" ", remover);
     }
@@ -705,15 +643,12 @@ function fold(start, indexes) {
 
 // what each tool's calls did, in a few words: one call, and n
 const DID = {
-  recall: ["recalled earlier chats", () => "recalled earlier chats"],
   search: ["searched the web", (n) => `searched the web ${n} times`],
   fetch: ["read a page", (n) => `read ${n} pages`],
   read: ["read a file", (n) => `read ${n} files`],
   run: ["ran code", (n) => `ran code ${n} times`],
   write: ["wrote a file", (n) => `wrote ${n} files`],
   edit: ["edited a file", (n) => `edited ${n} files`],
-  remember: ["remembered something", (n) => `remembered ${n} things`],
-  forget: ["forgot something", (n) => `forgot ${n} things`],
 };
 
 // what a turn's calls did, in a few words, in the order it began them; those that failed not
@@ -808,10 +743,6 @@ const LINES = {
     `Couldn't search for “${a.query}”`],
   fetch: (a, i) => [`Reading ${host(a.url)}…`, `Read ${i.title || host(i.url ?? a.url)}`,
     `Couldn't read ${host(a.url)}`],
-  recall: (a) => [`Recalling “${a.query}”…`, `Recalled “${a.query}”`, `Couldn't recall “${a.query}”`],
-  remember: (a, i) => ["Remembering…", `${i.replaced ? "Changed" : "Remembered"}: ${i.memory?.text}`,
-    "Couldn't remember"],
-  forget: (a, i) => ["Forgetting…", `Forgot: ${i.memory?.text}`, "Couldn't forget"],
   read: (a) => [`Reading ${named(a.path)}…`, `Read ${named(a.path)}`, `Couldn't read ${named(a.path)}`],
   write: (a) => [`Writing ${a.path}…`, `Wrote ${a.path}`, `Couldn't write ${a.path}`],
   edit: (a) => [`Editing ${a.path}…`, `Edited ${a.path}`, `Couldn't edit ${a.path}`],
@@ -829,7 +760,7 @@ function line(m) {
 
 // what a tool's call found, as its line opens on it
 function what(m) {
-  const { arguments: args, results, url, title, error, conversations } = m.info ?? {};
+  const { arguments: args, results, url, title, error } = m.info ?? {};
   if (error || !m.content) return [element("p", "", error ?? "")];
   if (m.name === "search" && results?.length) {
     return [listed(results.map((r) => link(r.url, r.title)), true)];
@@ -838,7 +769,6 @@ function what(m) {
     const asked = m.info?.question ? [element("p", "meta", `Read for: ${m.info.question}`)] : [];
     return [link(url, title || url), ...asked];
   }
-  if (m.name === "recall" && conversations?.length) return [listed(conversations.map(conversationLink))];
   if (m.name === "write" || m.name === "edit") return [fileLink(args.path)];
   if (m.info?.images) return [cards(m.info.images)]; // an image read, which the model saw
   if (m.name === "run") {
@@ -952,17 +882,6 @@ function source({ url, title, n }) {
   return a;
 }
 
-// a link to an earlier conversation, which opens it here
-function conversationLink({ id, title }) {
-  const a = element("a", "", title);
-  a.href = `/c/${id}`;
-  a.onclick = (event) => {
-    event.preventDefault();
-    open(id);
-  };
-  return a;
-}
-
 // a link to a page of the web; of an address of another kind, as javascript:, its text alone
 function link(url, text) {
   if (!/^https?:\/\//i.test(url ?? "")) return element("span", "", text);
@@ -996,13 +915,10 @@ function host(url) {
 const ICONS = {
   search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
   fetch: '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/>',
-  recall: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/>',
-  remember: '<path d="M6 3h12v18l-6-4-6 4z"/>',
   read: '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/>',
   write: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
   edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
   run: '<path d="m4 17 6-6-6-6"/><path d="M12 19h8"/>',
-  forget: '<path d="M6 3h12v18l-6-4-6 4z"/><path d="m10 8 4 4m0-4-4 4"/>',
   tool: '<circle cx="12" cy="12" r="3"/>',
 };
 function icon(name) {

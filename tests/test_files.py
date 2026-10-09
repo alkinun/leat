@@ -219,7 +219,7 @@ def test_system_prompt(agent, tmp_path):
     # the workspace and the skills, when the agent has a workspace
     from leat.agent.agent import _system
 
-    with_workspace, without = (_system([], w)["content"] for w in (True, False))
+    with_workspace, without = (_system(w)["content"] for w in (True, False))
     assert "- skills/docx/SKILL.md: Word documents" in with_workspace
     assert "workspace" not in without
 

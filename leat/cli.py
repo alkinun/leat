@@ -44,7 +44,7 @@ def main(argv: list[str] | None = None) -> None:
     agent.add_argument("--port", type=int, default=8000)
     agent.add_argument(
         "--data", type=Path, default=_data(),
-        help="where its state is kept: its conversations and memories, the user's files in "
+        help="where its state is kept: its conversations, the user's files in "
         "workspace/, and in sandbox/ the environment of libraries the sandbox offers",
     )  # fmt: skip
 
