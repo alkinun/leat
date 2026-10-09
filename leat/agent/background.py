@@ -175,14 +175,13 @@ def name(agent: "Agent", id: str) -> None:
 
 def review(agent: "Agent", id: str) -> None:
     """Reviews what is new in a conversation for memories, its person's and the household's,
-    changing them by the model's calls; not one with a character, whose roleplay is no fact, nor
-    one in a group chat, whose words are not the user's alone."""
+    changing them by the model's calls; not one with a character, whose roleplay is no fact."""
     if (c := agent.store.conversation(id)) is None:  # deleted
         return
     messages = agent.store.messages(id)
     new = [m for m in messages[agent.store.reviewed(id) :] if m["role"] in ("user", "assistant")]
-    # a roleplay's words, and a group's, are no facts of the user's
-    if c["character"] is None and not c["shared"] and any(m.get("content") for m in new):
+    # a roleplay's words are no facts of the user's
+    if c["character"] is None and any(m.get("content") for m in new):
         today = datetime.date.today()
         system = REVIEW.format(
             date=f"{today:%A}, {today.day} {today:%B %Y}",

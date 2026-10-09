@@ -140,19 +140,6 @@ body:is(.memory, .files, .tasks, .lists, .characters, .settings) :is(#log, #comp
   margin-top: 8px; padding: 6px 14px; border: 1px solid var(--line); border-radius: var(--round);
   background: var(--card); font-size: 0.875rem;
 }
-/* Telegram's settings */
-#telegram p { color: var(--muted); }
-#telegram a { color: var(--accent); }
-#telegram .steps { margin: 0 0 16px; padding-left: 22px; list-style: decimal; }
-#telegram .steps li { display: list-item; padding: 4px 0; border: none; }
-#telegram li button.allow { visibility: visible; }
-#telegram p button, #telegram li button.allow {
-  padding: 4px 12px; border: 1px solid var(--line); border-radius: var(--round);
-  background: var(--card); font-size: 0.875rem; color: var(--text);
-}
-#telegram li button.allow { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
-#telegram li > div { display: flex; flex-direction: column; }
-.user .note { text-align: right; }
 /* a scheduled task's message, marked */
 .user.scheduled { background: color-mix(in srgb, var(--accent) 12%, var(--bubble)); }
 .user.scheduled > div:first-of-type { display: flex; gap: 8px; align-items: center; }
@@ -361,7 +348,6 @@ body.gated #gate { display: grid; flex: 1; place-items: center; min-height: 100v
   padding: 4px 12px; border-radius: var(--round); background: var(--accent); color: var(--on-accent);
   font-size: 0.875rem;
 }
-body:not(.owner) .owned { display: none; }
 /* the household's characters, and the one a new chat is with */
 #character { flex-direction: column; align-items: stretch; }
 #character textarea {

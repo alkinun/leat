@@ -55,7 +55,6 @@ class Household:
             if not self.empty():
                 raise ValueError("this home has its people already: ask to join")
             person = self.store.add_person(name)
-            self._link_telegram(person["id"])
             return self._pair(person["id"], device)
 
     def device(self, secret: str | None) -> dict[str, Any] | None:
@@ -140,7 +139,6 @@ class Household:
         for c in self.store.conversations(id):
             self.agent.delete(c["id"], id)
         self.store.remove_person(id)
-        self._unlink_telegram(id)
         self._publish()
 
     def state(self) -> dict[str, Any]:
@@ -166,24 +164,6 @@ class Household:
         old = [id for id, r in self._requests.items() if time.time() - r.asked > WAIT]
         for id in old:
             del self._requests[id]
-
-    def _link_telegram(self, owner: int) -> None:
-        # the people Telegram let in before the household had any are its owner, as was all else
-        from leat.agent.channels import telegram  # which imports the agent
-
-        if settings := self.store.setting(telegram.KEY):
-            allowed = {k: v | {"person": v.get("person") or owner}
-                       for k, v in settings.get("allowed", {}).items()}  # fmt: skip
-            self.store.set_setting(telegram.KEY, settings | {"allowed": allowed})
-
-    def _unlink_telegram(self, person: int) -> None:
-        # turns out the people Telegram let in as a person removed, who must ask again
-        from leat.agent.channels import telegram  # which imports the agent
-
-        if settings := self.store.setting(telegram.KEY):
-            allowed = {k: v for k, v in settings.get("allowed", {}).items()
-                       if v.get("person") != person}  # fmt: skip
-            self.store.set_setting(telegram.KEY, settings | {"allowed": allowed})
 
     def _publish(self) -> None:
         self.agent.events.publish(self.state() | {"to": "owner"})

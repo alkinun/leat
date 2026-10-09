@@ -154,8 +154,7 @@ def test_turn(agent, engine, events):
     seen = until(events, ended)
     assert [e["type"] for e in seen[:3]] == ["conversation", "message", "message"]
     assert seen[0]["conversation"] | {"updated": 0} == {
-        "id": id, "title": "Hi", "updated": 0, "running": True, "character": None,
-        "shared": False}  # fmt: skip
+        "id": id, "title": "Hi", "updated": 0, "running": True, "character": None}  # fmt: skip
     user = {"role": "user", "content": "Hi\nand more",
             "info": {"think": False, "at": pytest.approx(time.time(), abs=5)}}  # fmt: skip
     assert seen[1]["message"] == user
@@ -1136,10 +1135,10 @@ def test_hang_up_is_quiet(agent, capsys):
 
 
 @contextlib.contextmanager
-def serving(agent: Agent, telegram: Any = None) -> Iterator[str]:
+def serving(agent: Agent) -> Iterator[str]:
     """The agent's server, its household's owner set up, whose cookie urllib's requests send from
     then on, as a browser's do."""
-    with Server(agent, port=0, telegram=telegram) as server:
+    with Server(agent, port=0) as server:
         threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True).start()
         url = f"http://127.0.0.1:{server.server_port}"
         processor = urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
@@ -1337,7 +1336,7 @@ def test_joining(server, agent, engine, events):
     assert told[0] == {"type": "conversations", "conversations": []}
     assert told[-1]["conversation"]["id"] == mine["id"]  # the owner's never told
     connection.close()
-    for path, body in [("/api/models/load", {"model": "fake"}), ("/api/telegram", {"token": "x"}),
+    for path, body in [("/api/models/load", {"model": "fake"}),
                        ("/api/pairings/0123456789abcdef/allow", {})]:  # fmt: skip
         assert ask(path, "POST", body)[0] in (403, 404)
     assert ask("/api/models/load", "POST", {"model": "fake"})[0] == 403
@@ -1346,8 +1345,7 @@ def test_joining(server, agent, engine, events):
     assert request(f"{server}/api/people/2", "POST", {"child": True})[0] == 200
     assert request(f"{server}/api/people/1", "POST", {"child": True})[0] == 404  # the owner
     assert agent.store.person(2)["child"] == 1
-    # unpaired by the owner, it must ask again; and removed, with all that is hers, and the
-    # Telegram people who talked as her
+    # unpaired by the owner, it must ask again; and removed, with all that is hers
     (device,) = [d["id"] for d in agent.store.devices() if d["person"] == 2]
     connection = http.client.HTTPConnection(server.replace("http://", ""), timeout=5)
     connection.request("GET", "/api/events", headers={"Cookie": adas})
@@ -1358,11 +1356,8 @@ def test_joining(server, agent, engine, events):
     agent.events.publish({"type": "files", "files": [], "to": "owner"})
     assert stream.read().endswith(b"\n\n")  # to its end, which the server closed
     connection.close()
-    allowed = {"9": {"id": 9, "name": "Ada", "person": 2}, "7": {"id": 7, "name": "A", "person": 1}}
-    agent.store.set_setting("telegram", {"allowed": allowed})
     assert request(f"{server}/api/people/2", "DELETE")[0] == 200
     assert agent.store.person(2) is None and agent.conversations(2) == []
-    assert list(agent.store.setting("telegram")["allowed"]) == ["7"]
     assert request(f"{server}/api/people/1", "DELETE")[0] == 400  # the owner
 
 

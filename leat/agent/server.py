@@ -8,7 +8,7 @@ from the app's own page, or from no browser, not from another site's page.
 Every request but for the app's own files, the household's setup and a device's request to join
 comes from a device of the household's, by the secret its cookie holds. A person sees and changes
 their own conversations, memories and tasks, and the household's memories and files; the owner
-alone the household's people and devices, Telegram, and the engine's model.
+alone the household's people and devices, and the engine's model.
 """
 
 import contextlib
@@ -28,7 +28,6 @@ from pathlib import Path
 from typing import Any
 
 from leat.agent.agent import Agent, Busy, NotFound
-from leat.agent.channels.telegram import Telegram, TelegramError
 from leat.agent.client import EngineError
 from leat.agent.household import Household
 from leat.agent.tools import lists
@@ -65,13 +64,12 @@ _YEARS = 10 * 365 * 86400  # seconds a device keeps its cookie: till it is unpai
 # the types of the workspace's files a browser shows in the page; it downloads the others, as a page
 # the model wrote might act as the app's own
 _SHOWN = {"image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf", "text/plain"}
-# /api/conversations/<id>, and what to do there; /api/memories/<id>; a task's, a Telegram person's,
-# a request to join's and what to do with it, a device's and a person's; a file's name, of
+# /api/conversations/<id>, and what to do there; /api/memories/<id>; a task's, a request to
+# join's and what to do with it, a device's and a person's; a file's name, of
 # /files/<name> to download it and of /api/files/<name> to upload or delete it
 _CONVERSATION = re.compile(r"/api/conversations/([0-9a-f]{12})(/messages|/stop)?")
 _MEMORY = re.compile(r"/api/memories/([0-9]+)")
 _TASK = re.compile(r"/api/tasks/([0-9]+)(/run)?")
-_TELEGRAM = re.compile(r"/api/telegram/people/(-?[0-9]+)")
 _REQUEST = re.compile(r"/api/pairings/([0-9a-f]{16})(/allow)?")
 _DEVICE = re.compile(r"/api/devices/([0-9]+)")
 _PERSON = re.compile(r"/api/people/([0-9]+)")
@@ -82,16 +80,12 @@ _FILE = re.compile(r"/(?:api/)?files/(.+)")
 
 
 class Server(ThreadingHTTPServer):
-    """Serves `agent` at http://host:port, until shut down, to its household's devices, and its
-    `telegram` bot's settings."""
+    """Serves `agent` at http://host:port, until shut down, to its household's devices."""
 
     daemon_threads = True  # event streams end with the server
 
-    def __init__(
-        self, agent: Agent, host: str = "127.0.0.1", port: int = 8000,
-        telegram: Telegram | None = None,
-    ):  # fmt: skip
-        self.agent, self.telegram, self.household = agent, telegram, Household(agent)
+    def __init__(self, agent: Agent, host: str = "127.0.0.1", port: int = 8000):
+        self.agent, self.household = agent, Household(agent)
         super().__init__((host, port), _Handler)
 
     def handle_error(self, request: Any, client_address: Any) -> None:
@@ -142,7 +136,7 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._trusted(write=True):
             return self._error(403, "requests from other sites' pages are refused")
         path, agent = urllib.parse.urlsplit(self.path).path, self.server.agent
-        household, telegram = self.server.household, self.server.telegram
+        household = self.server.household
         if (match := _REQUEST.fullmatch(path)) and not match[2]:
             # a POST, of this server's page alone: a link another gave could log a browser in
             return self._joined(match[1])
@@ -204,16 +198,6 @@ class _Handler(BaseHTTPRequestHandler):
                 to = body.get("person")
                 name = body.get("name") if isinstance(body.get("name"), str) else None
                 self._json(200, household.allow(match[1], int(to) if to else None, name))
-            elif path == "/api/telegram" and telegram is not None:
-                _owner(me)
-                self._json(200, telegram.connect(_text(body, "token")))
-            elif path == "/api/telegram/people" and telegram is not None:
-                _owner(me)
-                whose = int(body.get("person") or person)
-                if agent.store.person(whose) is None:
-                    raise NotFound(f"there is no person {whose}")
-                telegram.allow(int(body.get("id", 0)), whose)
-                self._json(200, {})
             elif path == "/api/models/load":
                 _owner(me)
                 agent.load(_text(body, "model"))
@@ -225,7 +209,7 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._trusted(write=True):
             return self._error(403, "requests from other sites' pages are refused")
         path, agent = urllib.parse.urlsplit(self.path).path, self.server.agent
-        household, telegram = self.server.household, self.server.telegram
+        household = self.server.household
         with self._answering():
             me = self._device()
             person = me["person"]
@@ -258,12 +242,6 @@ class _Handler(BaseHTTPRequestHandler):
             elif match := _PERSON.fullmatch(path):
                 _owner(me)
                 household.remove(int(match[1]))
-            elif path == "/api/telegram" and telegram is not None:
-                _owner(me)
-                telegram.disconnect()
-            elif (match := _TELEGRAM.fullmatch(path)) and telegram is not None:
-                _owner(me)
-                telegram.refuse(int(match[1]))
             else:
                 return self._error(404, f"there is no DELETE {path}")
             self._json(200, {})
@@ -301,8 +279,6 @@ class _Handler(BaseHTTPRequestHandler):
             self._error(409, str(e))
         except EngineError as e:
             self._error(502, str(e))
-        except TelegramError as e:
-            self._error(400, f"Telegram refused it: {e}")
 
     def _device(self) -> dict[str, Any]:
         # the household's device the request comes from, by its cookie's secret. Raises _Unpaired
@@ -371,8 +347,6 @@ class _Handler(BaseHTTPRequestHandler):
             self._event(lists.event(agent))
             if me["owner"]:
                 self._event(self.server.household.state())
-                if self.server.telegram is not None:
-                    self._event(self.server.telegram.state())
             self._event(agent.models_event())
             checked = time.monotonic()
             while True:

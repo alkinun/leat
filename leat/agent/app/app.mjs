@@ -14,7 +14,6 @@ let forgotten = []; // the memories forgotten or changed, as they were, the late
 let files = []; // the workspace's, the latest changed first: {name, size, modified}
 let attached = []; // the files the next message attaches: {name, uploading}
 let tasks = []; // the scheduled, the next due first: {id, prompt, schedule, conversation}
-let telegram = null; // its bot, if connected, and the people allowed and asking
 let me = null; // the person whose this device is: {person, name, owner, device}
 let household = null; // the owner's to manage: its people and their devices, and those asking
 let characters = []; // the household's, which a new chat may be with
@@ -135,7 +134,6 @@ async function start() {
   status("");
   if (response.status === 401) return gate((await response.json()).empty);
   me = await response.json();
-  document.body.classList.toggle("owner", me.owner);
   renderHousehold();
   const events = new EventSource("/api/events");
   events.onmessage = (event) => handle(JSON.parse(event.data));
@@ -348,10 +346,6 @@ function handle(event) {
       tasks = event.tasks;
       renderTasks();
       return;
-    case "telegram":
-      telegram = event;
-      renderTelegram();
-      return;
     case "characters":
       characters = event.characters;
       renderCharacters();
@@ -363,7 +357,6 @@ function handle(event) {
     case "household":
       household = event;
       renderHousehold();
-      renderTelegram();
       return;
     case "done": // a scheduled task's turn, ended
       notify(event.task, event.conversation);
@@ -744,55 +737,6 @@ function renderWith() {
   $("with").replaceChildren(`With ${c.name}`, leave);
 }
 
-// Telegram's settings: how to make a bot and connect it, or the bot connected, and its people
-function renderTelegram() {
-  const box = $("telegram");
-  if (!telegram?.bot) {
-    const steps = element("ol", "steps");
-    steps.append(...["In Telegram, open @BotFather and send it /newbot.",
-      "Give your bot a name, then a username that ends in “bot”.",
-      "Paste the token BotFather gives you here."].map((step) => element("li", "", step)));
-    const form = element("form"), token = element("input"), button = element("button", "", "Connect");
-    Object.assign(token, { placeholder: "123456:ABC-…", autocomplete: "off" });
-    form.append(token, button);
-    form.onsubmit = async (event) => {
-      event.preventDefault();
-      try {
-        await post("/api/telegram", { token: token.value });
-        status("");
-      } catch (error) {
-        status(error.message, true);
-      }
-    };
-    return box.replaceChildren(element("p", "", "Talk to Leat from Telegram, anywhere."), steps, form);
-  }
-  const bot = link(`https://t.me/${telegram.bot}`, `@${telegram.bot}`);
-  const unlink = element("button", "", "Disconnect");
-  unlink.onclick = () => fetch("/api/telegram", { method: "DELETE" });
-  const connected = element("p", "", "Connected as ");
-  connected.append(bot, ". Only the people you allow can talk to it. ", unlink);
-  const people = household?.people ?? [];
-  const whose = (id) => people.find((p) => p.id === id)?.name ?? "no one yet";
-  const person = (p, asking) => { // one asking is let in as a person of the household's
-    const item = element("li"), about = element("div");
-    about.append(element("span", "", p.name),
-      element("span", "meta", asking ? "asks to talk to Leat" : `talks as ${whose(p.person)}`));
-    const as = element("select");
-    as.append(...people.map((q) => new Option(`as ${q.name}`, q.id)));
-    const yes = element("button", "allow", "Allow"), no = element("button", "", "×");
-    yes.onclick = () => post("/api/telegram/people", { id: p.id, person: Number(as.value) })
-      .catch((error) => status(error.message, true));
-    no.title = asking ? "Turn down" : "Remove";
-    no.onclick = () => fetch(`/api/telegram/people/${p.id}`, { method: "DELETE" });
-    item.append(about, ...(asking ? [as, yes] : []), no);
-    return item;
-  };
-  const list = element("ul");
-  list.append(...telegram.requests.map((p) => person(p, true)), ...telegram.allowed.map((p) => person(p, false)));
-  const none = element("p", "meta", `No one yet: write to @${telegram.bot}, then allow yourself here.`);
-  box.replaceChildren(connected, telegram.requests.length + telegram.allowed.length ? list : none);
-}
-
 // the next Sunday at 18:00, as a task's first time: "YYYY-MM-DD 18:00"
 function sunday() {
   const day = new Date();
@@ -908,7 +852,7 @@ function renderList() {
       remove(c);
     };
     const title = element("span", "", c.title), played = characters.find((p) => p.id === c.character);
-    if (played || c.shared) title.prepend(element("span", "with", `${played?.name ?? "In a group"} · `));
+    if (played) title.prepend(element("span", "with", `${played.name} · `));
     item.append(title, remover);
     item.onclick = () => open(c.id);
     return item;
@@ -1057,7 +1001,6 @@ function message(m) {
     item.querySelectorAll(":not(.code) > pre").forEach(codeBar); // the blocks new since
     cite(item);
     if (answer) pages.replaceChildren(...sources(m).map(source));
-    if (m.info?.via === "telegram") note.textContent = "via Telegram";
     const names = m.role === "user" ? (m.info?.files ?? []) : answer ? made(m) : [];
     cards.replaceChildren(...names.map(card));
     if (m.role !== "user") note.textContent = answer ? describe(m.info ?? {}) : "";

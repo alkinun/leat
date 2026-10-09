@@ -15,8 +15,7 @@ to the model's.
 
 A task is a prompt the agent runs at its next time, in a conversation, first at its first, the
 time asked for, or the first of its repeats after, whose wall clock and day of the month its repeats
-keep; one done for good is deleted. Settings are values by name, of JSON,
-as a messaging app's connection.
+keep; one done for good is deleted. Settings are values by name, of JSON.
 
 The household is its people, the first its owner, and the devices paired to each, known by the hash
 of a secret each holds; its characters, whom a conversation may be with; and its lists, as its
@@ -180,7 +179,7 @@ _MIGRATIONS = [
 ]
 _SEARCHED = ("user", "assistant")  # the roles of the messages search finds
 # a conversation's columns as the apps list it
-_SUMMARY = "id, title, created, updated, person, character, shared"
+_SUMMARY = "id, title, created, updated, person, character"
 # the memories a person knows: their own, and the household's
 _KNOWN = "(person IS ? OR category = 'household')"
 
@@ -212,20 +211,19 @@ class Store:
 
     def create(
         self, title: str, messages: list[dict[str, Any]], person: int | None = None,
-        character: int | None = None, shared: bool = False,
+        character: int | None = None,
     ) -> dict[str, Any]:  # fmt: skip
-        """A new conversation of a person's, with a character if given, in a group chat if
-        `shared`, of these messages."""
+        """A new conversation of a person's, with a character if given, of these messages."""
         id, now = uuid.uuid4().hex[:12], time.time()
         with self._lock, self._db:
             self._db.execute("BEGIN")
             self._db.execute(
-                "INSERT INTO conversations (id, title, created, updated, person, character, shared)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)", (id, title, now, now, person, character, shared),
+                "INSERT INTO conversations (id, title, created, updated, person, character)"
+                " VALUES (?, ?, ?, ?, ?, ?)", (id, title, now, now, person, character),
             )  # fmt: skip
             self._insert(id, 0, messages)
         return {"id": id, "title": title, "created": now, "updated": now, "person": person,
-                "character": character, "shared": int(shared)}  # fmt: skip
+                "character": character}  # fmt: skip
 
     def context(self, id: str) -> dict[str, Any]:
         rows = self._query("SELECT context FROM conversations WHERE id = ?", id)
