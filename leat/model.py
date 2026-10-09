@@ -339,6 +339,14 @@ class Transformer:
         of M-RoPE, an image's, at `positions` (T, 3), each token's time, height and width."""
         if len(spans) > 1 and not all(isinstance(s.length, int) for s in spans):
             raise ValueError("several spans need lengths known in advance")
+        # a ring holds a window and a run's tokens but one: a longer run would overwrite the keys
+        # its own first tokens read
+        most = max(int(s.length if isinstance(s.length, int) else s.length.vmax) for s in spans)
+        windows = zip(self.sizes, self.config.windows, self.rings, strict=True)
+        held = [size - window + 1 for size, window, ring in windows if ring]
+        if held and most > min(held):
+            raise ValueError(f"a run of {most} tokens is longer than the {min(held)} the cache's "
+                             "sliding windows hold at once: give the most a run takes")  # fmt: skip
         for i in range(self.config.n_layers):
             if self.config.recurrent[i]:
                 x = self._delta_net(i, x, spans, save)

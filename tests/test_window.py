@@ -74,6 +74,16 @@ def test_ring_sizes(long):
     assert Transformer(gemma, weights, 16384, run=512).sizes == (2048, 16384)
 
 
+def test_runs_fit_their_rings(long):
+    # a ring of 64 for a window of 4 takes runs of 61 tokens at most: a longer one would overwrite
+    # the keys its first tokens read, and is refused
+    f = GGUF.open(long("gpt-oss")[0])
+    model = Transformer(Config.from_gguf(f.metadata), f.load(), LONG, run=CHUNK)
+    model(Tensor([[1] * 61], dtype=dtypes.int32), 0).realize()
+    with pytest.raises(ValueError, match="longer than the 61 the cache's sliding windows hold"):
+        model(Tensor([[1] * 62], dtype=dtypes.int32), 0)
+
+
 def test_holds(long):
     # a ring of 64 for a window of 4 holds the last 64 positions written: a token sees the 3
     # positions before it

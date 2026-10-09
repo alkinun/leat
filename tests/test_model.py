@@ -610,7 +610,12 @@ def test_chunked_prefill(model_path):
     # attention, Qwen2.5 7B's chunked pass once picked a token 0.07 below the best.
     engine = Engine(model_path, max_context=512, prefill_chunk=128)
     vocab, bos = engine.config.vocab_size, engine.tokenizer.bos_id
-    prompt = [0 if bos is None else bos] + [(i * 7919) % vocab for i in range(299)]
+    # as many tokens as every layer's cache holds in one run: gpt-oss's windows of 128 keep rings
+    # of 256 positions, which a run of more than 129 would wrap over the keys its first tokens read
+    m = engine.model
+    n = min([300] + [size - window + 1 for size, window, ring
+                     in zip(m.sizes, m.config.windows, m.rings, strict=True) if ring])  # fmt: skip
+    prompt = [0 if bos is None else bos] + [(i * 7919) % vocab for i in range(n - 1)]
 
     def held() -> list[np.ndarray]:  # what the first layer holds of the prompt
         if (cache := engine.model.cache[0]) is not None:

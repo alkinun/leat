@@ -406,7 +406,7 @@ def _perplexity(args: argparse.Namespace) -> None:
     from leat.engine import Engine
 
     ctx = bench.base_chunk(args.kl_base) if args.kl_base else args.ctx
-    engine = Engine(args.model, max_context=ctx)
+    engine = Engine(args.model, max_context=ctx, prefill_chunk=ctx)  # a chunk in one run
     if args.kl_base:
         result = bench.kl_divergence(engine, args.kl_base, args.chunks, args.decode)
     else:
