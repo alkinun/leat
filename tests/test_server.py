@@ -685,11 +685,19 @@ def test_worker_error_ends_a_waiting_load(server):
 
 
 def test_loading_the_loaded_model_waits_for_nothing(client, server, monkeypatch):
-    # not even for the completions running, which a load of another model waits out
-    going, take = threading.Event(), _Writer.take
-    monkeypatch.setattr(_Writer, "take", lambda self, token: going.wait(5) and take(self, token))
+    # not even for the completions running, which a load of another model waits out. The worker
+    # holds the completion unstepped, taking requests meanwhile, rather than waiting in a step,
+    # which would hold the load back as well
+    going, step = threading.Event(), Server._step
+    monkeypatch.setattr(Server, "_step",
+                        lambda self, running: step(self, running) if going.is_set()
+                        else time.sleep(0.001))  # fmt: skip
     reply = threading.Thread(target=chat, args=(client, "hello"), kwargs={"max_tokens": 2})
     reply.start()
+    deadline = time.monotonic() + 5
+    while server.busy == 0 and time.monotonic() < deadline:  # the completion runs
+        time.sleep(0.01)
+    assert server.busy == 1
     loading = threading.Thread(target=server.load, args=("tiny",))
     loading.start()
     loading.join(2)
