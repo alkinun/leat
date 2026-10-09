@@ -43,7 +43,6 @@ class Outcome:
     answer: str
     memories: list[str]
     files: list[str]
-    tasks: list[str]  # each its prompt and how often it repeats, as "Call Ada (once)"
     seconds: float
     cached: float  # of the prompts' tokens, the share the engine's cache held
 
@@ -78,11 +77,6 @@ def remembers_nothing(o: Outcome) -> str | None:
     return f"remembers {o.memories}" if o.memories else None
 
 
-def schedules(pattern: str) -> Check:
-    found = lambda o: any(re.search(pattern, t, re.I) for t in o.tasks)  # noqa: E731
-    return lambda o: None if found(o) else f"scheduled no task /{pattern}/ but {o.tasks}"
-
-
 def forgot(pattern: str) -> Check:
     return lambda o: f"still remembers /{pattern}/" if remembers(pattern)(o) is None else None
 
@@ -112,7 +106,7 @@ class Case:
     others: list[str] = field(default_factory=list)
 
 
-NONE = ("search", "fetch", "remember", "forget", "recall", "read", "run", "schedule")
+NONE = ("search", "fetch", "remember", "forget", "recall", "read", "run")
 CASES = [
     Case("chat", "Write a haiku about autumn.", [uncalled(*NONE)]),
     Case("arithmetic", "What is 17 * 23?", [says(r"391"), uncalled(*NONE)]),
@@ -143,12 +137,6 @@ CASES = [
          [called("run"), makes(r"\.docx$")]),
     Case("spreadsheet", "Make an Excel budget: rent 900, food 350 and transport 80 a month, with "
          "yearly totals.", [called("run"), makes(r"\.xlsx$")]),
-    Case("reminder", "Remind me in 2 hours to take out the trash.",
-         [called("schedule"), schedules(r"trash.*\(once\)")]),
-    Case("briefing", "Every weekday at 7:30, give me the weather in London.",
-         [called("schedule"), schedules(r"weather.*London.*\(weekdays\)")]),
-    Case("watch", "Every morning at 7, check whether it will rain in London that day, and only "
-         "tell me if it will.", [called("schedule"), schedules(r"London.*\(daily\) if .*rain")]),
     Case("noticed", "I'm planning my daughter Ada's 7th birthday party for next Saturday. Suggest "
          "5 party games.", [remembers("Ada")], reviewed=True),
     Case("no junk", "What's 2^2^2^2?", [remembers_nothing], reviewed=True),
@@ -239,12 +227,10 @@ def _run(case: Case, args: argparse.Namespace) -> Outcome:
         answer = messages[-1]["content"] if messages and messages[-1]["role"] == "assistant" else ""
         memories = [m["text"] for m in agent.memories(person)]
         names = [f["name"] for f in workspace.files()]
-        tasks = [f"{t['prompt']} ({t['repeat']})" + (f" if {c}" if (c := t["condition"]) else "")
-                 for t in agent.tasks(person)]  # fmt: skip
         infos = [m["info"] for m in messages if m["role"] == "assistant" and "read" in m["info"]]
         held, read = sum(i["cached"] or 0 for i in infos), sum(i["read"] for i in infos)
         share = held / (held + read) if held + read else 0.0
-        return Outcome(tools_called, answer or "", memories, names, tasks, seconds, share)
+        return Outcome(tools_called, answer or "", memories, names, seconds, share)
 
 
 def _wait(agent: Agent, id: str, person: int | None) -> list[dict]:

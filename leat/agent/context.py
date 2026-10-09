@@ -64,29 +64,15 @@ State = dict[str, Any]  # "cleared": tools' answers before this message's index 
 
 def message(m: dict[str, Any]) -> dict[str, Any]:
     """A message as the model reads it: without what only people see, nor an empty reasoning, but
-    with the files the user attached named, a scheduled task's said to be one, and a user's
-    begun with when it was sent, which is how the model knows the time as it answers; and with
-    `images`, the names of the workspace's images it shows, those the user attached or a tool
-    read, which the agent shows the model if it sees images. The reasoning is sent back, which
-    templates such as Qwen3.5's show the steps of an agent's turn."""
+    with the files the user attached named, and a user's begun with when it was sent, which is how
+    the model knows the time as it answers; and with `images`, the names of the workspace's images
+    it shows, those the user attached or a tool read, which the agent shows the model if it sees
+    images. The reasoning is sent back, which templates such as Qwen3.5's show the steps of an
+    agent's turn."""
     api = {k: v for k, v in m.items() if k != "info" and (v or k != "reasoning_content")}
     info = m.get("info", {})
     if images := [*info.get("images", []), *(f for f in info.get("files", []) if picture(f))]:
         api["images"] = images
-    if (task := info.get("task")) and (quiet := info.get("quiet")) and info.get("trial"):
-        check = api["content"].rstrip(" .")
-        api["content"] = (
-            f"(Your scheduled check [{task}] is run now, for the user to try it: {check}. Tell "
-            f"them what you find, and whether {quiet}.)"
-        )
-    elif task and quiet:
-        check = api["content"].rstrip(" .")
-        api["content"] = (
-            f"(Your scheduled check [{task}] is due now: {check}. Tell the user only if {quiet}; "
-            "if not, reply NOTHING alone.)"
-        )
-    elif task:
-        api["content"] = f"(Your scheduled task [{task}] is due now: {api['content']})"
     if attached := info.get("files"):
         api["content"] += f"\n\n(Attached, in the workspace: {', '.join(attached)})"
     if m["role"] == "user" and (at := info.get("at")):

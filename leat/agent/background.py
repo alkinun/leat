@@ -1,7 +1,7 @@
-"""The agent's work in the background: running the scheduled tasks as each is due, naming each
-conversation after its first turn, once a conversation is idle, reviewing what is new in it for
-memories, tidying each person's memory once a day, at night, and telling the apps when the engine
-comes up or goes away, as it does when the box starts.
+"""The agent's work in the background: naming each conversation after its first turn, once a
+conversation is idle, reviewing what is new in it for memories, tidying each person's memory once a
+day, at night, and telling the apps when the engine comes up or goes away, as it does when the box
+starts.
 
 The review is ChatGPT's "dreaming" and Hermes Agent's background review, which both have as
 models do not save every memory they should as they talk: small ones say they noted a fact and call
@@ -21,14 +21,13 @@ from typing import TYPE_CHECKING, Any
 from leat.agent import context
 from leat.agent.client import EngineError
 from leat.agent.tools import Context, Tool, arguments, memory
-from leat.agent.tools import tasks as scheduling
 
 if TYPE_CHECKING:
     from leat.agent.agent import Agent
 
 IDLE = 120  # seconds after its last message a conversation is reviewed
 TIDIED = "tidied"  # of the settings: the day each person's memory was last tidied
-CHECK = 30  # seconds between looks for idle conversations, and tasks due, at most
+CHECK = 30  # seconds between looks for idle conversations
 ROUNDS = 4  # replies a review takes at most
 READ = 24000  # characters of what was said that a review reads at most, the latest
 NIGHT = 3  # the hour from which each day's tidying of the memory runs, or at the first look after
@@ -49,7 +48,7 @@ Then read what the user and Leat said since you last looked, and remember what w
 later conversations: who the user is, the people in their life, their work and plans, how they \
 like things done. Each fact a memory of its own, written of "the user", as "The user's cat is \
 called Pamuk.", with the user's own words it rests on as its evidence, and a plan with its last \
-day. Not what they asked about or wondered, what Leat said or found, or a task's details. What is \
+day. Not what they asked about or wondered, or what Leat said or found. What is \
 remembered already, leave; what changed, change with replaces.
 
 If nothing is to change, reply "Done." alone.
@@ -84,24 +83,19 @@ class Background:
 
     def wake(self) -> None:
         """Has the work done now, not at the next look: as a turn ends, after which its
-        conversation is named and the tasks waiting for it run, or as the tasks change."""
+        conversation is named."""
         self._woken.set()
 
     def _work(self) -> None:
-        # tells the apps of the engine's models if they changed, as it came up, runs the tasks due,
-        # names the conversations not named, as those whose first turns ended, and reviews the
-        # idle ones, one at a time, then waits for a wake, the next task or the next look. Each
-        # piece of work that fails is tried again at the next look, the others done meanwhile: a
-        # task due that waits, for its conversation or the engine, and any while the engine is
+        # tells the apps of the engine's models if they changed, as it came up, names the
+        # conversations not named, as those whose first turns ended, and reviews the idle ones,
+        # one at a time, then waits for a wake or the next look. Each piece of work that fails is
+        # tried again at the next look, the others done meanwhile, as any while the engine is
         # away. A bug's error is said, not the thread's end.
         while True:
             self._woken.clear()
-            soonest = float("inf")
             try:
                 self.agent.models_changed()
-                due = self.agent.store.due(time.time())
-                for task in due:
-                    _attempt(run, self.agent, task)
                 for id in self.agent.store.unnamed():
                     if not self.agent.running(id):
                         _attempt(name, self.agent, id)
@@ -112,12 +106,9 @@ class Background:
                 for person in [p["id"] for p in self.agent.store.people()] or [None]:
                     if now.hour >= NIGHT and tidied.get(str(person)) != now.date().isoformat():
                         _attempt(tidy, self.agent, person)
-                # the next task's time, of all but those due at this look that wait, as they were
-                tasks = [t["next"] for t in self.agent.store.tasks(everyone=True) if t not in due]
-                soonest = min(tasks, default=soonest)
             except Exception:
                 traceback.print_exc()
-            self._woken.wait(max(0, min(CHECK, soonest - time.time())))
+            self._woken.wait(CHECK)
 
 
 def _attempt(work: Callable[..., None], *args: Any) -> None:
@@ -129,32 +120,6 @@ def _attempt(work: Callable[..., None], *args: Any) -> None:
         pass
     except Exception:
         traceback.print_exc()
-
-
-def run(agent: "Agent", task: dict[str, Any]) -> None:
-    """Sends a task that is due, in its conversation, or a new one if it is gone, and sets when it
-    runs next: after now, so that one missed while the box was off runs once. A task whose
-    conversation is busy waits for the next look; one the engine has no model to run, as the box
-    starts, raises EngineError, and waits too."""
-    from leat.agent.agent import Busy  # which imports this module
-
-    if not any(m.get("status") == "loaded" for m in agent.models()):
-        raise EngineError("no model is loaded")
-    conversation = task["conversation"]
-    if conversation is not None and agent.store.conversation(conversation) is None:
-        conversation = None  # deleted: a new one, the task's person's
-    try:
-        sent = agent.send(
-            conversation, task["prompt"], task=task["id"], person=task["person"],
-            quiet=task["condition"],
-        )  # fmt: skip
-    except Busy:
-        return
-    now, day = datetime.datetime.now(), datetime.datetime.fromtimestamp(task["first"]).day
-    due: datetime.datetime | None = datetime.datetime.fromtimestamp(task["next"])
-    while due is not None and due <= now:
-        due = scheduling.following(due, task["repeat"], day)
-    agent.ran(task["id"], due.timestamp() if due else None, sent)
 
 
 def name(agent: "Agent", id: str) -> None:

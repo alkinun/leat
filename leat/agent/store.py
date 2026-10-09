@@ -13,13 +13,11 @@ message it was reviewed to, and named by the model once.
 A conversation's context is the state of what its prompt keeps of it, as leat.agent.context fits it
 to the model's.
 
-A task is a prompt the agent runs at its next time, in a conversation, first at its first, the
-time asked for, or the first of its repeats after, whose wall clock and day of the month its repeats
-keep; one done for good is deleted. Settings are values by name, of JSON.
+Settings are values by name, of JSON.
 
 The household is its people, the first its owner, and the devices paired to each, known by the hash
-of a secret each holds. A conversation, a memory and a task are each a person's; a memory of the
-household category is everyone's. Before the household has its first person, everything is no one's,
+of a secret each holds. A conversation and a memory are each a person's; a memory of the household
+category is everyone's. Before the household has its first person, everything is no one's,
 and becomes the owner's.
 """
 
@@ -409,49 +407,6 @@ class Store:
                 sql = "INSERT OR REPLACE INTO settings VALUES (?, ?)"
                 self._db.execute(sql, (key, json.dumps(value, ensure_ascii=False)))
 
-    def tasks(self, person: int | None = None, everyone: bool = False) -> list[dict[str, Any]]:
-        """A person's tasks, or `everyone`'s, the next due first."""
-        if everyone:
-            return [dict(row) for row in self._query("SELECT * FROM tasks ORDER BY next")]
-        sql = "SELECT * FROM tasks WHERE person IS ? ORDER BY next"
-        return [dict(row) for row in self._query(sql, person)]
-
-    def task(self, id: int) -> dict[str, Any] | None:
-        rows = self._query("SELECT * FROM tasks WHERE id = ?", id)
-        return dict(rows[0]) if rows else None
-
-    def add_task(
-        self, prompt: str, repeat: str, first: float, conversation: str | None,
-        person: int | None = None, condition: str | None = None, next: float | None = None,
-    ) -> dict[str, Any]:  # fmt: skip
-        """A task of a person's, a check if it has a condition, next at its first time or at
-        `next`, one of its repeats after."""
-        rows = self._query(
-            "INSERT INTO tasks (prompt, repeat, first, next, conversation, created, person,"
-            " condition) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *",
-            prompt, repeat, first, first if next is None else next, conversation, time.time(),
-            person, condition,
-        )  # fmt: skip
-        return dict(rows[0])
-
-    def due(self, now: float) -> list[dict[str, Any]]:
-        """The tasks due by a time, the earliest first."""
-        rows = self._query("SELECT * FROM tasks WHERE next <= ? ORDER BY next", now)
-        return [dict(row) for row in rows]
-
-    def advance(self, id: int, due: float | None, conversation: str) -> None:
-        """Sets when a task runs next, and where, or deletes it if it is done for good."""
-        with self._lock:
-            if due is None:
-                self._db.execute("DELETE FROM tasks WHERE id = ?", (id,))
-            else:
-                sql = "UPDATE tasks SET next = ?, conversation = ? WHERE id = ?"
-                self._db.execute(sql, (due, conversation, id))
-
-    def delete_task(self, id: int) -> dict[str, Any] | None:
-        rows = self._query("DELETE FROM tasks WHERE id = ? RETURNING *", id)
-        return dict(rows[0]) if rows else None
-
     def people(self) -> list[dict[str, Any]]:
         """The household's people, the owner first."""
         return [dict(row) for row in self._query("SELECT * FROM people ORDER BY id")]
@@ -472,9 +427,8 @@ class Store:
             )  # fmt: skip
             assert person is not None
             if first:
-                for table in ("conversations", "tasks"):
-                    sql = f"UPDATE {table} SET person = ? WHERE person IS NULL"
-                    self._db.execute(sql, (person["id"],))
+                sql = "UPDATE conversations SET person = ? WHERE person IS NULL"
+                self._db.execute(sql, (person["id"],))
                 for table in ("memories", "forgotten"):
                     sql = f"UPDATE {table} SET person = ? WHERE person IS NULL"
                     self._db.execute(f"{sql} AND category != 'household'", (person["id"],))
@@ -485,14 +439,14 @@ class Store:
 
     def remove_person(self, id: int) -> None:
         """Removes a person who is not the owner, and all that is theirs: their conversations,
-        memories, tasks and devices."""
+        memories and devices."""
         with self._lock, self._db:
             self._db.execute("BEGIN")
             for (conversation,) in self._db.execute(
                 "SELECT id FROM conversations WHERE person = ?", (id,)
             ).fetchall():
                 self._db.execute("DELETE FROM search WHERE conversation = ?", (conversation,))
-            for table in ("conversations", "memories", "forgotten", "tasks", "devices"):
+            for table in ("conversations", "memories", "forgotten", "devices"):
                 self._db.execute(f"DELETE FROM {table} WHERE person = ?", (id,))
             self._db.execute("DELETE FROM people WHERE id = ? AND NOT owner", (id,))
 

@@ -13,7 +13,6 @@ and watches the events after misses nothing, and an event it gets twice changes 
 import base64
 import contextlib
 import copy
-import datetime
 import json
 import mimetypes
 import queue
@@ -27,7 +26,6 @@ from leat.agent.background import Background
 from leat.agent.client import Client, Completion, EngineError, whole
 from leat.agent.store import Store
 from leat.agent.tools import Context, Result, Tool, arguments, files, memory, numbered
-from leat.agent.tools import tasks as scheduling
 from leat.agent.workspace import Workspace
 
 # sampling as Qwen3.6 recommends for general tasks, thinking first, then not
@@ -44,7 +42,7 @@ When the user tells you something about themselves worth knowing in later conver
 call remember, then reply: who they are, the people in their life, their work and plans, how they \
 like things done; each fact a memory of its own, written of "the user", as "The user's cat is \
 called Pamuk.", with the words they told you it in as its evidence, and a plan with its last day. \
-Only what they tell you: not what they asked about, what you read or found, or a task's details. \
+Only what they tell you: not what they asked about, or what you read or found. \
 When a memory changes, remember the new one in its place; when they ask you to forget something, \
 forget it. Never say you noted something unless you called remember. Use what you remember only \
 where it helps your answer, and what the user says now over it. To find what you talked about in \
@@ -56,10 +54,6 @@ question you want it to answer, more only if they fall short. When the user asks
 something, search it in several ways and read the pages that matter, ten or so, before you answer \
 with a report: what you found, in sections, and what stays unsure. Cite what you use by the \
 numbers the tools give their sources, as [1] or [2][3], after the words they support.
-
-When the user wants something done later, once or again and again, as a reminder or a morning's \
-briefing, call schedule; to be told only if something holds, as rain tomorrow or a price falling, \
-give it only_if.
 {workspace}
 What you remember of the user, each by its number and dated when it was last confirmed:
 {memories}"""
@@ -116,7 +110,7 @@ class Agent:
     """The conversations and memories in `store`, the turns run by the model `engine` serves,
     which calls the memory's tools and `tools`; and the user's files, in `workspace`, if any.
 
-    Each conversation, memory and task is a person's of the household, `person` by its id, and an
+    Each conversation and memory is a person's of the household, `person` by its id, and an
     event that tells of one is to that person's apps alone: "to" says whose. Before the household
     has its first person, all is no one's, None's."""
 
@@ -125,7 +119,7 @@ class Agent:
         workspace: Workspace | None = None,
     ):  # fmt: skip
         self.store, self.engine, self.workspace, self.events = store, engine, workspace, Events()
-        own = [*memory.tools(self), *scheduling.tools(self)]
+        own = memory.tools(self)
         self.tools = {tool.name: tool for tool in [*own, *(tools or [])]}
         self._files: list[dict[str, Any]] | None = None  # the files the apps were last told of
         self._models: Event | None = None  # the engine's models, as the apps were last told
@@ -134,9 +128,9 @@ class Agent:
         self._lock = threading.Lock()
 
     def start(self) -> None:
-        """Starts the agent's work in the background: running the tasks due, naming
-        conversations, reviewing them for memories once idle, and telling the apps when the
-        engine comes up or goes away, as background.Background does."""
+        """Starts the agent's work in the background: naming conversations, reviewing them for
+        memories once idle, and telling the apps when the engine comes up or goes away, as
+        background.Background does."""
         self.background = Background(self)
         self.background.start()
 
@@ -169,22 +163,13 @@ class Agent:
 
     def send(
         self, id: str | None, content: str, think: bool = False, attached: list[str] | None = None,
-        task: int | None = None, person: int | None = None, quiet: str | None = None,
-        trial: bool = False,
+        person: int | None = None,
     ) -> str:  # fmt: skip
         """Starts a turn of a person's message, in a new conversation without an id; returns the
         conversation's id. The model thinks before it replies if `think`, which takes longer, and
-        reads of the files `attached`, in the workspace. A message of a scheduled task names it,
-        with the condition of a check, `quiet`, that tells only if it holds, but for a `trial`
-        run, which tells what it found. Raises NotFound if there is no such conversation of the
-        person's, or file, Busy if a turn runs in the conversation."""
+        reads of the files `attached`, in the workspace. Raises NotFound if there is no such
+        conversation of the person's, or file, Busy if a turn runs in the conversation."""
         info: dict[str, Any] = {"think": think, "at": time.time()}
-        if task:
-            info["task"] = task
-        if quiet:
-            info["quiet"] = quiet
-        if trial:
-            info["trial"] = True
         if attached:
             space = self.workspace
             if space is None or not all(space.path(name).is_file() for name in attached):
@@ -205,7 +190,7 @@ class Agent:
                     raise Busy("a reply is already running")
                 start = len(self.store.messages(id))
                 self.store.append(id, message)
-            turn = _Turn(self, id, person, start, content, think, task, None if trial else quiet)
+            turn = _Turn(self, id, person, start, content, think)
             self._turns[id] = turn
             self._publish_summary(id)
             self._publish_message(id, person, start, message)
@@ -308,68 +293,6 @@ class Agent:
     def files_event(self) -> Event:
         return {"type": "files", "files": self.workspace.files() if self.workspace else []}
 
-    def schedule(
-        self, prompt: str, at: datetime.datetime, repeat: str, conversation: str | None = None,
-        person: int | None = None, condition: str | None = None,
-    ) -> dict[str, Any]:  # fmt: skip
-        """Schedules a person's task, first at a time of the box's clock, then as often as
-        `repeat` says, in a conversation; a check, which tells the user only if its `condition`
-        holds, if it has one. Raises ValueError if it may not be one, as at a time passed."""
-        now = datetime.datetime.now()
-        asked, at = at, scheduling.first(at, repeat, now)
-        prompt = scheduling.checked(prompt, at, repeat, now)
-        condition = scheduling.condition(condition)
-        with self._lock:
-            if len(self.store.tasks(person)) >= scheduling.MOST:
-                raise ValueError(f"{scheduling.MOST} tasks are scheduled, the most: cancel one")
-            task = self.store.add_task(  # first as asked, whose day a monthly one keeps to
-                prompt, repeat, asked.timestamp(), conversation, person, condition, at.timestamp()
-            )
-            self.events.publish(self.tasks_event(person))
-        if self.background is not None:
-            self.background.wake()
-        return task | {"schedule": scheduling.describe(task)}
-
-    def unschedule(self, id: int, person: int | None = None) -> dict[str, Any]:
-        """Cancels a person's task, and returns it. Raises NotFound if there is no such task."""
-        with self._lock:
-            if (task := self.store.task(id)) is None or task["person"] != person:
-                raise NotFound(f"there is no task {id}")
-            self.store.delete_task(id)
-            self.events.publish(self.tasks_event(person))
-        return task
-
-    def run_now(self, id: int, person: int | None = None) -> str:
-        """Runs a person's task now, to try it, in its conversation, or a new one that becomes
-        its; when it runs next stays as it was. Returns the conversation's id. Raises NotFound if
-        there is no such task, Busy if a turn runs in its conversation."""
-        if (task := self.store.task(id)) is None or task["person"] != person:
-            raise NotFound(f"there is no task {id}")
-        conversation = task["conversation"]
-        if conversation is not None and self.store.conversation(conversation) is None:
-            conversation = None
-        sent = self.send(conversation, task["prompt"], task=id, person=person,
-                         quiet=task["condition"], trial=True)  # fmt: skip
-        with self._lock:  # its next time as it is now, which a run due meanwhile may have moved
-            if (task := self.store.task(id)) is not None:
-                self.store.advance(id, task["next"], sent)
-                self.events.publish(self.tasks_event(person))
-        return sent
-
-    def tasks(self, person: int | None = None) -> list[dict[str, Any]]:
-        """A person's tasks, the next due first, each with its times in words."""
-        return [t | {"schedule": scheduling.describe(t)} for t in self.store.tasks(person)]
-
-    def ran(self, id: int, due: float | None, conversation: str) -> None:
-        """Sets when a task that ran runs next, in the conversation it ran in; or ends it."""
-        with self._lock:
-            if (task := self.store.task(id)) is not None:
-                self.store.advance(id, due, conversation)
-                self.events.publish(self.tasks_event(task["person"]))
-
-    def tasks_event(self, person: int | None = None) -> Event:
-        return {"type": "tasks", "tasks": self.tasks(person), "to": person}
-
     def memories_event(self, person: int | None = None) -> Event:
         """A person's memories and the household's, and the latest forgotten or changed, as they
         were, to restore."""
@@ -444,13 +367,11 @@ class _Turn:
     """A turn running in a person's conversation, of their message at `start`."""
 
     def __init__(
-        self, agent: Agent, id: str, person: int | None, start: int, content: str, think: bool,
-        task: int | None, quiet: str | None = None,
-    ):  # fmt: skip
-        self.agent, self.id, self.start, self.content, self.think = agent, id, start, content, think
-        self.person, self.quiet = person, quiet  # of a check: what must hold to tell
+        self, agent: Agent, id: str, person: int | None, start: int, content: str, think: bool
+    ):
+        self.agent, self.id, self.person, self.start = agent, id, person, start
+        self.content, self.think = content, think
         self.tools = agent.tools  # the tools the model calls
-        self.task = task  # the scheduled task the message is of, if any
         self.state = agent.store.context(id)  # the prompt's, as it was, to take the turn back to
         self.kept = start + 1  # the conversation's messages kept
         self.live: list[dict[str, Any]] = []  # those after, to keep: a reply, or its calls running
@@ -479,10 +400,7 @@ class _Turn:
                 self.agent.files_changed()  # as a call may have changed them
                 if self.stopped.is_set():
                     break
-            if self.quiet and _nothing(self.agent.store.messages(self.id)[-1]):
-                self._take_back(None)  # a check that found nothing to tell: as if it never ran
-            else:
-                self._end()
+            self._end()
         except _Deleted:
             pass
         except EngineError as e:
@@ -739,16 +657,13 @@ class _Turn:
             if a._turns.get(self.id) is self:
                 del a._turns[self.id]
                 a._publish_summary(self.id)
-                if self.task:  # a scheduled task done, for the apps to say
-                    done = {"type": "done", "conversation": self.id, "task": self.content}
-                    a.events.publish(done | {"to": self.person})
         if a.background is not None:
             a.background.wake()
 
-    def _take_back(self, error: str | None) -> None:
+    def _take_back(self, error: str) -> None:
         # removes the turn's messages, from `start`, and the conversation it began, and puts the
         # prompt's state back as it was; tells the apps why, and what the user wrote, to send
-        # again, or, of a check that found nothing, `error` None, nothing
+        # again
         a = self.agent
         with a._lock:
             if a._turns.get(self.id) is not self:
@@ -756,8 +671,6 @@ class _Turn:
             del a._turns[self.id]
             self.live = []
             event = {"type": "error", "conversation": self.id, "error": error, "start": self.start}
-            if error is None:
-                event["type"] = "withdrawn"
             a.events.publish(event | {"content": self.content, "to": self.person})
             if self.start == 1:  # its first turn
                 a.store.delete(self.id)
@@ -791,14 +704,6 @@ def _system(
     home = f"the home of the user, {name}:" if name else "the user's home:"
     content = SYSTEM.format(home=home, memories=remembered, workspace=space)
     return {"role": "system", "content": content}
-
-
-def _nothing(reply: dict[str, Any]) -> bool:
-    # whether a check's reply says there is nothing to tell
-    return (
-        reply["role"] == "assistant"
-        and reply.get("content", "").strip(" .!\n").upper() == "NOTHING"
-    )
 
 
 def _title(content: str) -> str:

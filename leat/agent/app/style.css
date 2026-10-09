@@ -50,7 +50,7 @@ body.menu nav { display: none; } /* on a narrow screen, the menu shows it instea
 #conversations { flex: 1; overflow-y: auto; margin-top: calc(12px * var(--density)); }
 /* the pages beside the conversations, at the sidebar's foot */
 .place { display: flex; gap: 10px; align-items: center; padding: calc(8px * var(--density)) 10px; border-radius: var(--round); }
-.place:hover, body.memory #remembered, body.files #filed, body.tasks #timed, body.settings #set {
+.place:hover, body.memory #remembered, body.files #filed, body.settings #set {
   background: var(--bubble);
 }
 .conversation {
@@ -100,10 +100,8 @@ main.empty #greeting { display: block; margin-bottom: calc(28px * var(--density)
 
 /* a page, as the memory's, in place of a conversation */
 .page { display: none; flex: 1; overflow-y: auto; padding: calc(16px * var(--density)) max(24px, calc(50% - 368px)); }
-body.memory #memory, body.files #files, body.tasks #tasks, body.settings #settings {
-  display: block;
-}
-body:is(.memory, .files, .tasks, .settings) :is(#log, #composer, #greeting) {
+body.memory #memory, body.files #files, body.settings #settings { display: block; }
+body:is(.memory, .files, .settings) :is(#log, #composer, #greeting) {
   display: none;
 }
 .page h1 { margin: calc(24px * var(--density)) 0 calc(8px * var(--density)); font: var(--display-weight) 1.875rem/1.3 var(--font-display); }
@@ -133,23 +131,6 @@ body:is(.memory, .files, .tasks, .settings) :is(#log, #composer, #greeting) {
 .page .meta { color: var(--muted); font-size: 0.8125rem; white-space: nowrap; }
 .page li button { padding: 0 8px; color: var(--muted); font-size: 1.125rem; }
 .page li button.undo { font-size: 0.875rem; color: var(--accent); }
-#scheduled li > div { display: flex; flex-direction: column; gap: 2px; }
-#scheduled:empty::before { content: "Nothing yet."; color: var(--muted); }
-#scheduled a { width: fit-content; font-size: 0.8125rem; color: var(--accent); }
-#notifying button {
-  margin-top: 8px; padding: 6px 14px; border: 1px solid var(--line); border-radius: var(--round);
-  background: var(--card); font-size: 0.875rem;
-}
-/* a scheduled task's message, marked */
-.user.scheduled { background: color-mix(in srgb, var(--accent) 12%, var(--bubble)); }
-.user.scheduled > div:first-of-type { display: flex; gap: 8px; align-items: center; }
-.user.scheduled svg { width: 16px; height: 16px; flex: none; color: var(--accent); }
-/* the notice of a task done, which opens its conversation */
-#toast {
-  position: fixed; bottom: 96px; left: 50%; transform: translateX(-50%); z-index: 2;
-  max-width: min(480px, 90vw); padding: 10px 18px; border-radius: var(--round-large);
-  background: var(--text); color: var(--page); font-size: 0.875rem; box-shadow: 0 4px 20px rgb(0 0 0 / 0.2);
-}
 .page li:not(:hover) button { visibility: hidden; }
 
 .message { margin-bottom: calc(28px * var(--density)); white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -347,11 +328,6 @@ body.gated #gate { display: grid; flex: 1; place-items: center; min-height: 100v
 #household li button.allow {
   padding: 4px 12px; border-radius: var(--round); background: var(--accent); color: var(--on-accent);
   font-size: 0.875rem;
-}
-#suggested { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 16px; }
-#suggested button, #scheduled li button.talk {
-  padding: 4px 12px; border: 1px solid var(--line); border-radius: var(--round);
-  background: var(--card); font-size: 0.875rem; color: var(--text); visibility: visible;
 }
 /* the themes, each a sample of itself, and the mode they are in */
 #modes {

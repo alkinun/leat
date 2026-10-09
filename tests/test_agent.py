@@ -238,7 +238,7 @@ def test_tools(agent, engine, events):
     }  # fmt: skip
     assert reply["content"] == "It said hi."
     first, second = engine.requests
-    names = ["remember", "forget", "recall", "schedule", "unschedule", "tasks", "echo"]
+    names = ["remember", "forget", "recall", "echo"]
     assert [tool["function"]["name"] for tool in first["tools"]] == names
     assert second["messages"][-1] == _api(answer)
 
@@ -343,14 +343,12 @@ def test_memory(agent, engine, events):
 
 
 def test_said():
-    # the user's words, whatever their case and punctuation; not a task's, nor a single word that
-    # runs across two messages; or an old memory's, of one it replaces
+    # the user's words, whatever their case and punctuation; not a single word that runs across two
+    # messages; or an old memory's, of one it replaces
     messages = [{"role": "system", "content": "x"},
                 {"role": "user", "content": "I'm Sam -- a NURSE, in Izmir.", "info": {}},
-                {"role": "assistant", "content": "Nice!", "info": {}},
-                {"role": "user", "content": "Call mum", "info": {"task": 1}}]  # fmt: skip
-    assert memory.said("a nurse in izmir", messages)
-    assert not memory.said("nice", messages) and not memory.said("call mum", messages)
+                {"role": "assistant", "content": "Nice!", "info": {}}]  # fmt: skip
+    assert memory.said("a nurse in izmir", messages) and not memory.said("nice", messages)
     assert not memory.said("...", messages) and not memory.said("nurse", messages)
     assert not memory.said("a nur", messages)  # parts of words
     assert memory.said("going to Rome", messages, ["The user is going to Rome in May."])
@@ -441,7 +439,7 @@ def test_forgotten(agent, events):
 
 def test_household(agent, engine, events):
     # all that was no one's becomes the first person's, the owner's; then each person's
-    # conversations, memories and tasks are their own, the household's memories everyone's, and
+    # conversations and memories are their own, the household's memories everyone's, and
     # each event says whose it is
     engine.replies.put(REPLY)
     before = agent.send(None, "Hi")
@@ -487,14 +485,6 @@ def test_household(agent, engine, events):
     agent.forget(cat["id"], person=owner["id"])  # the household's: anyone's to forget
     (gone,) = agent.store.forgotten(ada["id"])
     assert agent.restore(gone["id"], ada["id"])["text"] == "The household's cat is called Pamuk."
-    # tasks: each person's own
-    soon = datetime.datetime.now() + datetime.timedelta(hours=1)
-    task = agent.schedule("Practise", soon, "once", mine, ada["id"])
-    assert agent.tasks(owner["id"]) == [] and [t["id"] for t in agent.tasks(ada["id"])] == [
-        task["id"]
-    ]
-    with pytest.raises(NotFound):
-        agent.unschedule(task["id"], owner["id"])
     # recall finds a person's own conversations alone
     found = agent.store.search("hello hi", person=owner["id"])
     assert {f["conversation"] for f in found} == {before}
@@ -822,124 +812,6 @@ def test_citations(agent, engine, events):
     assert [m["info"]["n"] for m in agent.store.messages(id) if m["role"] == "tool"] == [1, 2, 2, 3]
 
 
-def test_schedule(agent, engine, events):
-    # a task set in a conversation, by the model's call; past times refused, saying now's
-    engine.replies.put([{"tool_calls": [call("schedule", {"task": "Remind the user to call Ada",
-                                                          "at": "in 2 hours"})]}])  # fmt: skip
-    engine.replies.put([{"content": "I will."}])
-    id = agent.send(None, "Remind me in 2 hours to call Ada")
-    until(events, ended)
-    (task,) = agent.tasks()
-    assert (task["prompt"], task["repeat"], task["conversation"]) == (
-        "Remind the user to call Ada", "once", id)  # fmt: skip
-    assert task["next"] == pytest.approx(time.time() + 7200, abs=5)
-    assert agent.store.messages(id)[3]["content"] == f"Scheduled, as task [1]: {task['schedule']}."
-    with pytest.raises(ValueError, match="that time has passed: it is"):
-        agent.schedule("Too late", datetime.datetime.now(), "once", id)
-    # a monthly one keeps to the day asked for, past the shorter months it may first run in
-    rent = agent.schedule("Pay the rent", datetime.datetime(2025, 1, 31, 9), "monthly", id)
-    assert rent["first"] == datetime.datetime(2025, 1, 31, 9).timestamp() < time.time()
-    assert "every month on the 31st" in rent["schedule"] and rent["next"] > time.time()
-    assert agent.unschedule(rent["id"])["prompt"] == "Pay the rent"
-    assert agent.unschedule(1)["prompt"] == "Remind the user to call Ada" and agent.tasks() == []
-    with pytest.raises(NotFound):
-        agent.unschedule(1)
-
-
-def test_task_runs(agent, engine, events):
-    # a task due is sent in its conversation, said to be one, and runs next a day after its time,
-    # once however long it was missed; a task done for good goes
-    engine.replies.put(REPLY)
-    id = agent.send(None, "Hi")
-    until(events, ended)
-    yesterday = datetime.datetime.now().replace(second=0, microsecond=0) - datetime.timedelta(
-        days=1, minutes=1)  # fmt: skip
-    daily = agent.store.add_task("Give the weather", "daily", yesterday.timestamp(), id)
-    engine.replies.put([{"content": "Sunny."}])
-    background.run(agent, daily)
-    done = until(events, lambda e: e["type"] == "done")[-1]
-    assert done == {"type": "done", "conversation": id, "task": "Give the weather", "to": None}
-    asked = engine.requests[-1]["messages"][-1]
-    assert asked == {
-        "role": "user",
-        "content": stamped(agent, id, 3) + "(Your scheduled task [1] is due now: Give the weather)",
-    }
-    (task,) = agent.tasks()
-    assert task["next"] == (yesterday + datetime.timedelta(days=2)).timestamp()
-    # one whose conversation is gone runs in a new one; one that runs once is then gone
-    once = agent.store.add_task("Say hello", "once", yesterday.timestamp(), "000000000000")
-    engine.replies.put([{"content": "Hello."}])
-    background.run(agent, once)
-    other = until(events, lambda e: e["type"] == "done")[-1]["conversation"]
-    assert other != id and [t["id"] for t in agent.tasks()] == [1]
-
-
-def test_check(agent, engine, events):
-    # a check tells only if its condition holds: one that finds nothing is withdrawn, as if it
-    # never ran, and the apps are told nothing is done; one that finds it is kept, and told
-    engine.replies.put(REPLY)
-    id = agent.send(None, "Hi")
-    until(events, ended)
-    tomorrow = datetime.datetime.now() + datetime.timedelta(days=1)
-    check = agent.schedule("Look at tomorrow's weather in Izmir", tomorrow, "daily", id,
-                           condition=" it will  rain ")  # fmt: skip
-    assert check["condition"] == "it will rain"
-    assert check["schedule"].endswith(", telling only if it will rain")
-    engine.replies.put([{"content": "NOTHING."}])
-    background.run(agent, agent.store.task(check["id"]))
-    seen = until(events, ended)
-    assert "withdrawn" in [e["type"] for e in seen] and "done" not in [e["type"] for e in seen]
-    asked = engine.requests[-1]["messages"][-1]["content"]
-    due = "(Your scheduled check [1] is due now: Look at tomorrow's weather in Izmir. Tell the "
-    assert asked.endswith(due + "user only if it will rain; if not, reply NOTHING alone.)")
-    assert len(agent.store.messages(id)) == 3  # as it was
-    engine.replies.put([{"content": "Take an umbrella: rain is coming."}])
-    background.run(agent, agent.store.task(check["id"]))
-    assert until(events, lambda e: e["type"] == "done")[-1]["task"].startswith("Look at")
-    assert agent.store.messages(id)[-1]["content"] == "Take an umbrella: rain is coming."
-
-
-def test_task_waits(agent, engine, events, monkeypatch):
-    # a task due in a conversation whose turn runs waits, without looking again and again, for the
-    # turn's end
-    engine.replies.put([{"content": "Hel"}, HOLD])
-    id = agent.send(None, "Hi")
-    until(events, lambda e: e["type"] == "delta")
-    agent.store.name(id, "Greetings")  # not named by the next replies
-    task = agent.store.add_task("Say hello", "once", time.time() - 1, id)
-    looks = []
-    due = agent.store.due
-    monkeypatch.setattr(agent.store, "due", lambda now: looks.append(now) or due(now))
-    agent.background = background.Background(agent, idle=60)
-    agent.background.start()
-    time.sleep(0.3)
-    assert len(looks) == 1 and agent.store.due(time.time()) == [task]
-    engine.replies.put([{"content": "Hello."}])
-    engine.released.set()
-    assert until(events, lambda e: e["type"] == "done")[-1]["task"] == "Say hello"
-    assert agent.tasks() == []
-
-
-def test_task_without_model(agent, engine, events):
-    # a task due while the engine has no model, as the box starts, waits for one
-    engine.status = "unloaded"
-    task = agent.store.add_task("Say hello", "once", time.time() - 1, None)
-    with pytest.raises(EngineError, match="no model is loaded"):
-        background.run(agent, task)
-    assert agent.store.due(time.time()) == [task] and agent.conversations() == []
-
-
-def test_task_on_time(agent, engine, events):
-    # a task set for sooner than the next look runs on time
-    agent.background = background.Background(agent, idle=60)
-    agent.background.start()
-    time.sleep(0.1)  # waiting for the next look
-    engine.replies.put([{"content": "Hello."}])
-    agent.schedule("Say hello", datetime.datetime.now() + datetime.timedelta(seconds=0.3), "once")
-    done = until(events, lambda e: e["type"] == "done")[-1]
-    assert done["task"] == "Say hello"
-
-
 def test_live_reply(agent, engine, events):
     # while a reply streams, the conversation shows it, and another message must wait for it
     engine.replies.put([{"content": "Hel"}, HOLD, {"content": "lo"}])
@@ -1170,27 +1042,6 @@ def test_api_memories(server, agent):
     assert request(f"{server}/memory")[0] == 200  # the app's page of them
 
 
-def test_api_tasks(server, agent, engine, events):
-    in_an_hour = datetime.datetime.now() + datetime.timedelta(hours=1)
-    task = agent.schedule("Remind the user to stretch", in_an_hour, "daily", person=1)
-    assert request(f"{server}/api/tasks/{task['id']}", "DELETE")[0] == 200
-    assert request(f"{server}/api/tasks/{task['id']}", "DELETE")[0] == 404
-    assert request(f"{server}/tasks")[0] == 200  # the app's page of them
-    # one the user schedules themselves, a check, and runs now, to try it, in a chat that is its
-    url = f"{server}/api/tasks"
-    body = {"prompt": "Look at tomorrow's weather", "at": "19:00", "repeat": "daily",
-            "only_if": "it will rain"}  # fmt: skip
-    status, made = request(url, "POST", body)
-    check = json.loads(made)
-    assert status == 200 and check["schedule"].endswith("telling only if it will rain")
-    assert request(url, "POST", body | {"repeat": "yearly"})[0] == 400
-    engine.replies.put([{"content": "It will rain."}])
-    status, ran = request(f"{url}/{check['id']}/run", "POST", {})
-    until(events, lambda e: e["type"] == "done")
-    assert agent.store.task(check["id"])["conversation"] == json.loads(ran)["id"]
-    assert agent.store.task(check["id"])["next"] == check["next"]  # its time as it was
-
-
 def test_joining(server, agent, engine, events):
     # a device asks to join, showing a code the owner's device shows too; let in as a new person,
     # it sees their own alone, may not do what the owner alone may, and is unpaired by the owner
@@ -1297,7 +1148,6 @@ def test_events(server, agent, engine):
     assert event() == {"type": "conversations", "conversations": []}
     assert event() == {"type": "memories", "memories": [], "forgotten": []}
     assert event() == {"type": "files", "files": []}
-    assert event() == {"type": "tasks", "tasks": []}
     assert event()["type"] == "household"  # the owner's
     assert event()["type"] == "models"
     engine.replies.put(REPLY)

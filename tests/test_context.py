@@ -33,11 +33,10 @@ def test_prompt():
 
 
 def test_stamp():
-    # a user's message begins with when it was sent, a task's too; a reply's does not
+    # a user's message begins with when it was sent; a reply's does not
     at = datetime.datetime(2026, 10, 8, 14, 5).timestamp()
-    task = {"role": "user", "content": "Brief me", "info": {"at": at, "task": 3}}
-    due = "(Your scheduled task [3] is due now: Brief me)"
-    assert context.message(task)["content"] == f"[Thursday 8 October 2026, 14:05]\n{due}"
+    asked = {"role": "user", "content": "Brief me", "info": {"at": at}}
+    assert context.message(asked)["content"] == "[Thursday 8 October 2026, 14:05]\nBrief me"
     reply = {"role": "assistant", "content": "Done.", "info": {"at": at}}
     assert context.message(reply)["content"] == "Done."
 
