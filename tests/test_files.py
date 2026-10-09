@@ -272,6 +272,12 @@ def test_api_files(server, workspace, monkeypatch):
         bad.add_unredirected_header("Content-Length", length)
         with pytest.raises(urllib.error.HTTPError, match="400"):
             urllib.request.urlopen(bad)
+    # a body in chunks, of no length, which would make an empty file
+    chunked = urllib.request.Request(f"{server}/api/files/c.txt", iter([b"x"]), method="PUT")
+    chunked.add_unredirected_header("Transfer-Encoding", "chunked")
+    with pytest.raises(urllib.error.HTTPError, match="400"):
+        urllib.request.urlopen(chunked)
+    assert not workspace.path("c.txt").exists()
     monkeypatch.setattr("leat.agent.server.UPLOAD", 4)
     assert call(f"{server}/api/files/big.bin", "PUT", b"12345")[0] == 413
     assert call(f"{server}/files")[0] == 200  # the app's page of them

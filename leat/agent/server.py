@@ -316,7 +316,10 @@ class _Handler(BaseHTTPRequestHandler):
         return not write or origin is None or urllib.parse.urlsplit(origin).netloc == host
 
     def _length(self) -> int:
-        # the body's length, as its header says. Raises ValueError if it says none there can be.
+        # the body's length, as its header says. Raises ValueError if it says none there can be,
+        # or the body comes in chunks, which this server does not read: an upload would be empty
+        if "Transfer-Encoding" in self.headers:
+            raise ValueError("a body must come whole, of the length its Content-Length says")
         if (n := int(self.headers.get("Content-Length") or 0)) < 0:
             raise ValueError("a body's length cannot be negative")
         return n
