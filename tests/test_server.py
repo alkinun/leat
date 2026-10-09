@@ -466,6 +466,28 @@ def test_harmony_tool_call(client, replies_with, monkeypatch, stream, header, bo
 
 
 @pytest.mark.parametrize("stream", [False, True])
+def test_tool_choice_none(client, server, replies_with, monkeypatch, stream):
+    # tool_choice "none" as OpenAI's API has it: of harmony, the tools still declared, so that the
+    # prompt is as of "auto", and the reply opened in the final channel, an answer, whatever call
+    # it goes on to; of a format of no such channel, the tools left out
+    chat_template, rendered, texts = server.loaded.chat, [], []
+    render, tokens = chat_template.render, chat_template.tokens
+    monkeypatch.setattr(chat_template, "render", lambda m, **o: rendered.append(o) or render(m))
+    monkeypatch.setattr(chat_template, "tokens", lambda t, i=(): texts.append(t) or tokens(t, i))
+    kwargs = {"tools": [WEATHER], "tool_choice": "none", "stream": stream}
+    monkeypatch.setattr(ChatTemplate, "form", property(lambda self: "harmony"))
+    replies_with("It is sunny.<|end|><|start|>assistant<|channel|>commentary to=functions.weather"
+                 '<|message|>{"city": "Paris"}')  # fmt: skip
+    assert complete(client, "Weather in Paris?", **kwargs)[0] == "It is sunny."
+    assert rendered[-1]["tools"] == [WEATHER]
+    assert texts[-1].endswith("<|channel|>final<|message|>")
+    monkeypatch.setattr(ChatTemplate, "form", property(lambda self: None))
+    replies_with("It is sunny.")
+    assert complete(client, "Weather in Paris?", **kwargs)[0] == "It is sunny."
+    assert "tools" not in rendered[-1] and not texts[-1].endswith("<|message|>")
+
+
+@pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize(
     "text, choice",
     [

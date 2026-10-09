@@ -117,6 +117,13 @@ class ChatTemplate:
             ids += image + self._tokenizer.encode(piece, bos=False, special=True)
         return ids
 
+    @property
+    def answer(self) -> str:
+        """What opens a reply that answers, rather than calls a tool, in a format that marks one,
+        as harmony's final channel does: a prompt that ends in it has the model answer. Else
+        nothing."""
+        return _ANSWER.get(self.form or "", "")
+
     def opens_thinking(self, text: str) -> bool:
         """Whether a rendered prompt ends inside a block of reasoning, which the reply then
         continues, as DeepSeek-R1's distillations' templates open their <think>."""
@@ -161,6 +168,8 @@ class Reply:
 # where a form's block of reasoning opens and closes, before the text: <think> blocks, and Gemma
 # 4's thought channel
 _THINKING = {"think": ("<think>", "</think>"), "gemma4": ("<|channel>thought", "<channel|>")}
+# what opens a form's reply that answers, rather than calls a tool
+_ANSWER = {"harmony": "<|channel|>final<|message|>"}
 # the harmony format's markers, and those blocks'
 _REPLY_MARKERS = ("<|start|>", "<|channel|>", "<|message|>", "<|end|>", "<|constrain|>",
                   *(marker for markers in _THINKING.values() for marker in markers))  # fmt: skip
@@ -378,8 +387,14 @@ def images(messages: list[dict[str, Any]]) -> list[bytes]:
 def _message(message: dict[str, Any]) -> dict[str, Any]:
     # an OpenAI message as templates read it: content as one string, its text parts joined by
     # newlines and its images, `image_url` parts or transformers' `image` ones, IMAGE; and tool
-    # calls only where there are some, with their arguments as objects rather than JSON text
+    # calls only where there are some, with their arguments as objects rather than JSON text; and
+    # reasoning as `thinking` too, as gpt-oss's template reads it, and llama.cpp and vLLM give it:
+    # of replies that called tools, it keeps it until the turn's answer, and of those with text
+    # too, it takes the text for their reasoning, and refuses both
     message = dict(message)
+    reasoning = message.get("reasoning_content")
+    if reasoning and not message.get("content") and "thinking" not in message:
+        message["thinking"] = reasoning
     if isinstance(content := message.get("content"), list):
         kinds = ("text", "image", "image_url")
         if any(not isinstance(part, dict) or part.get("type") not in kinds for part in content):

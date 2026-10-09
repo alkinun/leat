@@ -51,9 +51,9 @@ answer, without a link: the app shows the user the files you make. The skills:
 {skills}
 """
 TITLE = 60  # characters of a conversation's title at most: its first message's start
-ROUNDS = 25  # replies a turn takes at most; the last may call no tools, and answers, told so
+ROUNDS = 25  # replies a turn takes at most; the last answers, told so, and may call no tools
 LAST = "(You have made all the tool calls this message allows: answer now, from what you found.)"
-# replies of nothing, neither text nor a call, a turn asks again at most: a model may end its
+# times a reply of nothing, neither text nor a call, is asked again at most: a model may end its
 # reasoning without a word, as gpt-oss does of one reply in forty or so, which would end the turn
 EMPTY = 2
 
@@ -281,7 +281,7 @@ class _Turn:
         self.limit: int | None = None  # the model's context, once the turn asks
         self.image = 0  # the tokens an image takes at most, of a model that sees them, once asked
         self.redone = False  # a reply the context cut off, after the prompt was made smaller
-        self.empty = 0  # replies of nothing asked again
+        self.empty = 0  # times the reply was asked again, as it said nothing
         self.sources: dict[str, int] = {}  # the conversation's, by address, numbered for citing
 
     def stop(self) -> None:
@@ -311,15 +311,16 @@ class _Turn:
             self._take_back(f"the turn failed: {e!r}")
             raise
 
-    def _reply(self, last: bool = False, tools: bool = True) -> list[dict[str, Any]]:
+    def _reply(self, last: bool = False) -> list[dict[str, Any]]:
         # streams a reply of the model's into the conversation and keeps it; returns the calls it
-        # makes of the agent's tools. The turn's `last` reply is told to answer, the tools still
-        # declared, so that its prompt extends the last; if it calls them anyway, it is redone
-        # without `tools`. The prompt is made smaller first if it outgrows its share of the
-        # context, and again, the reply redone, if the context cuts the reply off.
+        # makes of the agent's tools. The turn's `last` reply is told to answer, and may call
+        # none, with tool_choice "none": the tools still declared, so that its prompt extends the
+        # last, as gpt-oss, told to answer, would call them still. The prompt is made smaller
+        # first if it outgrows its share of the context, and again, the reply redone, if the
+        # context cuts the reply off.
         a = self.agent
         messages, state = a.store.messages(self.id), a.store.context(self.id)
-        declared = [tool.declaration() for tool in self.tools.values()] if tools else []
+        declared = [tool.declaration() for tool in self.tools.values()]
         extra = len(json.dumps(declared))
         if self.limit and self._estimate(messages, state, extra) > context.COMPACT * self.limit:
             state = self._compact(messages, state, extra)
@@ -338,8 +339,9 @@ class _Turn:
         body["chat_template_kwargs"] = {"preserve_thinking": True}
         if declared:
             body["tools"] = declared
-        if last and self.tools:
+        if last and declared:
             body["messages"].append({"role": "user", "content": LAST})
+            body["tool_choice"] = "none"
         started, finish = time.monotonic(), None
         chunks: Iterable[dict[str, Any]] = ()
         if not self.stopped.is_set():  # as it may be, while the prompt was made smaller
@@ -369,18 +371,17 @@ class _Turn:
                 self.redone = True
                 with a._lock:
                     self.live.remove(reply)
-                return self._reply(last, tools)
+                return self._reply(last)
         said = reply["content"].strip() or reply.get("tool_calls")
         if not said and finish == "stop" and self.empty < EMPTY and not self.stopped.is_set():
             self.empty += 1  # asked again, of the same prompt, which the engine's cache holds
             with a._lock:
                 self.live.remove(reply)
-            return self._reply(last, tools)
-        if last and declared and reply.get("tool_calls") and not self.stopped.is_set():
-            with a._lock:
-                self.live.remove(reply)
-            return self._reply(last, tools=False)
+            return self._reply(last)
+        self.empty = 0
         with a._lock:
+            if last:  # of a server that calls tools all the same, none answered
+                reply.pop("tool_calls", None)
             if self.stopped.is_set():
                 info["stopped"] = True
             if finish == "length":

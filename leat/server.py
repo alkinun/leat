@@ -147,6 +147,7 @@ class _Completion:
     key: str = ""  # the name of the key it came with, if the server asks for keys
     user: str = ""  # the end user it is for, if the client names them
     thinking: bool = False  # the prompt opened a <think> block
+    opened: str = ""  # what the prompt opened the reply with, as ChatTemplate.answer
     id: str = field(default_factory=lambda: f"chatcmpl-{uuid.uuid4().hex}")
     created: int = field(default_factory=lambda: int(time.time()))
     # from the worker: pieces of text, then how generation finished or the exception it raised
@@ -605,7 +606,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _reply(self, c: _Completion) -> None:
         try:
-            reply = split_reply("".join(c.pieces(self._hung_up)), c.form, c.thinking, done=True)
+            text = c.opened + "".join(c.pieces(self._hung_up))
+            reply = split_reply(text, c.form, c.thinking, done=True)
         except RuntimeError as e:
             return self._error(500, str(e))
         message: dict[str, Any] = {"role": "assistant", "content": reply.content}
@@ -628,7 +630,7 @@ class _Handler(BaseHTTPRequestHandler):
         self._chunk(c, {"role": "assistant", "content": ""})
         # what may yet be part of a tool call is held back; the reply is split once more when
         # done, the end that may have begun a marker then its own
-        text, reasoned, sent, reply = "", 0, 0, Reply()
+        text, reasoned, sent, reply = c.opened, 0, 0, Reply()
         try:
             for piece in itertools.chain(c.pieces(self._hung_up), [None]):
                 text += piece or ""
@@ -737,13 +739,19 @@ def _completion(body: Any, server: Server) -> _Completion:
         raise ValueError(f"tool_choice={choice!r} is not supported, only 'auto' and 'none'")
     if (loaded := server.loaded) is None:
         raise ValueError("no model is loaded")
-    tools = (body.get("tools") or None) if choice == "auto" else None
+    # tool_choice "none" as OpenAI's API has it: the tools still declared, so that the prompt is
+    # as of "auto", which the cache may hold, and the reply opened as an answer, as harmony's
+    # final channel opens it, of a format that marks one; else the tools left out
+    declared, opened = body.get("tools") or None, ""
+    if choice == "none" and declared and not (opened := loaded.chat.answer):
+        declared = None
+    tools = declared if choice == "auto" else None
     # the reasoning effort, as the template is told it, and options for the template too, such as
     # Qwen3's enable_thinking, as llama.cpp and vLLM take, which a client gives over the effort
     effort = loaded.chat.effort(body["reasoning_effort"]) if body.get("reasoning_effort") else {}
     given = body.get("chat_template_kwargs") or {}
-    options = effort | given | ({"tools": tools} if tools else {})
-    text = loaded.chat.render(body["messages"], **options)
+    options = effort | given | ({"tools": declared} if declared else {})
+    text = loaded.chat.render(body["messages"], **options) + opened
     if (files := images(body["messages"])) and loaded.engine.vision is None:
         raise ValueError(f"{loaded.name} takes no images: it has no vision encoder")
     shown = [loaded.engine.image(data) for data in files]
@@ -769,6 +777,7 @@ def _completion(body: Any, server: Server) -> _Completion:
         form=loaded.chat.form,
         user=body.get("safety_identifier") or body.get("user") or "",
         thinking=loaded.chat.opens_thinking(text),
+        opened=opened,
     )
 
 

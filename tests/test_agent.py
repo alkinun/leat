@@ -250,14 +250,16 @@ def test_tools(agent, engine, events):
 
 def test_empty_reply(agent, engine, events):
     # a reply of nothing, neither text nor a call, as gpt-oss ends its reasoning without a word at
-    # times, is asked again, and not kept; twice at most, after which the turn ends as it is
+    # times, is asked again, and not kept; twice at most, each of a turn's replies, after which
+    # the turn ends as it is
     engine.replies.put([{"reasoning_content": "Let me search again."}])
     engine.replies.put([{"content": "  "}])
     engine.replies.put([{"tool_calls": [call("echo", {"text": "hi"})]}])
+    engine.replies.put([{"reasoning_content": "Done."}])
     engine.replies.put([{"content": "It said hi."}])
     id = agent.send(None, "Echo hi")
     until(events, ended)
-    assert len(engine.requests) == 4
+    assert len(engine.requests) == 5
     assert engine.requests[0]["messages"] == engine.requests[2]["messages"]  # the same prompt
     roles = [(m["role"], m.get("content")) for m in agent.store.messages(id)[2:]]
     assert roles == [("assistant", ""), ("tool", "echo: hi"), ("assistant", "It said hi.")]
@@ -266,7 +268,7 @@ def test_empty_reply(agent, engine, events):
     other = agent.send(None, "Again")
     until(events, ended)
     last = agent.store.messages(other)[-1]
-    assert len(engine.requests) == 7 and last["reasoning_content"] == "Hmm."
+    assert len(engine.requests) == 8 and last["reasoning_content"] == "Hmm."
 
 
 def test_bad_calls(agent, engine, events):
@@ -315,8 +317,8 @@ def test_stop_in_call(agent, engine, events):
 
 
 def test_rounds(agent, engine, events, monkeypatch):
-    # a turn's last reply is told to answer, the tools still declared so that its prompt extends
-    # the last; one that calls them anyway is redone without them
+    # a turn's last reply is told to answer, and may call no tools, which stay declared so that
+    # its prompt extends the last; a call it makes all the same is not answered, nor kept
     monkeypatch.setattr("leat.agent.agent.ROUNDS", 3)
     for _ in range(2):
         engine.replies.put([{"tool_calls": [call("echo", {"text": "again"})]}])
@@ -324,17 +326,18 @@ def test_rounds(agent, engine, events, monkeypatch):
     id = agent.send(None, "Hi")
     until(events, ended)
     assert ["tools" in request for request in engine.requests] == [True, True, True]
+    assert [r.get("tool_choice") for r in engine.requests] == [None, None, "none"]
     assert engine.requests[-1]["messages"][-1] == {"role": "user", "content": LAST}
     previous = engine.requests[-2]["messages"]
     assert engine.requests[-1]["messages"][: len(previous)] == previous
-    for _ in range(3):
+    for _ in range(2):
         engine.replies.put([{"tool_calls": [call("echo", {"text": "again"})]}])
-    engine.replies.put([{"content": "Done at last."}])
+    engine.replies.put([{"content": "Done at last.", "tool_calls": [call("echo", {})]}])
     agent.send(id, "Again")
     until(events, ended)
-    assert ["tools" in request for request in engine.requests[3:]] == [True, True, True, False]
-    *_, calls, answer = agent.store.messages(id)
-    assert calls["role"] == "tool" and answer["content"] == "Done at last."
+    assert len(engine.requests) == 6
+    answer = agent.store.messages(id)[-1]
+    assert answer["content"] == "Done at last." and "tool_calls" not in answer
 
 
 def test_people(agent, engine, events):

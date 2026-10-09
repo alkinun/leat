@@ -108,14 +108,29 @@ def with_marker(marker: str) -> ChatTemplate:
 
 
 def test_form():
-    # how replies mark their reasoning, by the vocab's markers or the template's, and whether a
-    # prompt opened a block of it
+    # how replies mark their reasoning, by the vocab's markers or the template's, whether a prompt
+    # opened a block of it, and what opens an answer
     think = chat(TEMPLATE + "<think>")[0]
     assert chat()[0].form is None and think.form == "think" and think.opens_thinking("a<think>\n")
-    assert with_marker("<|channel|>").form == "harmony"
+    harmony = with_marker("<|channel|>")
+    assert harmony.form == "harmony" and harmony.answer == "<|channel|>final<|message|>"
+    assert chat()[0].answer == ""  # of a format that marks no answer
     gemma = with_marker("<|channel>")
     assert gemma.form == "gemma4" and gemma.opens_thinking("<|turn>model\n<|channel>thought\n")
     assert not gemma.opens_thinking("<|turn>model\n<|channel>thought\n<channel|>")
+
+
+def test_thinking():
+    # reasoning as gpt-oss's template reads it too, of a message without text, which it would
+    # take for the reasoning and refuse both
+    c, _ = chat("{% for m in messages %}{{ m.thinking }}|{% endfor %}")
+    call = {"type": "function", "function": {"name": "f", "arguments": "{}"}}
+    messages = [
+        {"role": "assistant", "content": "", "reasoning_content": "Hm.", "tool_calls": [call]},
+        {"role": "assistant", "content": "Hi.", "reasoning_content": "Hm."},
+        {"role": "assistant", "content": "", "reasoning_content": "Hm.", "thinking": "Own."},
+    ]
+    assert c.render(messages, add_generation_prompt=False) == "Hm.||Own.|"
 
 
 GPT_OSS = (
