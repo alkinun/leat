@@ -61,9 +61,13 @@ class Workspace:
             name = path.relative_to(self.root).as_posix()
             if any(part.startswith(".") for part in name.split("/")):
                 continue
-            if path.is_file() and path.resolve().is_relative_to(self.root):
+            if not path.is_file() or not path.resolve().is_relative_to(self.root):
+                continue
+            try:  # one deleted meanwhile, as by code a call runs at once with this one, is gone
                 stat = path.stat()
-                found.append({"name": name, "size": stat.st_size, "modified": stat.st_mtime})
+            except FileNotFoundError:
+                continue
+            found.append({"name": name, "size": stat.st_size, "modified": stat.st_mtime})
         return sorted(found, key=lambda f: f["modified"], reverse=True)
 
     def free(self, name: str) -> str:

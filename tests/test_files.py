@@ -65,6 +65,19 @@ def test_files(workspace, tmp_path):
     workspace.delete("b.txt")
     with pytest.raises(FileNotFoundError):
         workspace.delete("b.txt")
+    # a file deleted between being found and looked at, as by code a call runs meanwhile, is gone
+    stat, gone, looks = Path.stat, workspace.root / "notes" / "a.txt", []
+
+    def deleting(path: Path, **kwargs) -> os.stat_result:  # at the second look, after is_file's
+        if path == gone:
+            looks.append(path)
+            if len(looks) == 2:
+                gone.unlink()
+        return stat(path, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Path, "stat", deleting)
+        assert workspace.files() == []
 
 
 def test_read_write_edit(workspace):
