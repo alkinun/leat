@@ -211,27 +211,28 @@ def rotate(
     q: Tensor, k: Tensor, v: Tensor, cache: Tensor, spans: list[Span],
     rope: tuple[tuple[Tensor, Tensor], int] | None, halves: bool,
     biases: tuple[Tensor, Tensor, Tensor] | None, norms: tuple[Tensor, Tensor] | None,
-    v_norm: bool, eps: float, own: bool = False,
+    v_norm: bool, eps: float, own: bool = False, ring: bool = False,
 ) -> tuple[Tensor, Tensor]:  # fmt: skip
     # q (1, T, H, D), k and v (1, T, KV_H, D), the spans' tokens in turn: plus their biases (H * D
     # or KV_H * D), if given; each head of q and k normed with its weight, if given, and of v
     # without, if v_norm; the first R dimensions of q and k rotated by RoPE's tables (positions,
     # R/2), or each slot's (slots, positions, R/2), at their positions, or if `own` by the tokens'
     # own angles (T, R/2) of a single span, for rope ((cos, sin), R), if given; and k and v stored
-    # there in their slots of the cache. Returns q (1, H, T, D) and the cache.
+    # there in their slots of the cache, or of a `ring`, at their positions mod its positions.
+    # Returns q (1, H, T, D) and the cache.
     args = (rope, halves, biases, norms, v_norm, eps)
     if own:
-        return _rotate(q, k, v, cache, spans[0], *args, own=True)
+        return _rotate(q, k, v, cache, spans[0], *args, own=True, ring=ring)
     if _fast() and kernels.supports_rotate(q, cache) and (rows := _rows(spans)) is not None:
         slots, positions = rows
-        return kernels.rotate(q, k, v, cache, slots, positions, *args)
+        return kernels.rotate(q, k, v, cache, slots, positions, *args, ring=ring)
     if len(spans) == 1:
-        return _rotate(q, k, v, cache, spans[0], *args)
+        return _rotate(q, k, v, cache, spans[0], *args, ring=ring)
     outs, at = [], 0
     for span in spans:
         n = int(span.length)
         part, cache = _rotate(q[:, at : at + n], k[:, at : at + n], v[:, at : at + n], cache,
-                              span, *args)  # fmt: skip
+                              span, *args, ring=ring)  # fmt: skip
         outs.append(part)
         at += n
     return outs[0].cat(*outs[1:], dim=2), cache
@@ -241,7 +242,7 @@ def _rotate(
     q: Tensor, k: Tensor, v: Tensor, cache: Tensor, span: Span,
     rope: tuple[tuple[Tensor, Tensor], int] | None, halves: bool,
     biases: tuple[Tensor, Tensor, Tensor] | None, norms: tuple[Tensor, Tensor] | None,
-    v_norm: bool, eps: float, own: bool = False,
+    v_norm: bool, eps: float, own: bool = False, ring: bool = False,
 ) -> tuple[Tensor, Tensor]:  # fmt: skip
     # rotate() for one span
     T, slot, start_pos = q.shape[1], span.slot, span.start
@@ -257,8 +258,27 @@ def _rotate(
         cos, sin = tables if own else (table[start_pos : start_pos + T] for table in tables)
         q, k = (rotary(t, cos, sin, halves) for t in (q, k))
     new = Tensor.stack(k, v.transpose(1, 2)).cast(cache.dtype)
-    cache[:, slot : slot + 1, :, start_pos : start_pos + T].assign(new)
+    if not ring:
+        cache[:, slot : slot + 1, :, start_pos : start_pos + T].assign(new)
+        return q, cache
+    # in a ring, the tokens up to its end, then any past it from its start: a span holds fewer
+    # tokens than the ring. Each is stored at once, as tinygrad finds a cycle in the writes where
+    # they are scheduled with a drafter's reads of the cache before them.
+    n = int(cache.shape[3])
+    at = start_pos % n
+    first = _smaller(n - at, T)
+    for rows, tokens in (((at, at + first), (0, first)), ((0, T - first), (first, T))):
+        if isinstance(size := rows[1] - rows[0], UOp) or size:
+            held = cache.shrink((None, (slot, slot + 1), None, rows, None))
+            held.assign(new.shrink((None, None, None, tokens, None))).realize()
     return q, cache
+
+
+def _smaller(a: int | UOp, b: int | UOp) -> int | UOp:
+    # the smaller of two sizes, either bound
+    if isinstance(a, UOp):
+        return a.minimum(b)
+    return b.minimum(a) if isinstance(b, UOp) else min(a, b)
 
 
 Rows = list[int | UOp] | int | UOp  # one per token, or one for a single span's tokens
@@ -282,14 +302,15 @@ def _tokens(spans: list[Span]) -> bool:
 
 def attention(
     q: Tensor, cache: Tensor, spans: list[Span], scale: float, window: int = 0,
-    sinks: Tensor | None = None,
+    sinks: Tensor | None = None, ring: bool = False,
 ) -> Tensor:  # fmt: skip
     # q: (1, H, T, D), the spans' tokens in turn; cache: (2, slots, KV_H, positions, D). Each
     # token attends over its span's slot, causally or over all the span's tokens as the span
     # has it, and over only the last `window` positions before it if given, with scores
     # q.k * scale; with a sink per head, if given, a score that takes its
-    # share of the softmax and adds no value, as gpt-oss's. Returns (1, T, H * D), the layout the
-    # output projection reads.
+    # share of the softmax and adds no value, as gpt-oss's. A `ring` holds position p at p mod its
+    # positions, as many as the window and the tokens of a span more. Returns (1, T, H * D), the
+    # layout the output projection reads.
     # a token per row: of a single span of one, or of several spans, each token its own row
     rows = _rows(spans) if len(spans) > 1 or _tokens(spans) else None
     if _fast() and rows is not None and kernels.supports_attention(q, cache):
@@ -299,33 +320,38 @@ def attention(
         several = any(s.length != 1 for s in spans)
         ends = [n - 1 for n in itertools.accumulate(int(s.length) for s in spans)]
         return kernels.attention(
-            q, cache, slots, lengths, scale, window, sinks, ends if several else None
+            q, cache, slots, lengths, scale, window, sinks, ends if several else None, ring
         )
     if len(spans) == 1:
         span = spans[0]
         if _fast() and kernels.supports_flash_attention(q, cache):
             return kernels.flash_attention(
-                q, cache, span.slot, span.start, scale, window, sinks, span.causal
+                q, cache, span.slot, span.start, scale, window, sinks, span.causal, ring
             )
-        return _attention(q, cache, span, scale, window, sinks)
+        return _attention(q, cache, span, scale, window, sinks, ring)
     outs, at = [], 0
     for span in spans:
         n = int(span.length)
-        outs.append(_attention(q[:, :, at : at + n], cache, span, scale, window, sinks))
+        outs.append(_attention(q[:, :, at : at + n], cache, span, scale, window, sinks, ring))
         at += n
     return outs[0].cat(*outs[1:], dim=1)
 
 
 def _attention(
-    q: Tensor, cache: Tensor, span: Span, scale: float, window: int, sinks: Tensor | None
-) -> Tensor:
+    q: Tensor, cache: Tensor, span: Span, scale: float, window: int, sinks: Tensor | None,
+    ring: bool = False,
+) -> Tensor:  # fmt: skip
     # attention() for one span, in plain ops
     B, H, T, D = q.shape
     slot, start_pos = span.slot, span.start
-    k, v = (cache[i, slot : slot + 1, :, : start_pos + T].cast(q.dtype) for i in (0, 1))
     mask = None
     causal = span.causal and not (isinstance(T, int) and T == 1)
-    if window or causal:
+    if ring:
+        k, v = (cache[i, slot : slot + 1].cast(q.dtype) for i in (0, 1))
+        mask = _ring_mask(T, int(cache.shape[3]), start_pos, window, causal, q.max_shape[2])
+    else:
+        k, v = (cache[i, slot : slot + 1, :, : start_pos + T].cast(q.dtype) for i in (0, 1))
+    if not ring and (window or causal):
         full = Tensor.full((1, 1, T, k.shape[2]), float("-inf"), dtype=q.dtype)
         # later positions, where the span sees only those before each token, and positions
         # `window` or more back
@@ -340,6 +366,24 @@ def _attention(
     scores = scores.cat(sinks.reshape(1, H, 1, 1).expand(B, H, T, 1), dim=-1)
     out = scores.softmax(-1)[..., :-1] @ v
     return out.transpose(1, 2).reshape(B, T, H * D)
+
+
+def _ring_mask(
+    T: int | UOp, n: int, start: int | UOp, window: int, causal: bool, most: int
+) -> Tensor:
+    # (1, 1, T, n): -inf where token t of T, at start + t, does not see row r of a ring of n
+    # positions, which holds the last position up to the tokens' last that is r mod n: a row that
+    # holds no position yet, one past the window, or with `causal`, one past the token. Worked
+    # out for as many tokens as there may be, `most`, as T may be bound.
+    end = Tensor(start + T - 1)
+    held = end - (end + n - Tensor.arange(n)) % n  # each row's position
+    back = (Tensor(start) + Tensor.arange(most)).reshape(most, 1) - held.reshape(1, n)
+    hidden = (held < 0).reshape(1, n).expand(most, n)
+    if window:
+        hidden = hidden | (back >= window)
+    if causal:
+        hidden = hidden | (back < 0)
+    return hidden.where(float("-inf"), 0.0).shrink(((0, T), (0, n))).reshape(1, 1, T, n)
 
 
 def delta_net(

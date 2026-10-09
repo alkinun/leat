@@ -145,7 +145,8 @@ class Gemma4Assistant:
             # and its own, and one fewer back for a window
             cache, window = self.target.cache[source], max(c.windows[source] - 1, 0)
             assert cache is not None
-            out = ops.attention(q, cache, spans, c.scales[source], window)
+            out = ops.attention(q, cache, spans, c.scales[source], window, None,
+                                self.target.rings[source])  # fmt: skip
             out = ops.linear(out, layer["attn_output"])
             x = x + ops.rms_norm(out, small["post_attention_norm"], eps)
             mlp = (layer["ffn_gate"], layer["ffn_up"], layer["ffn_down"])

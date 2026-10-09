@@ -12,6 +12,11 @@ from leat.ops import Span
 from leat.quant import BLOCK, NATIVE, GGMLType, QTensor
 
 CACHE_TILE = 256  # positions
+# the fewest positions a sliding-window layer's ring holds, which holds a power of 2 of them: the
+# attention kernels' chunks and tiles of keys are each in one piece, and a position's row is its
+# low bits, where a ring of 1536 decoded Gemma 4 26B A4B 0.3% slower than its whole cache, as
+# its rows were the remainders of a division
+RING_TILE = 64
 _LAYER = ("attn_norm", "attn_q", "attn_k", "attn_output", "ffn_norm")
 # the tensors of a Gated DeltaNet layer, Qwen3.5's in place of attention: its input norm, the
 # projections of queries, keys and values and of the output's gate z, those of the decay's alpha
@@ -213,6 +218,11 @@ class Transformer:
     """Weights, RoPE tables and a KV cache of `slots` sequences of up to `max_context` tokens, and
     for Gated DeltaNet's layers in place of attention, the recurrent state of each sequence.
 
+    Given the most tokens a run stores at once, `run`, a sliding-window layer's cache is a ring
+    of its window and that many more positions, where it is smaller than the context, as only
+    those are read: position p at p mod its size. A slot's rings then hold only the last
+    positions its runs wrote, as many as their size; see `holds`.
+
     Optional parts are used where the GGUF has their tensors: biases of q, k, v and the attention
     output, RMSNorms of q and k, of the attention and MLP outputs, attention sinks, a shared MLP
     beside the experts, gated or not, the router's and experts' biases, and a scale per layer
@@ -221,7 +231,7 @@ class Transformer:
 
     def __init__(
         self, config: Config, weights: dict[str, QTensor], max_context: int, slots: int = 1,
-        saved_tokens: int = 0,
+        saved_tokens: int = 0, run: int | None = None,
     ):  # fmt: skip
         if not 0 < max_context <= config.context_length:
             raise ValueError(
@@ -272,12 +282,16 @@ class Transformer:
         if config.mrope:
             own = {r: (_slots(cos, slots), _slots(sin, slots)) for r, (cos, sin) in tables.items()}
             self.rope = [own.get(rope) for rope in config.ropes]
-        # whole tiles of positions, which the attention kernels need; the rest stay unused
+        # whole tiles of positions, which the attention kernels need; the rest stay unused. A
+        # window's ring holds the positions a run's first token sees before it and the run's own,
+        # so that a run overwrites none its tokens see.
         positions = -(-max_context // CACHE_TILE) * CACHE_TILE
+        self.sizes = tuple(_ring(window, run, positions) for window in config.windows)
+        self.rings = tuple(size < positions for size in self.sizes)
         self.cache = [
-            None if recurrent else _zeros(2, slots, kv_heads, positions, dim, dtype=dtypes.half)
-            for kv_heads, dim, recurrent in zip(
-                config.kv_heads, config.head_dims, config.recurrent, strict=True
+            None if recurrent else _zeros(2, slots, kv_heads, size, dim, dtype=dtypes.half)
+            for kv_heads, dim, recurrent, size in zip(
+                config.kv_heads, config.head_dims, config.recurrent, self.sizes, strict=True
             )
         ]
         # a Gated DeltaNet layer's state of each slot: the last inputs of its convolution, and
@@ -353,6 +367,17 @@ class Transformer:
             copied.append(state[slot : slot + 1].assign(state[source : source + 1]))
         Tensor.realize(*copied)
 
+    def holds(self, written: int, position: int) -> bool:
+        """Whether a slot that ran the positions before `position`, and whose rings any run has
+        written up to `written` at most since it last started from position 0, still holds the
+        keys and values that a token at `position` sees of them: a ring of n holds those from
+        `written` - n on."""
+        return position == 0 or all(
+            max(position - window + 1, 0) >= written - size
+            for window, size, ring in zip(self.config.windows, self.sizes, self.rings, strict=True)
+            if ring
+        )
+
     def keep(self, slot: int | UOp) -> None:
         """Copies the recurrent states of slot `slot` to its kept copy."""
         _copy_slot(self.states, self.kept, slot)
@@ -394,7 +419,9 @@ class Transformer:
         # x + the attention block's output
         c, w, s = self.config, self.layers[i], self.small[i]
         (q, gate), cache = self._rotated(i, x, spans, positions)
-        out = ops.attention(q, cache, spans, c.scales[i], c.windows[i], s.get("attn_sinks"))
+        out = ops.attention(
+            q, cache, spans, c.scales[i], c.windows[i], s.get("attn_sinks"), self.rings[i]
+        )
         if gate is not None:
             out = out * gate.reshape(out.shape).sigmoid()
         # gpt-oss's output bias joins the residual
@@ -433,7 +460,7 @@ class Transformer:
         cache = self.cache[i]
         assert cache is not None
         q, cache = ops.rotate(q, k, v, cache, spans, rope, c.rope_halves, biases, norms, c.v_norm,
-                              eps, positions is not None)  # fmt: skip
+                              eps, positions is not None, self.rings[i])  # fmt: skip
         return (q, gate), cache
 
     def _delta_net(self, i: int, x: Tensor, spans: list[Span], save: bool = False) -> Tensor:
@@ -508,6 +535,14 @@ def _factors(rope: Rope, weights: dict[str, QTensor], max_context: int) -> Tenso
     if rope.longrope:
         name = f"rope_factors_{'long' if max_context > rope.longrope else 'short'}.weight"
     return weights[name].dequant() if name in weights else None
+
+
+def _ring(window: int, run: int | None, positions: int) -> int:
+    # the positions a layer's cache holds: of a window, the window's and a run's but one, as a
+    # power of 2, where fewer than all
+    if not window or not run:
+        return positions
+    return min(max(1 << (window + run - 2).bit_length(), RING_TILE), positions)
 
 
 def _small(name: str, w: QTensor) -> bool:

@@ -787,6 +787,139 @@ def test_flash_attention_wide(tokens, start, window, symbolic):
     np.testing.assert_allclose(got.reshape(expected.shape), expected, rtol=3e-3, atol=3e-3)
 
 
+# ******** sliding windows' rings ********
+
+
+def ring_of(cache: np.ndarray, ends: dict[int, int], size: int, rng) -> np.ndarray:
+    # a ring of `size` positions of each slot of a cache (2, slots, kv_heads, positions, dim): row
+    # r of slot s holds the last of its positions before ends[s] that is r mod size, and rows
+    # that hold none, noise
+    ring = rng.standard_normal((*cache.shape[:3], size, cache.shape[4])).astype(cache.dtype)
+    for s, end in ends.items():
+        for r in range(size):
+            if (p := end - 1 - (end - 1 - r) % size) >= 0:
+                ring[:, s, :, r] = cache[:, s, :, p]
+    return ring
+
+
+# decode rows over rings of Gemma 4's window and a narrow one: a row whose window has not yet
+# wrapped the ring, and rows whose window wraps it, each in a slot of its own
+@pytest.mark.parametrize("window, size", [(1024, 1536), (100, 192)])
+@pytest.mark.parametrize("symbolic", [False, True])
+@pytest.mark.parametrize(
+    "rows", [[(0, 1), (2, 1100), (1, 3079)], [(0, 2048), (2, 70)]], ids=["long", "short"]
+)
+def test_attention_ring(window, size, symbolic, rows):
+    rng = np.random.default_rng(len(rows) + window)
+    cache = rng.standard_normal((2, SLOTS, 8, 4096, 256)).astype(np.float16)
+    ring = ring_of(cache, dict(rows), size, rng)
+    q = rng.standard_normal((1, 16, len(rows), 256)).astype(np.float32) * 0.2
+    sink = rng.standard_normal(16).astype(np.float32)
+    slots: list[int | UOp] = [s for s, _ in rows]
+    lengths: list[int | UOp] = [n for _, n in rows]
+    if symbolic:
+        slots = [UOp.variable(f"slot{i}", 0, SLOTS - 1).bind(s) for i, (s, _) in enumerate(rows)]
+        lengths = [
+            UOp.variable(f"pos{i}", 0, 4095).bind(n - 1) + 1 for i, (_, n) in enumerate(rows)
+        ]
+    q_t, ring_t = Tensor(q).realize(), Tensor(ring).realize()
+    assert kernels.supports_attention(q_t, ring_t)
+    got = kernels.attention(q_t, ring_t, slots, lengths, 1.0, window, Tensor(sink), ring=True)
+    for t, (s, n) in enumerate(rows):
+        expected = reference_attention(q[0, :, t : t + 1], cache, n - 1, window, 1.0, sink, s)
+        np.testing.assert_allclose(got.numpy()[0, t], expected.reshape(-1), rtol=2e-3, atol=2e-3)
+
+
+# rows of two sequences' consecutive tokens, as a speculative step's, over rings
+@pytest.mark.parametrize("symbolic", [False, True])
+def test_attention_ring_spans(symbolic):
+    spans, window, size = [(0, 2044, 4), (2, 67, 3)], 1024, 1088  # slot, start, tokens
+    rows = [(slot, start + i + 1) for slot, start, n in spans for i in range(n)]
+    rng = np.random.default_rng(5)
+    cache = rng.standard_normal((2, SLOTS, 8, 4096, 128)).astype(np.float16)
+    ring = ring_of(cache, {slot: start + n for slot, start, n in spans}, size, rng)
+    q = rng.standard_normal((1, 32, len(rows), 128)).astype(np.float32) * 0.3
+    slots: list[int | UOp] = [s for s, _ in rows]
+    lengths: list[int | UOp] = [n for _, n in rows]
+    if symbolic:
+        starts = [
+            UOp.variable(f"pos{i}", 0, 4000).bind(start) for i, (_, start, _) in enumerate(spans)
+        ]
+        lengths = [starts[i] + j + 1 for i, (_, _, n) in enumerate(spans) for j in range(n)]
+    q_t, ring_t = Tensor(q).realize(), Tensor(ring).realize()
+    got = kernels.attention(q_t, ring_t, slots, lengths, 0.1, window, ends=[3, 6], ring=True)
+    for t, (s, n) in enumerate(rows):
+        expected = reference_attention(q[0, :, t : t + 1], cache, n - 1, window, 0.1, None, s)
+        np.testing.assert_allclose(got.numpy()[0, t], expected.reshape(-1), rtol=2e-3, atol=2e-3)
+
+
+# a chunk of prompt over a ring of its window and a chunk more, causal or as an image's, from
+# a ring's start, wrapping it, and past its first wrap; a tile of queries whose keys blocks split
+@pytest.mark.parametrize("tokens, start", [(37, 0), (512, 1000), (100, 3000), (11, 1530)])
+@pytest.mark.parametrize("dim, window, size", [(256, 1024, 1536), (128, 100, 640)])
+@pytest.mark.parametrize("causal", [True, False])
+@pytest.mark.parametrize("symbolic", [False, True])
+@matrix_cores
+def test_flash_attention_ring(tokens, start, dim, window, size, causal, symbolic):
+    rng = np.random.default_rng(tokens + start + dim)
+    cache = rng.standard_normal((2, SLOTS, 8, 4096, dim)).astype(np.float16)
+    ring = ring_of(cache, {SLOT: start + tokens}, size, rng)
+    q = rng.standard_normal((1, 16, 512, dim)).astype(np.float32) * 0.2
+    q_t, ring_t = Tensor(q).realize(), Tensor(ring).realize()
+    if symbolic:
+        pos = UOp.variable("start_pos", 0, 4095).bind(start)
+        q_t = q_t[:, :, : chunk_len(tokens)]
+    else:
+        pos, q_t = start, q_t[:, :, :tokens]
+    assert kernels.supports_flash_attention(q_t, ring_t)
+    got = kernels.flash_attention(
+        q_t, ring_t, slot(symbolic), pos, 1.0, window, causal=causal, ring=True
+    )
+    got = got.pad_to((1, 512, 16 * dim)).numpy()[0, :tokens]
+    expected = reference_attention(q[0, :, :tokens], cache, start, window, 1.0, causal=causal)
+    np.testing.assert_allclose(got.reshape(expected.shape), expected, rtol=3e-3, atol=3e-3)
+
+
+@pytest.mark.parametrize("symbolic", [False, True])
+@pytest.mark.parametrize("rows", [False, True])
+def test_rotate_ring(monkeypatch, symbolic, rows):
+    # tokens stored in a ring at their positions mod its size, by the kernel as by the reference
+    # ops, and as a whole cache holds them: a span that wraps the ring, or a decode step's rows
+    rng = np.random.default_rng(20)
+    dim, kv_heads, size = 128, 8, 64
+    places = [(0, 7), (2, 300), (1, 511), (2, 63)] if rows else [(SLOT, 60 + i) for i in range(9)]
+    q, k, v = (
+        Tensor(rng.standard_normal((1, len(places), h, dim)).astype(np.float32)).realize()
+        for h in (32, kv_heads, kv_heads)
+    )
+    angles = rng.uniform(0, 6, (512, dim // 2)).astype(np.float32)
+    rope = ((Tensor(np.cos(angles)).realize(), Tensor(np.sin(angles)).realize()), dim)
+    norms = tuple(Tensor(rng.uniform(0.5, 1.5, dim).astype(np.float32)) for _ in "qk")
+    spans = [ops.Span(s, p) for s, p in places] if rows else [ops.Span(SLOT, 60, len(places))]
+    if symbolic:
+        spans = [
+            ops.Span(UOp.variable(f"slot{i}", 0, SLOTS - 1).bind(span.slot),
+                     UOp.variable(f"pos{i}", 0, 511).bind(span.start), span.length)
+            for i, span in enumerate(spans)
+        ]  # fmt: skip
+    results = []
+    for mode, positions in (("auto", size), ("ref", size), ("ref", 512)):
+        monkeypatch.setenv("LEAT_KERNELS", mode)
+        cache = Tensor.zeros(2, SLOTS, kv_heads, positions, dim, dtype=dtypes.half)
+        cache = cache.contiguous().realize()
+        ring = positions == size
+        out, cache = ops.rotate(q, k, v, cache, spans, rope, True, None, norms, True, 1e-6,
+                                ring=ring)  # fmt: skip
+        Tensor.realize(out, cache)
+        results.append((out.numpy(), cache.numpy().astype(np.float32)))
+    (out, ring), (ref_out, ref_ring), (_, whole) = results
+    np.testing.assert_allclose(out, ref_out, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(ring, ref_ring, rtol=1e-3, atol=1e-3)
+    for s, p in places:
+        np.testing.assert_allclose(ring[:, s, :, p % size], whole[:, s, :, p], rtol=1e-3, atol=1e-3)
+        assert np.abs(ring[:, s, :, p % size]).sum() > 0
+
+
 # ******** argmax ********
 
 

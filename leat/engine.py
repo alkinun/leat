@@ -107,6 +107,12 @@ class Engine:
     are read causally, as Mistral's and Qwen's. The image is encoded when its chunk runs, and not
     again where the cache holds it. Of M-RoPE, as Qwen3.5's, an image takes fewer of RoPE's
     positions than of the cache's: each slot's RoPE moves on by as many as the images before.
+
+    A sliding-window layer's cache holds its window and the most tokens a step runs of a sequence
+    more, its chunk of prompt, image or speculative tokens, as a ring, rather than the whole
+    context. A slot's rings hold only the last positions its runs wrote, as many as their size: it
+    shares a prefix of its tokens only where they still hold the window before the prefix's end,
+    as llama.cpp's.
     """
 
     def __init__(
@@ -128,17 +134,21 @@ class Engine:
         self.tokenizer = Tokenizer(gguf.metadata)
         self.config = Config.from_gguf(gguf.metadata)
         cache_slots = slots + bool(self._padded)
-        weights = gguf.load(names=filter(self.config.uses, gguf.tensors))
-        # with a drafter, a recurrent model keeps its states after each token a speculative step
-        # runs, to go back to the last each sequence keeps
-        saved = SPECULATIVE_TOKENS if draft is not None else 0
-        self.model = Transformer(self.config, weights, max_context, cache_slots, saved)
-        self.drafter: Drafter | None = None if draft is None else load_drafter(draft, self.model)
         self.vision: Vision | None = None
         if vision is not None:
             self.vision = load_vision(vision, self.tokenizer, self.config.dim)
             self._image_len = UOp.variable("image_len", 1, self.vision.tokens)
             self._encode, self._image_chunk = graph(self.vision.encode), graph(self._step)
+        weights = gguf.load(names=filter(self.config.uses, gguf.tensors))
+        # with a drafter, a recurrent model keeps its states after each token a speculative step
+        # runs, to go back to the last each sequence keeps
+        saved = SPECULATIVE_TOKENS if draft is not None else 0
+        # the most tokens a step runs of a sequence: a chunk of prompt, an image, or a token and
+        # its drafts
+        run = max(prefill_chunk, self.vision.tokens if self.vision else 1,
+                  DRAFT_TOKENS + 1 if draft is not None else 1)  # fmt: skip
+        self.model = Transformer(self.config, weights, max_context, cache_slots, saved, run)
+        self.drafter: Drafter | None = None if draft is None else load_drafter(draft, self.model)
         # of M-RoPE, each slot's offset of RoPE's positions from the cache's, which an image's
         # change, as it takes fewer of RoPE's than of the cache's; and what moves it on
         self._mrope = bool(self.config.mrope)
@@ -184,6 +194,9 @@ class Engine:
         self._kept: list[list[int]] = [[] for _ in range(slots)]  # tokens before each kept state
         self._last: dict[int, _Batch] = {}  # the last decode step's batches, by graph
         self._cached: list[list[int]] = [[] for _ in range(slots)]  # tokens each slot holds
+        # where each slot's runs since it last started from position 0 wrote up to, of which its
+        # sliding windows' rings hold the last positions
+        self._written = [0] * slots
         self._used = [0] * slots  # when each slot last started a generation
         self._clock = itertools.count(1)
         self.active: list[Sequence] = []  # in the order they started
@@ -326,7 +339,8 @@ class Engine:
         """How many leading tokens of `prompt` the cache holds: generation prefills the rest. Of
         a model with recurrent state, those of a slot's or of a free slot's kept state."""
         busy = {s.slot for s in self.active}
-        kept = [len(k) for s, k in enumerate(self._kept) if s not in busy and _resumes(prompt, k)]
+        kept = [len(self._kept[s]) for s in range(self.slots)
+                if s not in busy and self._resumes(prompt, s)]  # fmt: skip
         return max(self._shared(prompt) + kept)
 
     def reset(self) -> None:
@@ -336,6 +350,7 @@ class Engine:
             self.cancel(sequence)
         self._cached = [[] for _ in range(self.slots)]
         self._kept = [[] for _ in range(self.slots)]
+        self._written = [0] * self.slots
 
     def _claim(self, prompt: list[int]) -> int:
         # a free slot for the prompt, made to hold the longest prefix of it that any slot holds
@@ -353,6 +368,9 @@ class Engine:
         if (prefix := shared[source]) > shared[slot]:
             self._cached[slot], self._kept[slot] = [], []  # while the copy overwrites it
             self._copy(self._source.bind(source), self._slot_vars[0].bind(slot))
+            self._written[slot] = self._written[source]
+        elif prefix == 0:  # the slot starts anew
+            self._written[slot] = 0
         self._cached[slot] = prompt[:prefix]
         if prefix < len(self._kept[slot]):  # the slot no longer holds the tokens before it
             self._kept[slot] = []
@@ -363,7 +381,7 @@ class Engine:
         # takes a free slot back to its kept recurrent state, where the prompt shares all the
         # tokens before it, and more than all of any slot's
         best = max(self._shared(prompt))
-        kept = [s for s in free if best < len(self._kept[s]) and _resumes(prompt, self._kept[s])]
+        kept = [s for s in free if best < len(self._kept[s]) and self._resumes(prompt, s)]
         if kept:
             slot = max(kept, key=lambda s: len(self._kept[s]))
             self._restore(self._slot_vars[0].bind(slot))
@@ -375,7 +393,18 @@ class Engine:
         shared = [_shared(prompt, cached) for cached in self._cached]
         if self._recurrent:
             shared = [n if n == len(c) else 0 for n, c in zip(shared, self._cached, strict=True)]
-        return shared
+        # and of a slot whose rings no longer hold the window before it, none
+        return [n if self.model.holds(self._written[s], n) else 0 for s, n in enumerate(shared)]
+
+    def _resumes(self, prompt: list[int], slot: int) -> bool:
+        # whether a prompt may go on from a slot's kept state: it shares all the tokens before
+        # it, whose window the slot's rings still hold
+        kept = self._kept[slot]
+        return _resumes(prompt, kept) and self.model.holds(self._written[slot], len(kept))
+
+    def _wrote(self, slot: int, end: int) -> None:
+        # a run wrote slot `slot`'s positions up to `end`
+        self._written[slot] = max(self._written[slot], end)
 
     def _prefill(self, sequence: Sequence, size: int) -> int | None:
         # runs the next chunk of the sequence's prompt: an image whole, or else up to `size`
@@ -400,6 +429,7 @@ class Engine:
             graph, length = (self._few_chunk, self._few) if few else (self._chunk, self._len)
             tokens = _ids(chunk, int(length.vmax)).shrink(((0, 1), (0, length.bind(n))))
             token = graph(tokens, *sequence.options, *row)
+        self._wrote(sequence.slot, pos + len(chunk))
         cached += chunk
         if self._recurrent and len(cached) == mark:
             self._keep(self._slot_vars[0].bind(sequence.slot))
@@ -477,6 +507,7 @@ class Engine:
         out = self._decode[n](tokens, *options, *bound, live=live)
         self._last[n] = _Batch(list(sequences), out.reshape(1, n), options)
         for s in sequences:
+            self._wrote(s.slot, len(self._cached[s.slot]) + 1)
             self._cached[s.slot].append(s.tokens[-1])
         return out.numpy().ravel()[:k].tolist()
 
@@ -509,6 +540,7 @@ class Engine:
         generated: list[tuple[Sequence, int]] = []
         settled = []
         for i, (sequence, row) in enumerate(zip(sequences, out, strict=True)):
+            self._wrote(sequence.slot, len(self._cached[sequence.slot]) + drafts + 1)
             drafted, sampled = row[:drafts], row[drafts:]
             pairs = enumerate(zip(drafted, sampled[:drafts], strict=True))
             kept = next((j for j, (d, t) in pairs if d != t), drafts)
