@@ -283,10 +283,12 @@ function codeSpan(text, i) {
 
 // *em*, **strong**, ***both*** and ~~struck~~: a run of a delimiter opens before a non-space,
 // and one as long closes after one, an _ neither within a word. A run of three that no run of
-// three closes may open strong in em, or em in strong.
+// three closes may open strong in em, or em in strong. A run that cannot open is text whole, as
+// CommonMark's: foo__bar__ stays so, and its second _ opens nothing, which would also search the
+// rest of the text for its close, again for each such run
 function emphasis(text, i) {
   const c = text[i], run = runAt(text, i);
-  if (!opens(text, i, run)) return null;
+  if (!opens(text, i, run)) return [text.slice(i, i + run), i + run];
   for (const n of c === "~" ? [2] : [3, 2, 1]) {
     const end = n <= run ? closer(text, i + n, c, n) : -1;
     if (end < 0) continue;

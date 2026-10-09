@@ -130,6 +130,10 @@ CASES = [
     ("**Note:**text", [["p", ["strong", "Note:"], "text"]]),
     ("2 * 3 * 4, a ** b, ** c **", [["p", "2 * 3 * 4, a ** b, ** c **"]]),
     ("_snake_case_ and _x_y_", [["p", ["em", "snake_case"], " and ", ["em", "x_y"]]]),
+    # a run that cannot open is text whole, as CommonMark's: its second _ opens nothing either
+    ("foo__bar__ and snake__case or other___x___", [["p", "foo__bar__ and snake__case or "
+                                                         "other___x___"]]),
+    ("__a_ and obj.__dict__", [["p", "_", ["em", "a"], " and obj.", ["strong", "dict"]]]),
     ("~5 to ~10, ~~~", [["p", "~5 to ~10, ~~~"]]),
     ("**a\nb**", [["p", ["strong", "a\nb"]]]),
     ("**unclosed", [["p", "**unclosed"]]),
@@ -203,6 +207,7 @@ HARD = {
     "quotes": ">" * 4000 + " deep",
     "lists": "- + " * 1300,
     "links": "[" * 3000 + "x" + "](https://x.io)" * 3000,
+    "within words": "x_y__z " * 3000,
 }
 
 
