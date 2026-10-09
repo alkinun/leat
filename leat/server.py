@@ -7,7 +7,8 @@ model once the completions before have finished; the rest wait their turn in the
 
 Given keys, every request must hold one, as OpenAI's clients send it, `Authorization: Bearer KEY`,
 or as Anthropic's do, `x-api-key: KEY`; each key's requests, tokens and time are counted apart,
-and its prompts share cached prefixes with its own alone.
+and its prompts share cached prefixes with its own alone. A request may name the end user it is for,
+as OpenAI's `user` or `safety_identifier`, whose prompts then share them with that user's alone.
 """
 
 import collections
@@ -80,6 +81,9 @@ _FIELDS: dict[str, tuple[Callable[[Any], bool], str]] = {
     "tools": (lambda v: isinstance(v, list) and all(_tool(t) for t in v),
               'a list of objects, each {"type": "function", "function": {"name": ...}}'),
     "chat_template_kwargs": (lambda v: isinstance(v, dict), "an object"),
+    "user": (lambda v: isinstance(v, str) and len(v) <= 256, "a string of 256 characters at most"),
+    "safety_identifier": (lambda v: isinstance(v, str) and len(v) <= 256,
+                          "a string of 256 characters at most"),
 }  # fmt: skip
 
 # what leat does not implement, each with the value that asks for nothing more
@@ -129,6 +133,7 @@ class _Completion:
     images: list[Image] = field(default_factory=list)  # those the prompt shows
     form: str | None = None  # how the reply marks its reasoning, as ChatTemplate.form
     key: str = ""  # the name of the key it came with, if the server asks for keys
+    user: str = ""  # the end user it is for, if the client names them
     thinking: bool = False  # the prompt opened a <think> block
     id: str = field(default_factory=lambda: f"chatcmpl-{uuid.uuid4().hex}")
     created: int = field(default_factory=lambda: int(time.time()))
@@ -294,9 +299,11 @@ class Server(ThreadingHTTPServer):
         engine = loaded.engine
         if len(engine.active) == engine.slots:
             return False
-        # a key's prompts share the cache with its own alone, lest one key tell from the time to
-        # the first token what another's asked; without keys, every prompt's is the same, ""
-        owner = request.key
+        # a key's prompts share the cache with its own alone, and an end user's with that user's,
+        # lest one tell from the time to the first token what another's asked: a key's name holds
+        # no newline, so that no key's and user's are another's. Without either, every prompt's is
+        # the same, ""
+        owner = f"{request.key}\n{request.user}" if request.user else request.key
         try:  # timed from before start(), which copies a prefix in or restores a kept state
             started, cached = time.perf_counter(), engine.cached_prefix(request.prompt, owner)
             sequence = engine.start(
@@ -737,6 +744,7 @@ def _completion(body: Any, server: Server) -> _Completion:
         stream_usage=bool((body.get("stream_options") or {}).get("include_usage")),
         images=shown,
         form=loaded.chat.form,
+        user=body.get("safety_identifier") or body.get("user") or "",
         thinking=loaded.chat.opens_thinking(text),
     )
 

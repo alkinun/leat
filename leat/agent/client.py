@@ -72,13 +72,19 @@ class Client:
         """Loads a model in place of the loaded one; returns once it is ready."""
         self._json("POST", "/v1/models/load", {"model": model})
 
-    def complete(self, body: dict[str, Any]) -> Completion:
-        """A chat completion of `body`, streamed."""
-        return Completion(*self._open("POST", "/v1/chat/completions", body | {"stream": True}))
+    def complete(self, body: dict[str, Any], person: int | None = None) -> Completion:
+        """A chat completion of `body`, streamed, for a person of the box's, by their id, if it is
+        one's: the engine keeps the prefixes it caches of a person's prompts to theirs alone, so
+        that no one can tell from how fast a reply starts what another asked."""
+        user = {"user": f"person-{person}"} if person is not None else {}
+        return Completion(
+            *self._open("POST", "/v1/chat/completions", body | user | {"stream": True})
+        )
 
-    def reply(self, body: dict[str, Any]) -> dict[str, Any]:
-        """A chat completion's reply to `body`, whole: its content, and its tool calls if any."""
-        return whole(self.complete(body))
+    def reply(self, body: dict[str, Any], person: int | None = None) -> dict[str, Any]:
+        """A chat completion's reply to `body`, whole, for a person as complete() is: its
+        content, and its tool calls if any."""
+        return whole(self.complete(body, person))
 
     def _json(
         self, method: str, path: str, body: dict[str, Any] | None = None,

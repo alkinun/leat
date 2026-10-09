@@ -336,6 +336,25 @@ def test_people(agent, engine, events):
             agent.stop(mine, other)
 
 
+def test_person_to_the_engine(agent, engine, events):
+    # each request of a person's conversation names them to the engine, which keeps the prefixes
+    # it caches of their prompts to theirs: their turns', and the naming of their conversations;
+    # one of no one's names no one
+    engine.replies.put(REPLY)
+    agent.send(None, "Hi")
+    until(events, ended)
+    agent.store.add_person("Alkın")
+    ada = agent.store.add_person("Ada")
+    engine.replies.put([{"tool_calls": [call("echo", {"text": "hi"})]}])
+    engine.replies.put(REPLY)
+    id = agent.send(None, "Hello", person=ada["id"])
+    until(events, ended)
+    engine.replies.put([{"content": "Greetings"}])
+    background.name(agent, id)
+    assert "user" not in engine.requests[0]
+    assert [r["user"] for r in engine.requests[1:]] == [f"person-{ada['id']}"] * 3
+
+
 def test_name(agent, engine, events):
     # a conversation named after its first exchange, once
     engine.replies.put(REPLY)

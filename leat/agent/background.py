@@ -64,8 +64,9 @@ def _attempt(work: Callable[..., None], *args: Any) -> None:
 
 
 def name(agent: "Agent", id: str) -> None:
-    """Names a conversation after its first exchange, as the model does; one the model gives no
-    name keeps its own, its first message's start."""
+    """Names a conversation after its first exchange, as the model does, for the person whose
+    it is, as their own prompts are; one the model gives no name keeps its own, its first
+    message's start."""
     if (c := agent.store.conversation(id)) is None:  # deleted
         return
     messages = agent.store.messages(id)
@@ -74,6 +75,6 @@ def name(agent: "Agent", id: str) -> None:
         "messages": [{"role": "system", "content": NAME}, {"role": "user", "content": said}],
         "max_tokens": 24, "temperature": 0.3, "chat_template_kwargs": {"enable_thinking": False},
     }  # fmt: skip
-    lines = agent.engine.reply(body)["content"].strip().splitlines()
+    lines = agent.engine.reply(body, c["person"])["content"].strip().splitlines()
     title = lines[0].strip(" \"'“”.") if lines else ""
     agent.rename(id, title[:80] or c["title"])

@@ -339,7 +339,7 @@ class _Turn:
         started, finish = time.monotonic(), None
         chunks: Iterable[dict[str, Any]] = ()
         if not self.stopped.is_set():  # as it may be, while the prompt was made smaller
-            chunks = self.completion = a.engine.complete(body)
+            chunks = self.completion = a.engine.complete(body, self.person)
             if self.stopped.is_set():  # before the completion was there to close
                 self.completion.close()
         for chunk in chunks:
@@ -443,7 +443,7 @@ class _Turn:
 
     def _whole(self, body: dict[str, Any]) -> dict[str, Any]:
         # the model's reply to body, whole, which a stop cuts short: raises _Stopped then
-        self.completion = self.agent.engine.complete(body)
+        self.completion = self.agent.engine.complete(body, self.person)
         if self.stopped.is_set():  # before the completion was there to close
             self.completion.close()
         reply = whole(self.completion)
@@ -515,7 +515,7 @@ class _Turn:
             if (tool := self.tools.get(message["name"])) is None:
                 raise ValueError(f"there is no tool {message['name']!r}")
             called = arguments(message["info"]["arguments"])
-            result = tool.run(Context(self.id, self._cite), **called)
+            result = tool.run(Context(self.id, self._cite, self.person), **called)
         except Exception as e:  # for the model, which may try again
             result = Result(f"error: {e}", {"error": str(e)})
         with a._lock:

@@ -179,12 +179,16 @@ def test_fetch_for_a_question(site, monkeypatch, tmp_path, engine):
     assert asked[0]["content"] == web.READING and "Paragraph 0" in asked[1]["content"]
     assert len(asked[1]["content"]) < web.READER + 200  # the page's start
     assert result.info["question"] == "When is it open late?"
+    assert "user" not in engine.requests[-1]  # of no one's conversation
+    engine.replies.put([{"content": "On Thursdays."}])
+    web.fetch(f"{site}/long", workspace, Context("c", person=2), "When is it open?", reader)
+    assert engine.requests[-1]["user"] == "person-2"  # of the person's who asked, as their turns
     assert web.fetch(f"{site}/page", workspace, None, "What?", reader).content.endswith("An item")
     engine.replies.put("the engine is busy")  # read as it is
     assert (
         "(The page goes on" in web.fetch(f"{site}/long", workspace, None, "When?", reader).content
     )
-    assert len(engine.requests) == 2
+    assert len(engine.requests) == 3
 
 
 @pytest.mark.skipif(not os.environ.get("LEAT_SANDBOX"), reason="needs LEAT_SANDBOX")

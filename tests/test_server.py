@@ -559,6 +559,37 @@ def test_keys_share_their_own_prefixes(tiny_model, tmp_path):
         server.shutdown()
 
 
+@pytest.mark.parametrize("keyed", [True, False])
+@pytest.mark.parametrize("field", ["user", "safety_identifier"])
+def test_users_share_their_own_prefixes(tiny_model, tmp_path, keyed, field):
+    # an end user a request names, as an app serving several people does, shares cached prefixes
+    # with that user's prompts alone, under one key or without keys; prompts that name no one
+    # share with each other
+    keys = Keys(tmp_path / "keys.json") if keyed else None
+    key = keys.add("agent") if keys else "unused"
+    options = {"max_context": CONTEXT, "prefill_chunk": 8, "slots": 3, "keys": keys}
+    with serving(tiny_model[0], **options) as server:
+        server.load("tiny")
+        url = f"http://127.0.0.1:{server.server_port}/v1"
+        client = openai.OpenAI(base_url=url, api_key=key, max_retries=0)
+
+        def cached(content: str, user: str | None = None) -> int:
+            named = {"extra_body": {field: user}} if user else {}
+            response = chat(client, content, max_tokens=2, **named)
+            return response.usage.prompt_tokens_details.cached_tokens
+
+        shared = len("a shared start, then ")
+        assert cached("a shared start, then one end", "person-1") == 0
+        assert cached("a shared start, then another", "person-2") == 0
+        assert cached("a shared start, then more") == 0
+        assert cached("a shared start, then yet more", "person-1") == shared
+        assert cached("a shared start, then the last", "person-2") == shared
+        assert cached("a shared start, then no one's") == shared
+        with pytest.raises(openai.BadRequestError, match=f"{field} must be a string"):
+            chat(client, "hi", max_tokens=1, extra_body={field: 1})
+        server.shutdown()
+
+
 def test_concurrent_requests(client, server, engine, expected, monkeypatch):
     # more requests at once than the engine's 2 slots, whole and streamed: each gets the reply it
     # would alone, two in batched steps, the third once a slot is free

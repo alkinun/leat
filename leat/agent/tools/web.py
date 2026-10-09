@@ -155,7 +155,8 @@ def fetch(
     info = {"url": final, "title": title, "n": n} | ({"saved": saved} if saved else {})
     if question and reader is not None and len(text) > WHOLE:
         with contextlib.suppress(EngineError):  # read as it is, if the engine cannot
-            found = _read(reader, question, f"{title}, {final}", text)
+            person = context.person if context else None
+            found = _read(reader, question, f"{title}, {final}", text, person)
             whole = f" The whole page is saved at {saved}." if saved else ""
             said = f"{found}\n\n(What the page says of: {question}.{whole})"
             return Result(f"{head}\n{final}\n\n{said}".strip(), info | {"question": question})
@@ -165,15 +166,16 @@ def fetch(
     return Result(f"{head}\n{final}\n\n{text}".strip(), info)
 
 
-def _read(reader: Client, question: str, page: str, text: str) -> str:
-    # what a page says of a question, as the model reads it in a conversation of its own
+def _read(reader: Client, question: str, page: str, text: str, person: int | None) -> str:
+    # what a page says of a question, as the model reads it in a conversation of its own, for the
+    # person who asked it, whose prompts alone may share its prefix: the question is theirs
     body = {
         "messages": [{"role": "system", "content": READING},
                      {"role": "user", "content": f"The question: {question}\n\nThe page, "
                       f"{page}:\n\n{text[:READER]}"}],
         "max_tokens": FOUND, "temperature": 0.3, "chat_template_kwargs": {"enable_thinking": False},
     }  # fmt: skip
-    return reader.reply(body)["content"].strip() or "The page says nothing of it."
+    return reader.reply(body, person)["content"].strip() or "The page says nothing of it."
 
 
 def _readable(html: str, url: str, workspace: Workspace | None) -> tuple[str, str]:
