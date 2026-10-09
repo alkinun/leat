@@ -313,11 +313,20 @@ async function stop() {
   }
 }
 
-async function remove(c) {
+// deletes a conversation, once the user says so: it cannot be had back
+function remove(c) {
+  if (confirm(`Delete “${c.title}”? It cannot be undone.`)) del(`/api/conversations/${c.id}`);
+}
+
+// deletes what a path names; whether it did, saying why not if not
+async function del(path) {
   try {
-    await fetch(`/api/conversations/${c.id}`, { method: "DELETE" });
+    const response = await fetch(path, { method: "DELETE" });
+    if (!response.ok) throw new Error((await response.json()).error.message);
+    return true;
   } catch (error) {
     status(error.message, true);
+    return false;
   }
 }
 
@@ -360,7 +369,7 @@ function renderAccounts() {
   const box = $("accounts");
   const unpair = element("button", "", "Unpair this device");
   unpair.onclick = () => confirm("Unpair this device? Using Leat on it again takes asking to join.")
-    && fetch(`/api/devices/${me.device}`, { method: "DELETE" }).then(() => location.reload());
+    && del(`/api/devices/${me.device}`).then((done) => done && location.reload());
   const you = element("p", "meta", `You are ${me?.name ?? ""} here. `);
   you.append(unpair);
   if (!me?.owner || !accounts) return box.replaceChildren(you);
@@ -377,7 +386,7 @@ function renderAccounts() {
     allow.onclick = () => post(`/api/pairings/${r.id}/allow`, as.value ? { person: Number(as.value) } : {})
       .catch((error) => status(error.message, true));
     no.title = "Turn down";
-    no.onclick = () => fetch(`/api/pairings/${r.id}`, { method: "DELETE" });
+    no.onclick = () => del(`/api/pairings/${r.id}`);
     item.append(about, as, allow, no);
     return item;
   });
@@ -387,7 +396,7 @@ function renderAccounts() {
       const item = element("li"), remover = element("button", "", "×");
       remover.title = "Unpair";
       remover.hidden = d.id === me.device;
-      remover.onclick = () => fetch(`/api/devices/${d.id}`, { method: "DELETE" });
+      remover.onclick = () => del(`/api/devices/${d.id}`);
       item.append(element("span", "", d.name), element("span", "meta", `seen ${day(d.seen)}`), remover);
       return item;
     }));
@@ -395,7 +404,7 @@ function renderAccounts() {
     if (!p.owner) {
       const remover = element("button", "", "Remove");
       remover.onclick = () => confirm(`Remove ${p.name}, with all their chats?`)
-        && fetch(`/api/people/${p.id}`, { method: "DELETE" });
+        && del(`/api/people/${p.id}`);
       heading.append(" ", remover);
     }
     return [heading, devices];
@@ -410,7 +419,7 @@ function renderFiles() {
   $("workspace").replaceChildren(...files.map((f) => {
     const item = element("li"), remover = element("button", "", "×");
     remover.title = "Delete";
-    remover.onclick = () => fetch(`/api/files/${encodeURIComponent(f.name)}`, { method: "DELETE" });
+    remover.onclick = () => del(`/api/files/${encodeURIComponent(f.name)}`);
     item.append(fileLink(f.name), element("span", "meta", `${bytes(f.size)} · ${day(f.modified)}`), remover);
     return item;
   }));
