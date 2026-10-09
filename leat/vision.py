@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from PIL import Image as Picture
-from PIL import ImageOps
+from PIL import ImageOps, UnidentifiedImageError
 from tinygrad import Tensor, dtypes
 
 from leat import kernels, ops
@@ -529,6 +529,8 @@ def _picture(data: bytes) -> Picture.Image:
             warnings.simplefilter("error", Picture.DecompressionBombWarning)
             with Picture.open(io.BytesIO(data)) as opened:
                 picture = ImageOps.exif_transpose(opened)
+    except UnidentifiedImageError:  # whose message names the bytes' Python object
+        raise ValueError("not an image Pillow reads") from None
     except (OSError, Picture.DecompressionBombError, Picture.DecompressionBombWarning) as e:
         raise ValueError(f"not an image Pillow reads: {e}") from None
     if picture.has_transparency_data:

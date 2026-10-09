@@ -223,6 +223,8 @@ def test_image_bytes(tiny, tiny_mmproj):
     assert positions[:, 0].max() < positions[:, 1].max()  # taller than wide
     with pytest.raises(ValueError, match="not an image"):
         v.image(b"GIF89a, but not")
+    with pytest.raises(ValueError, match="^not an image Pillow reads$"):  # no Python object named
+        v.image(b"no image at all")
 
 
 @pytest.mark.usefixtures("reference_ops")
