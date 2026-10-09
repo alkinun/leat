@@ -297,7 +297,7 @@ pre code { padding: 0; background: none; }
   #log, #composer, #greeting, .page { padding-left: 12px; padding-right: 12px; }
   .page li button { visibility: visible !important; }
 }
-/* the gate of a device not yet the household's: setting up the home, or asking to join it */
+/* the gate of a device not yet paired: setting the box up, or asking to join it */
 #gate { display: none; }
 body.gated > nav, body.gated > main { display: none; }
 body.gated #gate { display: grid; flex: 1; place-items: center; min-height: 100vh; padding: 24px; }
@@ -316,14 +316,14 @@ body.gated #gate { display: grid; flex: 1; place-items: center; min-height: 100v
 }
 #code b { display: block; margin-top: 8px; font-size: 2rem; letter-spacing: 4px; color: var(--text); }
 #join .error { color: var(--error, #b3261e); }
-/* the household's people and devices, the owner's to manage */
-#household h3 { margin: 16px 0 0; font-size: 1rem; font-weight: 600; }
-#household li > div { display: flex; flex-direction: column; gap: 2px; }
-#household h3 button { font-size: 0.8125rem; color: var(--muted); }
-#household .meta b { color: var(--text); letter-spacing: 1px; }
-#household select { border: 1px solid var(--line); border-radius: var(--round); background: var(--card); }
-#household li :is(button.allow, select) { visibility: visible; }
-#household li button.allow {
+/* the box's people and devices, the owner's to manage */
+#accounts h3 { margin: 16px 0 0; font-size: 1rem; font-weight: 600; }
+#accounts li > div { display: flex; flex-direction: column; gap: 2px; }
+#accounts h3 button { font-size: 0.8125rem; color: var(--muted); }
+#accounts .meta b { color: var(--text); letter-spacing: 1px; }
+#accounts select { border: 1px solid var(--line); border-radius: var(--round); background: var(--card); }
+#accounts li :is(button.allow, select) { visibility: visible; }
+#accounts li button.allow {
   padding: 4px 12px; border-radius: var(--round); background: var(--accent); color: var(--on-accent);
   font-size: 0.875rem;
 }

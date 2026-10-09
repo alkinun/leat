@@ -1,14 +1,14 @@
 """The agent's HTTP server: the app at /, its API at /api, and every change as an event, streamed to
 each app watching.
 
-It answers this machine and its home network alone. A request must name the box by an address or
+It answers this machine and its own network alone. A request must name the box by an address or
 a local name, which a site's page turned on the box by DNS rebinding cannot; and a write must come
 from the app's own page, or from no browser, not from another site's page.
 
-Every request but for the app's own files, the household's setup and a device's request to join
-comes from a device of the household's, by the secret its cookie holds. A person sees and changes
-their own conversations, and the household's files; the owner
-alone the household's people and devices, and the engine's model.
+Every request but for the app's own files, the box's setup and a device's request to join comes
+from a device paired to one of the box's people, by the secret its cookie holds. A person sees and
+changes their own conversations, and the files, everyone's; the owner alone the box's people and
+devices, and the engine's model.
 """
 
 import contextlib
@@ -26,9 +26,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from leat.agent.accounts import Accounts
 from leat.agent.agent import Agent, Busy, NotFound
 from leat.agent.client import EngineError
-from leat.agent.household import Household
 
 APP = Path(__file__).parent / "app"
 # the app's files, each served at its path in app/, and their types; the app's pages, /c/<id> one
@@ -71,12 +71,12 @@ _FILE = re.compile(r"/(?:api/)?files/(.+)")
 
 
 class Server(ThreadingHTTPServer):
-    """Serves `agent` at http://host:port, until shut down, to its household's devices."""
+    """Serves `agent` at http://host:port, until shut down, to the devices of its people."""
 
     daemon_threads = True  # event streams end with the server
 
     def __init__(self, agent: Agent, host: str = "127.0.0.1", port: int = 8000):
-        self.agent, self.household = agent, Household(agent)
+        self.agent, self.accounts = agent, Accounts(agent)
         super().__init__((host, port), _Handler)
 
     def handle_error(self, request: Any, client_address: Any) -> None:
@@ -87,11 +87,11 @@ class Server(ThreadingHTTPServer):
 
 
 class _Unpaired(Exception):
-    """The request comes from no device of the household's."""
+    """The request comes from no device paired to the box."""
 
 
 class _Refused(Exception):
-    """The request asks what only the household's owner may."""
+    """The request asks what only the box's owner may."""
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -127,7 +127,7 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._trusted(write=True):
             return self._error(403, "requests from other sites' pages are refused")
         path, agent = urllib.parse.urlsplit(self.path).path, self.server.agent
-        household = self.server.household
+        accounts = self.server.accounts
         if (match := _REQUEST.fullmatch(path)) and not match[2]:
             # a POST, of this server's page alone: a link another gave could log a browser in
             return self._joined(match[1])
@@ -137,11 +137,11 @@ class _Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(size))
             if not isinstance(body, dict):
                 raise ValueError("the body must be a JSON object")
-            if path == "/api/setup":  # the household's first person, its owner
-                secret = household.setup(_text(body, "name"), _device(self.headers))
+            if path == "/api/setup":  # the box's first person, its owner
+                secret = accounts.setup(_text(body, "name"), _device(self.headers))
                 return self._json(200, {}, secret)
             if path == "/api/pairings":  # a device's request to join
-                return self._json(200, household.ask(_text(body, "name"), _device(self.headers)))
+                return self._json(200, accounts.ask(_text(body, "name"), _device(self.headers)))
             me = self._device()
             person, match = me["person"], _CONVERSATION.fullmatch(path)
             if path == "/api/conversations":
@@ -155,7 +155,7 @@ class _Handler(BaseHTTPRequestHandler):
                 _owner(me)
                 to = body.get("person")
                 name = body.get("name") if isinstance(body.get("name"), str) else None
-                self._json(200, household.allow(match[1], int(to) if to else None, name))
+                self._json(200, accounts.allow(match[1], int(to) if to else None, name))
             elif path == "/api/models/load":
                 _owner(me)
                 agent.load(_text(body, "model"))
@@ -167,7 +167,7 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._trusted(write=True):
             return self._error(403, "requests from other sites' pages are refused")
         path, agent = urllib.parse.urlsplit(self.path).path, self.server.agent
-        household = self.server.household
+        accounts = self.server.accounts
         with self._answering():
             me = self._device()
             person = me["person"]
@@ -179,13 +179,13 @@ class _Handler(BaseHTTPRequestHandler):
             elif match := _DEVICE.fullmatch(path):  # the owner's, or a device unpairing itself
                 if int(match[1]) != me["id"]:
                     _owner(me)
-                household.unpair(int(match[1]))
+                accounts.unpair(int(match[1]))
             elif (match := _REQUEST.fullmatch(path)) and not match[2]:
                 _owner(me)
-                household.refuse(match[1])
+                accounts.refuse(match[1])
             elif match := _PERSON.fullmatch(path):
                 _owner(me)
-                household.remove(int(match[1]))
+                accounts.remove(int(match[1]))
             else:
                 return self._error(404, f"there is no DELETE {path}")
             self._json(200, {})
@@ -212,9 +212,9 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             yield
         except _Unpaired:
-            self._error(401, "this device is not one of the household's: ask to join")
+            self._error(401, "this device has not joined this Leat: ask to join")
         except _Refused:
-            self._error(403, "only the household's owner may do that")
+            self._error(403, "only this Leat's owner may do that")
         except (ValueError, RecursionError) as e:  # JSON nested too deep to parse, too
             self._error(400, str(e))
         except (NotFound, LookupError, FileNotFoundError) as e:
@@ -225,11 +225,11 @@ class _Handler(BaseHTTPRequestHandler):
             self._error(502, str(e))
 
     def _device(self) -> dict[str, Any]:
-        # the household's device the request comes from, by its cookie's secret. Raises _Unpaired
+        # the paired device the request comes from, by its cookie's secret. Raises _Unpaired
         # if it comes from none.
         cookies = http.cookies.SimpleCookie(self.headers.get("Cookie", ""))
         secret = cookies[COOKIE].value if COOKIE in cookies else None
-        if (device := self.server.household.device(secret)) is None:
+        if (device := self.server.accounts.device(secret)) is None:
             raise _Unpaired
         return device
 
@@ -244,7 +244,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _joined(self, id: str) -> None:
         # a request to join, asked after: its device's secret once the owner let it in
         try:
-            secret = self.server.household.answer(id)
+            secret = self.server.accounts.answer(id)
         except LookupError as e:
             return self._error(404, str(e))
         if secret is None:
@@ -276,7 +276,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _events(self, me: dict[str, Any]) -> None:
         # what there is of a device's person's, then every change for them, until the client goes;
-        # what is the household's owner's, to theirs alone
+        # what is the owner's, to theirs alone
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -286,7 +286,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._event({"type": "conversations", "conversations": agent.conversations(person)})
             self._event(agent.files_event())
             if me["owner"]:
-                self._event(self.server.household.state())
+                self._event(self.server.accounts.state())
             self._event(agent.models_event())
             checked = time.monotonic()
             while True:
@@ -349,13 +349,13 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _error(self, status: int, message: str) -> None:
         body: dict[str, Any] = {"error": {"message": message}}
-        if status == 401:  # and whether the household is yet to be set up, by its first person
-            body["empty"] = self.server.household.empty()
+        if status == 401:  # and whether the box is yet to be set up, by its first person
+            body["empty"] = self.server.accounts.empty()
         self._json(status, body)
 
 
 def _owner(device: dict[str, Any]) -> None:
-    # raises _Refused unless the device is the household's owner's
+    # raises _Refused unless the device is the owner's
     if not device["owner"]:
         raise _Refused
 

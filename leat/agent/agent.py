@@ -35,8 +35,9 @@ SAMPLING = {
 }
 # the system prompt, fixed when a conversation starts so that every prompt after extends the last
 SYSTEM = """\
-You are Leat, an assistant that runs on a computer in {home} private, and theirs. Each of the \
-user's messages begins with the date and time they sent it.
+You are Leat, an assistant that runs on a computer of the user's own, which keeps what they say \
+and the files they share private.{named} Each of the user's messages begins with the date and time \
+they sent it.
 
 When a question needs facts you may not know, or that may have changed since you learned them, \
 call search, then fetch the few pages most likely to answer, three or so, at once, each with the \
@@ -98,8 +99,8 @@ class Agent:
     """The conversations in `store`, the turns run by the model `engine` serves, which calls
     `tools`; and the user's files, in `workspace`, if any.
 
-    Each conversation is a person's of the household, `person` by its id, and an event that tells
-    of one is to that person's apps alone: "to" says whose. Before the household
+    Each conversation is a person's of the box's, `person` by its id, and an event that tells of
+    one is to that person's apps alone: "to" says whose. Before the box
     has its first person, all is no one's, None's."""
 
     def __init__(
@@ -594,12 +595,12 @@ class _Stopped(Exception):
 
 
 def _system(workspace: bool, name: str | None = None) -> dict[str, Any]:
-    # the system prompt of a conversation begun now with the user, of a `name` if the household
-    # has people, and the workspace's tools if `workspace`
+    # the system prompt of a conversation begun now with the user, of a `name` if the box has
+    # people, and the workspace's tools if `workspace`
     skills = "\n".join(f"- {path}: {about}" for path, about in files.skills())
     space = WORKSPACE.format(skills=skills) if workspace else ""
-    home = f"the home of the user, {name}:" if name else "the user's home:"
-    content = SYSTEM.format(home=home, workspace=space)
+    named = f" The user is {name}." if name else ""
+    content = SYSTEM.format(named=named, workspace=space)
     return {"role": "system", "content": content}
 
 

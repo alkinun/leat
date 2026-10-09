@@ -1,7 +1,6 @@
 // leat agent's app. It keeps nothing of its own: it shows the conversations on the box as the
 // agent's events change them, the turns running there too, and sends what the user writes. A device
-// is one of the household's, its person's, once paired: the first sets the home up, any other asks
-// the owner to let it in.
+// is its person's once paired: the first sets the box up, any other asks the owner to let it in.
 
 import { markdown } from "/markdown.mjs";
 
@@ -11,7 +10,7 @@ let shown = null; // the conversation shown, with its messages; null for a new o
 let files = []; // the workspace's, the latest changed first: {name, size, modified}
 let attached = []; // the files the next message attaches: {name, uploading}
 let me = null; // the person whose this device is: {person, name, owner, device}
-let household = null; // the owner's to manage: its people and their devices, and those asking
+let accounts = null; // the owner's to manage: the people and their devices, and those asking
 // the conversations whose turns ended while another was shown, as this device saw them
 const unread = new Set(JSON.parse(localStorage.getItem("leat.unread") ?? "[]"));
 let models = [], loading = null, unreachable = null; // the engine's, a model it loads, or why not
@@ -66,7 +65,7 @@ window.onpopstate = route;
 renderModes();
 start();
 
-// the app, of the person whose this device is; or, of a device not yet the household's, the gate
+// the app, of the person whose this device is; or, of a device not yet paired, the gate
 async function start() {
   const response = await fetch("/api/me").catch(() => null);
   if (!response?.ok && response?.status !== 401) { // the box away: tried again, in a while
@@ -76,7 +75,7 @@ async function start() {
   status("");
   if (response.status === 401) return gate((await response.json()).empty);
   me = await response.json();
-  renderHousehold();
+  renderAccounts();
   const events = new EventSource("/api/events");
   events.onmessage = (event) => handle(JSON.parse(event.data));
   events.onerror = async () => {
@@ -94,13 +93,13 @@ async function start() {
   route();
 }
 
-// the gate of a device not yet the household's: its first person sets the home up, and is its
-// owner; any other asks to join, showing a code the owner's device shows too
+// the gate of a device not yet paired: the box's first person sets it up, and is its owner; any
+// other asks to join, showing a code the owner's device shows too
 function gate(empty) {
   document.body.classList.add("gated");
   $("welcome").textContent = empty
     ? "Welcome! This Leat is new. What's your name? You'll be the one who lets the others in."
-    : "This device is not one of your home's yet. What's your name?";
+    : "This device has not joined this Leat yet. What's your name?";
   $("joining").textContent = empty ? "Start" : "Ask to join";
   $("join").onsubmit = async (event) => {
     event.preventDefault();
@@ -196,9 +195,9 @@ function handle(event) {
       files = event.files;
       renderFiles();
       return;
-    case "household":
-      household = event;
-      renderHousehold();
+    case "accounts":
+      accounts = event;
+      renderAccounts();
       return;
     case "loading":
       loading = event.model;
@@ -347,18 +346,18 @@ function day(seconds) {
   return new Date(seconds * 1000).toLocaleDateString(undefined, { day: "numeric", month: "short" });
 }
 
-// the household's people, their devices, and the devices asking to join, which the owner lets in
-// as a person known or new, once the code they show is the one their device shows; for any other,
-// who they are here
-function renderHousehold() {
-  const box = $("household");
+// the box's people, their devices, and the devices asking to join, which the owner lets in as a
+// person known or new, once the code they show is the one their device shows; for any other, who
+// they are here
+function renderAccounts() {
+  const box = $("accounts");
   const unpair = element("button", "", "Unpair this device");
   unpair.onclick = () => confirm("Unpair this device? Using Leat on it again takes asking to join.")
     && fetch(`/api/devices/${me.device}`, { method: "DELETE" }).then(() => location.reload());
   const you = element("p", "meta", `You are ${me?.name ?? ""} here. `);
   you.append(unpair);
-  if (!me?.owner || !household) return box.replaceChildren(you);
-  const asking = household.requests.map((r) => {
+  if (!me?.owner || !accounts) return box.replaceChildren(you);
+  const asking = accounts.requests.map((r) => {
     const item = element("li"), about = element("div");
     const code = element("b", "", `${r.code.slice(0, 3)} ${r.code.slice(3)}`);
     const meta = element("span", "meta", `${r.device} · code `);
@@ -366,7 +365,7 @@ function renderHousehold() {
     about.append(element("span", "", `${r.name} asks to join`), meta);
     const as = element("select");
     as.append(new Option(`as someone new, ${r.name}`, ""),
-      ...household.people.map((p) => new Option(`as ${p.name}`, p.id)));
+      ...accounts.people.map((p) => new Option(`as ${p.name}`, p.id)));
     const allow = element("button", "allow", "Let in"), no = element("button", "", "×");
     allow.onclick = () => post(`/api/pairings/${r.id}/allow`, as.value ? { person: Number(as.value) } : {})
       .catch((error) => status(error.message, true));
@@ -375,7 +374,7 @@ function renderHousehold() {
     item.append(about, as, allow, no);
     return item;
   });
-  const people = household.people.flatMap((p) => {
+  const people = accounts.people.flatMap((p) => {
     const devices = element("ul");
     devices.append(...p.devices.map((d) => {
       const item = element("li"), remover = element("button", "", "×");

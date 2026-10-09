@@ -40,7 +40,7 @@ def main(argv: list[str] | None = None) -> None:
     agent.add_argument(
         "--search", default="http://127.0.0.1:8888", help="a SearXNG's address, for web search"
     )
-    agent.add_argument("--host", default="127.0.0.1", help="0.0.0.0 for the home network too")
+    agent.add_argument("--host", default="127.0.0.1", help="0.0.0.0 for the local network too")
     agent.add_argument("--port", type=int, default=8000)
     agent.add_argument(
         "--data", type=Path, default=_data(),

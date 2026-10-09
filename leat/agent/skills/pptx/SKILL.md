@@ -16,7 +16,7 @@ deck.slide_width, deck.slide_height = Inches(13.333), Inches(7.5)  # 16:9
 
 slide = deck.slides.add_slide(deck.slide_layouts[0])  # the title slide
 slide.shapes.title.text = "Our year in numbers"
-slide.placeholders[1].text = "Family budget review · October 2026"
+slide.placeholders[1].text = "Budget review · October 2026"
 
 slide = deck.slides.add_slide(deck.slide_layouts[1])  # a title, and points
 slide.shapes.title.text = "We saved more than we planned"

@@ -1,4 +1,4 @@
-"""The agent's state, in one SQLite file: conversations and their messages, and the household.
+"""The agent's state, in one SQLite file: conversations and their messages, and the accounts.
 
 A message is a dict in OpenAI's chat format, as the model reads it, and its "info": what only people
 see of it, such as the model that wrote it and how fast. A conversation's messages are only ever
@@ -8,8 +8,8 @@ conversation is named by the model once.
 A conversation's context is the state of what its prompt keeps of it, as leat.agent.context fits it
 to the model's.
 
-The household is its people, the first its owner, and the devices paired to each, known by the hash
-of a secret each holds. A conversation is a person's. Before the household has its first person,
+The accounts are the box's people, the first its owner, and the devices paired to each, known by the
+hash of a secret each holds. A conversation is a person's. Before the box has its first person,
 every conversation is no one's, and becomes the owner's.
 """
 
@@ -164,7 +164,7 @@ _MIGRATIONS = [
     """
     ALTER TABLE tasks ADD COLUMN condition TEXT;
     """,
-    # the home's features gone: memories, tasks, characters, lists, the search of what was said and
+    # the household's features gone: memories, tasks, characters, lists, the search of what was said
     # the settings, a conversation's character and group chat and how far it was reviewed, and
     # whether a person is a child. The conversations are made anew without those columns, which
     # SQLite drops from no table that refers to another; their messages kept, as foreign keys are
@@ -289,7 +289,7 @@ class Store:
             self._db.execute(sql, (title, id))
 
     def people(self) -> list[dict[str, Any]]:
-        """The household's people, the owner first."""
+        """The box's people, the owner first."""
         return [dict(row) for row in self._query("SELECT * FROM people ORDER BY id")]
 
     def person(self, id: int) -> dict[str, Any] | None:
@@ -297,7 +297,7 @@ class Store:
         return dict(rows[0]) if rows else None
 
     def add_person(self, name: str) -> dict[str, Any]:
-        """A new person of the household's; the first its owner, whose every conversation that was
+        """A new person of the box's; the first its owner, whose every conversation that was
         no one's becomes."""
         with self._lock, self._db:
             self._db.execute("BEGIN")

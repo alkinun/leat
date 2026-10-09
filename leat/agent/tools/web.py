@@ -1,7 +1,7 @@
 """The web: searching it through the SearXNG on the box, and reading its pages.
 
 Pages are the web's alone: an address on the box's own network, a router's or another machine's,
-is refused, at every redirect too, so that a page cannot lead the model to read the home's devices.
+is refused, at every redirect too, so that a page cannot lead the model to read its devices.
 The addresses checked are those connected to, so that a site's DNS cannot answer the check with
 one and the connection with another.
 

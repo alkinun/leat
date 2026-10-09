@@ -1,9 +1,9 @@
-"""The household: its people, the devices each uses, and the pairing of a new device.
+"""The accounts: the box's people, the devices each uses, and the pairing of a new device.
 
-The first to open the app on a new box names themselves and is the household's owner, and all the
-box held before is theirs. Any device after asks to join, and shows a code; the owner lets it in,
-as a person of the household, known or new, once their own device shows the same code, as a
-Bluetooth pairing has it. A device keeps a secret, sent as a cookie, of which the box keeps the
+The first to open the app on a new box names themselves and is its owner, and all the box held
+before is theirs. Any device after asks to join, and shows a code; the owner lets it in, as one of
+the box's people, known or new, once their own device shows the same code, as a Bluetooth pairing
+has it. A device keeps a secret, sent as a cookie, of which the box keeps the
 hash alone, so that a copy of its state lets no one in.
 """
 
@@ -35,8 +35,8 @@ class _Request:
     secret: str | None = None
 
 
-class Household:
-    """The household of an agent's state: its people, their devices, and the requests to join."""
+class Accounts:
+    """The accounts of an agent's state: its people, their devices, and the requests to join."""
 
     def __init__(self, agent: "Agent"):
         self.agent, self.store = agent, agent.store
@@ -44,16 +44,16 @@ class Household:
         self._lock = threading.Lock()
 
     def empty(self) -> bool:
-        """Whether no one is the household's yet, before its owner names themselves."""
+        """Whether the box has no one yet, before its owner names themselves."""
         return not self.store.people()
 
     def setup(self, name: str, device: str) -> str:
         """Makes its first person, the owner, of a name, on a device; returns the device's secret.
-        Raises ValueError if the household has an owner already, or the name is no name."""
+        Raises ValueError if the box has an owner already, or the name is no name."""
         name = _checked(name)
         with self._lock:
             if not self.empty():
-                raise ValueError("this home has its people already: ask to join")
+                raise ValueError("this Leat has its owner already: ask to join")
             person = self.store.add_person(name)
             return self._pair(person["id"], device)
 
@@ -96,7 +96,7 @@ class Household:
         return request.secret
 
     def allow(self, id: str, person: int | None = None, name: str | None = None) -> dict:
-        """Lets a request's device in, as a person of the household, or as a new one of a name,
+        """Lets a request's device in, as one of the box's people, or as a new one of a name,
         theirs by default. Raises LookupError if there is no such request or person."""
         with self._lock:
             self._expire()
@@ -144,7 +144,7 @@ class Household:
         devices = self.store.devices()
         people = [p | {"devices": [d for d in devices if d["person"] == p["id"]]}
                   for p in self.store.people()]  # fmt: skip
-        return {"type": "household", "people": people, "requests": requests}
+        return {"type": "accounts", "people": people, "requests": requests}
 
     def _pair(self, person: int, device: str) -> str:
         # pairs a device to a person; returns the secret it keeps

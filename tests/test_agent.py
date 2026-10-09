@@ -309,7 +309,7 @@ def test_rounds(agent, engine, events, monkeypatch):
     assert calls["role"] == "tool" and answer["content"] == "Done at last."
 
 
-def test_household(agent, engine, events):
+def test_people(agent, engine, events):
     # all that was no one's becomes the first person's, the owner's; then each person's
     # conversations are their own, and each event says whose it is
     engine.replies.put(REPLY)
@@ -323,7 +323,7 @@ def test_household(agent, engine, events):
     with agent.events.watch() as told:
         mine = agent.send(None, "Hello", person=ada["id"])
         assert {e.get("to") for e in until(told, ended)} == {ada["id"]}
-    assert "the home of the user, Ada:" in agent.store.messages(mine)[0]["content"]
+    assert " The user is Ada. " in agent.store.messages(mine)[0]["content"]
     for other in (owner["id"], None):
         assert agent.conversation(mine, other) is None
         with pytest.raises(NotFound):
@@ -419,7 +419,7 @@ def test_migration(tmp_path):
     store = Store(tmp_path / "leat.db")
     assert [m["content"] for m in store.messages("0123456789ab")] == ["tulips", "Tulips?"]
     assert Store(tmp_path / "leat.db").conversations()[0]["id"] == "0123456789ab"
-    # of the home's features, nothing is left
+    # of the household's features gone, nothing is left
     tables = {name for (name,) in store._db.execute("SELECT name FROM sqlite_schema")}
     assert {t for t in tables if not t.startswith("sqlite_")} == {
         "conversations", "messages", "people", "devices"}  # fmt: skip
@@ -680,7 +680,7 @@ def test_hang_up_is_quiet(agent, capsys):
 
 @contextlib.contextmanager
 def serving(agent: Agent) -> Iterator[str]:
-    """The agent's server, its household's owner set up, whose cookie urllib's requests send from
+    """The agent's server, its owner set up, whose cookie urllib's requests send from
     then on, as a browser's do."""
     with Server(agent, port=0) as server:
         threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True).start()
@@ -778,13 +778,13 @@ def test_joining(server, agent, engine, events):
             return e.code, json.loads(e.read())
 
     assert ask("/api/me") == (401, {"error": {"message": ANY}, "empty": False})
-    assert ask("/api/setup", "POST", {"name": "Eve"})[0] == 400  # the household has its owner
+    assert ask("/api/setup", "POST", {"name": "Eve"})[0] == 400  # the box has its owner
     status, asked = ask("/api/pairings", "POST", {"name": "Ada"})
     assert status == 200 and len(asked["code"]) == 6
     connection = http.client.HTTPConnection(server.replace("http://", ""))
     connection.request("GET", "/api/events", headers={"Cookie": cookie()})
     response = connection.getresponse()
-    while not (line := response.readline()).startswith(b'data: {"type": "household"'):
+    while not (line := response.readline()).startswith(b'data: {"type": "accounts"'):
         pass
     (request_,) = json.loads(line[6:])["requests"]
     assert (request_["name"], request_["code"]) == ("Ada", asked["code"])
@@ -868,7 +868,7 @@ def test_events(server, agent, engine):
 
     assert event() == {"type": "conversations", "conversations": []}
     assert event() == {"type": "files", "files": []}
-    assert event()["type"] == "household"  # the owner's
+    assert event()["type"] == "accounts"  # the owner's
     assert event()["type"] == "models"
     engine.replies.put(REPLY)
     id = agent.send(None, "Hi", person=1)
