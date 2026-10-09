@@ -1,5 +1,6 @@
 import json
 import os
+import struct
 
 import pytest
 
@@ -33,6 +34,9 @@ def test_recommended_of_the_file():
     qwen = {"general.architecture": "qwen3", "general.sampling.temp": 0.5}
     thinks, plain = recommended(qwen)
     assert (thinks["temperature"], plain["temperature"]) == (0.5, 0.7)
+    # its float32s as their shortest decimals, as written, the same float32s
+    top_p = struct.unpack("<f", struct.pack("<f", 0.95))[0]  # 0.949999988079071, as read
+    assert recommended(gemma | {"general.sampling.top_p": top_p})[0]["top_p"] == 0.95
 
 
 def test_checked():

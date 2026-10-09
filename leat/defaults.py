@@ -8,7 +8,9 @@ not, and its presence_penalty, which no GGUF key holds. What neither says is Ope
 """
 
 import json
+import math
 import re
+import struct
 import threading
 from pathlib import Path
 from typing import Any
@@ -57,9 +59,19 @@ def recommended(metadata: dict[str, Any]) -> tuple[Options, Options]:
     named = re.sub(r"[^a-z0-9]", "", f"{metadata.get('general.name', '')}".lower())
     family = next(((r, p) for a, word, r, p in _FAMILIES if a == arch and word in named), None)
     reasoning, plain = family or ({}, None)
-    written = {option: metadata[key] for key, option in _KEYS.items() if key in metadata}
+    written = {option: _f32(metadata[key]) for key, option in _KEYS.items() if key in metadata}
     reasons = OPENAI | reasoning | written
     return reasons, OPENAI | plain if plain is not None else reasons
+
+
+def _f32(value: Any) -> Any:
+    # a float32 of a GGUF's as the shortest decimal of it, 0.95 rather than 0.949999988079071: the
+    # same float32, which sampling takes, as /v1/models says it
+    if not isinstance(value, float) or not math.isfinite(value):
+        return value
+    exact = struct.pack("<f", value)
+    shortest = (float(f"{value:.{digits}g}") for digits in range(1, 18))
+    return next(t for t in shortest if struct.pack("<f", t) == exact)
 
 
 def checked(options: Any, where: str) -> Options:
