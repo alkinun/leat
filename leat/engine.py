@@ -192,11 +192,22 @@ class Engine:
             self._rows = Tensor.zeros(saved, 1, dim).contiguous().realize()
             self._speculate = {n: graph(self._speculative_step) for n in self._speculated}
             self._settle = {n: graph(self._settled) for n in self._speculated}
-            # each sequence's tokens a step keeps, but one; its position, past a prompt's first
-            # token, which the drafter's attention needs to know
+            # each sequence's tokens a step keeps, but one; and of the step of n sequences, its
+            # position, past a prompt's first token, which the drafter's attention needs to know,
+            # and before the context's end by as many as it drafts at least, as a step runs only
+            # where its drafts fit
             each = range(max(self._speculated))
             self._kept_vars = [UOp.variable(f"kept{i}", 0, DRAFT_TOKENS) for i in each]
-            self._draft_vars = [UOp.variable(f"draft_pos{i}", 1, max_context - 1) for i in each]
+            self._draft_vars = {
+                n: [UOp.variable(f"draft_pos{n}_{i}", 1, max(max_context - 1 - _drafts(n), 1))
+                    for i in range(n)]
+                for n in self._speculated
+            }  # fmt: skip
+            # and its slot, a sequence's, never the padding's
+            self._draft_slots = {
+                n: [UOp.variable(f"draft_slot{n}_{i}", 0, slots - 1) for i in range(n)]
+                for n in self._speculated
+            }
         self._recurrent = any(self.config.recurrent)
         self._keep, self._restore = graph(self._keep_slot), graph(self._restore_slot)
         self._kept: list[list[int]] = [[] for _ in range(slots)]  # tokens before each kept state
@@ -320,8 +331,8 @@ class Engine:
             sampling = [
                 t for _ in range(n) for t in (Tensor([[0.0] * 5]), Tensor([0], dtype=dtypes.uint32))
             ]
-            slots = [self._slot_vars[i].bind(i) for i in range(n)]
-            starts = [self._draft_vars[i].bind(1) for i in range(n)]
+            slots = [self._draft_slots[n][i].bind(i) for i in range(n)]
+            starts = [self._draft_vars[n][i].bind(1) for i in range(n)]
             self._speculate[n](_ids([0] * n, n), *sampling, *slots, *starts)
             self._settle[n](*(x for i in range(n) for x in (self._kept_vars[i].bind(0), slots[i])))
         self._last = {}
@@ -548,9 +559,9 @@ class Engine:
         # generated too, each until the first it would not have, and the token the target
         # generated after them, each appended and checked as step() does
         n, drafts = len(sequences), _drafts(len(sequences))
-        slots = [self._slot_vars[i].bind(s.slot) for i, s in enumerate(sequences)]
+        slots = [self._draft_slots[n][i].bind(s.slot) for i, s in enumerate(sequences)]
         positions = [
-            self._draft_vars[i].bind(len(self._cached[s.slot])) for i, s in enumerate(sequences)
+            self._draft_vars[n][i].bind(len(self._cached[s.slot])) for i, s in enumerate(sequences)
         ]
         options = [t for s in sequences for t in s.options]
         tokens = _ids([s.tokens[-1] for s in sequences], n)
