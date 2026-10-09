@@ -262,20 +262,21 @@ async function open(id, push = true) {
   if (unread.delete(id)) localStorage.setItem("leat.unread", JSON.stringify([...unread]));
   document.body.classList.remove("menu", ...PAGES);
   const running = conversations.find((c) => c.id === id)?.running ?? false;
-  shown = id ? { id, title: "", messages: null, running, later: [] } : null; // until it comes
+  // until it comes; then shown, unless another was opened since, or this one again
+  const pending = id ? { id, title: "", messages: null, running, later: [] } : null;
+  shown = pending;
   render();
   if (!id) return;
   try {
     const response = await fetch(`/api/conversations/${id}`);
     if (!response.ok) throw new Error((await response.json()).error.message);
     const c = await response.json();
-    if (shown?.id !== id) return;
-    const { later } = shown;
+    if (shown !== pending) return;
     shown = c;
     render();
-    later.forEach(handle);
+    pending.later.forEach(handle);
   } catch (error) {
-    if (shown?.id !== id) return;
+    if (shown !== pending) return;
     history.replaceState(null, "", "/");
     shown = null;
     render();
