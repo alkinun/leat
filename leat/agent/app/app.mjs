@@ -839,8 +839,9 @@ function cite(element) {
 // a reply's sources: those it cites, in the order it first does, or the pages its turn read
 function sources(m) {
   const all = numbered(), cited = [];
-  for (const [, n] of (m.content ?? "").matchAll(/\[(\d{1,3})\](?!\()/g)) {
-    const s = all.get(Number(n));
+  const cites = /\[(\d{1,3})\](?!\()|【(\d{1,3})(?:†[^】\n]*)?】/g; // [1], or gpt-oss's 【1】
+  for (const [, n, oss] of (m.content ?? "").matchAll(cites)) {
+    const s = all.get(Number(n ?? oss));
     if (s && !cited.includes(s)) cited.push(s);
   }
   if (cited.length) return cited;

@@ -235,7 +235,7 @@ function span(text, i) {
 
 const SPANS = {
   "\\": escape, "`": codeSpan, $: math, "*": emphasis, _: emphasis, "~": emphasis,
-  "[": link, "!": link, "<": autolink, h: url,
+  "[": link, "!": link, "<": autolink, h: url, "【": citation,
 };
 
 // where the escape, code span or math at j ends, none of which another span reaches into, or -1
@@ -361,6 +361,12 @@ function link(text, i) {
   }
   const end = close + 1 + destination[0].length;
   return [["a", { href }, ...uncited(inline(text.slice(open + 1, close)))], end];
+}
+
+// 【1】, as gpt-oss cites the source of that number, at times with a part of it, 【1†L4-L9】: as [1]
+function citation(text, i) {
+  const match = /^【(\d{1,3})(?:†[^】\n]*)?】/.exec(text.slice(i, i + 64));
+  return match && [["sup", { class: "cite" }, match[1]], i + match[0].length];
 }
 
 // a link's text, which cites nothing: each [n] in it text again

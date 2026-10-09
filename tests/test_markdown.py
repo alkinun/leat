@@ -150,6 +150,10 @@ CASES = [
        ["sup", {"class": "cite"}, "12"], "."]]),
     ("[1234], [a], [1, 2] and [1](javascript:x)",
      [["p", "[1234], [a], [1, 2] and ", ["sup", {"class": "cite"}, "1"], "(javascript:x)"]]),
+    # and as gpt-oss cites, at times with a part of the source
+    ("Paris【1】, Lyon【2†L4-L9】, 【x】, 【1234】 and 【3",
+     [["p", "Paris", ["sup", {"class": "cite"}, "1"], ", Lyon", ["sup", {"class": "cite"}, "2"],
+       ", 【x】, 【1234】 and 【3"]]),
     ("[`]`](https://x.io)", [["p", ["a", {"href": "https://x.io"}, ["code", "]"]]]]),
     ("![a cat](https://x.io/cat.png)", [["p", ["a", {"href": "https://x.io/cat.png"}, "a cat"]]]),
     ("[a](javascript:alert(1)) [b](data:text/html,x) [c](/path) [d](HTTPS://X.IO)",
