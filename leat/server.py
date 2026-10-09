@@ -610,11 +610,11 @@ class _Handler(BaseHTTPRequestHandler):
             reply = split_reply(text, c.form, c.thinking, done=True)
         except RuntimeError as e:
             return self._error(500, str(e))
-        message: dict[str, Any] = {"role": "assistant", "content": reply.content}
-        if reply.reasoning:
-            message["reasoning_content"] = reply.reasoning
         reason = c.finish.reason
         content, calls = _calls(reply, c.tools, c.finish.reason)
+        message: dict[str, Any] = {"role": "assistant", "content": content}
+        if reply.reasoning:
+            message["reasoning_content"] = reply.reasoning
         if calls:
             message |= {"content": content or None, "tool_calls": _tool_calls(calls)}
             reason = "tool_calls"

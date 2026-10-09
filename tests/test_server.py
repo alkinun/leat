@@ -844,6 +844,15 @@ def test_shared_system_prompt(served, model_path):
     assert statistics.median(cold) > 10 * statistics.median(warm)
 
 
+@pytest.mark.parametrize("stream", [False, True])
+def test_cut_off_call_is_no_text(client, replies_with, stream):
+    # whole or streamed, a reply that ends for its length in a call it had begun says the text
+    # before the call alone
+    replies_with('Checking.\n<tool_call>\n{"name": "weather", "argu')
+    kwargs = {"tools": [WEATHER], "stream": stream}
+    assert complete(client, "Weather in Paris?", **kwargs) == ("Checking.", "length")
+
+
 def test_cut_off_call():
     # a call the context cut off is no text: the reply's text ends where it began
     reply = Reply(content="Here it is.\n<tool_call>\n<function=weather>\n<parameter=city>\nPar")
