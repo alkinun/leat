@@ -183,9 +183,7 @@ def _rope(m: dict[str, Any], arch: str, sliding: bool, dims: int) -> Rope:
     # sin times rope.scaling.attn_factor, as llama.cpp's every layer
     attn_factor, base = m.get("rope.scaling.attn_factor", 1.0), m.get("rope.freq_base", 10000.0)
     swa_base = m.get("rope.freq_base_swa", base if arch == "gpt-oss" else 10000.0)
-    if (
-        sliding and arch != "gpt-oss"
-    ):  # their own base, unscaled; gpt-oss's are scaled as the others
+    if sliding and arch != "gpt-oss":  # their own base, unscaled; gpt-oss's scaled as the others
         return Rope(swa_base, dims, mscale=attn_factor)
     # rope_freqs divides the frequencies of the layers that see all positions: all of Llama
     # 3.1's, few of Gemma 4's

@@ -6,11 +6,13 @@ cache held.
     uv run python scripts/evaluate.py [--engine http://127.0.0.1:8080] [-n 3] [--effort E] [-k name]
 
 The agent runs in this process, with leat agent's tools, against leat serve at --engine, the SearXNG
-at --search, and the sandbox's environment at --sandbox; the states are temporary, and the user's
-own untouched. A prompt's or a tool's change is measured here before it is kept.
+at --search, and the sandbox's environment at --sandbox, with leat serve's key in LEAT_ENGINE_KEY if
+it asks for one, as leat agent's; the states are temporary, and the user's own untouched. A
+prompt's or a tool's change is measured here before it is kept.
 """
 
 import argparse
+import os
 import re
 import statistics
 import sys
@@ -143,7 +145,7 @@ def _run(case: Case, args: argparse.Namespace) -> Outcome:
     with tempfile.TemporaryDirectory() as data:
         environment = args.sandbox if args.sandbox.exists() else None
         workspace = Workspace(Path(data) / "workspace", environment)
-        engine = Client(args.engine)
+        engine = Client(args.engine, os.environ.get("LEAT_ENGINE_KEY"))
         tools = [*web.tools(args.search, workspace, engine), *files.tools(workspace)]
         agent = Agent(Store(Path(data) / "leat.db"), engine, tools, workspace)
         for name, text in case.files.items():

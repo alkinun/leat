@@ -67,9 +67,8 @@ BLOCKS = {
     "section", "article", "main", "table", "ul", "ol", "dl", "dt", "dd", "figcaption",
 }  # fmt: skip
 _AGENT = "Mozilla/5.0 (compatible; leat)"
-WHOLE = (
-    4000  # characters of a page read whole even for a question, as its findings would be no less
-)
+# characters of a page read whole even for a question, as its findings would be no less
+WHOLE = 4000
 READER = 24000  # characters of a page a reader reads at most, its start
 FOUND = 600  # tokens of a reader's findings at most
 # a reader's instructions, of a page and a question
