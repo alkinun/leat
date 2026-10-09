@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
-  <!-- leat's mark: water stepping down a weir, and a signal quantized into levels; Leat's text's
-       color, light or dark as whatever shows it is -->
+  <!-- leat's mark: a pinwheel of four quarter circles, the wheel a leat's water turns; Leat's
+       text's color, light or dark as whatever shows it is -->
   <style>path { fill: #0a0a0a; } @media (prefers-color-scheme: dark) { path { fill: #ededed; } }</style>
-  <path d="M0 0h8v8h8v8h8v8H0z"/>
+  <path d="M0 11V0a11 11 0 0 1 11 11zM13 0h11a11 11 0 0 1-11 11zM24 13v11a11 11 0 0 1-11-11zM11 24H0a11 11 0 0 1 11-11z"/>
 </svg>
