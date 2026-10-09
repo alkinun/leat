@@ -116,13 +116,6 @@ class Household:
             self._requests.pop(id, None)
         self._publish()
 
-    def set_child(self, id: int, child: bool) -> None:
-        """Says whether a person is a child, whose conversations begun after keep to a child's
-        rules. Raises LookupError if there is no such person but the owner."""
-        if not self.store.set_child(id, child):
-            raise LookupError(f"there is no person {id} but the owner")
-        self._publish()
-
     def unpair(self, id: int) -> None:
         """Unpairs a device, which must ask to join again. Raises LookupError if there is none."""
         if not self.store.remove_device(id):

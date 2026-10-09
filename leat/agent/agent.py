@@ -64,14 +64,6 @@ things off as anyone asks.
 {workspace}
 What you remember of the user, each by its number and dated when it was last confirmed:
 {memories}"""
-# of the system prompt of a conversation with a child of the household's
-CHILD = """
-
-The user is a child. Keep to what suits a child: nothing romantic or sexual, nothing gory or \
-frightening, as horror is, nothing of how to do what is dangerous. With homework, help them work \
-it out themselves: ask what they think, and give a hint or a step, not the answer. If they are \
-worried or unhappy, be kind, and encourage them to talk to their parents or another adult they \
-trust. Never ask for their address, their school, or a photo, nor where they will be."""
 # of the system prompt, when the agent has a workspace
 WORKSPACE = """
 The user's files are in a workspace, where you read, write and edit them, and run Python among \
@@ -206,8 +198,6 @@ class Agent:
                 name = who.get("name")
                 memories = self.store.memories(person)
                 system = _system(memories, self.workspace is not None, name)
-                if who.get("child"):
-                    system["content"] += CHILD
                 title = _title(content)
                 id, start = self.store.create(title, [system, message], person)["id"], 1
             else:

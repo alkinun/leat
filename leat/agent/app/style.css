@@ -362,7 +362,6 @@ body.gated #gate { display: grid; flex: 1; place-items: center; min-height: 100v
 #shared form { margin: 8px 0 0; }
 #shared form input { padding: 6px 14px; }
 #new-list { margin-top: 28px; }
-#household h3 label.child { font-size: 0.8125rem; font-weight: 400; color: var(--muted); }
 #suggested { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 16px; }
 #suggested button, #scheduled li button.talk {
   padding: 4px 12px; border: 1px solid var(--line); border-radius: var(--round);

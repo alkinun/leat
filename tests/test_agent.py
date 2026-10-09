@@ -17,7 +17,6 @@ from unittest.mock import ANY
 
 import pytest
 
-from leat.agent import agent as agent_module
 from leat.agent import background, context
 from leat.agent.agent import LAST, Agent, Busy, NotFound
 from leat.agent.client import Client, EngineError
@@ -500,12 +499,6 @@ def test_household(agent, engine, events):
     # recall finds a person's own conversations alone
     found = agent.store.search("hello hi", person=owner["id"])
     assert {f["conversation"] for f in found} == {before}
-    # a child's conversations begun after keep to a child's rules
-    assert agent.store.set_child(ada["id"], True) and not agent.store.set_child(owner["id"], True)
-    engine.replies.put(REPLY)
-    id = agent.send(None, "Hi", person=ada["id"])
-    until(events, ended)
-    assert agent.store.messages(id)[0]["content"].endswith(agent_module.CHILD)
 
 
 def test_lists(agent, events):
@@ -1288,10 +1281,6 @@ def test_joining(server, agent, engine, events):
         assert ask(path, "POST", body)[0] in (403, 404)
     assert ask("/api/models/load", "POST", {"model": "fake"})[0] == 403
     assert ask("/api/people/1", "DELETE")[0] == 403
-    assert ask("/api/people/2", "POST", {"child": True})[0] == 403
-    assert request(f"{server}/api/people/2", "POST", {"child": True})[0] == 200
-    assert request(f"{server}/api/people/1", "POST", {"child": True})[0] == 404  # the owner
-    assert agent.store.person(2)["child"] == 1
     # unpaired by the owner, it must ask again; and removed, with all that is hers
     (device,) = [d["id"] for d in agent.store.devices() if d["person"] == 2]
     connection = http.client.HTTPConnection(server.replace("http://", ""), timeout=5)

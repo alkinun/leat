@@ -504,11 +504,6 @@ class Store:
     def rename_person(self, id: int, name: str) -> None:
         self._query("UPDATE people SET name = ? WHERE id = ?", name, id)
 
-    def set_child(self, id: int, child: bool) -> bool:
-        """Says whether a person, not the owner, is a child; False if there is no such person."""
-        sql = "UPDATE people SET child = ? WHERE id = ? AND NOT owner RETURNING id"
-        return bool(self._query(sql, int(child), id))
-
     def remove_person(self, id: int) -> None:
         """Removes a person who is not the owner, and all that is theirs: their conversations,
         memories, tasks and devices."""
