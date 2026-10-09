@@ -18,10 +18,9 @@ time asked for, or the first of its repeats after, whose wall clock and day of t
 keep; one done for good is deleted. Settings are values by name, of JSON.
 
 The household is its people, the first its owner, and the devices paired to each, known by the hash
-of a secret each holds; its characters, whom a conversation may be with; and its lists, as its
-shopping, everyone's. A conversation, a memory and a task are each a person's; a memory of the
-household category is everyone's. Before the household has its first person, everything is no one's,
-and becomes the owner's.
+of a secret each holds; and its lists, as its shopping, everyone's. A conversation, a memory and a
+task are each a person's; a memory of the household category is everyone's. Before the household
+has its first person, everything is no one's, and becomes the owner's.
 """
 
 import json
@@ -179,7 +178,7 @@ _MIGRATIONS = [
 ]
 _SEARCHED = ("user", "assistant")  # the roles of the messages search finds
 # a conversation's columns as the apps list it
-_SUMMARY = "id, title, created, updated, person, character"
+_SUMMARY = "id, title, created, updated, person"
 # the memories a person knows: their own, and the household's
 _KNOWN = "(person IS ? OR category = 'household')"
 
@@ -210,20 +209,18 @@ class Store:
         return dict(rows[0]) if rows else None
 
     def create(
-        self, title: str, messages: list[dict[str, Any]], person: int | None = None,
-        character: int | None = None,
-    ) -> dict[str, Any]:  # fmt: skip
-        """A new conversation of a person's, with a character if given, of these messages."""
+        self, title: str, messages: list[dict[str, Any]], person: int | None = None
+    ) -> dict[str, Any]:
+        """A new conversation of a person's, of these messages."""
         id, now = uuid.uuid4().hex[:12], time.time()
         with self._lock, self._db:
             self._db.execute("BEGIN")
             self._db.execute(
-                "INSERT INTO conversations (id, title, created, updated, person, character)"
-                " VALUES (?, ?, ?, ?, ?, ?)", (id, title, now, now, person, character),
+                "INSERT INTO conversations (id, title, created, updated, person)"
+                " VALUES (?, ?, ?, ?, ?)", (id, title, now, now, person),
             )  # fmt: skip
             self._insert(id, 0, messages)
-        return {"id": id, "title": title, "created": now, "updated": now, "person": person,
-                "character": character}  # fmt: skip
+        return {"id": id, "title": title, "created": now, "updated": now, "person": person}
 
     def context(self, id: str) -> dict[str, Any]:
         rows = self._query("SELECT context FROM conversations WHERE id = ?", id)
@@ -454,25 +451,6 @@ class Store:
     def delete_task(self, id: int) -> dict[str, Any] | None:
         rows = self._query("DELETE FROM tasks WHERE id = ? RETURNING *", id)
         return dict(rows[0]) if rows else None
-
-    def characters(self) -> list[dict[str, Any]]:
-        """The household's characters, but those removed, the oldest first."""
-        sql = "SELECT * FROM characters WHERE removed IS NULL ORDER BY id"
-        return [dict(row) for row in self._query(sql)]
-
-    def character(self, id: int) -> dict[str, Any] | None:
-        rows = self._query("SELECT * FROM characters WHERE id = ?", id)
-        return dict(rows[0]) if rows else None
-
-    def add_character(self, name: str, about: str) -> dict[str, Any]:
-        sql = "INSERT INTO characters (name, about, created) VALUES (?, ?, ?) RETURNING *"
-        return dict(self._query(sql, name, about, time.time())[0])
-
-    def remove_character(self, id: int) -> bool:
-        """Removes a character from those a conversation may begin with; its conversations go on
-        with them."""
-        sql = "UPDATE characters SET removed = ? WHERE id = ? AND removed IS NULL RETURNING id"
-        return bool(self._query(sql, time.time(), id))
 
     def lists(self) -> list[dict[str, Any]]:
         """The household's lists, the oldest first, each with its items, the oldest first."""

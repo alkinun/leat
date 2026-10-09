@@ -153,8 +153,8 @@ def test_turn(agent, engine, events):
     id = agent.send(None, "Hi\nand more")
     seen = until(events, ended)
     assert [e["type"] for e in seen[:3]] == ["conversation", "message", "message"]
-    assert seen[0]["conversation"] | {"updated": 0} == {
-        "id": id, "title": "Hi", "updated": 0, "running": True, "character": None}  # fmt: skip
+    summary = {"id": id, "title": "Hi", "updated": 0, "running": True}
+    assert seen[0]["conversation"] | {"updated": 0} == summary
     user = {"role": "user", "content": "Hi\nand more",
             "info": {"think": False, "at": pytest.approx(time.time(), abs=5)}}  # fmt: skip
     assert seen[1]["message"] == user
@@ -500,49 +500,12 @@ def test_household(agent, engine, events):
     # recall finds a person's own conversations alone
     found = agent.store.search("hello hi", person=owner["id"])
     assert {f["conversation"] for f in found} == {before}
-    # a child's conversations begun after keep to a child's rules, a character's too
+    # a child's conversations begun after keep to a child's rules
     assert agent.store.set_child(ada["id"], True) and not agent.store.set_child(owner["id"], True)
-    tutor = agent.add_character("Ms Ada", "A tutor.")
-    for character in (None, tutor["id"]):
-        engine.replies.put(REPLY)
-        id = agent.send(None, "Hi", person=ada["id"], character=character)
-        until(events, ended)
-        assert agent.store.messages(id)[0]["content"].endswith(agent_module.CHILD)
-
-
-def test_character(agent, engine, events):
-    # a conversation with one of the household's characters: their system prompt, knowing the
-    # user's memories but without the memory's tools, nor reviewed; going on once they are removed
-    agent.remember("The user is 9.", "about")
-    with pytest.raises(ValueError, match="needs a name"):
-        agent.add_character(" ", "Someone.")
-    tutor = agent.add_character("Ms Ada", "A patient maths tutor, who asks before she tells.")
-    assert agent.characters() == [tutor]
-    with pytest.raises(NotFound):
-        agent.send(None, "Hi", character=9)
-    engine.replies.put([{"tool_calls": [call("remember", {"memory": "x", "evidence": "x"})]}])
-    engine.replies.put([{"content": "What do you think 7 times 8 is?"}])
-    id = agent.send(None, "What is 7 times 8?", character=tutor["id"])
+    engine.replies.put(REPLY)
+    id = agent.send(None, "Hi", person=ada["id"])
     until(events, ended)
-    system = agent.store.messages(id)[0]["content"]
-    assert system.startswith("You are Ms Ada, a character that Leat plays")
-    assert "A patient maths tutor" in system and "[1] The user is 9." in system
-    names = [t["function"]["name"] for t in engine.requests[0]["tools"]]
-    assert "remember" not in names and "forget" not in names and "recall" in names
-    assert agent.store.messages(id)[3]["content"] == "error: there is no tool 'remember'"
-    assert agent.conversations()[0]["character"] == tutor["id"]
-    background.review(agent, id)  # no request: nothing of a roleplay is remembered
-    assert len(engine.requests) == 2 and agent.store.reviewed(id) == 5
-    agent.remove_character(tutor["id"])
-    engine.replies.put([{"content": "Right!"}])
-    agent.send(id, "56")
-    until(events, ended)
-    assert agent.conversations()[0]["character"] == tutor["id"] and agent.characters() == []
-    assert "remember" not in [t["function"]["name"] for t in engine.requests[-1]["tools"]]
-    for removed in (lambda: agent.remove_character(tutor["id"]),
-                    lambda: agent.send(None, "Hi", character=tutor["id"])):  # fmt: skip
-        with pytest.raises(NotFound):
-            removed()
+    assert agent.store.messages(id)[0]["content"].endswith(agent_module.CHILD)
 
 
 def test_lists(agent, events):
@@ -1234,22 +1197,6 @@ def test_api_memories(server, agent):
     assert request(f"{server}/memory")[0] == 200  # the app's page of them
 
 
-def test_api_characters(server, agent, engine, events):
-    url = f"{server}/api/characters"
-    status, body = request(url, "POST", {"name": "Ms Ada", "about": "A patient maths tutor."})
-    tutor = json.loads(body)
-    assert status == 200 and tutor["name"] == "Ms Ada"
-    assert request(url, "POST", {"name": "Nobody"})[0] == 400
-    engine.replies.put(REPLY)
-    _, body = request(f"{server}/api/conversations", "POST",
-                      {"content": "Hi", "character": tutor["id"]})  # fmt: skip
-    until(events, ended)
-    assert agent.conversations(1)[0]["character"] == tutor["id"]
-    assert request(f"{url}/{tutor['id']}", "DELETE")[0] == 200
-    assert request(f"{url}/{tutor['id']}", "DELETE")[0] == 404
-    assert request(f"{server}/characters")[0] == 200  # the app's page of them
-
-
 def test_api_lists(server, agent):
     from leat.agent.tools import lists
 
@@ -1395,7 +1342,6 @@ def test_events(server, agent, engine):
     assert event() == {"type": "memories", "memories": [], "forgotten": []}
     assert event() == {"type": "files", "files": []}
     assert event() == {"type": "tasks", "tasks": []}
-    assert event() == {"type": "characters", "characters": []}
     assert event() == {"type": "lists", "lists": []}
     assert event()["type"] == "household"  # the owner's
     assert event()["type"] == "models"

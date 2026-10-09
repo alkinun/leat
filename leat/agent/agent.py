@@ -64,25 +64,7 @@ things off as anyone asks.
 {workspace}
 What you remember of the user, each by its number and dated when it was last confirmed:
 {memories}"""
-# the system prompt of a conversation with one of the household's characters, who knows the user's
-# memories but changes none, as a roleplay's facts are not the user's
-CHARACTER = """\
-You are {name}, a character that Leat plays: Leat is an assistant that runs on a computer in \
-{home} private, and theirs. Each of the user's messages begins with the date and time they sent it.
-
-Who {name} is, as the household wrote it:
-{about}
-
-Talk as {name} would, in their voice and manner, keeping to who they are. If the user asks whether \
-you are a person, say you are a character that Leat, an AI, plays.
-
-When a question needs facts you may not know, or that may have changed since you learned them, \
-call search, then fetch the few pages most likely to answer, at once, each with the question you \
-want it to answer. Cite what you use by the numbers the tools give their sources, as [1].
-{workspace}
-What you know of the user, each by its number:
-{memories}"""
-# of the system prompt, Leat's or a character's, of a conversation with a child of the household's
+# of the system prompt of a conversation with a child of the household's
 CHILD = """
 
 The user is a child. Keep to what suits a child: nothing romantic or sexual, nothing gory or \
@@ -90,10 +72,6 @@ frightening, as horror is, nothing of how to do what is dangerous. With homework
 it out themselves: ask what they think, and give a hint or a step, not the answer. If they are \
 worried or unhappy, be kind, and encourage them to talk to their parents or another adult they \
 trust. Never ask for their address, their school, or a photo, nor where they will be."""
-NAME = 40  # characters of a character's name at most
-ABOUT = 2000  # characters of who a character is at most
-# the memory's tools a conversation with a character has not
-UNREMEMBERING = ("remember", "forget")
 # of the system prompt, when the agent has a workspace
 WORKSPACE = """
 The user's files are in a workspace, where you read, write and edit them, and run Python among \
@@ -200,16 +178,15 @@ class Agent:
 
     def send(
         self, id: str | None, content: str, think: bool = False, attached: list[str] | None = None,
-        task: int | None = None, person: int | None = None, character: int | None = None,
-        quiet: str | None = None, trial: bool = False,
+        task: int | None = None, person: int | None = None, quiet: str | None = None,
+        trial: bool = False,
     ) -> str:  # fmt: skip
-        """Starts a turn of a person's message, in a new conversation without an id, with one of
-        the household's characters if given; returns the conversation's id. The model thinks
-        before it replies if `think`, which takes longer, and reads of the files `attached`, in
-        the workspace. A message of a scheduled task names it, with the condition of a check,
-        `quiet`, that tells only if it holds, but for a `trial` run, which tells what it found.
-        Raises NotFound if there is no such conversation of the person's, file or character, Busy
-        if a turn runs in the conversation."""
+        """Starts a turn of a person's message, in a new conversation without an id; returns the
+        conversation's id. The model thinks before it replies if `think`, which takes longer, and
+        reads of the files `attached`, in the workspace. A message of a scheduled task names it,
+        with the condition of a check, `quiet`, that tells only if it holds, but for a `trial`
+        run, which tells what it found. Raises NotFound if there is no such conversation of the
+        person's, or file, Busy if a turn runs in the conversation."""
         info: dict[str, Any] = {"think": think, "at": time.time()}
         if task:
             info["task"] = task
@@ -227,23 +204,19 @@ class Agent:
             if id is None:
                 who = (self.store.person(person) or {}) if person else {}
                 name = who.get("name")
-                played = self.store.character(character) if character is not None else None
-                if character is not None and (played is None or played["removed"]):
-                    raise NotFound(f"there is no character {character}")
                 memories = self.store.memories(person)
-                system = _system(memories, self.workspace is not None, name, played)
-                if who.get("child"):  # whose rules no character's wins over
+                system = _system(memories, self.workspace is not None, name)
+                if who.get("child"):
                     system["content"] += CHILD
                 title = _title(content)
-                c = self.store.create(title, [system, message], person, character)
-                id, start = c["id"], 1
+                id, start = self.store.create(title, [system, message], person)["id"], 1
             else:
-                c = self._own(id, person)
+                self._own(id, person)
                 if id in self._turns:
                     raise Busy("a reply is already running")
                 start = len(self.store.messages(id))
                 self.store.append(id, message)
-            turn = _Turn(self, id, person, start, content, think, task, c, None if trial else quiet)
+            turn = _Turn(self, id, person, start, content, think, task, None if trial else quiet)
             self._turns[id] = turn
             self._publish_summary(id)
             self._publish_message(id, person, start, message)
@@ -266,34 +239,6 @@ class Agent:
                 turn.stop()
             self.store.delete(id)
             self.events.publish({"type": "deleted", "id": id, "to": person})
-
-    def characters(self) -> list[dict[str, Any]]:
-        """The household's characters, the oldest first."""
-        return self.store.characters()
-
-    def add_character(self, name: str, about: str) -> dict[str, Any]:
-        """Adds a character to the household's, whom a conversation may be with. Raises ValueError
-        if a name or who they are is none, or too long."""
-        name, about = " ".join(name.split()), about.strip()
-        if not name or not about:
-            raise ValueError("a character needs a name, and who they are")
-        if len(name) > NAME or len(about) > ABOUT:
-            raise ValueError(
-                f"a character's name is {NAME} characters at most, who they are {ABOUT}"
-            )
-        character = self.store.add_character(name, about)
-        self.events.publish(self.characters_event())
-        return character
-
-    def remove_character(self, id: int) -> None:
-        """Removes a character from those a conversation may begin with; its conversations go on
-        with them. Raises NotFound if there is no such character."""
-        if not self.store.remove_character(id):
-            raise NotFound(f"there is no character {id}")
-        self.events.publish(self.characters_event())
-
-    def characters_event(self) -> Event:
-        return {"type": "characters", "characters": self.store.characters()}
 
     def memories(self, person: int | None = None) -> list[dict[str, Any]]:
         """What the agent remembers of a person, and of the household, the oldest first."""
@@ -491,7 +436,7 @@ class Agent:
             self.events.publish(self.memories_event(person))
 
     def _summary(self, c: dict[str, Any]) -> dict[str, Any]:
-        running, keys = c["id"] in self._turns, ("id", "title", "updated", "character")
+        running, keys = c["id"] in self._turns, ("id", "title", "updated")
         return {k: c[k] for k in keys} | {"running": running}
 
     def _publish_summary(self, id: str) -> None:
@@ -511,13 +456,11 @@ class _Turn:
 
     def __init__(
         self, agent: Agent, id: str, person: int | None, start: int, content: str, think: bool,
-        task: int | None, c: dict[str, Any], quiet: str | None = None,
+        task: int | None, quiet: str | None = None,
     ):  # fmt: skip
         self.agent, self.id, self.start, self.content, self.think = agent, id, start, content, think
         self.person, self.quiet = person, quiet  # of a check: what must hold to tell
-        # the tools the model calls: of a conversation with a character, not the memory's
-        played = c["character"] is not None
-        self.tools = {n: t for n, t in agent.tools.items() if not played or n not in UNREMEMBERING}
+        self.tools = agent.tools  # the tools the model calls
         self.task = task  # the scheduled task the message is of, if any
         self.state = agent.store.context(id)  # the prompt's, as it was, to take the turn back to
         self.kept = start + 1  # the conversation's messages kept
@@ -849,20 +792,14 @@ class _Stopped(Exception):
 
 
 def _system(
-    memories: list[dict[str, Any]], workspace: bool, name: str | None = None,
-    character: dict[str, Any] | None = None,
-) -> dict[str, Any]:  # fmt: skip
+    memories: list[dict[str, Any]], workspace: bool, name: str | None = None
+) -> dict[str, Any]:
     # the system prompt of a conversation begun now with the user, of a `name` if the household
-    # has people, which knows these memories, and the workspace's tools if `workspace`; Leat's, or
-    # a character's
+    # has people, which knows these memories, and the workspace's tools if `workspace`
     remembered = memory.listing(memories)
     skills = "\n".join(f"- {path}: {about}" for path, about in files.skills())
     space = WORKSPACE.format(skills=skills) if workspace else ""
     home = f"the home of the user, {name}:" if name else "the user's home:"
-    if character is not None:
-        content = CHARACTER.format(name=character["name"], about=character["about"], home=home,
-                                   memories=remembered, workspace=space)  # fmt: skip
-        return {"role": "system", "content": content}
     content = SYSTEM.format(home=home, memories=remembered, workspace=space)
     return {"role": "system", "content": content}
 

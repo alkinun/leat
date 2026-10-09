@@ -35,7 +35,7 @@ from leat.agent.tools import tasks as scheduling
 
 APP = Path(__file__).parent / "app"
 # the app's files, each served at its path in app/, and their types; the app's pages, /c/<id> one
-# conversation's, /memory, /files, /tasks, /lists, /characters and /settings, are index.html
+# conversation's, /memory, /files, /tasks, /lists and /settings, are index.html
 _FILES = (
     "index.html",
     "style.css",
@@ -48,7 +48,7 @@ _FILES = (
     "vendor/temml/Temml.woff2",
     "vendor/temml/latinmodernmath.woff2",
 )
-_PAGES = ("/", "/memory", "/files", "/tasks", "/lists", "/characters", "/settings")
+_PAGES = ("/", "/memory", "/files", "/tasks", "/lists", "/settings")
 _TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
@@ -73,7 +73,6 @@ _TASK = re.compile(r"/api/tasks/([0-9]+)(/run)?")
 _REQUEST = re.compile(r"/api/pairings/([0-9a-f]{16})(/allow)?")
 _DEVICE = re.compile(r"/api/devices/([0-9]+)")
 _PERSON = re.compile(r"/api/people/([0-9]+)")
-_CHARACTER = re.compile(r"/api/characters/([0-9]+)")
 _LIST = re.compile(r"/api/lists/([0-9]+)(/items)?")
 _ITEM = re.compile(r"/api/lists/items/([0-9]+)")
 _FILE = re.compile(r"/(?:api/)?files/(.+)")
@@ -153,10 +152,8 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._json(200, household.ask(_text(body, "name"), _device(self.headers)))
             me = self._device()
             person, match = me["person"], _CONVERSATION.fullmatch(path)
-            if path == "/api/conversations":  # with one of the household's characters, if given
-                played = int(body["character"]) if body.get("character") else None
-                id = agent.send(None, *_message(body), person=person, character=played)
-                self._json(200, {"id": id})
+            if path == "/api/conversations":
+                self._json(200, {"id": agent.send(None, *_message(body), person=person)})
             elif match and match[2] == "/messages":
                 self._json(200, {"id": agent.send(match[1], *_message(body), person=person)})
             elif match and match[2] == "/stop":
@@ -176,8 +173,6 @@ class _Handler(BaseHTTPRequestHandler):
                                                person, condition))  # fmt: skip
             elif (match := _TASK.fullmatch(path)) and match[2]:  # a task run now, to try it
                 self._json(200, {"id": agent.run_now(int(match[1]), person)})
-            elif path == "/api/characters":
-                self._json(200, agent.add_character(_text(body, "name"), _text(body, "about")))
             elif path == "/api/lists":
                 lists.make(agent, _text(body, "name"))
                 lists.changed(agent)
@@ -219,8 +214,6 @@ class _Handler(BaseHTTPRequestHandler):
                 agent.forget(int(match[1]), person=person)
             elif (match := _TASK.fullmatch(path)) and not match[2]:
                 agent.unschedule(int(match[1]), person)
-            elif match := _CHARACTER.fullmatch(path):
-                agent.remove_character(int(match[1]))
             elif match := _ITEM.fullmatch(path):
                 if agent.store.remove_item(int(match[1])) is None:
                     raise NotFound(f"there is no item {match[1]}")
@@ -343,7 +336,6 @@ class _Handler(BaseHTTPRequestHandler):
             self._event(agent.memories_event(person))
             self._event(agent.files_event())
             self._event(agent.tasks_event(person))
-            self._event(agent.characters_event())
             self._event(lists.event(agent))
             if me["owner"]:
                 self._event(self.server.household.state())

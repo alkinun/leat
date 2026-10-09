@@ -16,9 +16,7 @@ let attached = []; // the files the next message attaches: {name, uploading}
 let tasks = []; // the scheduled, the next due first: {id, prompt, schedule, conversation}
 let me = null; // the person whose this device is: {person, name, owner, device}
 let household = null; // the owner's to manage: its people and their devices, and those asking
-let characters = []; // the household's, which a new chat may be with
 let lists = []; // the household's, each with its items: {id, name, items: [{id, text}]}
-let cast = null; // the character the next new chat is with, if one
 // the conversations whose turns ended while another was shown, as this device saw them
 const unread = new Set(JSON.parse(localStorage.getItem("leat.unread") ?? "[]"));
 let models = [], loading = null, unreachable = null; // the engine's, a model it loads, or why not
@@ -31,12 +29,10 @@ let views = []; // the shown messages' elements, by their indexes
 const opened = new Map(); // whether each turn's work is open, as the user left it
 const quietly = new Set(); // the conversations a check withdrew its turn from, finding nothing
 // the pages beside the conversations, each a section of its own name, and their titles
-const PAGES = ["memory", "files", "tasks", "lists", "characters", "settings"];
-const TITLES = { memory: "Memory", files: "Files", tasks: "Tasks", lists: "Lists",
-  characters: "Characters", settings: "Settings" };
+const PAGES = ["memory", "files", "tasks", "lists", "settings"];
+const TITLES = { memory: "Memory", files: "Files", tasks: "Tasks", lists: "Lists", settings: "Settings" };
 
 $("new").onclick = () => {
-  cast = null;
   open(null);
   $("input").focus();
 };
@@ -45,7 +41,6 @@ $("remembered").onclick = () => turnTo("memory");
 $("filed").onclick = () => turnTo("files");
 $("timed").onclick = () => turnTo("tasks");
 $("set").onclick = () => turnTo("settings");
-$("cast").onclick = () => turnTo("characters");
 $("listed").onclick = () => turnTo("lists");
 $("new-list").onsubmit = async (event) => {
   event.preventDefault();
@@ -54,17 +49,6 @@ $("new-list").onsubmit = async (event) => {
   try {
     await post("/api/lists", { name });
     $("list-name").value = "";
-  } catch (error) {
-    status(error.message, true);
-  }
-};
-$("character").onsubmit = async (event) => {
-  event.preventDefault();
-  const name = $("character-name").value.trim(), about = $("character-about").value.trim();
-  if (!name || !about) return;
-  try {
-    await post("/api/characters", { name, about });
-    $("character-name").value = $("character-about").value = "";
   } catch (error) {
     status(error.message, true);
   }
@@ -346,10 +330,6 @@ function handle(event) {
       tasks = event.tasks;
       renderTasks();
       return;
-    case "characters":
-      characters = event.characters;
-      renderCharacters();
-      break;
     case "lists":
       lists = event.lists;
       renderLists();
@@ -449,10 +429,8 @@ async function send() {
     const path = shown ? `/api/conversations/${shown.id}/messages` : "/api/conversations";
     const sent = attached, from = shown?.id;
     const files = sent.map((a) => a.name);
-    const body = { content, think, files, ...(!shown && cast ? { character: cast } : {}) };
-    const { id } = await (await post(path, body)).json();
+    const { id } = await (await post(path, { content, think, files })).json();
     attached = attached.filter((a) => !sent.includes(a)); // not those added meanwhile
-    cast = null;
     renderAttached();
     if (shown?.id === from && from !== id) open(id); // unless another was opened meanwhile
   } catch (error) {
@@ -684,59 +662,6 @@ function renderLists() {
   }));
 }
 
-// characters one may add in a click, as a start
-const PRESETS = [
-  ["Tutor", "A patient tutor for any school subject. Asks what the learner knows already, explains one step at a time with an example, and asks a question to check before going on. Helps with homework without simply giving the answers."],
-  ["Language partner", "A friendly partner to practise a language with. Speaks only the language the user wants to practise, in simple sentences, and gently corrects their mistakes after each reply."],
-  ["Storyteller", "Makes up stories together with the user: begins one in the world they ask for, stops at the moments where they choose what happens next, and keeps every story kind and fit for children."],
-];
-
-// the household's characters, each to talk to in a new chat, and those to add in a click
-function renderCharacters() {
-  $("cast-list").replaceChildren(...characters.map((c) => {
-    const item = element("li"), about = element("div");
-    const brief = c.about.length > 140 ? `${c.about.slice(0, 140)}…` : c.about;
-    about.append(element("span", "", c.name), element("span", "meta", brief));
-    const talk = element("button", "talk", "Talk"), remover = element("button", "", "×");
-    talk.onclick = () => talkTo(c.id);
-    remover.title = "Remove";
-    remover.onclick = () => fetch(`/api/characters/${c.id}`, { method: "DELETE" });
-    item.append(about, talk, remover);
-    return item;
-  }));
-  const unadded = PRESETS.filter(([name]) => !characters.some((c) => c.name === name));
-  $("presets").replaceChildren(...unadded.map(([name, about]) => {
-    const add = element("button", "", `+ ${name}`);
-    add.type = "button";
-    add.onclick = () => post("/api/characters", { name, about }).catch((e) => status(e.message, true));
-    return add;
-  }));
-  renderWith();
-}
-
-// begins a new chat with a character
-function talkTo(id) {
-  open(null);
-  cast = id;
-  renderWith();
-  controls();
-  $("input").focus();
-}
-
-// whom the next new chat is with, if not Leat itself
-function renderWith() {
-  const c = !shown && characters.find((other) => other.id === cast);
-  if (!c) return $("with").replaceChildren();
-  const leave = element("button", "", "×");
-  leave.title = "Talk to Leat instead";
-  leave.onclick = () => {
-    cast = null;
-    renderWith();
-    controls();
-  };
-  $("with").replaceChildren(`With ${c.name}`, leave);
-}
-
 // the next Sunday at 18:00, as a task's first time: "YYYY-MM-DD 18:00"
 function sunday() {
   const day = new Date();
@@ -835,7 +760,6 @@ function ready() {
 function render() {
   renderList();
   renderLog();
-  renderWith();
   controls();
 }
 
@@ -851,9 +775,7 @@ function renderList() {
       event.stopPropagation();
       remove(c);
     };
-    const title = element("span", "", c.title), played = characters.find((p) => p.id === c.character);
-    if (played) title.prepend(element("span", "with", `${played.name} · `));
-    item.append(title, remover);
+    item.append(element("span", "", c.title), remover);
     item.onclick = () => open(c.id);
     return item;
   }));
@@ -958,9 +880,8 @@ function controls() {
   const paged = PAGES.some((name) => document.body.classList.contains(name));
   if (!paged) document.title = shown?.title || "leat";
   $("main").classList.toggle("empty", !shown && !paged);
-  const played = characters.find((c) => c.id === cast);
   $("greeting").textContent = unreachable ? "The engine is not reachable"
-    : loading ? "Loading…" : !model ? "Choose a model" : played ? `Talk to ${played.name}` : "How can I help?";
+    : loading ? "Loading…" : !model ? "Choose a model" : "How can I help?";
   $("think").classList.toggle("on", think);
   $("send").classList.toggle("stop", running);
   $("send").title = running ? "Stop" : "Send";
