@@ -187,6 +187,8 @@ class Engine:
             # the rows of a speculative step's tokens, of which one of each sequence's becomes it
             dim = self.config.dim
             self._hidden = Tensor.zeros(cache_slots, 1, dim).contiguous().realize()
+            # and the one each slot's kept recurrent state goes on from, kept with it
+            self._kept_hidden = Tensor.zeros(cache_slots, 1, dim).contiguous().realize()
             self._rows = Tensor.zeros(saved, 1, dim).contiguous().realize()
             self._speculate = {n: graph(self._speculative_step) for n in self._speculated}
             self._settle = {n: graph(self._settled) for n in self._speculated}
@@ -196,7 +198,7 @@ class Engine:
             self._kept_vars = [UOp.variable(f"kept{i}", 0, DRAFT_TOKENS) for i in each]
             self._draft_vars = [UOp.variable(f"draft_pos{i}", 1, max_context - 1) for i in each]
         self._recurrent = any(self.config.recurrent)
-        self._keep, self._restore = graph(self.model.keep), graph(self.model.restore)
+        self._keep, self._restore = graph(self._keep_slot), graph(self._restore_slot)
         self._kept: list[list[int]] = [[] for _ in range(slots)]  # tokens before each kept state
         self._last: dict[int, _Batch] = {}  # the last decode step's batches, by graph
         self._cached: list[list[int]] = [[] for _ in range(slots)]  # tokens each slot holds
@@ -614,6 +616,19 @@ class Engine:
             row = i * ran + kept
             self._hidden[slot : slot + 1].assign(self._rows[row : row + 1]).realize()
             self.model.rewind(slot, row)
+
+    def _keep_slot(self, slot: UOp) -> None:
+        # slot `slot`'s recurrent states kept, and the hidden state the drafter goes on from
+        self.model.keep(slot)
+        if self.drafter is not None:
+            self._kept_hidden[slot : slot + 1].assign(self._hidden[slot : slot + 1]).realize()
+
+    def _restore_slot(self, slot: UOp) -> None:
+        # slot `slot` taken back to what _keep_slot kept, so that the drafter takes in the next
+        # token after the hidden state of the one before, not of the last the slot ran
+        self.model.restore(slot)
+        if self.drafter is not None:
+            self._hidden[slot : slot + 1].assign(self._kept_hidden[slot : slot + 1]).realize()
 
     def _copy_slot(self, source: UOp, slot: UOp) -> None:
         # slot `source`'s cache and states, and what the drafter holds of it, to slot `slot`

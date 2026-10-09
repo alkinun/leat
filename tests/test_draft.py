@@ -1,7 +1,8 @@
+import numpy as np
 import pytest
 from tinygrad import Tensor
 
-from leat.engine import DRAFT_TOKENS, Engine
+from leat.engine import DRAFT_TOKENS, KEEP_BACK, Engine
 from leat.sampler import GREEDY, Sampling
 from tests.helpers import CONTEXT, Oracle, reference_drafts, reference_mtp_drafts
 
@@ -42,6 +43,30 @@ def test_mtp_drafts_match_reference(tiny):
     drafts = engine.drafter.draft(Tensor([[token]]), engine._hidden[:1], [0], [len(PROMPT)], 3)
     assert drafts.tolist() == [reference_mtp_drafts(weights, PROMPT + [token], 3)]
     engine.cancel(sequence)
+
+
+@pytest.mark.usefixtures("reference_ops")
+def test_mtp_after_a_kept_state(tiny):
+    # a prompt that goes on from the state its slot kept before the last prompt's end, as a chat's
+    # next turn does, gives the MTP layer the hidden state of the token before the kept one, not
+    # of the last the slot ran: its keys and values are those of the prompt run anew
+    path = tiny("qwen35moe")[0]
+    first = PROMPT * 2
+    second = first + [4, 4, 4]
+
+    def held(engine: Engine) -> np.ndarray:  # the MTP layer's keys and values of `second`
+        sequence = engine.start(second, 1)
+        while not engine.step():  # its chunks, the first to where its own state is kept
+            pass
+        assert sequence.done and engine.drafter is not None
+        cache = engine.drafter.layer.cache[0]  # type: ignore[attr-defined]
+        return cache[:, 0, :, : len(second)].numpy()
+
+    engine = Engine(path, max_context=CONTEXT, draft=path)
+    list(engine.generate(first, 6))
+    assert engine.cached_prefix(second) == len(first) - KEEP_BACK  # from the kept state
+    np.testing.assert_allclose(held(engine), held(Engine(path, max_context=CONTEXT, draft=path)),
+                               atol=0.01)  # fmt: skip
 
 
 @pytest.mark.usefixtures("reference_ops")
