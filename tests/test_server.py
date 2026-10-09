@@ -17,9 +17,11 @@ import pytest
 from leat.chat import ChatTemplate, Reply
 from leat.defaults import OPENAI, Overrides
 from leat.engine import Engine
+from leat.gguf import GGUF
 from leat.keys import Keys
 from leat.sampler import Sampling
 from leat.server import Server, _calls, _completion, _Load, _Writer
+from leat.tokenizer import Tokenizer
 from tests.helpers import CONTEXT, Oracle, chat_template
 
 WEATHER = {
@@ -810,9 +812,12 @@ def served(model_path) -> Iterator[openai.OpenAI]:
 @pytest.mark.gpu
 @pytest.mark.model
 def test_calls_tools(served, model_path):
-    if "tools" not in chat_template(model_path):
-        pytest.skip("the model's chat template takes no tools")
     messages = [{"role": "user", "content": "What is the weather in Paris right now?"}]
+    metadata = GGUF.open(model_path).metadata
+    template = ChatTemplate(metadata, Tokenizer(metadata))
+    if template.render(messages, tools=[WEATHER]) == template.render(messages):
+        # as Phi-4-mini's, which shows tools a system message holds, not the request's
+        pytest.skip("the model's chat template shows no tools")
     response = served.chat.completions.create(
         model="real", messages=messages, tools=[WEATHER], temperature=0
     )
