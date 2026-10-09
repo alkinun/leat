@@ -72,6 +72,19 @@ def test_openai_messages():
     assert c.render(messages) == "a\nb;Oslo;c;"
     with pytest.raises(ValueError, match="text, image or image_url"):
         c.render([{"role": "user", "content": [{"type": "input_audio"}]}])
+    # a call's content of None, as OpenAI's clients send it, as text to templates that take text,
+    # as Qwen3's slices it
+    sliced = chat("{% for m in messages %}{{ m.content[:3] }}|{{ m.content is none }};{% endfor %}")
+    assert sliced[0].render(messages[1:2]) == "|False;"
+
+
+def test_undefined_joins_as_no_text():
+    # a tool's description, which OpenAI's API leaves out at will, joined to text as gpt-oss's
+    # template joins it; any other use of what is not there fails as before
+    c, _ = chat("{% for t in tools %}{{ '// ' + t.description + '!' }}{% endfor %}")
+    assert c.render([], tools=[{"name": "f"}, {"name": "g", "description": "G"}]) == "// !// G!"
+    with pytest.raises(jinja2.UndefinedError):
+        chat("{{ tools[0].description + 1 }}")[0].render([], tools=[{"name": "f"}])
 
 
 def test_images():

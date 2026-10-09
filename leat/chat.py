@@ -40,8 +40,9 @@ class ChatTemplate:
         if (source := metadata.get("tokenizer.chat_template")) is None:
             raise ValueError("the model has no chat template")
         env = ImmutableSandboxedEnvironment(
-            trim_blocks=True, lstrip_blocks=True, extensions=[jinja2.ext.loopcontrols]
-        )
+            trim_blocks=True, lstrip_blocks=True, extensions=[jinja2.ext.loopcontrols],
+            undefined=_Undefined,
+        )  # fmt: skip
         env.filters["tojson"] = _tojson
         env.globals["raise_exception"] = _raise
         env.globals["strftime_now"] = lambda fmt: datetime.now().strftime(fmt)
@@ -392,6 +393,10 @@ def _message(message: dict[str, Any]) -> dict[str, Any]:
     # of replies that called tools, it keeps it until the turn's answer, and of those with text
     # too, it takes the text for their reasoning, and refuses both
     message = dict(message)
+    if "content" in message and message["content"] is None:  # as OpenAI's clients send a call's,
+        # which templates that take content for text, as Qwen3's and Gemma 3's, cannot read: as
+        # llama.cpp gives it, where every template that reads None renders it as it does ""
+        message["content"] = ""
     reasoning = message.get("reasoning_content")
     if reasoning and not message.get("content") and "thinking" not in message:
         message["thinking"] = reasoning
@@ -442,3 +447,14 @@ def _tojson(value: Any, ensure_ascii=False, indent=None, separators=None, sort_k
 
 def _raise(message: str) -> None:
     raise jinja2.exceptions.TemplateError(message)
+
+
+class _Undefined(jinja2.Undefined):
+    # what a template reads that is not there, as a tool's description, which OpenAI's API leaves
+    # out at will: joined to text as no text, as gpt-oss's template joins "// " and it, rather
+    # than failing the request; any other use fails as Jinja's own does
+    def __add__(self, other: Any) -> Any:
+        return other if isinstance(other, str) else super().__add__(other)
+
+    def __radd__(self, other: Any) -> Any:
+        return other if isinstance(other, str) else super().__radd__(other)
