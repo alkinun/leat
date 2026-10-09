@@ -18,9 +18,9 @@ time asked for, or the first of its repeats after, whose wall clock and day of t
 keep; one done for good is deleted. Settings are values by name, of JSON.
 
 The household is its people, the first its owner, and the devices paired to each, known by the hash
-of a secret each holds; and its lists, as its shopping, everyone's. A conversation, a memory and a
-task are each a person's; a memory of the household category is everyone's. Before the household
-has its first person, everything is no one's, and becomes the owner's.
+of a secret each holds. A conversation, a memory and a task are each a person's; a memory of the
+household category is everyone's. Before the household has its first person, everything is no one's,
+and becomes the owner's.
 """
 
 import json
@@ -450,27 +450,6 @@ class Store:
 
     def delete_task(self, id: int) -> dict[str, Any] | None:
         rows = self._query("DELETE FROM tasks WHERE id = ? RETURNING *", id)
-        return dict(rows[0]) if rows else None
-
-    def lists(self) -> list[dict[str, Any]]:
-        """The household's lists, the oldest first, each with its items, the oldest first."""
-        rows = self._query("SELECT * FROM items ORDER BY id")
-        return [dict(row) | {"items": [dict(i) for i in rows if i["list"] == row["id"]]}
-                for row in self._query("SELECT * FROM lists ORDER BY id")]  # fmt: skip
-
-    def add_list(self, name: str) -> dict[str, Any]:
-        sql = "INSERT INTO lists (name, created) VALUES (?, ?) RETURNING *"
-        return dict(self._query(sql, name, time.time())[0]) | {"items": []}
-
-    def remove_list(self, id: int) -> bool:
-        return bool(self._query("DELETE FROM lists WHERE id = ? RETURNING id", id))
-
-    def add_item(self, list: int, text: str) -> dict[str, Any]:
-        sql = "INSERT INTO items (list, text, created) VALUES (?, ?, ?) RETURNING *"
-        return dict(self._query(sql, list, text, time.time())[0])
-
-    def remove_item(self, id: int) -> dict[str, Any] | None:
-        rows = self._query("DELETE FROM items WHERE id = ? RETURNING *", id)
         return dict(rows[0]) if rows else None
 
     def people(self) -> list[dict[str, Any]]:
