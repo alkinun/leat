@@ -18,7 +18,7 @@ from leat.agent.agent import Agent
 from leat.agent.client import Client
 from leat.agent.server import Server as AgentServer
 from leat.agent.store import Store
-from leat.agent.tools import files, weather, web
+from leat.agent.tools import files, web
 from leat.agent.workspace import Workspace
 
 if TYPE_CHECKING:
@@ -156,7 +156,7 @@ def _agent(args: argparse.Namespace) -> None:
     environment = args.data / "sandbox"
     workspace = Workspace(args.data / "workspace", environment if environment.exists() else None)
     engine = Client(args.engine)
-    tools = [*web.tools(args.search, workspace, engine), *weather.tools(), *files.tools(workspace)]
+    tools = [*web.tools(args.search, workspace, engine), *files.tools(workspace)]
     agent = Agent(Store(args.data / "leat.db"), engine, tools, workspace)
     agent.start()
     with AgentServer(agent, args.host, args.port) as server:

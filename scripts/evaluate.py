@@ -28,7 +28,7 @@ from leat.agent import background  # noqa: E402
 from leat.agent.agent import Agent  # noqa: E402
 from leat.agent.client import Client  # noqa: E402
 from leat.agent.store import Store  # noqa: E402
-from leat.agent.tools import files, weather, web  # noqa: E402
+from leat.agent.tools import files, web  # noqa: E402
 from leat.agent.workspace import Workspace  # noqa: E402
 
 TIMEOUT = 300  # seconds a turn may take
@@ -112,7 +112,7 @@ class Case:
     others: list[str] = field(default_factory=list)
 
 
-NONE = ("search", "fetch", "weather", "remember", "forget", "recall", "read", "run", "schedule")
+NONE = ("search", "fetch", "remember", "forget", "recall", "read", "run", "schedule")
 CASES = [
     Case("chat", "Write a haiku about autumn.", [uncalled(*NONE)]),
     Case("arithmetic", "What is 17 * 23?", [says(r"391"), uncalled(*NONE)]),
@@ -123,8 +123,6 @@ CASES = [
          [called("fetch")]),
     Case("research", "Research the pros and cons of heat pumps for a house in a cold climate.",
          [called("search", 2), called("fetch", 4), says(r"\[\d+\]")]),
-    Case("weather", "Will I need an umbrella in London tomorrow?",
-         [called("weather"), uncalled("fetch")]),
     Case("introduction", "Hi! I'm Sam, I work as a nurse, and my kids are called Mia and Leo.",
          [called("remember", 2), remembers("Sam"), remembers("nurse"), remembers("Mia|Leo")]),
     Case("preference", "I'm vegetarian, keep that in mind for recipes.",
@@ -211,8 +209,7 @@ def _run(case: Case, args: argparse.Namespace) -> Outcome:
         environment = args.sandbox if args.sandbox.exists() else None
         workspace = Workspace(Path(data) / "workspace", environment)
         engine = Client(args.engine)
-        tools = [*web.tools(args.search, workspace, engine), *weather.tools(),
-                 *files.tools(workspace)]  # fmt: skip
+        tools = [*web.tools(args.search, workspace, engine), *files.tools(workspace)]
         agent = Agent(Store(Path(data) / "leat.db"), engine, tools, workspace)
         person = None  # no household, but where another person's memories are
         if case.others:
