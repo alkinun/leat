@@ -245,7 +245,8 @@ def _llama_batched(bin_dir: Path, model: Path) -> dict:
 
 
 def _server(env: dict, model: Path) -> dict:
-    # leat serve on a free port, until it lists its model, then a streamed chat reply
+    # leat serve on a free port, until it lists its model loaded, as it answers while it loads,
+    # then a streamed chat reply
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
@@ -257,9 +258,10 @@ def _server(env: dict, model: Path) -> dict:
     url, result = f"http://127.0.0.1:{port}", {"ok": False}
     try:
         while time.perf_counter() - start < 1800 and server.poll() is None:
-            with contextlib.suppress(OSError):
-                urllib.request.urlopen(url + "/v1/models", timeout=5).read()
-                break
+            with contextlib.suppress(OSError, ValueError):
+                listed = json.loads(urllib.request.urlopen(url + "/v1/models", timeout=5).read())
+                if any(m.get("status") == "loaded" for m in listed["data"]):
+                    break
             time.sleep(2)
         result["ready after"] = f"{time.perf_counter() - start:.0f} s"
         body = {"messages": [{"role": "user", "content": SERVER_PROMPT}], "max_tokens": 200,
