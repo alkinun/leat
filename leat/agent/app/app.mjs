@@ -17,7 +17,7 @@ let models = [], loading = null, unreachable = null; // the engine's, a model it
 let lost = false; // the events' connection, until it is back
 let mode = localStorage.getItem("leat.mode") ?? "system"; // light, dark, or as the system is
 let views = []; // the shown messages' elements, by their indexes
-const opened = new Map(); // whether each turn's work is open, as the user left it
+const opened = new Map(); // whether each fold is open, as the user left it: work, calls, reasoning
 // the pages beside the conversations, each a section of its own name, and their titles
 const PAGES = ["files", "settings"];
 const TITLES = { files: "Files", settings: "Settings" };
@@ -182,6 +182,10 @@ function handle(event) {
     case "error": // the turn taken back, its message to send again
       if (showing(event.conversation)) {
         shown.messages.length = Math.min(event.start, shown.messages.length);
+        for (const key of opened.keys()) { // the folds of those taken back, for the next not to open
+          const [id, , index] = key.split(" ");
+          if (id === event.conversation && Number(index) >= event.start) opened.delete(key);
+        }
         renderLog();
       }
       if (shown?.id === event.conversation) {
@@ -245,8 +249,10 @@ function put(index, m) {
 function grow({ index, key, at, text }) {
   const m = shown.messages[index];
   if (!m || (m[key] ?? "").length < at) return open(shown.id, false); // some was missed
+  const was = answers(m);
   m[key] = (m[key] ?? "").slice(0, at) + text;
-  follow(() => views[index].update());
+  // shown again where it now belongs, once its text shows it the answer rather than a step
+  follow(() => (answers(m) === was ? views[index].update() : refresh(index)));
 }
 
 // shows a conversation, or a new one, at its own address
@@ -548,30 +554,41 @@ function refresh(index) {
   if (!old) $("log").append(turn);
 }
 
+// whether a message is its turn's answer, rather than a step of its work: the model's, calling no
+// tools, and, while it is written, saying something, as until then it may yet call them, which
+// the engine sends as the reply ends
+function answers(m) {
+  if (m?.role !== "assistant" || m.tool_calls) return false;
+  return !live(m) || Boolean(m.content?.trim());
+}
+
+// whether a message is the reply the model is writing
+function live(m) {
+  return Boolean(shown?.running) && shown.messages.at(-1) === m;
+}
+
 // shows a turn in its element: the user's message, the work that came of it folded into a line,
 // and the answer
 function fill(turn, [start, ...rest]) {
-  const view = (i) => (views[i] = message(shown.messages[i]));
-  const last = shown.messages[rest.at(-1)], answered = last?.role === "assistant" && !last.tool_calls;
+  const view = (i) => (views[i] = message(shown.messages[i], i));
+  const answered = answers(shown.messages[rest.at(-1)]);
   const work = answered ? rest.slice(0, -1) : rest;
   turn.start = start;
   turn.classList.toggle("summarized", [start, ...rest].includes(shown.summarized));
   turn.replaceChildren(view(start));
-  if (work.length) turn.append(fold(start, work));
+  if (work.length) turn.append(fold(start, work, !answered));
   if (answered) turn.append(view(rest.at(-1)));
   return turn;
 }
 
 // a turn's work, its steps and calls, folded into a line: what it does as it runs, then what it did
-function fold(start, indexes) {
-  const box = element("details", "work"), key = `${shown.id} ${start}`;
-  const running = shown.running && turns().at(-1)[0] === start; // the turn running
+function fold(start, indexes, unanswered) {
+  const box = kept(element("details", "work"), `work ${start}`);
+  const running = unanswered && shown.running && turns().at(-1)[0] === start; // working still
   const calls = indexes.map((i) => shown.messages[i]).filter((m) => m.role === "tool");
-  box.open = opened.get(key) ?? false;
-  box.ontoggle = () => opened.set(key, box.open);
   box.classList.toggle("running", running);
-  const said = running ? (calls.length ? line(calls.at(-1)) : "Working…") : summary(calls);
-  box.append(element("summary", "", said), ...indexes.map((i) => (views[i] = message(shown.messages[i]))));
+  const said = running ? (calls.length ? line(calls.at(-1)) : "Thinking…") : summary(calls);
+  box.append(element("summary", "", said), ...indexes.map((i) => (views[i] = message(shown.messages[i], i))));
   return box;
 }
 
@@ -623,20 +640,20 @@ function status(text, error = false) {
 
 // a message's element, whose update() shows it again as it changes: a tool's is a line of the
 // work it did, a system message's is hidden
-function message(m) {
-  if (m.role === "tool") return work(m);
+function message(m, index) {
+  if (m.role === "tool") return work(m, index);
   const item = element("div", `message ${m.role}`);
-  const thinking = element("details"), reasoning = element("div");
+  const thinking = kept(element("details"), `thinking ${index}`), reasoning = element("div");
   const text = element("div"), pages = element("div", "sources"), note = element("div", "note");
   const summary = element("summary", "", "Thinking"), cards = element("div", "cards");
   thinking.append(summary, reasoning);
   item.append(thinking, text, cards, pages, note);
   item.update = () => {
-    const answer = m.role === "assistant" && !m.tool_calls; // not a step to the tools it calls
+    const answer = answers(m); // not a step of the work, as a reply that calls tools is
     item.hidden = m.role === "system" || (!answer && !m.content && !m.reasoning_content);
-    item.classList.toggle("step", Boolean(m.tool_calls));
+    item.classList.toggle("step", m.role === "assistant" && !answer);
     thinking.hidden = !m.reasoning_content;
-    const thinks = !m.content && answer && shown?.running && shown.messages.at(-1) === m;
+    const thinks = !m.content && !m.tool_calls && live(m);
     summary.textContent = thinks ? "Thinking…" : "Thinking";
     markdown(reasoning, m.reasoning_content ?? "");
     if (m.role === "user") text.textContent = m.content;
@@ -654,9 +671,18 @@ function message(m) {
   return item;
 }
 
+// a fold, open or not as the user left it, by its key in the shown conversation, through the
+// renders that make it again
+function kept(details, key) {
+  const where = `${shown.id} ${key}`;
+  details.open = opened.get(where) ?? false;
+  details.ontoggle = () => opened.set(where, details.open);
+  return details;
+}
+
 // a tool's message, as a line of the work it did, which opens on what it found
-function work(m) {
-  const item = element("details", "message tool");
+function work(m, index) {
+  const item = kept(element("details", "message tool"), `call ${index}`);
   const summary = element("summary"), found = element("div");
   item.append(summary, found);
   item.update = () => {
