@@ -230,7 +230,8 @@ function update(c) {
   if (shown?.id !== c.id) return;
   const ended = shown.running && !c.running;
   Object.assign(shown, { title: c.title, running: c.running });
-  if (ended && shown.messages?.length) refresh(shown.messages.length - 1); // done working
+  // done working: its turn shown again, kept scrolled to the end if it was
+  if (ended && shown.messages?.length) follow(() => refresh(shown.messages.length - 1));
 }
 
 // whether a conversation is the one shown, its messages here
