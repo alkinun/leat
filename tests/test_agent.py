@@ -174,25 +174,24 @@ def test_turn(agent, engine, events):
     assert seen[-2] == {"type": "message", "conversation": id, "index": 2, "message": reply,
                         "to": None}  # fmt: skip
     # the model read the system prompt and the message, at its own effort, of a model told none,
-    # sampled as Qwen3.6 recommends without reasoning
+    # sampled as leat serve has the model, of which the request says nothing
     (request,) = engine.requests
     assert request["messages"] == [_api(m) for m in messages[:2]] and request["stream"] is True
     assert request["messages"][1]["content"] == stamped(agent, id, 1) + "Hi\nand more"
     assert request["chat_template_kwargs"] == {"preserve_thinking": True}
     assert "reasoning_effort" not in request
-    assert request["temperature"] == 0.7 and request["presence_penalty"] == 1.5
+    assert not {"temperature", "top_k", "top_p", "min_p", "presence_penalty"} & request.keys()
 
 
 def test_effort(agent, engine, events):
     # a message's effort, which the engine gives as near as the model can, or else the model's
-    # default; sampled as Qwen3.6 recommends as the model reasons at it or not
+    # default
     engine.reasoning = {"efforts": ["none", "high"], "default": "high"}
-    for effort, temperature in ((None, 1.0), ("none", 0.7), ("medium", 1.0)):
+    for effort in (None, "none", "medium"):
         engine.replies.put(REPLY)
         id = agent.send(None, "Prove it.", effort)
         until(events, ended)
-        request = engine.requests[-1]
-        assert request.get("reasoning_effort") == effort and request["temperature"] == temperature
+        assert engine.requests[-1].get("reasoning_effort") == effort
         assert agent.store.messages(id)[1]["info"].get("effort") == effort
 
 

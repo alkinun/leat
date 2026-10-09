@@ -13,10 +13,12 @@ as OpenAI's `user` or `safety_identifier`, whose prompts then share them with th
 
 import collections
 import contextlib
+import dataclasses
 import gc
 import itertools
 import json
 import queue
+import re
 import socket
 import sys
 import threading
@@ -40,6 +42,7 @@ from leat.chat import (
     split_reply,
     tool_call_start,
 )
+from leat.defaults import Overrides, recommended
 from leat.engine import Engine, Sequence
 from leat.keys import Keys
 from leat.sampler import Sampling
@@ -173,7 +176,9 @@ class _Completion:
 
 class Server(ThreadingHTTPServer):
     """Serves GGUF models at http://host:port, the API at /v1 and its metrics at /metrics, until
-    shut down, to the requests that hold one of the `keys`, if given, and to any otherwise.
+    shut down, to the requests that hold one of the `keys`, if given, and to any otherwise. A
+    request's sampling is what it asks for, else the `sampling` an operator sets of the model, if
+    given, else what the model's makers recommend, as leat.defaults has it.
 
     One model is loaded at a time, none until load(), as Engine(path, **options); it answers every
     request, whatever model it names. A model's id is its file name without .gguf. Unless the
@@ -182,10 +187,11 @@ class Server(ThreadingHTTPServer):
 
     def __init__(
         self, models: Iterable[str | Path], host: str = "127.0.0.1", port: int = 8080,
-        keys: Keys | None = None, **options: Any,
+        keys: Keys | None = None, sampling: Overrides | None = None, **options: Any,
     ):  # fmt: skip
         self.models = {Path(path).stem: Path(path) for path in models}
         self.options, self.created, self.keys = options, int(time.time()), keys
+        self.overrides = sampling  # an operator's sampling, of each model's, if given
         self.metrics = _Metrics()
         self.busy = self.queued = 0  # completions running, and waiting for a slot, as last stepped
         self.loaded: _Loaded | None = None
@@ -585,6 +591,8 @@ class _Handler(BaseHTTPRequestHandler):
             completion = _completion(body, self.server)
         except (ValueError, TypeError, jinja2.TemplateError) as e:
             return self._error(400, str(e))
+        except _Unset as e:  # the operator's file of sampling, broken
+            return self._error(500, str(e))
         completion.key = self.key
         self.server.requests.put(completion)
         try:
@@ -674,6 +682,9 @@ class _Handler(BaseHTTPRequestHandler):
             model["max_context"] = loaded.engine.max_context
             if chat.efforts:
                 model["reasoning"] = {"efforts": list(chat.efforts), "default": chat.default_effort}
+            with contextlib.suppress(_Unset):  # said when a completion asks for it
+                reasons, plain = _sampling(s, loaded)
+                model["sampling"] = {"reasoning": reasons, "plain": plain}
             if (vision := loaded.engine.vision) is not None:
                 # a square image's embeddings, as most images are, and the few that wrap them
                 model |= {"vision": True, "image_tokens": vision.typical + 8}
@@ -739,14 +750,11 @@ def _completion(body: Any, server: Server) -> _Completion:
     prompt = loaded.chat.tokens(text, [image.tokens for image in shown])
     if len(prompt) >= (context := loaded.engine.max_context):
         raise ValueError(f"the prompt has {len(prompt)} tokens, too many for {context} of context")
+    # what the request asks for of its sampling, else the model's, as it reasons or not
     stop, given = body.get("stop") or [], {k: v for k, v in body.items() if v is not None}
-    sampling = Sampling(
-        temperature=given.get("temperature", 1.0),  # OpenAI's default
-        top_k=max(given.get("top_k", 0), 0),  # vLLM's -1 keeps every token too
-        top_p=given.get("top_p", 1.0),
-        min_p=given.get("min_p", 0.0),
-        presence_penalty=given.get("presence_penalty", 0.0),
-    )
+    defaults = _sampling(server, loaded)[0 if _reasons(loaded.chat, options) else 1]
+    sampling = Sampling(**({k: given.get(k, v) for k, v in defaults.items()}))
+    sampling = dataclasses.replace(sampling, top_k=max(sampling.top_k, 0))  # vLLM's -1: every one
     return _Completion(
         prompt,
         loaded.name,
@@ -762,6 +770,29 @@ def _completion(body: Any, server: Server) -> _Completion:
         user=body.get("safety_identifier") or body.get("user") or "",
         thinking=loaded.chat.opens_thinking(text),
     )
+
+
+class _Unset(Exception):
+    """The operator's file of sampling is broken."""
+
+
+def _sampling(server: Server, loaded: _Loaded) -> tuple[dict[str, float], dict[str, float]]:
+    # a model's sampling as it reasons and as it does not: its makers', under the operator's.
+    # Raises _Unset if the operator's file is broken.
+    reasons, plain = recommended(loaded.engine.gguf.metadata)
+    try:
+        own = server.overrides.of(loaded.name) if server.overrides is not None else {}
+    except (OSError, ValueError) as e:
+        raise _Unset(f"the server's sampling cannot be read: {e}") from e
+    return reasons | own, plain | own
+
+
+def _reasons(chat: ChatTemplate, options: dict[str, Any]) -> bool:
+    # whether a model reasons, as its template is told: as enable_thinking says, if the template
+    # is told it, else as its default effort is, a model of levels at every one, as gpt-oss does
+    if "enable_thinking" in options:
+        return bool(options["enable_thinking"])
+    return (chat.default_effort or "none") != "none"
 
 
 def _calls(
@@ -782,13 +813,17 @@ def _calls(
     # that are no JSON object too, as gpt-oss calls the python it was trained with: the client
     # answers that it has no such tool, and the model goes on, rather than its turn ending in a
     # reply of nothing
-    calls = []
+    names, calls = {tool.get("function", {}).get("name") for tool in tools}, []
     for call in reply.calls:
-        arguments: Any = call["arguments"]
+        name, arguments = call["name"], call["arguments"]
+        # a tool's name run into the channel it is called on, as gpt-oss writes
+        # to=functions.searchcommentary at times, leaving out the <|channel|> between
+        bare = re.sub(r"(commentary|analysis|final)$", "", name)
+        name = bare if name not in names and bare in names else name
         with contextlib.suppress(ValueError, RecursionError):
             if isinstance(parsed := json.loads(arguments), dict):
                 arguments = parsed
-        calls.append({"name": call["name"], "arguments": arguments})
+        calls.append({"name": name, "arguments": arguments})
     return reply.content, calls
 
 

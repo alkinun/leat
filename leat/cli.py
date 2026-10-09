@@ -22,6 +22,7 @@ from leat.agent.server import Server as AgentServer
 from leat.agent.store import Store
 from leat.agent.tools import files, web
 from leat.agent.workspace import Workspace
+from leat.defaults import Overrides
 from leat.keys import Keys
 
 if TYPE_CHECKING:
@@ -101,6 +102,13 @@ def main(argv: list[str] | None = None) -> None:
         "--keys", type=Path, nargs="?", const=_data() / "keys.json",
         help="a file of API keys, as `leat keys` makes it, one of which every request must hold; "
         f"by default {_data() / 'keys.json'}. Needed to serve beyond this machine",
+    )  # fmt: skip
+
+    serve.add_argument(
+        "--sampling", type=Path, nargs="?", const=_data() / "sampling.json",
+        help="a file of JSON of your own sampling, by model id, or \"*\" for every model, as "
+        '{"gpt-oss-20b": {"temperature": 0.8}}, over what each model\'s makers recommend; by '
+        f"default {_data() / 'sampling.json'}. Read again as it changes",
     )  # fmt: skip
 
     keys = commands.add_parser("keys", help="make, list and remove leat serve's API keys")
@@ -300,7 +308,13 @@ def _serve(args: argparse.Namespace) -> None:
     options = {"max_context": args.max_context, "slots": args.slots, "draft": args.draft,
                "vision": args.mmproj}  # fmt: skip
     keys = Keys(args.keys) if args.keys is not None else None
-    with Server(models, args.host, args.port, keys, **options) as server:
+    sampling = Overrides(args.sampling) if args.sampling is not None else None
+    if sampling is not None:
+        try:
+            sampling.of("")
+        except (OSError, ValueError) as e:
+            raise SystemExit(f"the sampling at {args.sampling} cannot be read: {e}") from e
+    with Server(models, args.host, args.port, keys, sampling, **options) as server:
         # served at once, the model loading meanwhile, so that a client asking while it compiles
         # hears it is loading, its completions waiting for it, rather than no answer
         url, name = _url(args.host, server.server_port), models[0].stem

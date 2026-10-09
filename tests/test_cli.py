@@ -176,14 +176,15 @@ def test_serve_directories(tiny_model, tmp_path, monkeypatch, capsys):
     # the server
     (models := tmp_path / "models").mkdir()
     (models / "tiny.gguf").symlink_to(tiny_model[0])
-    loaded, failing, keys = [], [], []
+    loaded, failing, keys, samplings = [], [], [], []
 
     class Fake:
         server_port = 8080
 
-        def __init__(self, files, host, port, given, **options):
+        def __init__(self, files, host, port, given, sampling, **options):
             self.files, self.stopped = files, threading.Event()
             keys.append(given)
+            samplings.append(sampling)
 
         def __enter__(self):
             return self
@@ -214,7 +215,17 @@ def test_serve_directories(tiny_model, tmp_path, monkeypatch, capsys):
     assert loaded == ["tiny"] and "the API at http://127.0.0.1:8080/v1, compiling..." in out
     assert keys[-1].path == tmp_path / "keys.json"
     main(["serve", str(models), "--host", "::1"])  # this machine's alone: no keys needed
-    assert keys[-1] is None
+    assert keys[-1] is None and samplings[-1] is None
+    # an operator's sampling, read as it starts, which a file of none or a broken one stops
+    sampling = tmp_path / "sampling.json"
+    with pytest.raises(SystemExit, match="cannot be read"):
+        main(["serve", str(models), "--sampling", str(sampling)])
+    sampling.write_text('{"tiny": {"temperature": 9}}')
+    with pytest.raises(SystemExit, match="temperature must be a number from 0 to 2"):
+        main(["serve", str(models), "--sampling", str(sampling)])
+    sampling.write_text('{"tiny": {"temperature": 0.5}}')
+    main(["serve", str(models), "--sampling", str(sampling)])
+    assert samplings[-1].of("tiny") == {"temperature": 0.5}
     failing.append(True)
     with pytest.raises(RuntimeError, match="loading tiny failed"):
         main(["serve", str(models)])

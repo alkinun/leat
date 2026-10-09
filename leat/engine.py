@@ -161,9 +161,13 @@ class Engine:
         # token at least
         drafting = 0 if self.drafter is None else min(slots, self.drafter.sequences)
         self._speculated = [n for n in range(1, drafting + 1) if _drafts(n)]
-        # the tokens each slot's sequence has generated, for presence_penalty
+        # the tokens each slot's sequence has generated, for presence_penalty, of those it may
+        # lower: not a format's markup, as harmony's <|channel|> or Qwen's <tool_call>, which a
+        # reply must write again and again, and which, lowered, it would garble or leave out
         vocab = int(self.model.output.shape[0])
         self._seen = Tensor.zeros(cache_slots, vocab, dtype=dtypes.bool).contiguous().realize()
+        special = self.tokenizer.special_ids
+        self._text = Tensor([i not in special for i in range(vocab)]).realize()
         self.max_context, self.prefill_chunk, self.slots = max_context, prefill_chunk, slots
         self._len = UOp.variable("chunk_len", 1, prefill_chunk)
         self._few = UOp.variable("few_len", 1, min(FEW_TOKENS, prefill_chunk))
@@ -681,6 +685,7 @@ class Engine:
             self._seen[slots[0] : slots[0] + 1].assign(self._seen[:1].zeros_like()).realize()
             return self._seen[:1].zeros_like()
         hot = Tensor.arange(self._seen.shape[1]).reshape(1, -1) == tokens.reshape(-1, 1)
+        hot = hot & self._text.reshape(1, -1)
         seen = Tensor.cat(*(self._seen[slot : slot + 1] for slot in slots)) | hot
         Tensor.realize(
             *(self._seen[s : s + 1].assign(seen[i : i + 1]) for i, s in enumerate(slots))

@@ -213,6 +213,9 @@ class Tokenizer:
         }
         user = {t: i for t, i in special.items() if types[i] == USER_DEFINED}
         self._special, self._user = special, user
+        # the markup of a format, as its turns' and its tools' markers, rather than its text
+        markup = (CONTROL, USER_DEFINED)
+        self.special_ids = frozenset(i for i, ty in enumerate(types) if ty in markup)
         self._split_special, self._split_user = _alternation(special), _alternation(user)
         # the tokens text drops the whitespace after, as llama.cpp's workaround has Phi-3's: its
         # special ones but <unk>, <s> and <|endoftext|>, and </s>

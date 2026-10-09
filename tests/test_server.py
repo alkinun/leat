@@ -15,6 +15,7 @@ import openai
 import pytest
 
 from leat.chat import ChatTemplate, Reply
+from leat.defaults import OPENAI, Overrides
 from leat.engine import Engine
 from leat.keys import Keys
 from leat.sampler import Sampling
@@ -242,6 +243,30 @@ def test_completion(server):
     assert (asked.sampling, asked.max_tokens, asked.stop) == (Sampling(1.0), CONTEXT, ["y"])
 
 
+def test_sampling_defaults(server, client, monkeypatch, tmp_path):
+    # what a request leaves out of its sampling: the model's makers' set as it reasons, or as it
+    # does not, under the operator's of every model and of it; listed with the model
+    thinks, plain = {"temperature": 0.6, "top_k": 20}, {"temperature": 0.7, "top_k": 20}
+    monkeypatch.setattr("leat.server.recommended", lambda metadata: (
+        OPENAI | thinks, OPENAI | plain))  # fmt: skip
+    messages = [{"role": "user", "content": "hi"}]
+    on = {"chat_template_kwargs": {"enable_thinking": True}}
+    assert _completion({"messages": messages} | on, server).sampling == Sampling(0.6, 20)
+    # the tiny model's, which never reasons
+    assert _completion({"messages": messages}, server).sampling == Sampling(0.7, 20)
+    path = tmp_path / "sampling.json"
+    path.write_text(json.dumps({"*": {"min_p": 0.05}, "tiny": {"top_k": 40}}))
+    monkeypatch.setattr(server, "overrides", Overrides(path))
+    asked = _completion({"messages": messages, "top_k": 5}, server)
+    assert asked.sampling == Sampling(0.7, 5, 1.0, 0.05)  # the request's over all
+    assert _completion({"messages": messages}, server).sampling == Sampling(0.7, 40, 1.0, 0.05)
+    (model,) = client.models.list()
+    assert model.sampling["plain"] == OPENAI | plain | {"top_k": 40, "min_p": 0.05}
+    path.write_text("[]")  # broken: said to the client, the server going on
+    with pytest.raises(openai.InternalServerError, match="sampling cannot be read"):
+        chat(client, "hi", max_tokens=1)
+
+
 @pytest.mark.parametrize("stream", [False, True])
 def test_speculative_steps(tiny, tiny_assistant, stream):
     # a step that gives several tokens ends the reply at max_tokens or a stop string within them
@@ -418,6 +443,9 @@ def test_reply_ends_as_a_marker_begins(
         ("commentary to=functions.python", "print(1)", "python", "print(1)"),
         ("analysis to=python code", "print(1)", "python", "print(1)"),
         ("commentary to=functions.weather", '{"city": Paris}', "weather", '{"city": Paris}'),
+        # a tool's name run into its channel, the <|channel|> between left out, as gpt-oss writes
+        ("to=functions.weathercommentary json", '{"city": "Paris"}', "weather",
+         '{"city": "Paris"}'),
     ],
 )  # fmt: skip
 def test_harmony_tool_call(client, replies_with, monkeypatch, stream, header, body, name,

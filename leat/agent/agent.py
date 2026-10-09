@@ -28,11 +28,6 @@ from leat.agent.store import Store
 from leat.agent.tools import Context, Result, Tool, arguments, files, numbered
 from leat.agent.workspace import Workspace
 
-# sampling as Qwen3.6 recommends for general tasks, reasoning first, then not
-SAMPLING = {
-    True: {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5},
-    False: {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5},
-}
 # the system prompt, fixed when a conversation starts so that every prompt after extends the last
 SYSTEM = """\
 You are Leat, an assistant that runs on a computer of the user's own, which keeps what they say \
@@ -277,7 +272,6 @@ class _Turn:
     ):  # fmt: skip
         self.agent, self.id, self.person, self.start = agent, id, person, start
         self.content, self.effort = content, effort  # asked of the model, or its default if None
-        self.reasons = False  # whether the model reasons at that effort, once the turn asks
         self.tools = agent.tools  # the tools the model calls
         self.state = agent.store.context(id)  # the prompt's, as it was, to take the turn back to
         self.kept = start + 1  # the conversation's messages kept
@@ -299,8 +293,6 @@ class _Turn:
         try:
             loaded = self.agent.loaded()
             self.limit, self.image = loaded.get("max_context"), loaded.get("image_tokens") or 0
-            reasoning = loaded.get("reasoning") or {}
-            self.reasons = (self.effort or reasoning.get("default") or "none") != "none"
             self.sources = numbered(self.agent.store.messages(self.id))
             for n in range(ROUNDS):
                 calls = self._reply(last=n == ROUNDS - 1)
@@ -336,7 +328,8 @@ class _Turn:
         reply["info"] = info
         (index,) = self._show(reply)
         read = context.prompt(messages, state)
-        body: dict[str, Any] = {"messages": self._seen(read), **SAMPLING[self.reasons]}
+        # sampled as leat serve has the model, as its makers recommend it, or as set there
+        body: dict[str, Any] = {"messages": self._seen(read)}
         if self.effort:
             body["reasoning_effort"] = self.effort
         # as Qwen3's templates take them, and others ignore: the replies of turns before rendered

@@ -446,6 +446,10 @@ def test_presence_penalty(tiny_model):
     assert len(set(out)) == len(out)
     list(engine.generate(PROMPT[:11], 4, ignore_eog=True))  # 11 of its 12 tokens cached
     assert list(engine.generate(PROMPT, 12, penalized, ignore_eog=True)) == out
+    # but for a format's markup, which a reply writes again and again
+    special = engine.tokenizer.special_ids
+    assert special and engine._text.numpy().tolist() == [
+        i not in special for i in range(len(engine._text.numpy()))]  # fmt: skip
 
 
 # ******** several sequences at once ********
