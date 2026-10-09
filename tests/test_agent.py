@@ -419,6 +419,15 @@ def test_migration(tmp_path):
     store = Store(tmp_path / "leat.db")
     assert [m["content"] for m in store.messages("0123456789ab")] == ["tulips", "Tulips?"]
     assert Store(tmp_path / "leat.db").conversations()[0]["id"] == "0123456789ab"
+    # of the home's features, nothing is left
+    tables = {name for (name,) in store._db.execute("SELECT name FROM sqlite_schema")}
+    assert {t for t in tables if not t.startswith("sqlite_")} == {
+        "conversations", "messages", "people", "devices"}  # fmt: skip
+    columns = [row[1] for row in store._db.execute("PRAGMA table_info(conversations)")]
+    assert columns == ["id", "title", "created", "updated", "context", "named", "person"]
+    # and a conversation deleted takes its messages with it, as the state's references hold
+    store.delete("0123456789ab")
+    assert store._db.execute("SELECT count(*) FROM messages").fetchone() == (0,)
 
 
 def test_clearing(agent, engine, events):

@@ -164,6 +164,34 @@ _MIGRATIONS = [
     """
     ALTER TABLE tasks ADD COLUMN condition TEXT;
     """,
+    # the home's features gone: memories, tasks, characters, lists, the search of what was said and
+    # the settings, a conversation's character and group chat and how far it was reviewed, and
+    # whether a person is a child. The conversations are made anew without those columns, which
+    # SQLite drops from no table that refers to another; their messages kept, as foreign keys are
+    # not enforced while the state migrates
+    """
+    CREATE TABLE kept (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      created REAL NOT NULL,
+      updated REAL NOT NULL,
+      context TEXT NOT NULL DEFAULT '{}',
+      named INTEGER NOT NULL DEFAULT 0,
+      person INTEGER REFERENCES people (id)
+    );
+    INSERT INTO kept SELECT id, title, created, updated, context, named, person FROM conversations;
+    DROP TABLE conversations;
+    ALTER TABLE kept RENAME TO conversations;
+    DROP TABLE memories;
+    DROP TABLE forgotten;
+    DROP TABLE tasks;
+    DROP TABLE characters;
+    DROP TABLE items;
+    DROP TABLE lists;
+    DROP TABLE search;
+    DROP TABLE settings;
+    ALTER TABLE people DROP COLUMN child;
+    """,
 ]
 # a conversation's columns as the apps list it
 _SUMMARY = "id, title, created, updated, person"
@@ -175,7 +203,6 @@ class Store:
     def __init__(self, path: Path | str):
         self._db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self._lock = threading.Lock()
-        self._db.execute("PRAGMA foreign_keys = ON")
         self._db.execute("PRAGMA journal_mode = WAL")
         (version,) = self._db.execute("PRAGMA user_version").fetchone()
         for i, migration in enumerate(_MIGRATIONS[version:], version + 1):
@@ -183,7 +210,12 @@ class Store:
                 self._db.execute("BEGIN")
                 for statement in migration.split(";"):
                     self._db.execute(statement)
+                if self._db.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                    raise sqlite3.IntegrityError(f"the state's migration {i} broke a reference")
                 self._db.execute(f"PRAGMA user_version = {i}")
+        # enforced once migrated, as a table made anew is dropped before its copy takes its name,
+        # which would delete what refers to it
+        self._db.execute("PRAGMA foreign_keys = ON")
 
     def conversations(self, person: int | None = None) -> list[dict[str, Any]]:
         """A person's conversations, without their messages, the latest updated first."""
