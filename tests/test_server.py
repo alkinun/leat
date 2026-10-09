@@ -557,6 +557,11 @@ def test_unknown_route(client, server):
         urllib.request.urlopen(urllib.request.Request(f"{url}/v1/chat/completions", b"{"))
     with urllib.request.urlopen(f"{url}/v1/models?x=1") as response:  # the path, its query aside
         assert response.status == 200
+    # a body's length that is no length, answered rather than read till the client hangs up
+    head = "POST /v1/chat/completions HTTP/1.1\r\nContent-Length: -1\r\n\r\n{}"
+    with socket.create_connection(("127.0.0.1", server.server_port), timeout=10) as connection:
+        connection.sendall(head.encode())
+        assert connection.recv(64).startswith(b"HTTP/1.0 400")
 
 
 def metrics(server: Server, key: str | None = None) -> dict[str, float]:

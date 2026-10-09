@@ -510,7 +510,10 @@ class _Handler(BaseHTTPRequestHandler):
             if not self._authorized():
                 return
             try:
-                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+                if (length := int(self.headers.get("Content-Length") or 0)) < 0:  # which would
+                    # read on till the client hangs up
+                    raise ValueError("a body's length cannot be negative")
+                body = json.loads(self.rfile.read(length))
             except (ValueError, RecursionError) as e:  # not JSON, or nested too deep to parse
                 return self._error(400, str(e))
             with contextlib.suppress(OSError):  # the client hung up, while a model loaded say
