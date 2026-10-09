@@ -199,9 +199,12 @@ def test_stream(client, expected):
     assert last.model_extra["timings"]["predicted_n"] == 8
 
 
-def test_timings_leave_out_the_wait(client):
+def test_timings_leave_out_the_wait(client, engine, monkeypatch):
     # a request that waits for a slot, both taken by longer replies, is timed from when it gets
-    # one: the wait is in the time its client takes to see the first token, not in its timings
+    # one: the wait is in the time its client takes to see the first token, not in its timings.
+    # Each step takes 10 ms more, so that the wait is long beside a GPU's few milliseconds.
+    step = engine.step
+    monkeypatch.setattr(engine, "step", lambda: time.sleep(0.01) or step())
     contents = ("a long reply", "another long reply")
     streams = [chat(client, content, max_tokens=30, stream=True) for content in contents]
     for stream in streams:  # both are generating
