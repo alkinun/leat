@@ -58,7 +58,6 @@ body.menu nav { display: none; } /* on a narrow screen, the menu shows it instea
 }
 .conversation span { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .conversation button { padding: 0 6px; color: var(--muted); font-size: 1rem; }
-.conversation:not(:hover) button { visibility: hidden; }
 /* a conversation whose turn is running, on the box */
 .conversation.running::after {
   content: ""; flex: none; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%;
@@ -129,7 +128,6 @@ body:is(.files, .settings) :is(#log, #composer, #greeting) {
 .page li a:hover { text-decoration: underline; }
 .page .meta { color: var(--muted); font-size: 0.8125rem; white-space: nowrap; }
 .page li button { padding: 0 8px; color: var(--muted); font-size: 1.125rem; }
-.page li:not(:hover) button { visibility: hidden; }
 
 .message { margin-bottom: calc(28px * var(--density)); white-space: pre-wrap; overflow-wrap: anywhere; }
 /* where the messages the model reads begin again, those before summarized */
@@ -303,7 +301,11 @@ pre code { padding: 0; background: none; }
   }
   body.menu nav { display: flex; }
   #log, #composer, #greeting, .page { padding-left: 12px; padding-right: 12px; }
-  .page li button { visibility: visible !important; }
+}
+/* a row's buttons, as a conversation's ×, shown as it is pointed at where the device points, and
+   always on a touch screen, which points at nothing */
+@media (hover: hover) {
+  :is(.conversation, .page li):not(:hover, :focus-within) button { visibility: hidden; }
 }
 /* the gate of a device not yet paired: setting the box up, or asking to join it */
 #gate { display: none; }
