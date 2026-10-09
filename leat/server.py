@@ -31,7 +31,15 @@ from typing import Any
 
 import jinja2
 
-from leat.chat import ChatTemplate, Reply, images, parse_tool_calls, split_reply, tool_call_start
+from leat.chat import (
+    EFFORTS,
+    ChatTemplate,
+    Reply,
+    images,
+    parse_tool_calls,
+    split_reply,
+    tool_call_start,
+)
 from leat.engine import Engine, Sequence
 from leat.keys import Keys
 from leat.sampler import Sampling
@@ -81,6 +89,7 @@ _FIELDS: dict[str, tuple[Callable[[Any], bool], str]] = {
     "tools": (lambda v: isinstance(v, list) and all(_tool(t) for t in v),
               'a list of objects, each {"type": "function", "function": {"name": ...}}'),
     "chat_template_kwargs": (lambda v: isinstance(v, dict), "an object"),
+    "reasoning_effort": (lambda v: v in EFFORTS, f"one of {', '.join(EFFORTS)}"),
     "user": (lambda v: isinstance(v, str) and len(v) <= 256, "a string of 256 characters at most"),
     "safety_identifier": (lambda v: isinstance(v, str) and len(v) <= 256,
                           "a string of 256 characters at most"),
@@ -660,8 +669,11 @@ class _Handler(BaseHTTPRequestHandler):
         loaded = loaded if loaded is not None and loaded.name == name else None
         status = "loaded" if loaded else "loading" if s.loading == name else "unloaded"
         model = {"id": name, "object": "model", "created": s.created, "owned_by": "leat"}
-        if loaded:  # and if it takes images, the tokens an image takes at most
+        if loaded:  # the efforts it reasons at, and if it takes images, the tokens one takes
+            chat = loaded.chat
             model["max_context"] = loaded.engine.max_context
+            if chat.efforts:
+                model["reasoning"] = {"efforts": list(chat.efforts), "default": chat.default_effort}
             if (vision := loaded.engine.vision) is not None:
                 # a square image's embeddings, as most images are, and the few that wrap them
                 model |= {"vision": True, "image_tokens": vision.typical + 8}
@@ -715,8 +727,11 @@ def _completion(body: Any, server: Server) -> _Completion:
     if (loaded := server.loaded) is None:
         raise ValueError("no model is loaded")
     tools = (body.get("tools") or None) if choice == "auto" else None
-    # options for the template too, such as Qwen3's enable_thinking, as llama.cpp and vLLM take
-    options = (body.get("chat_template_kwargs") or {}) | ({"tools": tools} if tools else {})
+    # the reasoning effort, as the template is told it, and options for the template too, such as
+    # Qwen3's enable_thinking, as llama.cpp and vLLM take, which a client gives over the effort
+    effort = loaded.chat.effort(body["reasoning_effort"]) if body.get("reasoning_effort") else {}
+    given = body.get("chat_template_kwargs") or {}
+    options = effort | given | ({"tools": tools} if tools else {})
     text = loaded.chat.render(body["messages"], **options)
     if (files := images(body["messages"])) and loaded.engine.vision is None:
         raise ValueError(f"{loaded.name} takes no images: it has no vision encoder")

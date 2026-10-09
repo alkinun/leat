@@ -29,6 +29,7 @@ from typing import Any
 from leat.agent.accounts import Accounts
 from leat.agent.agent import Agent, Busy, NotFound
 from leat.agent.client import EngineError
+from leat.chat import EFFORTS
 
 APP = Path(__file__).parent / "app"
 # the app's files, each served at its path in app/, and their types; the app's pages, /c/<id> one
@@ -388,13 +389,13 @@ def _text(body: dict[str, Any], key: str) -> str:
     return text
 
 
-def _message(body: dict[str, Any]) -> tuple[str, bool, list[str]]:
-    # a message's content, whether the model is to think before it replies, and the files attached
+def _message(body: dict[str, Any]) -> tuple[str, str | None, list[str]]:
+    # a message's content, the effort the model is to reason at, if one, and the files attached
     if not isinstance(content := body.get("content"), str) or not content.strip():
         raise ValueError("a message needs content: some text")
-    if not isinstance(think := body.get("think", False), bool):
-        raise ValueError("think must be a boolean")
+    if (effort := body.get("effort")) is not None and effort not in EFFORTS:
+        raise ValueError(f"effort must be one of {', '.join(EFFORTS)}")
     attached = body.get("files", [])
     if not isinstance(attached, list) or not all(isinstance(name, str) for name in attached):
         raise ValueError("files must be a list of the workspace's files' names")
-    return content, think, attached
+    return content, effort, attached

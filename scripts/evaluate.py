@@ -3,7 +3,7 @@ says and makes what it should, each case run several times, in a state of its ow
 Markdown table of each case's passes, mean time, and the share of the prompts' tokens the engine's
 cache held.
 
-    uv run python scripts/evaluate.py [--engine http://127.0.0.1:8080] [-n 3] [--think] [-k name]
+    uv run python scripts/evaluate.py [--engine http://127.0.0.1:8080] [-n 3] [--effort E] [-k name]
 
 The agent runs in this process, with leat agent's tools, against leat serve at --engine, the SearXNG
 at --search, and the sandbox's environment at --sandbox; the states are temporary, and the user's
@@ -28,6 +28,7 @@ from leat.agent.client import Client  # noqa: E402
 from leat.agent.store import Store  # noqa: E402
 from leat.agent.tools import files, web  # noqa: E402
 from leat.agent.workspace import Workspace  # noqa: E402
+from leat.chat import EFFORTS  # noqa: E402
 
 TIMEOUT = 300  # seconds a turn may take
 
@@ -110,7 +111,9 @@ def main() -> None:
         help="the sandbox's environment, as leat/agent/sandbox.txt makes it",
     )  # fmt: skip
     parser.add_argument("-n", "--runs", type=int, default=3, help="runs of each case")
-    parser.add_argument("--think", action="store_true", help="have the model think first")
+    parser.add_argument(
+        "--effort", choices=EFFORTS, help="the effort the model reasons at; by default its own"
+    )
     parser.add_argument("-k", help="the cases whose names hold this alone")
     args = parser.parse_args()
     cases = [case for case in CASES if not args.k or args.k in case.name]
@@ -129,7 +132,7 @@ def main() -> None:
         rows.append(f"| {case.name} | {args.runs - len(failures)}/{args.runs} | "
                     f"{statistics.mean(seconds):.1f} | {statistics.mean(cached):.0%} | "
                     f"{failed} |")  # fmt: skip
-    mode = "thinking" if args.think else "not thinking"
+    mode = f"reasoning at {args.effort}" if args.effort else "reasoning at the model's default"
     print(f"\n{passed} of {len(cases) * args.runs} passed, {mode}\n")
     print("| case | passed | mean s | cached | failures |\n|---|---:|---:|---:|---|")
     print("\n".join(rows))
@@ -146,7 +149,7 @@ def _run(case: Case, args: argparse.Namespace) -> Outcome:
         for name, text in case.files.items():
             workspace.path(name).write_text(text)
         start = time.monotonic()
-        messages = _wait(agent, agent.send(None, case.message, args.think, list(case.files)))
+        messages = _wait(agent, agent.send(None, case.message, args.effort, list(case.files)))
         seconds = time.monotonic() - start
         tools_called = [m["name"] for m in messages if m["role"] == "tool"]
         answer = messages[-1]["content"] if messages and messages[-1]["role"] == "assistant" else ""

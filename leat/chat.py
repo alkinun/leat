@@ -19,6 +19,11 @@ from leat.tokenizer import Tokenizer
 # where an image of a message's content stands in the rendered text, which tokens() replaces with
 # the image's own tokens: the object replacement character, which text parts never hold
 IMAGE = "\ufffc"
+# the reasoning efforts a request may ask for, as OpenAI's reasoning_effort names them, the least
+# first: a model takes those its template does, and a request the nearest of them
+EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
+# the efforts of a template that takes reasoning_effort but compares it with no value, as gpt-oss's
+_LEVELS = ("low", "medium", "high")
 
 
 class ChatTemplate:
@@ -53,11 +58,36 @@ class ChatTemplate:
             else "think" if "<think>" in source
             else None
         )  # fmt: skip
+        self._efforts, self._default, self._told = _reasoning(source)
 
     @property
     def form(self) -> str | None:
         """How replies mark their reasoning: "harmony", "gemma4", "think", or None."""
         return self._form
+
+    @property
+    def efforts(self) -> tuple[str, ...]:
+        """The reasoning efforts the model takes, the least first, of EFFORTS: ("none", "high")
+        of a template that turns reasoning off or on, and none of one that cannot be told, as of a
+        model that never reasons, or always does."""
+        return self._efforts
+
+    @property
+    def default_effort(self) -> str | None:
+        """The effort the model reasons at when a request asks for none, if it takes any."""
+        return self._default
+
+    def effort(self, asked: str) -> dict[str, Any]:
+        """What the template is told of a request's reasoning effort, one of EFFORTS: of a template
+        that turns reasoning off or on, on but for "none"; of one of levels, the nearest of them,
+        the lesser of two as near; of one that cannot be told, nothing."""
+        if self._told == "enable_thinking":
+            return {"enable_thinking": asked != "none"}
+        if self._told == "reasoning_effort":
+            rank = EFFORTS.index
+            nearest = min(self._efforts, key=lambda e: (abs(rank(e) - rank(asked)), rank(e)))
+            return {"reasoning_effort": nearest}
+        return {}
 
     def render(
         self, messages: list[dict[str, Any]], add_generation_prompt: bool = True, **kwargs
@@ -91,6 +121,30 @@ class ChatTemplate:
         """Whether a rendered prompt ends inside a block of reasoning, which the reply then
         continues, as DeepSeek-R1's distillations' templates open their <think>."""
         return self.form in _THINKING and text.rstrip().endswith(_THINKING[self.form][0])
+
+
+def _reasoning(source: str) -> tuple[tuple[str, ...], str | None, str | None]:
+    # the efforts a template's model reasons at, its default, and the variable that tells the
+    # template: reasoning_effort, of the values the template compares it with, its default among
+    # them, or else low to high, as gpt-oss's; enable_thinking, off or on, off by default only where
+    # the template says so; or none
+    if "reasoning_effort" in source:
+        compared = re.findall(r"reasoning_effort\s*[!=]=\s*['\"](\w+)", source)
+        compared += re.findall(r"['\"](\w+)['\"]\s*[!=]=\s*reasoning_effort", source)
+        for listed in re.findall(r"reasoning_effort\s+(?:not\s+)?in\s*[\[(]([^\])]*)", source):
+            compared += re.findall(r"['\"](\w+)['\"]", listed)
+        set_to = re.search(r"reasoning_effort\s*=\s*['\"](\w+)|reasoning_effort\s*\|\s*default"
+                           r"\(\s*['\"](\w+)", source)  # fmt: skip
+        named = next((d for d in set_to.groups() if d), None) if set_to else None
+        levels = {*(compared or _LEVELS), *([named] if named else [])} & set(EFFORTS)
+        if levels:
+            efforts = tuple(e for e in EFFORTS if e in levels)
+            default = named if named in levels else efforts[len(efforts) // 2]
+            return efforts, default, "reasoning_effort"
+    if "enable_thinking" in source:
+        off = re.search(r"enable_thinking\s*\|\s*default\(\s*false", source, re.IGNORECASE)
+        return ("none", "high"), "none" if off else "high", "enable_thinking"
+    return (), None, None
 
 
 @dataclass

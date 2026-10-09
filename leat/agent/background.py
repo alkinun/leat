@@ -73,7 +73,7 @@ def name(agent: "Agent", id: str) -> None:
     said = context.transcript([m for m in messages[1:] if m["role"] != "tool"][:2])[:2000]
     body = {
         "messages": [{"role": "system", "content": NAME}, {"role": "user", "content": said}],
-        "max_tokens": 24, "temperature": 0.3, "chat_template_kwargs": {"enable_thinking": False},
+        "max_tokens": 24, "temperature": 0.3, "reasoning_effort": "none",
     }  # fmt: skip
     lines = agent.engine.reply(body, c["person"])["content"].strip().splitlines()
     title = lines[0].strip(" \"'“”.") if lines else ""

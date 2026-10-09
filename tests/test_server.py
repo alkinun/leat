@@ -294,6 +294,29 @@ def test_chat_template_kwargs(client):
     assert response.usage.prompt_tokens == len("abhello")
 
 
+def test_reasoning_effort(client, server, monkeypatch):
+    # a model's efforts listed with it, and a request's told its template as it is told: the nearest
+    # of its levels, over which chat_template_kwargs win; none of a model that takes none
+    (model,) = client.models.list()
+    assert getattr(model, "reasoning", None) is None
+    chat_template, rendered = server.loaded.chat, []
+    render = chat_template.render
+    monkeypatch.setattr(chat_template, "_efforts", ("low", "medium", "high"))
+    monkeypatch.setattr(chat_template, "_default", "medium")
+    monkeypatch.setattr(chat_template, "_told", "reasoning_effort")
+    monkeypatch.setattr(chat_template, "render", lambda m, **o: rendered.append(o) or render(m))
+    (model,) = client.models.list()
+    assert model.reasoning == {"efforts": ["low", "medium", "high"], "default": "medium"}
+    for body in (
+        {"reasoning_effort": "none"},
+        {"reasoning_effort": "xhigh"},
+        {},
+        {"reasoning_effort": "low", "chat_template_kwargs": {"reasoning_effort": "high"}},
+    ):
+        chat(client, "hello", max_tokens=1, extra_body=body)  # fmt: skip
+    assert [o.get("reasoning_effort") for o in rendered] == ["low", "high", None, "high"]
+
+
 @pytest.fixture
 def replies_with(engine, monkeypatch):
     # makes the engine reply with the given text, which the tiny model would never write: each
@@ -430,6 +453,7 @@ def test_text_is_not_a_tool_call(client, replies_with, stream, text, choice):
         ({"messages": []}, "messages must be a non-empty list of objects"),
         ({"messages": [{"role": "user", "content": "x" * CONTEXT}]}, "the prompt has 64 tokens"),
         ({"extra_body": {"chat_template_kwargs": "x"}}, "chat_template_kwargs must be an object"),
+        ({"extra_body": {"reasoning_effort": "max"}}, "reasoning_effort must be one of none,"),
         # what a message or tool holds, of the shapes templates read
         ({"messages": [{"role": "user", "content": [None]}]}, "text, image or image_url"),
         ({"messages": [{"role": "user", "content": [{"type": "text"}]}]}, "text must be a string"),

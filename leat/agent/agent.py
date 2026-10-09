@@ -28,7 +28,7 @@ from leat.agent.store import Store
 from leat.agent.tools import Context, Result, Tool, arguments, files, numbered
 from leat.agent.workspace import Workspace
 
-# sampling as Qwen3.6 recommends for general tasks, thinking first, then not
+# sampling as Qwen3.6 recommends for general tasks, reasoning first, then not
 SAMPLING = {
     True: {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5},
     False: {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5},
@@ -149,14 +149,15 @@ class Agent:
             return self._summary(c) | {"messages": messages, "summarized": summarized}
 
     def send(
-        self, id: str | None, content: str, think: bool = False, attached: list[str] | None = None,
-        person: int | None = None,
+        self, id: str | None, content: str, effort: str | None = None,
+        attached: list[str] | None = None, person: int | None = None,
     ) -> str:  # fmt: skip
         """Starts a turn of a person's message, in a new conversation without an id; returns the
-        conversation's id. The model thinks before it replies if `think`, which takes longer, and
-        reads of the files `attached`, in the workspace. Raises NotFound if there is no such
-        conversation of the person's, or file, Busy if a turn runs in the conversation."""
-        info: dict[str, Any] = {"think": think, "at": time.time()}
+        conversation's id. The model reasons at `effort`, one of leat.chat's EFFORTS, which leat
+        serve gives as near as the model can, or else at the model's own default; and reads of the
+        files `attached`, in the workspace. Raises NotFound if there is no such conversation of the
+        person's, or file, Busy if a turn runs in the conversation."""
+        info: dict[str, Any] = {"at": time.time()} | ({"effort": effort} if effort else {})
         if attached:
             space = self.workspace
             if space is None or not all(space.path(name).is_file() for name in attached):
@@ -176,7 +177,7 @@ class Agent:
                     raise Busy("a reply is already running")
                 start = len(self.store.messages(id))
                 self.store.append(id, message)
-            turn = _Turn(self, id, person, start, content, think)
+            turn = _Turn(self, id, person, start, content, effort)
             self._turns[id] = turn
             self._publish_summary(id)
             self._publish_message(id, person, start, message)
@@ -268,10 +269,12 @@ class _Turn:
     """A turn running in a person's conversation, of their message at `start`."""
 
     def __init__(
-        self, agent: Agent, id: str, person: int | None, start: int, content: str, think: bool
-    ):
+        self, agent: Agent, id: str, person: int | None, start: int, content: str,
+        effort: str | None,
+    ):  # fmt: skip
         self.agent, self.id, self.person, self.start = agent, id, person, start
-        self.content, self.think = content, think
+        self.content, self.effort = content, effort  # asked of the model, or its default if None
+        self.reasons = False  # whether the model reasons at that effort, once the turn asks
         self.tools = agent.tools  # the tools the model calls
         self.state = agent.store.context(id)  # the prompt's, as it was, to take the turn back to
         self.kept = start + 1  # the conversation's messages kept
@@ -292,6 +295,8 @@ class _Turn:
         try:
             loaded = self.agent.loaded()
             self.limit, self.image = loaded.get("max_context"), loaded.get("image_tokens") or 0
+            reasoning = loaded.get("reasoning") or {}
+            self.reasons = (self.effort or reasoning.get("default") or "none") != "none"
             self.sources = numbered(self.agent.store.messages(self.id))
             for n in range(ROUNDS):
                 calls = self._reply(last=n == ROUNDS - 1)
@@ -327,11 +332,13 @@ class _Turn:
         reply["info"] = info
         (index,) = self._show(reply)
         read = context.prompt(messages, state)
-        body: dict[str, Any] = {"messages": self._seen(read), **SAMPLING[self.think]}
+        body: dict[str, Any] = {"messages": self._seen(read), **SAMPLING[self.reasons]}
+        if self.effort:
+            body["reasoning_effort"] = self.effort
         # as Qwen3's templates take them, and others ignore: the replies of turns before rendered
         # as they were, their reasoning kept, so that the prompt of a message after a turn that
         # called tools extends the last, which the engine's cache holds, rather than changing it
-        body["chat_template_kwargs"] = {"enable_thinking": self.think, "preserve_thinking": True}
+        body["chat_template_kwargs"] = {"preserve_thinking": True}
         if declared:
             body["tools"] = declared
         if last and self.tools:
@@ -423,7 +430,7 @@ class _Turn:
                 "messages": [*self._seen(context.prompt(messages, state)), note],
                 "max_tokens": tokens,
                 "temperature": 0.3, "tools": [t.declaration() for t in self.tools.values()],
-                "chat_template_kwargs": {"enable_thinking": False, "preserve_thinking": True},
+                "reasoning_effort": "none", "chat_template_kwargs": {"preserve_thinking": True},
             }  # fmt: skip
             reply = self._whole(body)
             if (summary := reply["content"].strip()) and not reply.get("tool_calls"):
@@ -436,8 +443,7 @@ class _Turn:
         body = {
             "messages": [{"role": "system", "content": context.SUMMARIZE},
                          {"role": "user", "content": user}],
-            "max_tokens": tokens, "temperature": 0.3,
-            "chat_template_kwargs": {"enable_thinking": False},
+            "max_tokens": tokens, "temperature": 0.3, "reasoning_effort": "none",
         }  # fmt: skip
         return self._whole(body)["content"].strip() or (before or "")
 

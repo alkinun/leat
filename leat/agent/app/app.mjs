@@ -15,7 +15,6 @@ let accounts = null; // the owner's to manage: the people and their devices, and
 const unread = new Set(JSON.parse(localStorage.getItem("leat.unread") ?? "[]"));
 let models = [], loading = null, unreachable = null; // the engine's, a model it loads, or why not
 let lost = false; // the events' connection, until it is back
-let think = localStorage.getItem("leat.think") === "true"; // as the user last chose
 let mode = localStorage.getItem("leat.mode") ?? "system"; // light, dark, or as the system is
 let views = []; // the shown messages' elements, by their indexes
 const opened = new Map(); // whether each turn's work is open, as the user left it
@@ -45,10 +44,9 @@ window.ondrop = (event) => { // files dropped, attached to the next message, or 
   if (document.body.classList.contains("files")) dropped.forEach(upload);
   else dropped.forEach(attach);
 };
-$("think").onclick = () => {
-  think = !think;
-  localStorage.setItem("leat.think", think);
-  controls();
+$("effort").onchange = () => { // kept for the model, on this device
+  localStorage.setItem(`leat.effort.${ready()}`, $("effort").value);
+  renderEffort();
   $("input").focus();
 };
 $("model").onchange = () => load($("model").value);
@@ -201,6 +199,7 @@ function handle(event) {
       return;
     case "loading":
       loading = event.model;
+      renderEffort(); // none, till it is loaded
       break;
     case "models":
       models = event.models;
@@ -287,7 +286,8 @@ async function send() {
     const path = shown ? `/api/conversations/${shown.id}/messages` : "/api/conversations";
     const sent = attached, from = shown?.id;
     const files = sent.map((a) => a.name);
-    const { id } = await (await post(path, { content, think, files })).json();
+    const effort = chosen(models.find((m) => m.id === ready())) ?? undefined; // none, if it has none
+    const { id } = await (await post(path, { content, effort, files })).json();
     attached = attached.filter((a) => !sent.includes(a)); // not those added meanwhile
     renderAttached();
     if (shown?.id === from && from !== id) open(id); // unless another was opened meanwhile
@@ -497,6 +497,30 @@ function renderModels() {
   const none = new Option(models.length ? "Choose a model" : "No models", "");
   none.disabled = true;
   $("model").replaceChildren(none, ...models.map((m) => new Option(m.id)));
+  renderEffort();
+}
+
+// the efforts the model reasons at, as the composer names them: of two, the first none, off and on
+const EFFORTS = { none: "Off", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Max" };
+
+// the efforts the loaded model takes, as leat serve lists them, to choose among: none where the
+// model has no choice, as one that never reasons, or always does
+function renderEffort() {
+  const model = models.find((m) => m.id === ready()), efforts = model?.reasoning?.efforts ?? [];
+  const toggle = efforts.length === 2 && efforts[0] === "none";
+  $("effort").replaceChildren(...efforts.map((e) =>
+    new Option(toggle ? (e === "none" ? "Off" : "On") : (EFFORTS[e] ?? e), e)));
+  $("effort").value = chosen(model) ?? "";
+  $("reasoning").hidden = efforts.length < 2;
+  $("reasoning").classList.toggle("on", (chosen(model) ?? "none") !== "none");
+}
+
+// the effort the model is to reason at: as last chosen for it on this device, else its default;
+// none of a model that takes no effort
+function chosen(model) {
+  const { efforts = [], default: given = null } = model?.reasoning ?? {};
+  const kept = localStorage.getItem(`leat.effort.${model?.id}`);
+  return efforts.includes(kept) ? kept : given;
 }
 
 function renderLog() {
@@ -584,7 +608,6 @@ function controls() {
   $("main").classList.toggle("empty", !shown && !paged);
   $("greeting").textContent = unreachable ? "The engine is not reachable"
     : loading ? "Loading…" : !model ? "Choose a model" : "How can I help?";
-  $("think").classList.toggle("on", think);
   $("send").classList.toggle("stop", running);
   $("send").title = running ? "Stop" : "Send";
   const uploading = attached.some((a) => a.uploading);

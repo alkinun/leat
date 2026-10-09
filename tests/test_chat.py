@@ -4,6 +4,7 @@ import jinja2
 import pytest
 
 from leat.chat import (
+    EFFORTS,
     IMAGE,
     ChatTemplate,
     Reply,
@@ -115,6 +116,54 @@ def test_form():
     gemma = with_marker("<|channel>")
     assert gemma.form == "gemma4" and gemma.opens_thinking("<|turn>model\n<|channel>thought\n")
     assert not gemma.opens_thinking("<|turn>model\n<|channel>thought\n<channel|>")
+
+
+GPT_OSS = (
+    '{%- if reasoning_effort is not defined %}{%- set reasoning_effort = "medium" %}{%- endif %}'
+)
+MISTRAL = (
+    "{%- set reasoning_effort = reasoning_effort | default('none') %}"
+    "{%- if reasoning_effort not in ['none', 'high'] %}{{ raise_exception('no') }}{% endif %}"
+)
+LEVELS = (
+    "{%- if reasoning_effort == 'xhigh' %}x{% elif 'low' == reasoning_effort %}l{% endif %}"
+    '{%- set reasoning_effort = reasoning_effort | default("medium") %}'
+)
+GEMMA = "{%- set enable_thinking = enable_thinking | default(false) -%}"
+QWEN = "{%- if enable_thinking is defined and enable_thinking is false %}<think></think>{% endif %}"
+
+
+@pytest.mark.parametrize(
+    "template, efforts, default",
+    [
+        (TEMPLATE, (), None),  # never reasons
+        (TEMPLATE + "<think>", (), None),  # always does, and cannot be told
+        (GPT_OSS + TEMPLATE, ("low", "medium", "high"), "medium"),  # compares it with nothing
+        (MISTRAL + TEMPLATE, ("none", "high"), "none"),  # of the values it compares it with
+        (LEVELS + TEMPLATE, ("low", "medium", "xhigh"), "medium"),
+        (GEMMA + TEMPLATE, ("none", "high"), "none"),  # off by default, as it says
+        (QWEN + TEMPLATE, ("none", "high"), "high"),  # on, unless turned off
+    ],
+)
+def test_efforts(template, efforts, default):
+    # the efforts a template's model reasons at, and its default, of what the template reads
+    c = chat(template)[0]
+    assert (c.efforts, c.default_effort) == (efforts, default)
+
+
+def test_effort():
+    # a request's effort, as the template is told it: the nearest of its levels, the lesser of two
+    # as near; on or off; or nothing
+    levels, toggle = chat(LEVELS + TEMPLATE)[0], chat(QWEN + TEMPLATE)[0]
+    told = {e: levels.effort(e)["reasoning_effort"] for e in EFFORTS}
+    assert told == {"none": "low", "minimal": "low", "low": "low", "medium": "medium",
+                    "high": "medium", "xhigh": "xhigh"}  # fmt: skip
+    turned = [toggle.effort(e)["enable_thinking"] for e in ("none", "minimal", "xhigh")]
+    assert turned == [False, True, True]
+    assert chat()[0].effort("high") == {}
+    shown = chat(GPT_OSS + "Reasoning: {{ reasoning_effort }}")[0]
+    assert shown.render([], **shown.effort("xhigh")) == "Reasoning: high"
+    assert shown.render([]) == "Reasoning: medium"
 
 
 WEATHER = [{"type": "function", "function": {"name": "weather"}}]

@@ -41,6 +41,7 @@ class FakeEngine(ThreadingHTTPServer):
         self.context: int | None = None  # the model's, said only if set
         self.status = "loaded"  # the model's
         self.vision = False  # whether it sees images
+        self.reasoning: dict[str, Any] | None = None  # the efforts it takes, if it is told any
         self.authorized: list[str | None] = []  # each request's Authorization header
         super().__init__(("127.0.0.1", 0), _FakeHandler)
 
@@ -60,6 +61,8 @@ class _FakeHandler(BaseHTTPRequestHandler):
         model = {"id": "fake", "status": self.server.status}
         if self.server.vision:
             model |= {"vision": True, "image_tokens": 300}
+        if self.server.reasoning:
+            model["reasoning"] = self.server.reasoning
         if self.server.context:
             model["max_context"] = self.server.context
         self._json(200, {"object": "list", "data": [model]})
@@ -156,7 +159,7 @@ def test_turn(agent, engine, events):
     summary = {"id": id, "title": "Hi", "updated": 0, "running": True}
     assert seen[0]["conversation"] | {"updated": 0} == summary
     user = {"role": "user", "content": "Hi\nand more",
-            "info": {"think": False, "at": pytest.approx(time.time(), abs=5)}}  # fmt: skip
+            "info": {"at": pytest.approx(time.time(), abs=5)}}  # fmt: skip
     assert seen[1]["message"] == user
     assert seen[2]["index"] == 2 and seen[2]["message"]["content"] == ""
     messages = agent.store.messages(id)
@@ -170,24 +173,27 @@ def test_turn(agent, engine, events):
     assert info["first"] >= 0 and (info["cached"], info["read"]) == (0, read)
     assert seen[-2] == {"type": "message", "conversation": id, "index": 2, "message": reply,
                         "to": None}  # fmt: skip
-    # the model read the system prompt and the message, not thinking, sampled as Qwen3.6
-    # recommends then
+    # the model read the system prompt and the message, at its own effort, of a model told none,
+    # sampled as Qwen3.6 recommends without reasoning
     (request,) = engine.requests
     assert request["messages"] == [_api(m) for m in messages[:2]] and request["stream"] is True
     assert request["messages"][1]["content"] == stamped(agent, id, 1) + "Hi\nand more"
-    assert request["chat_template_kwargs"] == {"enable_thinking": False, "preserve_thinking": True}
+    assert request["chat_template_kwargs"] == {"preserve_thinking": True}
+    assert "reasoning_effort" not in request
     assert request["temperature"] == 0.7 and request["presence_penalty"] == 1.5
 
 
-def test_think(agent, engine, events):
-    # a message may ask the model to think first, sampled as Qwen3.6 recommends for thinking
-    engine.replies.put(REPLY)
-    id = agent.send(None, "Prove it.", think=True)
-    until(events, ended)
-    assert engine.requests[-1]["chat_template_kwargs"] == {
-        "enable_thinking": True, "preserve_thinking": True}  # fmt: skip
-    assert engine.requests[-1]["temperature"] == 1.0
-    assert agent.store.messages(id)[1]["info"]["think"] is True
+def test_effort(agent, engine, events):
+    # a message's effort, which the engine gives as near as the model can, or else the model's
+    # default; sampled as Qwen3.6 recommends as the model reasons at it or not
+    engine.reasoning = {"efforts": ["none", "high"], "default": "high"}
+    for effort, temperature in ((None, 1.0), ("none", 0.7), ("medium", 1.0)):
+        engine.replies.put(REPLY)
+        id = agent.send(None, "Prove it.", effort)
+        until(events, ended)
+        request = engine.requests[-1]
+        assert request.get("reasoning_effort") == effort and request["temperature"] == temperature
+        assert agent.store.messages(id)[1]["info"].get("effort") == effort
 
 
 def test_deltas(agent, engine, events):
@@ -364,6 +370,7 @@ def test_name(agent, engine, events):
     background.name(agent, id)
     asked = engine.requests[-1]["messages"]
     assert asked[0]["content"] == background.NAME
+    assert engine.requests[-1]["reasoning_effort"] == "none"  # the least the model takes
     said = "When should I plant tulip bulbs?\n\nAssistant: Hello there."
     assert asked[1]["content"] == f"User: {stamped(agent, id, 1)}{said}"
     assert agent.conversations()[0]["title"] == "Planting tulip bulbs"
@@ -770,7 +777,8 @@ def test_api(server, engine, agent, events):
     # what is wrong with a request, said
     assert request(f"{server}/api/conversations", "POST", {"content": " "})[0] == 400
     assert request(f"{server}/api/conversations", "POST", [1])[0] == 400
-    assert request(f"{server}/api/conversations", "POST", {"content": "Hi", "think": 1})[0] == 400
+    asked = {"content": "Hi", "effort": "max"}
+    assert request(f"{server}/api/conversations", "POST", asked)[0] == 400
     assert request(f"{server}/api/conversations/0123456789ab/messages", "POST",
                    {"content": "Hi"})[0] == 404  # fmt: skip
     assert request(f"{server}/api/conversations/0123456789ab")[0] == 404

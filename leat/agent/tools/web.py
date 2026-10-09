@@ -173,7 +173,7 @@ def _read(reader: Client, question: str, page: str, text: str, person: int | Non
         "messages": [{"role": "system", "content": READING},
                      {"role": "user", "content": f"The question: {question}\n\nThe page, "
                       f"{page}:\n\n{text[:READER]}"}],
-        "max_tokens": FOUND, "temperature": 0.3, "chat_template_kwargs": {"enable_thinking": False},
+        "max_tokens": FOUND, "temperature": 0.3, "reasoning_effort": "none",
     }  # fmt: skip
     return reader.reply(body, person)["content"].strip() or "The page says nothing of it."
 
