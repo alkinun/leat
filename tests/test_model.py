@@ -291,6 +291,40 @@ def test_shared_prefix_is_copied(tiny_model, monkeypatch):
 
 
 @pytest.mark.usefixtures("reference_ops")
+def test_owners_share_their_own_prefixes(tiny_model, monkeypatch):
+    # a slot's tokens are its owner's: another's prompt that shares them starts over in a slot of
+    # its own, and the owner's still goes on from them; a slot of another's that a prompt takes,
+    # the least recently used, starts anew
+    path, _ = tiny_model
+    engine = Engine(path, max_context=CONTEXT, prefill_chunk=8, slots=2)
+    list(engine.generate(PROMPT, 4, owner="a"))
+    longer = PROMPT + [4]
+    assert engine.cached_prefix(longer, "a") == len(PROMPT)
+    assert engine.cached_prefix(longer, "b") == engine.cached_prefix(longer) == 0
+    starts, branch = prefill_starts(engine, monkeypatch), PROMPT[:9] + [1, 2, 3]
+    assert list(engine.generate(branch, 6, owner="b")) == generated(path, branch, 6)
+    assert starts == [0, 8]
+    assert list(engine.generate(longer, 4, owner="a")) == generated(path, longer, 4)
+    assert starts == [0, 8, len(PROMPT)]
+    assert list(engine.generate(branch + [5], 4, owner="c")) == generated(path, branch + [5], 4)
+    assert starts == [0, 8, len(PROMPT), 0, 8]
+    assert engine.cached_prefix(branch + [6], "b") == 0
+    assert engine.cached_prefix(longer + [6], "a") == len(longer)
+
+
+@pytest.mark.usefixtures("reference_ops")
+def test_recurrent_state_resumes_for_its_owner(tiny):
+    # a slot's kept recurrent state goes on only for its owner's prompts
+    path, _ = tiny("qwen35moe")
+    engine = Engine(path, max_context=CONTEXT, prefill_chunk=8)
+    prompt = (PROMPT * 2)[:20]
+    list(engine.generate(prompt, 3, owner="a"))
+    turn = prompt[:18] + [7, 1, 2]
+    assert engine.cached_prefix(turn, "a") == len(prompt) - KEEP_BACK
+    assert engine.cached_prefix(turn, "b") == 0
+
+
+@pytest.mark.usefixtures("reference_ops")
 def test_recurrent_state_shares_whole_slots(tiny, monkeypatch):
     # recurrent state holds all a slot ran: a prompt that shares part of a slot's tokens starts
     # over in another, and one that shares all of them goes on from there

@@ -536,6 +536,29 @@ def test_keys(tiny_model, tmp_path):
         server.shutdown()
 
 
+def test_keys_share_their_own_prefixes(tiny_model, tmp_path):
+    # a key's prompts start from the cached prefixes of its own alone: another key's that shares
+    # them is prefilled whole, so that it cannot tell from its time to the first token, or its
+    # cached tokens, what the first asked
+    keys = Keys(tmp_path / "keys.json")
+    alkin, agent = keys.add("alkin"), keys.add("agent")
+    options = {"max_context": CONTEXT, "prefill_chunk": 8, "slots": 2, "keys": keys}
+    with serving(tiny_model[0], **options) as server:
+        server.load("tiny")
+        url = f"http://127.0.0.1:{server.server_port}/v1"
+        first, second = (openai.OpenAI(base_url=url, api_key=key, max_retries=0)
+                         for key in (alkin, agent))  # fmt: skip
+
+        def cached(client: openai.OpenAI, content: str) -> int:
+            return chat(client, content, max_tokens=2).usage.prompt_tokens_details.cached_tokens
+
+        assert cached(first, "a shared start, then one end") == 0
+        assert cached(second, "a shared start, then another") == 0
+        assert cached(first, "a shared start, then another") == len("a shared start, then ")
+        assert cached(second, "a shared start, then more") == len("a shared start, then ")
+        server.shutdown()
+
+
 def test_concurrent_requests(client, server, engine, expected, monkeypatch):
     # more requests at once than the engine's 2 slots, whole and streamed: each gets the reply it
     # would alone, two in batched steps, the third once a slot is free

@@ -100,7 +100,9 @@ class Engine:
     that prefix in: a system prompt that several conversations share, say. A model with recurrent
     state, as Qwen3.5's Gated DeltaNet, holds it for all the tokens a slot ran, and so shares a
     slot's tokens only when it shares all of them, or else all those before the state it kept
-    KEEP_BACK tokens before its last prompt's end.
+    KEEP_BACK tokens before its last prompt's end. A slot's tokens are its prompts' owner's: a
+    prompt shares them only of the same owner, so that one owner cannot tell from how fast a
+    prompt starts what another's held. Every prompt's owner is the same by default.
 
     With a vision encoder, prompts hold images: each at as many positions as it has embeddings,
     which run in a chunk of their own, the image's whole, and see each other, as Gemma's do, or
@@ -194,6 +196,7 @@ class Engine:
         self._kept: list[list[int]] = [[] for _ in range(slots)]  # tokens before each kept state
         self._last: dict[int, _Batch] = {}  # the last decode step's batches, by graph
         self._cached: list[list[int]] = [[] for _ in range(slots)]  # tokens each slot holds
+        self._owners = [""] * slots  # whose prompts each slot's tokens are
         # where each slot's runs since it last started from position 0 wrote up to, of which its
         # sliding windows' rings hold the last positions
         self._written = [0] * slots
@@ -209,6 +212,7 @@ class Engine:
         seed: int | None = None,
         ignore_eog: bool = False,
         images: Iterable[Image] = (),
+        owner: str = "",
     ) -> Generator[int, None, None]:
         """Yields up to `max_tokens` ids; stops early at end of generation or the context limit.
 
@@ -218,7 +222,7 @@ class Engine:
         """
         if self.active:
             raise RuntimeError("another generation is unfinished: exhaust or close it first")
-        sequence = self.start(prompt, max_tokens, sampling, seed, ignore_eog, images)
+        sequence = self.start(prompt, max_tokens, sampling, seed, ignore_eog, images, owner)
         try:
             while not sequence.done:
                 for _, token in self.step():
@@ -234,9 +238,11 @@ class Engine:
         seed: int | None = None,
         ignore_eog: bool = False,
         images: Iterable[Image] = (),
+        owner: str = "",
     ) -> Sequence:
         """Starts a generation in a free slot, as generate() would; step() advances it. The
-        prompt shows each of `images` with its tokens."""
+        prompt shows each of `images` with its tokens, and shares cached tokens only of prompts
+        of the same `owner`."""
         if max_tokens < 1:
             raise ValueError(f"max_tokens must be at least 1, got {max_tokens}")
         if not 0 < len(prompt) < self.max_context:
@@ -250,7 +256,7 @@ class Engine:
         if len(self.active) == self.slots:
             raise RuntimeError(f"all {self.slots} slots are generating")
         seed = random.getrandbits(32) if seed is None else seed % 2**32
-        slot = self._claim(prompt)
+        slot = self._claim(prompt, owner)
         sequence = Sequence(prompt, max_tokens, sampling, seed, ignore_eog, slot, shown)
         self.active.append(sequence)
         return sequence
@@ -335,13 +341,14 @@ class Engine:
             raise ValueError("the model has no vision encoder")
         return self.vision.image(data)
 
-    def cached_prefix(self, prompt: list[int]) -> int:
-        """How many leading tokens of `prompt` the cache holds: generation prefills the rest. Of
-        a model with recurrent state, those of a slot's or of a free slot's kept state."""
+    def cached_prefix(self, prompt: list[int], owner: str = "") -> int:
+        """How many leading tokens of `prompt` the cache holds for its `owner`, as start() takes
+        them: generation prefills the rest. Of a model with recurrent state, those of a slot's or
+        of a free slot's kept state."""
         busy = {s.slot for s in self.active}
         kept = [len(self._kept[s]) for s in range(self.slots)
-                if s not in busy and self._resumes(prompt, s)]  # fmt: skip
-        return max(self._shared(prompt) + kept)
+                if s not in busy and self._resumes(prompt, s, owner)]  # fmt: skip
+        return max(self._shared(prompt, owner) + kept)
 
     def reset(self) -> None:
         """Forgets every cached prefix, so the next prompt is prefilled from scratch, and ends
@@ -350,15 +357,17 @@ class Engine:
             self.cancel(sequence)
         self._cached = [[] for _ in range(self.slots)]
         self._kept = [[] for _ in range(self.slots)]
+        self._owners = [""] * self.slots
         self._written = [0] * self.slots
 
-    def _claim(self, prompt: list[int]) -> int:
-        # a free slot for the prompt, made to hold the longest prefix of it that any slot holds
+    def _claim(self, prompt: list[int], owner: str) -> int:
+        # a free slot for the prompt, made to hold the longest prefix of it that any slot of its
+        # owner's holds; another's slot it takes starts anew
         busy = {s.slot for s in self.active}
         free = [s for s in range(self.slots) if s not in busy]
         if self._recurrent:
-            self._resume(prompt, free)
-        shared = self._shared(prompt)
+            self._resume(prompt, free, owner)
+        shared = self._shared(prompt, owner)
         extended = [s for s in free if shared[s] == len(self._cached[s])]  # empty slots too
         if extended:
             slot = max(extended, key=lambda s: shared[s])
@@ -371,36 +380,39 @@ class Engine:
             self._written[slot] = self._written[source]
         elif prefix == 0:  # the slot starts anew
             self._written[slot] = 0
-        self._cached[slot] = prompt[:prefix]
+        self._cached[slot], self._owners[slot] = prompt[:prefix], owner
         if prefix < len(self._kept[slot]):  # the slot no longer holds the tokens before it
             self._kept[slot] = []
         self._used[slot] = next(self._clock)
         return slot
 
-    def _resume(self, prompt: list[int], free: list[int]) -> None:
-        # takes a free slot back to its kept recurrent state, where the prompt shares all the
-        # tokens before it, and more than all of any slot's
-        best = max(self._shared(prompt))
-        kept = [s for s in free if best < len(self._kept[s]) and self._resumes(prompt, s)]
+    def _resume(self, prompt: list[int], free: list[int], owner: str) -> None:
+        # takes a free slot of the owner's back to its kept recurrent state, where the prompt
+        # shares all the tokens before it, and more than all of any slot's
+        best = max(self._shared(prompt, owner))
+        kept = [s for s in free if best < len(self._kept[s]) and self._resumes(prompt, s, owner)]
         if kept:
             slot = max(kept, key=lambda s: len(self._kept[s]))
             self._restore(self._slot_vars[0].bind(slot))
             self._cached[slot] = list(self._kept[slot])
 
-    def _shared(self, prompt: list[int]) -> list[int]:
-        # how many leading tokens of the prompt each slot holds that generation may start from: of
-        # a slot with recurrent state, all its tokens or none
-        shared = [_shared(prompt, cached) for cached in self._cached]
+    def _shared(self, prompt: list[int], owner: str) -> list[int]:
+        # how many leading tokens of the prompt each slot holds that generation may start from:
+        # none of another owner's slot, and of a slot with recurrent state, all its tokens or none
+        shared = [_shared(prompt, cached) if self._owners[s] == owner else 0
+                  for s, cached in enumerate(self._cached)]  # fmt: skip
         if self._recurrent:
             shared = [n if n == len(c) else 0 for n, c in zip(shared, self._cached, strict=True)]
         # and of a slot whose rings no longer hold the window before it, none
         return [n if self.model.holds(self._written[s], n) else 0 for s, n in enumerate(shared)]
 
-    def _resumes(self, prompt: list[int], slot: int) -> bool:
-        # whether a prompt may go on from a slot's kept state: it shares all the tokens before
-        # it, whose window the slot's rings still hold
+    def _resumes(self, prompt: list[int], slot: int, owner: str) -> bool:
+        # whether a prompt of the owner's may go on from a slot's kept state: the slot's tokens
+        # are the owner's, and the prompt shares all those before it, whose window the slot's
+        # rings still hold
         kept = self._kept[slot]
-        return _resumes(prompt, kept) and self.model.holds(self._written[slot], len(kept))
+        held = self.model.holds(self._written[slot], len(kept))
+        return self._owners[slot] == owner and _resumes(prompt, kept) and held
 
     def _wrote(self, slot: int, end: int) -> None:
         # a run wrote slot `slot`'s positions up to `end`

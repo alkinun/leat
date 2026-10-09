@@ -6,7 +6,8 @@ engine: it runs completions together, one per slot, a token of each per batched 
 model once the completions before have finished; the rest wait their turn in the order they arrive.
 
 Given keys, every request must hold one, as OpenAI's clients send it, `Authorization: Bearer KEY`,
-or as Anthropic's do, `x-api-key: KEY`; each key's requests, tokens and time are counted apart.
+or as Anthropic's do, `x-api-key: KEY`; each key's requests, tokens and time are counted apart,
+and its prompts share cached prefixes with its own alone.
 """
 
 import collections
@@ -293,11 +294,14 @@ class Server(ThreadingHTTPServer):
         engine = loaded.engine
         if len(engine.active) == engine.slots:
             return False
+        # a key's prompts share the cache with its own alone, lest one key tell from the time to
+        # the first token what another's asked; without keys, every prompt's is the same, ""
+        owner = request.key
         try:  # timed from before start(), which copies a prefix in or restores a kept state
-            started, cached = time.perf_counter(), engine.cached_prefix(request.prompt)
+            started, cached = time.perf_counter(), engine.cached_prefix(request.prompt, owner)
             sequence = engine.start(
                 request.prompt, request.max_tokens, request.sampling, request.seed,
-                images=request.images,
+                images=request.images, owner=owner,
             )  # fmt: skip
         except Exception as e:  # for the client; the server carries on
             request.out.put(e)
