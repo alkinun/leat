@@ -336,14 +336,13 @@ def _loopback(host: str) -> bool:
 
 def _keys(args: argparse.Namespace) -> None:
     keys = Keys(args.file)
-    if args.action == "list":
-        for listed in keys.listed():
-            print(f"{listed['name']}\t{listed['created']}")
-        return
-    if not args.name:
+    if args.action != "list" and not args.name:
         raise SystemExit(f"leat keys {args.action} needs the key's name")
     try:
-        if args.action == "add":
+        if args.action == "list":
+            for listed in keys.listed():
+                print(f"{listed['name']}\t{listed['created']}")
+        elif args.action == "add":
             key = keys.add(args.name)
             print(f"{key}\n\nThe key of {args.name}, shown this once: keep it where its app reads "
                   f"it, as OPENAI_API_KEY. {args.file} keeps its hash alone.")  # fmt: skip

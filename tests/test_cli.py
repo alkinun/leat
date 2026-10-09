@@ -251,6 +251,10 @@ def test_keys(tmp_path, capsys):
     main(["keys", "remove", "alkin", "--file", file])
     main(["keys", "list", "--file", file])
     assert capsys.readouterr().out.endswith("from the next request on.\n")
+    (tmp_path / "keys.json").write_text("[]")  # no file of keys: said so, as of every action
+    for args in (["list"], ["add", "bo"], ["remove", "bo"]):
+        with pytest.raises(SystemExit, match="is no file of leat's keys"):
+            main(["keys", *args, "--file", file])
 
 
 def test_agent(tmp_path, monkeypatch, capsys):
