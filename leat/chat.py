@@ -191,14 +191,17 @@ def split_reply(text: str, form: str | None, thinking: bool = False, done: bool 
 def _harmony(text: str) -> Reply:
     # messages separated by <|start|> or <|end|>, each a header, as <|channel|>analysis or
     # <|channel|>commentary to=functions.weather <|constrain|>json, then <|message|> and its text:
-    # analysis is reasoning, a message to a function a call, and any other text
+    # analysis is reasoning, a message to a tool a call, and any other text. A call of the tools
+    # gpt-oss was trained with, as to=python or to=browser.search, is one too, named so, rather
+    # than its code or query taken for text
     reply = Reply()
     for message in re.split(r"<\|end\|>|<\|start\|>", text):
         header, marked, body = message.partition("<|message|>")
         if not marked:  # a header, so far
             continue
-        if to := re.search(r"to=functions\.([^\s<]+)", header):
-            reply.calls.append({"name": to.group(1), "arguments": body.strip()})
+        if to := re.search(r"to=([^\s<]+)", header):
+            name = to.group(1).removeprefix("functions.")
+            reply.calls.append({"name": name, "arguments": body.strip()})
         elif re.search(r"<\|channel\|>analysis", header):
             reply.reasoning += body
         else:

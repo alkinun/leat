@@ -767,10 +767,10 @@ def _completion(body: Any, server: Server) -> _Completion:
 def _calls(
     reply: Reply, tools: list[dict[str, Any]] | None, reason: str = "stop"
 ) -> tuple[str, list[dict[str, Any]]]:
-    # a reply's text and its calls to the tools: those of the harmony format whose arguments are
-    # JSON objects and name a tool, or those of the text. A call the context cut off, of a reply
-    # that ended for its length, is no text: the text ends where it began, but for a reply all of
-    # JSON, as Llama 3's calls are, which may be text whole.
+    # a reply's text and its calls to the tools: those of the harmony format, every one, or those
+    # of the text. A call the context cut off, of a reply that ended for its length, is no text:
+    # the text ends where it began, but for a reply all of JSON, as Llama 3's calls are, which may
+    # be text whole.
     if not tools:
         return reply.content, []
     if not reply.calls:
@@ -778,12 +778,17 @@ def _calls(
         if reason == "length" and not calls and not content.lstrip().startswith("{"):
             content = content[: tool_call_start(content)]
         return content, calls
-    names, calls = {tool.get("function", {}).get("name") for tool in tools}, []
+    # as the model made them, as OpenAI's API passes them on, of tools not given and of arguments
+    # that are no JSON object too, as gpt-oss calls the python it was trained with: the client
+    # answers that it has no such tool, and the model goes on, rather than its turn ending in a
+    # reply of nothing
+    calls = []
     for call in reply.calls:
+        arguments: Any = call["arguments"]
         with contextlib.suppress(ValueError, RecursionError):
-            arguments = json.loads(call["arguments"])
-            if call["name"] in names and isinstance(arguments, dict):
-                calls.append({"name": call["name"], "arguments": arguments})
+            if isinstance(parsed := json.loads(arguments), dict):
+                arguments = parsed
+        calls.append({"name": call["name"], "arguments": arguments})
     return reply.content, calls
 
 
@@ -793,14 +798,17 @@ def _partial_stop(text: str, stops: list[str]) -> int:
 
 
 def _tool_calls(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    # as OpenAI's API has them, with the arguments as JSON text
+    # as OpenAI's API has them, with the arguments as JSON text, or as the model wrote them, if
+    # they are no JSON object
     return [
         {
             "id": f"call_{uuid.uuid4().hex[:24]}",
             "type": "function",
             "function": {
                 "name": c["name"],
-                "arguments": json.dumps(c["arguments"], ensure_ascii=False),
+                "arguments": c["arguments"]
+                if isinstance(c["arguments"], str)
+                else json.dumps(c["arguments"], ensure_ascii=False),
             },
         }
         for c in calls

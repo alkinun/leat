@@ -407,19 +407,34 @@ def test_reply_ends_as_a_marker_begins(
 
 
 @pytest.mark.parametrize("stream", [False, True])
-def test_harmony_tool_call(client, replies_with, monkeypatch, stream):
+@pytest.mark.parametrize(
+    "header, body, name, arguments",
+    [
+        ("commentary to=functions.weather <|constrain|>json", '{"city": "Paris"}', "weather",
+         '{"city": "Paris"}'),
+        # passed on as the model made it, as OpenAI's API does, for the client to say what is
+        # wrong, rather than the reply ending with nothing: a tool not given, gpt-oss's own
+        # python, and arguments that are no JSON object
+        ("commentary to=functions.python", "print(1)", "python", "print(1)"),
+        ("analysis to=python code", "print(1)", "python", "print(1)"),
+        ("commentary to=functions.weather", '{"city": Paris}', "weather", '{"city": Paris}'),
+    ],
+)  # fmt: skip
+def test_harmony_tool_call(client, replies_with, monkeypatch, stream, header, body, name,
+                           arguments):  # fmt: skip
     monkeypatch.setattr(ChatTemplate, "form", property(lambda self: "harmony"))
-    replies_with(
-        '<|channel|>commentary to=functions.weather <|constrain|>json<|message|>{"city": "Paris"}'
-    )
+    replies_with(f"<|channel|>{header}<|message|>{body}")
     response = chat(client, "Weather in Paris?", tools=[WEATHER], stream=stream)
     if stream:
         choices = [chunk.choices[0] for chunk in response]
         (call,), reason = choices[-2].delta.tool_calls, choices[-1].finish_reason
+        content = "".join(c.delta.content or "" for c in choices)
     else:
         (call,), reason = response.choices[0].message.tool_calls, response.choices[0].finish_reason
-    assert reason == "tool_calls" and call.function.name == "weather"
-    assert json.loads(call.function.arguments) == {"city": "Paris"}
+        content = response.choices[0].message.content or ""
+    assert reason == "tool_calls" and (call.function.name, call.function.arguments) == (
+        name, arguments)  # fmt: skip
+    assert content == ""
 
 
 @pytest.mark.parametrize("stream", [False, True])

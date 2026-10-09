@@ -58,6 +58,9 @@ answer, without a link: the app shows the user the files you make. The skills:
 TITLE = 60  # characters of a conversation's title at most: its first message's start
 ROUNDS = 25  # replies a turn takes at most; the last may call no tools, and answers, told so
 LAST = "(You have made all the tool calls this message allows: answer now, from what you found.)"
+# replies of nothing, neither text nor a call, a turn asks again at most: a model may end its
+# reasoning without a word, as gpt-oss does of one reply in forty or so, which would end the turn
+EMPTY = 2
 
 Event = dict[str, Any]
 
@@ -284,6 +287,7 @@ class _Turn:
         self.limit: int | None = None  # the model's context, once the turn asks
         self.image = 0  # the tokens an image takes at most, of a model that sees them, once asked
         self.redone = False  # a reply the context cut off, after the prompt was made smaller
+        self.empty = 0  # replies of nothing asked again
         self.sources: dict[str, int] = {}  # the conversation's, by address, numbered for citing
 
     def stop(self) -> None:
@@ -373,6 +377,12 @@ class _Turn:
                 with a._lock:
                     self.live.remove(reply)
                 return self._reply(last, tools)
+        said = reply["content"].strip() or reply.get("tool_calls")
+        if not said and finish == "stop" and self.empty < EMPTY and not self.stopped.is_set():
+            self.empty += 1  # asked again, of the same prompt, which the engine's cache holds
+            with a._lock:
+                self.live.remove(reply)
+            return self._reply(last, tools)
         if last and declared and reply.get("tool_calls") and not self.stopped.is_set():
             with a._lock:
                 self.live.remove(reply)

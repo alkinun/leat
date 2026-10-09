@@ -249,6 +249,27 @@ def test_tools(agent, engine, events):
     assert second["messages"][-1] == _api(answer)
 
 
+def test_empty_reply(agent, engine, events):
+    # a reply of nothing, neither text nor a call, as gpt-oss ends its reasoning without a word at
+    # times, is asked again, and not kept; twice at most, after which the turn ends as it is
+    engine.replies.put([{"reasoning_content": "Let me search again."}])
+    engine.replies.put([{"content": "  "}])
+    engine.replies.put([{"tool_calls": [call("echo", {"text": "hi"})]}])
+    engine.replies.put([{"content": "It said hi."}])
+    id = agent.send(None, "Echo hi")
+    until(events, ended)
+    assert len(engine.requests) == 4
+    assert engine.requests[0]["messages"] == engine.requests[2]["messages"]  # the same prompt
+    roles = [(m["role"], m.get("content")) for m in agent.store.messages(id)[2:]]
+    assert roles == [("assistant", ""), ("tool", "echo: hi"), ("assistant", "It said hi.")]
+    for _ in range(3):
+        engine.replies.put([{"reasoning_content": "Hmm."}])
+    other = agent.send(None, "Again")
+    until(events, ended)
+    last = agent.store.messages(other)[-1]
+    assert len(engine.requests) == 7 and last["reasoning_content"] == "Hmm."
+
+
 def test_bad_calls(agent, engine, events):
     # a call the tools cannot answer is answered with why, for the model to try again
     calls = [call("nothing", {}, "a"), call("echo", "{not JSON", "b"), call("echo", [1], "c"),
