@@ -11,6 +11,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import ANY
 
@@ -649,13 +650,16 @@ def test_delete(agent, engine, events):
 
 def test_failure(agent, engine, events):
     # a turn that fails is taken back whole, saying why, with the message to send again; the
-    # conversation it began too
+    # conversation it began too; and the engine is looked at at once, as it may have gone away
+    looks = []
+    agent.background = SimpleNamespace(wake=lambda: looks.append(1))  # type: ignore[assignment]
     engine.replies.put("the prompt is too long")
     id = agent.send(None, "Hi")
     error, deleted = until(events, ended)[-2:]
     assert error == {"type": "error", "conversation": id, "error": "the prompt is too long",
                      "start": 1, "content": "Hi", "to": None}  # fmt: skip
     assert deleted == {"type": "deleted", "id": id, "to": None} and agent.conversations() == []
+    assert looks == [1]
     engine.replies.put(REPLY)
     id = agent.send(None, "Hi")
     until(events, ended)

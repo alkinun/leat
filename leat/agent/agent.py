@@ -574,8 +574,11 @@ class _Turn:
     def _take_back(self, error: str) -> None:
         # removes the turn's messages, from `start`, and the conversation it began, and puts the
         # prompt's state back as it was; tells the apps why, and what the user wrote, to send
-        # again
+        # again; and has the engine looked at now, which may have gone away, so that the apps are
+        # told so, and again once it is back, rather than at the next look
         a = self.agent
+        if a.background is not None:
+            a.background.wake()
         with a._lock:
             if a._turns.get(self.id) is not self:
                 return
