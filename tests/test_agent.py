@@ -722,7 +722,7 @@ def test_app(server):
         with urllib.request.urlopen(f"{server}{path}") as response:
             assert response.headers["Content-Type"] == "text/html; charset=utf-8"
             assert b"<title>leat</title>" in response.read()
-    for path in ("/app.mjs", "/themes.mjs"):
+    for path in ("/app.mjs", "/markdown.mjs"):
         with urllib.request.urlopen(f"{server}{path}") as response:
             assert response.headers["Content-Type"] == "text/javascript; charset=utf-8"
     with urllib.request.urlopen(f"{server}/vendor/temml/Temml.woff2") as response:

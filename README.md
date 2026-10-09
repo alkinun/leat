@@ -107,19 +107,7 @@ Context: a conversation's prompt is fit to the model's context, which leat serve
 
 Files: the user's are in a workspace, `~/.local/share/leat/workspace` by default, which they upload to and attach to messages in the app, and whose Files page lists them. The model reads them, PDFs and Word, Excel and PowerPoint files as markdown that keeps their headings, lists and tables, as markitdown reads them, and sees images, those a message attached and those it reads, where the model takes images, as data: URLs of the workspace's files, writes and edits them, and runs Python among them, in bubblewrap's sandbox: it sees `/usr`, the workspace and the environment of `leat/agent/sandbox.txt`'s libraries, and no network, in 4 GB and 120 s. Documents are parsed there too, so that a file made to attack a parser attacks the sandbox. To make a document it first reads a skill, a guide to its kind with a template, of `leat/agent/skills`. The app shows the files a message attached and those its answer made, images as they are, which a message also attaches pasted, served sandboxed, and downloaded but for images, PDFs and plain text, which no page can act in. The app is a page with no dependencies, its Markdown and math rendered by `leat/agent/app/markdown.mjs`. The agent answers its own machine and network alone: a request must name it by an address or a `.local` name, which a site's page cannot by DNS rebinding, and a write must come from its own page.
 
-Themes: the app's look is a theme's, chosen in Settings on each device, light, dark or as the system is. A theme is the few things that make it: its fonts, of the text, of the greeting and titles, and of code, the text's size and the titles' weight, its corners, of the controls and of the messages and composer, how much room it leaves, and its colors, light and dark, fourteen of each, the composer's shadow one. Leat comes with a few looks of its own: Leat's, black on white and white on black, sharp, with lines rather than shadows; Hermes, a terminal's gold on black after Hermes Agent's; and Newsprint, square and serif, in black rules and red ink. Every other comes of the themes people already have, which Settings opens as files: VS Code's color themes, as their extensions' `themes/*.json` are, of one scheme each, whose colors it takes, its editor's, sidebar's, inputs', buttons' and syntax's, what one does not say mixed of its text and background; and shadcn/ui's, as [tweakcn](https://tweakcn.com) makes them, its CSS or its registry's JSON, whose fonts, radius, spacing and shadows it takes too. Settings saves any theme as Leat's own JSON, to change and open again; whatever a theme leaves out is Leat's, and one of a single scheme is always that one. Fonts are named, not served, so each device uses the fonts it has, falling back to the next named:
-
-```json
-{
-  "name": "Mint",
-  "font": "Inter, system-ui, sans-serif", "displayFont": "Georgia, serif", "displayWeight": 400,
-  "codeFont": "ui-monospace, monospace", "size": 16, "radius": 6, "radiusLarge": 18, "density": 1,
-  "light": {"page": "#f3fbf8", "accent": "#0f9d76", "shadow": "0 4px 20px rgb(0 0 0 / 0.06)"},
-  "dark": {"page": "#0f1a17", "accent": "#3ccf9f"}
-}
-```
-
-The colors are `page`, `side`, `card`, `bubble`, `line`, `text`, `muted`, `accent`, `onAccent`, `error`, `keyword`, `string` and `number`, with `shadow`; [leat/agent/app/themes.mjs](leat/agent/app/themes.mjs) says what each is, how VS Code's and shadcn/ui's become them, and has the looks Leat comes with.
+Look: the app's is Leat's own, black on white and white on black, sharp, with lines rather than shadows, light, dark or as the system is, as Settings chooses on each device.
 
 ## Measurements
 

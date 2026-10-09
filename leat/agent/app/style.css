@@ -1,24 +1,23 @@
 :root {
-  /* the theme's, as themes.mjs has Leat's, until it makes the app the one chosen */
+  /* Leat's look: black on white, and white on black, its corners sharp, its lines rather than
+     shadows; dark as the system is, or as the mode chosen in Settings says */
   color-scheme: light dark;
   --font: "Geist", "Inter", system-ui, sans-serif;
   --font-display: "Geist", "Inter", system-ui, sans-serif; --display-weight: 600;
   --font-mono: "Geist Mono", ui-monospace, monospace; --size: 16px;
   --round: 6px; --round-large: 12px; /* controls and code; bubbles, the composer, round buttons */
-  --density: 1; /* the room around things, as a share of Leat's */
-  --page: #fff; --side: #fafafa; --card: #fff; --bubble: #f2f2f2; --line: #e6e6e6;
-  --text: #0a0a0a; --muted: #6e6e6e; --accent: #0a0a0a; --on-accent: #fff; --error: #d92d20;
-  --keyword: #7c3aed; --string: #15803d; --number: #b45309;
+  --density: 1; /* the room around things */
+  --page: light-dark(#fff, #0a0a0a); --side: light-dark(#fafafa, #000);
+  --card: light-dark(#fff, #111); --bubble: light-dark(#f2f2f2, #1a1a1a);
+  --line: light-dark(#e6e6e6, #262626); --text: light-dark(#0a0a0a, #ededed);
+  --muted: light-dark(#6e6e6e, #8f8f8f); --accent: light-dark(#0a0a0a, #ededed);
+  --on-accent: light-dark(#fff, #0a0a0a); --error: light-dark(#d92d20, #ff6369);
+  --keyword: light-dark(#7c3aed, #c4a1ff); --string: light-dark(#15803d, #86efac);
+  --number: light-dark(#b45309, #fdba74);
   --shadow: none;
 }
-@media (prefers-color-scheme: dark) {
-  :root {
-    --page: #0a0a0a; --side: #000; --card: #111; --bubble: #1a1a1a; --line: #262626;
-    --text: #ededed; --muted: #8f8f8f; --accent: #ededed; --on-accent: #0a0a0a; --error: #ff6369;
-    --keyword: #c4a1ff; --string: #86efac; --number: #fdba74;
-    --shadow: none;
-  }
-}
+:root[data-mode="light"] { color-scheme: light; }
+:root[data-mode="dark"] { color-scheme: dark; }
 * { box-sizing: border-box; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
 html { font-size: var(--size); }
 body {
@@ -91,7 +90,7 @@ main.empty { justify-content: center; padding-bottom: 12vh; }
 main.empty header { position: absolute; top: 0; }
 main.empty #log { display: none; }
 main.empty #greeting { display: block; margin-bottom: calc(28px * var(--density)); }
-/* leat's mark, over the greeting and the gate's welcome, in the theme's text color */
+/* leat's mark, over the greeting and the gate's welcome, in the text's color */
 #greeting::before, #join h1::before {
   content: ""; display: block; width: 32px; height: 32px; margin: 0 auto 20px;
   background: currentColor; mask: url(/logo.svg) center / contain no-repeat;
@@ -328,9 +327,9 @@ body.gated #gate { display: grid; flex: 1; place-items: center; min-height: 100v
   padding: 4px 12px; border-radius: var(--round); background: var(--accent); color: var(--on-accent);
   font-size: 0.875rem;
 }
-/* the themes, each a sample of itself, and the mode they are in */
+/* the mode Leat's look is in */
 #modes {
-  display: inline-flex; gap: 2px; margin: 8px 0 16px; padding: 3px;
+  display: inline-flex; gap: 2px; margin: 8px 0; padding: 3px;
   border: 1px solid var(--line); border-radius: var(--round); background: var(--card);
 }
 #modes button {
@@ -338,40 +337,3 @@ body.gated #gate { display: grid; flex: 1; place-items: center; min-height: 100v
   font-size: 0.875rem;
 }
 #modes button.on { background: var(--bubble); color: var(--text); }
-#themes { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 16px 12px; }
-.theme { display: flex; flex-direction: column; gap: 6px; }
-.theme .name {
-  display: flex; justify-content: space-between; align-items: center; color: var(--muted);
-  font-size: 0.875rem;
-}
-.theme.chosen .name { color: var(--text); font-weight: 600; }
-.theme .name button { padding: 0 6px; color: var(--muted); }
-.theme:not(:hover) .name button { visibility: hidden; }
-/* a sample: its sizes its own, as small as it is */
-.sample {
-  display: grid; grid-template-columns: 26% 1fr; height: 96px; padding: 0; overflow: hidden;
-  border: 1px solid var(--line); border-radius: var(--round); background: var(--page);
-  color: var(--text); font: 12px/1 var(--font); text-align: left;
-}
-.theme.chosen .sample { outline: 2px solid var(--accent); outline-offset: 2px; }
-.sample .strip { background: var(--side); border-right: 1px solid var(--line); }
-.sample .chat { display: flex; flex-direction: column; gap: 5px; min-width: 0; padding: 8px; }
-.sample .hello { font: var(--display-weight) 15px/1 var(--font-display); }
-.sample .ask {
-  align-self: flex-end; width: 45%; height: 12px; border-radius: var(--round-large);
-  background: var(--bubble);
-}
-.sample .said { width: 85%; height: 4px; border-radius: 2px; background: var(--muted); opacity: 0.5; }
-.sample .said + .said { width: 60%; }
-.sample .box {
-  display: flex; justify-content: flex-end; margin-top: auto; padding: 3px;
-  border: 1px solid var(--line); border-radius: var(--round-large); background: var(--card);
-  box-shadow: var(--shadow);
-}
-.sample .send { width: 12px; height: 12px; border-radius: var(--round-large); background: var(--accent); }
-#appearance p { margin: 20px 0 8px; color: var(--muted); font-size: 0.875rem; }
-#appearance .row { display: flex; gap: 6px; }
-#appearance .row button {
-  padding: 4px 12px; font-size: 0.875rem; border: 1px solid var(--line); border-radius: var(--round);
-  background: var(--card); color: var(--text);
-}

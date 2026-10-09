@@ -7,9 +7,8 @@
 <link rel="icon" href="/logo.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/vendor/temml/Temml-Latin-Modern.css">
 <link rel="stylesheet" href="/style.css">
-<!-- the theme chosen on this device, as it was last, so that the first paint is already in it -->
-<style id="theme"></style>
-<script>document.getElementById("theme").textContent = localStorage.getItem("leat.theme.css");</script>
+<!-- the mode chosen on this device, so that the first paint is already in it -->
+<script>document.documentElement.dataset.mode = localStorage.getItem("leat.mode") ?? "system";</script>
 <script type="module" src="/app.mjs"></script>
 </head>
 <body>
@@ -52,14 +51,7 @@
   <section id="settings" class="page">
     <h1>Settings</h1>
     <h2>Appearance</h2>
-    <div id="appearance">
-      <div id="modes"></div>
-      <div id="themes"></div>
-      <p>Each device has its own. Open any of VS Code's color themes, or of shadcn/ui's as
-        tweakcn makes them; or save one as a file, change its fonts, corners and colors, and open
-        it again.</p>
-      <div class="row"><button id="save">Save this one</button><button id="open">Open a theme</button></div>
-    </div>
+    <div id="modes"></div>
     <h2>People and devices</h2>
     <div id="household"></div>
   </section>

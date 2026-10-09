@@ -38,7 +38,6 @@ _FILES = (
     "style.css",
     "app.mjs",
     "markdown.mjs",
-    "themes.mjs",
     "logo.svg",
     "vendor/temml/temml.mjs",
     "vendor/temml/Temml-Latin-Modern.css",
