@@ -159,12 +159,14 @@ function handle(event) {
   switch (event.type) {
     case "conversations":
       conversations = event.conversations;
+      for (const id of unread) if (!conversations.some((c) => c.id === id)) markRead(id); // gone
       break;
     case "conversation":
       update(event.conversation);
       break;
     case "deleted":
       conversations = conversations.filter((c) => c.id !== event.id);
+      markRead(event.id);
       if (shown?.id === event.id) open(null);
       break;
     case "message":
@@ -234,6 +236,11 @@ function update(c) {
   if (ended && shown.messages?.length) follow(() => refresh(shown.messages.length - 1));
 }
 
+// a conversation no longer unread, as this device keeps them: seen, or gone
+function markRead(id) {
+  if (unread.delete(id)) localStorage.setItem("leat.unread", JSON.stringify([...unread]));
+}
+
 // whether a conversation is the one shown, its messages here
 function showing(id) {
   return shown?.id === id && shown.messages !== null;
@@ -259,7 +266,7 @@ function grow({ index, key, at, text }) {
 // shows a conversation, or a new one, at its own address
 async function open(id, push = true) {
   if (push) history.pushState(null, "", id ? `/c/${id}` : "/");
-  if (unread.delete(id)) localStorage.setItem("leat.unread", JSON.stringify([...unread]));
+  markRead(id);
   document.body.classList.remove("menu", ...PAGES);
   const running = conversations.find((c) => c.id === id)?.running ?? false;
   // until it comes; then shown, unless another was opened since, or this one again
