@@ -164,6 +164,24 @@ def test_fetch_long(site, monkeypatch, tmp_path):
         "[a](https://x.org/b) [c](https://x.org/y/d) [e](https://f/) [g](#h)")  # fmt: skip
 
 
+def test_save_beside_other_fetches(monkeypatch, tmp_path):
+    # a page saved while another fetch, running at once, deletes a page this one lists, as its
+    # HTML read in the sandbox; the oldest pages past KEPT deleted
+    workspace = Workspace(tmp_path)
+    monkeypatch.setattr(web, "KEPT", 2)
+    names = []
+    for i in range(3):  # each older than the next
+        names.append(web._save(workspace, f"https://{i}.example/", str(i)))
+        os.utime(workspace.path(names[-1]), (1000 + i, 1000 + i))
+    folder, listed = workspace.path(web.SAVED), Path.iterdir
+    gone = folder / "gone.html"
+    monkeypatch.setattr(Path, "iterdir", lambda self: iter([*listed(self), gone]))
+    name = web._save(workspace, "https://3.example/", "3")
+    monkeypatch.undo()
+    assert sorted(p.name for p in folder.iterdir()) == sorted(
+        workspace.path(n).name for n in (names[2], name))  # fmt: skip
+
+
 def test_fetch_for_a_question(site, monkeypatch, tmp_path, engine):
     # a long page read for a question by a reader, the model in a conversation of its own, whose
     # findings the conversation takes, the page saved; a short one, or one the engine cannot

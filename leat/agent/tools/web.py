@@ -28,6 +28,7 @@ import ssl
 import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import Any
 
 from leat.agent.client import Client, EngineError
@@ -213,9 +214,18 @@ def _save(workspace: Workspace, url: str, text: str, suffix: str = ".md") -> str
     folder.mkdir(exist_ok=True)
     name = f"{SAVED}/{hashlib.sha256(url.encode()).hexdigest()[:16]}{suffix}"
     workspace.path(name).write_text(text, encoding="utf-8")
-    for old in sorted(folder.iterdir(), key=lambda p: p.stat().st_mtime)[:-KEPT]:
+    for old in sorted(folder.iterdir(), key=_changed)[:-KEPT]:
         old.unlink(missing_ok=True)
     return name
+
+
+def _changed(path: Path) -> float:
+    # when a saved page last changed; one another fetch, running at once, deleted meanwhile, as
+    # the HTML it read, the oldest
+    try:
+        return path.stat().st_mtime
+    except FileNotFoundError:
+        return 0.0
 
 
 def _connect(address: tuple[str, int], *options: Any) -> socket.socket:
