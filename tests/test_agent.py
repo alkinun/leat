@@ -395,6 +395,9 @@ def test_name(agent, engine, events):
     asked = engine.requests[-1]["messages"]
     assert asked[0]["content"] == background.NAME
     assert engine.requests[-1]["reasoning_effort"] == "none"  # the least the model takes
+    # and room for the analysis of a model that reasons all the same, as gpt-oss, which spent 24
+    # tokens on its own and named nothing
+    assert engine.requests[-1]["max_tokens"] >= 64
     said = "When should I plant tulip bulbs?\n\nAssistant: Hello there."
     assert asked[1]["content"] == f"User: {stamped(agent, id, 1)}{said}"
     assert agent.conversations()[0]["title"] == "Planting tulip bulbs"

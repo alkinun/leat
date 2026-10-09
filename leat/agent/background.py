@@ -17,6 +17,10 @@ NAME = (
     "Name the conversation below in 2 to 6 words, as a title, in its language: the name alone, "
     "without quotes or a full stop."
 )
+# tokens a name may take, its reasoning's first where the model cannot be told not to reason, as
+# gpt-oss, whose least effort spent all of 24 on its analysis, naming nothing; a model that does
+# not reason stops after the name
+NAME_TOKENS = 160
 
 
 class Background:
@@ -73,7 +77,7 @@ def name(agent: "Agent", id: str) -> None:
     said = context.transcript([m for m in messages[1:] if m["role"] != "tool"][:2])[:2000]
     body = {
         "messages": [{"role": "system", "content": NAME}, {"role": "user", "content": said}],
-        "max_tokens": 24, "temperature": 0.3, "reasoning_effort": "none",
+        "max_tokens": NAME_TOKENS, "temperature": 0.3, "reasoning_effort": "none",
     }  # fmt: skip
     lines = agent.engine.reply(body, c["person"])["content"].strip().splitlines()
     title = lines[0].strip(" \"'“”.") if lines else ""
