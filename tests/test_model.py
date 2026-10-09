@@ -576,10 +576,12 @@ def test_start_needs_a_free_slot(tiny_model):
 # flips a token's choice of experts. The top token is the noisier measure: on the 1020 positions
 # here, a change of rounding in the matrix kernels took Llama's decode path's KL from 0.00128 to
 # 0.00126 and its agreement from 98.2 to 97.9%. Qwen3.6 35B A3B, of 256 experts and recurrent
-# state, scores 0.0082 and 97.4% on both paths.
+# state, scores 0.0082 and 97.4% on both paths. Mistral Small 3.2 24B, of the llama
+# architecture, scores 0.0021 and 98.1% on the prompt's path, and 0.0025 and 98.4% on the decode
+# path, its depth adding to the noise, as the 0.0017 of 20 chunks of the README's table.
 LIMITS = {
     "llama": (0.0015, 0.975), "qwen2": (0.0045, 0.97), "qwen3": (0.0035, 0.97),
-    "qwen3moe": (0.007, 0.97), "qwen35moe": (0.01, 0.965),
+    "qwen3moe": (0.007, 0.97), "qwen35moe": (0.01, 0.965), "Mistral Small": (0.003, 0.975),
 }  # fmt: skip
 
 
@@ -587,14 +589,16 @@ LIMITS = {
 @pytest.mark.model
 @pytest.mark.parametrize("decode", [False, True], ids=["prefill", "decode"])
 def test_matches_llama_cpp(model_path, llama_cpp, wikitext, tmp_path, decode):
-    if (arch := GGUF.open(model_path).metadata["general.architecture"]) not in LIMITS:
+    metadata = GGUF.open(model_path).metadata
+    arch, name = metadata["general.architecture"], metadata.get("general.name", "")
+    if (limits := next((LIMITS[k] for k in LIMITS if k in name), LIMITS.get(arch))) is None:
         pytest.skip(f"{arch} is instruction-tuned only, and scores raw text badly")
     args = ["-m", model_path, "-f", wikitext, "-c", "512", "--chunks", "4"]
     args += ["--kl-divergence-base", base := tmp_path / "base.kld"]
     subprocess.run([llama_cpp / "llama-perplexity", *args], check=True, capture_output=True)
     engine = Engine(model_path, max_context=512)
     quality = bench.kl_divergence(engine, base, decode=decode)
-    kl, top1 = LIMITS[engine.gguf.metadata["general.architecture"]]
+    kl, top1 = limits
     assert quality.kl_mean is not None and quality.kl_mean < kl
     assert quality.top1 is not None and quality.top1 > top1
 
