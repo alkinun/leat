@@ -150,6 +150,7 @@ RTX 3090, one sequence, in tokens per second; Q4_K_M files but for gpt-oss's, MX
 | Qwen3 8B | 5296 | 4745 | 142.0 | 149.2 |
 | Qwen3 30B A3B | 4697 | 5036 | 213.1 | 233.1 |
 | Qwen3.6 35B A3B | 3516 | 3708 | 168.0 | 192.2 |
+| Qwen3.8 27B | 1434 | 1188 | 39.4 | 42.4 |
 | Gemma 3 4B it | 9795 | 8436 | 203.0 | 226.8 |
 | Gemma 3 12B it | 3463 | 2749 | 89.0 | 97.6 |
 | Gemma 4 26B A4B it | 4823 | 4919 | 158.2 | 190.6 |
@@ -171,7 +172,7 @@ Several sequences decoding at once, in tokens per second in all: `leat bench -s 
 | Gemma 4 26B A4B it | 157.9 | 190.1 | 273.3 | 310.3 | 363.0 | 443.4 |
 | gpt-oss 20B | 213.3 | 228.3 | 333.4 | 335.6 | 438.0 | 437.5 |
 
-Speculative decoding, over replies to eight chat prompts of 256 tokens each, the best of two runs, as `leat bench --chat` measures greedy ones: Qwen3.6 35B A3B with its MTP layer at 329.9 tok/s greedy against 189.0 without, 1.75x, and 283.8 against 189.2 at temperature 1; Gemma 4 26B A4B with its assistant at 294.0 against 186.5, 1.58x, and 285.9 against 185.9. Several sequences at once, in tokens per second in all, greedy: Qwen3.6 decodes 2 at 398.1 against 319.5, 1.25x, and 3 at 446.5 against 385.9, 1.16x; Gemma 4 2 at 325.1 against 294.0, 1.11x, and 3 at 373.3 against 359.7, 1.04x. A step's tokens often share experts: the mixtures' kernels read each row of an expert for all of them at about the same time, the later reads from cache, which made speculative decoding of Qwen3.6 7.8% faster.
+Speculative decoding, over replies to eight chat prompts of 256 tokens each, the best of two runs, as `leat bench --chat` measures greedy ones: Qwen3.6 35B A3B with its MTP layer at 329.9 tok/s greedy against 189.0 without, 1.75x, and 283.8 against 189.2 at temperature 1; Gemma 4 26B A4B with its assistant at 294.0 against 186.5, 1.58x, and 285.9 against 185.9; Qwen3.8 27B with the MTP layer of its `mtp-*.gguf`, Q8_0, at 96.8 tok/s greedy against 42.4, 2.28x, 3.59 tokens a step, and 56.5 against 42.3, 1.34x, sampled as its makers recommend, `presence_penalty` too, as `leat bench --chat --recommended` measures. On the 3090 it serves with its MTP layer at the defaults, 4 slots of 4096 tokens, in 23.6 GB, its replies through `leat serve` decoding at 72.8 tok/s as recommended; 16384 tokens in 4 slots leave no room for their keys and values beside its 17.7 GB of weights. Several sequences at once, in tokens per second in all, greedy: Qwen3.6 decodes 2 at 398.1 against 319.5, 1.25x, and 3 at 446.5 against 385.9, 1.16x; Gemma 4 2 at 325.1 against 294.0, 1.11x, and 3 at 373.3 against 359.7, 1.04x. A step's tokens often share experts: the mixtures' kernels read each row of an expert for all of them at about the same time, the later reads from cache, which made speculative decoding of Qwen3.6 7.8% faster.
 
 Vision encoders, an image's on the 3090, their attention FlashAttention's kernel, which makes no matrix of scores, padding hidden by a dimension past each head's: Gemma 4's takes 0.24 s for 280 embeddings, against 1.6 s in f32 off the matrix cores, Gemma 3's 0.32 s for 256, and Mistral Small 3's and Qwen3.6's 0.34 s and 0.33 s for 1024, of 4096 patches. Their embeddings in f16 are within a cosine of 0.9986 of transformers' in f32 for Gemma 4's, 0.9992 for Mistral Small 3's, 0.998 for Gemma 3's SigLIP and 0.52 for Qwen3.6's, of large activations, whose own in bf16 are within 0.777 and 0.186, and Qwen's mean cosine 0.997 against their 0.957. With Gemma 4 26B A4B, the first token after an image and 21 tokens arrives in 414 ms, and after the same prompt again in 16 ms.
 
@@ -191,6 +192,7 @@ Quality against llama.cpp on the same file: wikitext-2, chunks of 512 tokens wit
 | Qwen3 8B | 11.0321 | 11.0142 | 0.0031 | 97.3% |
 | Qwen3 30B A3B | 9.4920 | 9.5012 | 0.0043 | 97.6% |
 | Qwen3.6 35B A3B | 6.6609 | 6.6521 | 0.0069 | 96.7% |
+| Qwen3.8 27B | 6.9640 | 6.9502 | 0.0014 | 98.1% |
 | Gemma 3 4B it | 17.9125 | 17.8991 | 0.0093 | 96.2% |
 | Gemma 3 12B it | 10.1972 | 10.1917 | 0.0054 | 97.3% |
 | Phi-4-mini Instruct | 11.4617 | 11.4474 | 0.0032 | 97.2% |

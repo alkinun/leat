@@ -1,3 +1,5 @@
+import weakref
+
 import numpy as np
 import pytest
 from tinygrad import Tensor
@@ -198,6 +200,31 @@ def test_own_drafter(tiny, tiny_model, tmp_path):
     assert own_drafter(model) is None
     with pytest.raises(ValueError, match="holds no MTP layer"):
         Engine(model, max_context=CONTEXT, draft=model)
+
+
+def test_no_room_for_the_drafter(tiny, monkeypatch, capsys):
+    # a model whose own drafter the GPU has no room for loads without it, saying so, once what the
+    # try with it took is freed, as a GPU holds one model at most
+    from tests.test_server import serving
+
+    tried: list[weakref.ref] = []
+
+    class Took:  # what a try takes of the GPU
+        pass
+
+    def engine(path, draft=None, **options):
+        if draft is not None:
+            took = Took()
+            tried.append(weakref.ref(took))
+            raise MemoryError("Allocation of 1.00 GB failed")
+        assert tried and tried[0]() is None
+        return Engine(path, **options)
+
+    monkeypatch.setattr("leat.server.Engine", engine)
+    with serving(tiny("qwen35")[0], max_context=CONTEXT) as server:
+        server.load("tiny")
+        assert server.loaded.engine.drafter is None
+        assert "so it decodes without drafting" in capsys.readouterr().err
 
 
 @pytest.mark.gpu

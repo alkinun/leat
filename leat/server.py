@@ -417,20 +417,20 @@ class Server(ThreadingHTTPServer):
         # drafter first, where the GPU has no room for it too
         extras = {"draft": self.options.get("draft"), "vision": self.options.get("vision")}
         found = {"draft": own_drafter(path), "vision": beside(path)}
-        optional = [k for k, given in extras.items() if given is None and found[k] is not None]
-        extras |= {k: found[k] for k in optional}
+        optional = [(k, file) for k, file in found.items() if extras[k] is None and file]
+        extras |= dict(optional)
         while True:
             try:
                 return self._warmed(path, extras)
             except MemoryError:
                 if not optional:
                     raise
-                left = optional.pop(0)
-                gc.collect()  # what the try took, its traceback gone
-                said = "decodes without drafting" if left == "draft" else "takes no images"
-                print(f"{path.stem}: the GPU has no room for {found[left]} beside it, so it "
-                      f"{said}", file=sys.stderr, flush=True)  # fmt: skip
-                extras[left] = None
+            left, file = optional.pop(0)
+            gc.collect()  # what the try took, once its traceback is gone, past the except
+            said = "decodes without drafting" if left == "draft" else "takes no images"
+            print(f"{path.stem}: the GPU has no room for {file.name} beside it, so it {said}",
+                  file=sys.stderr, flush=True)  # fmt: skip
+            extras[left] = None
 
     def _warmed(self, path: Path, extras: dict[str, Path | None]) -> tuple[Engine, ChatTemplate]:
         engine = Engine(path, **self.options | extras)

@@ -598,9 +598,12 @@ def test_start_needs_a_free_slot(tiny_model):
 # state, scores 0.0082 and 97.4% on both paths. Mistral Small 3.2 24B, of the llama
 # architecture, scores 0.0021 and 98.1% on the prompt's path, and 0.0025 and 98.4% on the decode
 # path, its depth adding to the noise, as the 0.0017 of 20 chunks of the README's table.
+# Qwen3.8 27B, dense, of recurrent state, scores 0.0014 and 98.1% on 20 chunks of the prompt's
+# path; its decode path's scoring takes more than the 3090's 24 GB.
 LIMITS = {
     "llama": (0.0015, 0.975), "qwen2": (0.0045, 0.97), "qwen3": (0.0035, 0.97),
-    "qwen3moe": (0.007, 0.97), "qwen35moe": (0.01, 0.965), "Mistral Small": (0.003, 0.975),
+    "qwen3moe": (0.007, 0.97), "qwen35": (0.003, 0.975), "qwen35moe": (0.01, 0.965),
+    "Mistral Small": (0.003, 0.975),
 }  # fmt: skip
 
 

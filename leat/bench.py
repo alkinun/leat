@@ -18,6 +18,7 @@ from tinygrad import Tensor, TinyJit, UOp, dtypes
 
 from leat.chat import ChatTemplate
 from leat.engine import BATCH, Engine, graph
+from leat.sampler import GREEDY, Sampling
 
 
 @dataclass(frozen=True)
@@ -99,18 +100,19 @@ CHAT_CONTEXT = 256  # tokens a chat prompt takes at most, in its template
 
 @dataclass(frozen=True)
 class ChatSpeed:
-    decode: float  # tokens/s in all, of `sequences` greedy replies to CHAT_PROMPTS at once
+    decode: float  # tokens/s in all, of `sequences` replies to CHAT_PROMPTS at once
     per_step: float  # tokens a reply takes per step it decodes in: more than 1 speculatively
     sequences: int = 1
 
 
 def chat_speed(
-    engine: Engine, gen_tokens: int = 256, reps: int = 2, sequences: int = 1
+    engine: Engine, gen_tokens: int = 256, reps: int = 2, sequences: int = 1,
+    sampling: Sampling = GREEDY,
 ) -> ChatSpeed:  # fmt: skip
     """Decode speed over replies to CHAT_PROMPTS in the model's chat template, `sequences` at
-    once, each to a prompt of its own, timed while all are past their prompts: the best of
-    `reps` runs, after one that compiles the graphs. Prompts keep their last tokens where the
-    context would not hold them and the reply."""
+    once, each to a prompt of its own, sampled as `sampling` says, timed while all are past their
+    prompts: the best of `reps` runs, after one that compiles the graphs. Prompts keep their last
+    tokens where the context would not hold them and the reply."""
     template = ChatTemplate(engine.gguf.metadata, engine.tokenizer)
     room = max(engine.max_context - gen_tokens, 1)
     prompts = [
@@ -120,7 +122,13 @@ def chat_speed(
     for rep in range(reps + 1):
         engine.reset()
         started = [
-            engine.start(prompts[i % len(prompts)], gen_tokens if rep else 8, ignore_eog=True)
+            engine.start(
+                prompts[i % len(prompts)],
+                gen_tokens if rep else 8,
+                sampling,
+                seed=i,
+                ignore_eog=True,
+            )
             for i in range(sequences)
         ]
         while not all(s.tokens for s in started):

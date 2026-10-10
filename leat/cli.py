@@ -14,7 +14,7 @@ import threading
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from leat.agent.agent import Agent
 from leat.agent.client import Client
@@ -138,12 +138,17 @@ def main(argv: list[str] | None = None) -> None:
         "--draft",
         type=Path,
         help="a drafter's GGUF, for speculative decoding: Gemma 4's assistant for Gemma 4, or "
-        "for Qwen3.5's MTP layer the model's own",
+        "for Qwen3.5's MTP layer the model's own file, or the mtp-*.gguf beside it",
     )
     speed.add_argument(
         "--chat", action="store_true",
         help="decode replies to chat prompts in the model's template instead, as a drafter "
         "guesses them in use, for -n tokens each",
+    )  # fmt: skip
+    speed.add_argument(
+        "--recommended", action="store_true",
+        help="with --chat, sample the replies as the model's makers recommend, rather than "
+        "greedily",
     )  # fmt: skip
     speed.add_argument("--json", action="store_true", help="print one JSON object")
 
@@ -386,9 +391,11 @@ def _bench(args: argparse.Namespace) -> None:
     from tinygrad import Device
 
     from leat import bench
+    from leat.defaults import recommended
     from leat.engine import Engine
     from leat.gguf import GGUF
     from leat.model import Config
+    from leat.sampler import GREEDY, Sampling
 
     n = args.sequences
     context = (bench.CHAT_CONTEXT if args.chat else args.prompt) + args.generate
@@ -400,7 +407,9 @@ def _bench(args: argparse.Namespace) -> None:
     )
     name = engine.gguf.path.stem
     if args.chat:
-        chat = bench.chat_speed(engine, args.generate, args.reps, n)
+        made: dict[str, Any] = dict(recommended(engine.gguf.metadata)[0])  # the reasoning set's
+        sampling = Sampling(**made) if args.recommended else GREEDY
+        chat = bench.chat_speed(engine, args.generate, args.reps, n, sampling)
         if args.json:
             print(json.dumps({"model": name, "device": Device.DEFAULT} | asdict(chat)))
             return

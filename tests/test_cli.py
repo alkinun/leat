@@ -65,10 +65,12 @@ def test_bench_draft(tiny, tiny_assistant, capsys):
 
 
 @pytest.mark.parametrize("sequences", [1, 2])
-def test_bench_chat(tiny, tiny_assistant, capsys, sequences):
-    # replies to chat prompts, which a drafter that guesses them all takes 4 tokens a step of
+@pytest.mark.parametrize("sampled", [[], ["--recommended"]], ids=["greedy", "recommended"])
+def test_bench_chat(tiny, tiny_assistant, capsys, sequences, sampled):
+    # replies to chat prompts, greedy or sampled as the model's makers recommend, of which a
+    # drafter takes up to 4 tokens a step
     path = tiny("gemma4")[0]
-    args = ("-n", 9, "-r", 1, "-s", sequences, "--draft", tiny_assistant[0], "--chat")
+    args = ("-n", 9, "-r", 1, "-s", sequences, "--draft", tiny_assistant[0], "--chat", *sampled)
     result = run_json(capsys, "bench", path, *args)
     assert result["decode"] > 0 and 1 <= result["per_step"] <= 4
     assert result["sequences"] == sequences
