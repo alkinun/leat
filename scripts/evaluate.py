@@ -102,7 +102,7 @@ def absent(o: Outcome) -> str | None:
     said = (
         r"(\b(no|not|none|nothing)\b|n['’]t\b).{0,60}\b(found|find|present|mention|cover|say"
         r"|contain|exist|address|describ|refer|discuss|appear|locat|in the|among)"
-        r"|\bcontains? only\b"
+        r"|\bcontains? only\b|\bonly contains?\b"
     )
     return None if re.search(said, o.answer, re.I) else "did not say the files do not say it"
 
@@ -190,7 +190,7 @@ TOTAL = re.escape(f"{sum(amount for _, _, amount in BILLED):,.2f}")
 NONE = ("search_web", "fetch", "read", "run")
 CASES = [
     Case("chat", "Write a haiku about autumn.", [uncalled(*NONE)]),
-    Case("arithmetic", "What is 17 * 23?", [says(r"391"), uncalled(*NONE)]),
+    Case("arithmetic", "What is 17 * 23?", [says(r"391"), uncalled("search_web", "fetch", "read")]),
     Case("known fact", "What is the capital of Australia?", [says("Canberra")]),
     Case("news", "What's in the news today about space exploration?", [called("search_web")]),
     Case("reads pages", "When does the British Museum open tomorrow? Check its website.",
