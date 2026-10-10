@@ -1,7 +1,7 @@
 """Spreadsheets of the workspace's: tables read, of a CSV or an Excel workbook's first sheet, and
 tables written as a workbook of sheets, each in the sandbox, with its libraries, as every document
-is. A CSV is read whatever it is separated by, of UTF-8 or of Windows' Turkish, as offices' banks
-write them.
+is. A CSV is read whatever it is separated by, of UTF-8 or of Windows' Western European, as German
+banks write them.
 """
 
 from typing import Any
@@ -15,7 +15,7 @@ import csv, datetime, json, sys
 path = sys.argv[2]
 if path.lower().endswith((".csv", ".tsv", ".txt")):
     data = open(path, "rb").read()
-    for encoding in ("utf-8-sig", "cp1254"):
+    for encoding in ("utf-8-sig", "cp1252"):
         try:
             text = data.decode(encoding)
             break

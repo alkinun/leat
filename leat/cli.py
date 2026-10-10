@@ -23,7 +23,7 @@ from leat.agent.index import Index
 from leat.agent.ocr import Transcriber
 from leat.agent.server import Server as AgentServer
 from leat.agent.store import Store
-from leat.agent.tools import ask, files, office, web
+from leat.agent.tools import ask, files, office, reconcile, web
 from leat.agent.workspace import Workspace
 from leat.defaults import Overrides
 from leat.keys import Keys
@@ -193,7 +193,7 @@ def _agent(args: argparse.Namespace) -> None:
     index = Index(args.data / "index.db", workspace, Transcriber(engine), Embedder(engine))
     tools = [
         *web.tools(args.search, engine), *files.tools(index), *ask.tools(engine, index),
-        *office.tools(engine),
+        *office.tools(engine), *reconcile.tools(),
     ]  # fmt: skip
     agent = Agent(Store(args.data / "leat.db"), engine, tools, workspace, index)
     agent.start()
@@ -327,7 +327,9 @@ def _serve(args: argparse.Namespace) -> None:
             sampling.of("")
         except (OSError, ValueError) as e:
             raise SystemExit(f"the sampling at {args.sampling} cannot be read: {e}") from e
-    with Server(models, args.host, args.port, keys, sampling, args.embed, **options) as server:
+    with Server(
+        models, args.host, args.port, keys, sampling, embed=args.embed, **options
+    ) as server:
         # served at once, the model loading meanwhile, so that a client asking while it compiles
         # hears it is loading, its completions waiting for it, rather than no answer
         url, name = _url(args.host, server.server_port), models[0].stem
