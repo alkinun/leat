@@ -55,6 +55,7 @@ class Accounts:
             if not self.empty():
                 raise ValueError("this Leat has its owner already: ask to join")
             person = self.store.add_person(name)
+            self.agent.settle()  # the files that were no one's, now the owner's
             return self._pair(person["id"], device)
 
     def device(self, secret: str | None) -> dict[str, Any] | None:
@@ -135,6 +136,8 @@ class Accounts:
             if project["person"] == id and not project["shared"]:
                 self.agent.delete_project(project["id"], id)
         self.store.remove_person(id)
+        if self.agent.workspace is not None:  # and their own files
+            self.agent.space(None, id).remove()
         self.agent.projects_changed()  # those they shared, now the owner's
         self._publish()
 

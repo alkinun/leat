@@ -1,6 +1,10 @@
 """The workspace: the user's files, which they upload and the agent makes, and Python run among them
 in a sandbox.
 
+The workspace is the box's, and holds spaces, each a workspace of its own: a person's own files, at
+people/<id>, and each project's, at projects/<id>. A conversation's tools work in its space alone,
+whose folder alone its sandbox sees.
+
 The sandbox is bubblewrap's: the code sees /usr, the sandbox's environment of libraries, which it
 cannot change, and the workspace, at /workspace; no network, no other file of the box's, and a
 memory and a time it may not pass. Files of the kinds whose reading parses them, as PDFs, are read
@@ -45,6 +49,15 @@ class Workspace:
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.environment = environment.resolve() if environment else None
+
+    def space(self, name: str) -> "Workspace":
+        """The workspace of a folder of this one's, as one of its own, whose code runs with the
+        same libraries: a person's files, or a project's."""
+        return Workspace(self.path(name), self.environment)
+
+    def remove(self) -> None:
+        """Deletes the workspace's folder, with every file in it."""
+        shutil.rmtree(self.root, ignore_errors=True)
 
     def path(self, name: str) -> Path:
         """The path of a file in the workspace, named relative to it. Raises ValueError for a

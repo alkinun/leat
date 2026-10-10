@@ -85,7 +85,8 @@ elif kind == "pptx":
 """
 
 
-def tools(workspace: Workspace) -> list[Tool]:
+def tools() -> list[Tool]:
+    """read, write, edit and run, each in its call's conversation's workspace."""
     start = {"type": "integer", "description": "the character to read from, in a long file"}
     path = {"type": "string", "description": "the file's path in the workspace, as 'notes.txt'"}
     reading = {"type": "object", "properties": {"path": path, "start": start}, "required": ["path"]}
@@ -95,13 +96,13 @@ def tools(workspace: Workspace) -> list[Tool]:
             "Read a file in the workspace as text, a PDF or a Word, Excel or PowerPoint file too, "
             "or list a folder's files, '.' the workspace's",
             reading,
-            lambda context, path, start=0: read(workspace, path, start),
+            lambda context, path, start=0: read(context.space(), path, start),
         ),
         Tool(
             "write",
             "Write a text file in the workspace, in place of any of its name",
             strings(path="the file's path in the workspace", content="the text"),
-            lambda context, path, content: write(workspace, path, content),
+            lambda context, path, content: write(context.space(), path, content),
         ),
         Tool(
             "edit",
@@ -111,14 +112,14 @@ def tools(workspace: Workspace) -> list[Tool]:
                 old="the passage, as it is in the file",
                 new="what replaces it",
             ),  # fmt: skip
-            lambda context, path, old, new: edit(workspace, path, old, new),
+            lambda context, path, old, new: edit(context.space(), path, old, new),
         ),
         Tool(
             "run",
             "Run Python code in the workspace, in a sandbox without the network: what it prints, "
             "and the files it makes or changes",
             strings(code=f"Python 3; its libraries are {LIBRARIES}"),
-            lambda context, code: run(workspace, code),
+            lambda context, code: run(context.space(), code),
         ),
     ]
 

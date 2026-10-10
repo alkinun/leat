@@ -146,16 +146,17 @@ def _run(case: Case, args: argparse.Namespace) -> Outcome:
         environment = args.sandbox if args.sandbox.exists() else None
         workspace = Workspace(Path(data) / "workspace", environment)
         engine = Client(args.engine, os.environ.get("LEAT_ENGINE_KEY"))
-        tools = [*web.tools(args.search, workspace, engine), *files.tools(workspace)]
+        tools = [*web.tools(args.search, engine), *files.tools()]
         agent = Agent(Store(Path(data) / "leat.db"), engine, tools, workspace)
+        space = agent.space()  # no one's own, as the conversation is
         for name, text in case.files.items():
-            workspace.path(name).write_text(text)
+            space.path(name).write_text(text)
         start = time.monotonic()
         messages = _wait(agent, agent.send(None, case.message, args.effort, list(case.files)))
         seconds = time.monotonic() - start
         tools_called = [m["name"] for m in messages if m["role"] == "tool"]
         answer = messages[-1]["content"] if messages and messages[-1]["role"] == "assistant" else ""
-        names = [f["name"] for f in workspace.files()]
+        names = [f["name"] for f in space.files()]
         infos = [m["info"] for m in messages if m["role"] == "assistant" and "read" in m["info"]]
         held, read = sum(i["cached"] or 0 for i in infos), sum(i["read"] for i in infos)
         share = held / (held + read) if held + read else 0.0

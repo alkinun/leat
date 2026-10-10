@@ -7,8 +7,8 @@ from the app's own page, or from no browser, not from another site's page.
 
 Every request but for the app's own files, the box's setup and a device's request to join comes
 from a device paired to one of the box's people, by the secret its cookie holds. A person sees and
-changes their own conversations, their own projects and those shared, and the files, everyone's;
-the owner alone the box's people and devices, and the engine's model.
+changes their own conversations and files, and their own projects and those shared, with their
+files; the owner alone the box's people and devices, and the engine's model.
 """
 
 import contextlib
@@ -29,11 +29,12 @@ from typing import Any
 from leat.agent.accounts import Accounts
 from leat.agent.agent import Agent, Busy, NotFound, Refused
 from leat.agent.client import EngineError
+from leat.agent.workspace import Workspace
 from leat.chat import EFFORTS
 
 APP = Path(__file__).parent / "app"
 # the app's files, each served at its path in app/, and their types; the app's pages, /c/<id> one
-# conversation's, /files and /settings, are index.html
+# conversation's, /projects/<id> one project's, /projects, /files and /settings, are index.html
 _FILES = (
     "index.html",
     "style.css",
@@ -45,7 +46,7 @@ _FILES = (
     "vendor/temml/Temml.woff2",
     "vendor/temml/latinmodernmath.woff2",
 )
-_PAGES = ("/", "/files", "/settings")
+_PAGES = ("/", "/projects", "/files", "/settings")
 _TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
@@ -63,15 +64,17 @@ _YEARS = 10 * 365 * 86400  # seconds a device keeps its cookie: till it is unpai
 # the types of the workspace's files a browser shows in the page; it downloads the others, as a page
 # the model wrote might act as the app's own
 _SHOWN = {"image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf", "text/plain"}
-# /api/conversations/<id>, and what to do there; a project's; a request to join's and
-# what to do with it, a device's and a person's; a file's name, of
-# /files/<name> to download it and of /api/files/<name> to upload or delete it
+# /api/conversations/<id>, and what to do there; a project's, and its page; a request to join's and
+# what to do with it, a device's and a person's; a file's project, if one, and name, of
+# [/projects/<id>]/files/<name> to download it and of /api[/projects/<id>]/files/<name> to upload
+# or delete it
 _CONVERSATION = re.compile(r"/api/conversations/([0-9a-f]{12})(/messages|/stop)?")
 _PROJECT = re.compile(r"/api/projects/([0-9a-f]{12})")
+_PROJECT_PAGE = re.compile(r"/projects/[0-9a-f]{12}")
 _REQUEST = re.compile(r"/api/pairings/([0-9a-f]{16})(/allow)?")
 _DEVICE = re.compile(r"/api/devices/([0-9]+)")
 _PERSON = re.compile(r"/api/people/([0-9]+)")
-_FILE = re.compile(r"/(?:api/)?files/(.+)")
+_FILE = re.compile(r"/(?:api/)?(?:projects/([0-9a-f]{12})/)?files/(.+)")
 
 
 class Server(ThreadingHTTPServer):
@@ -105,7 +108,7 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._trusted():
             return self._error(403, "this server answers its own network's requests alone")
         path, agent = urllib.parse.urlsplit(self.path).path, self.server.agent
-        if path in _PAGES or path.startswith("/c/"):
+        if path in _PAGES or path.startswith("/c/") or _PROJECT_PAGE.fullmatch(path):
             path = "/index.html"
         if path[1:] in _FILES:
             file = APP / path[1:]
@@ -118,8 +121,9 @@ class _Handler(BaseHTTPRequestHandler):
                 )
             elif path == "/api/events":
                 self._events(me)
-            elif path.startswith("/files/") and (match := _FILE.fullmatch(path)):
-                self._download(urllib.parse.unquote(match[1]))
+            elif not path.startswith("/api/") and (match := _FILE.fullmatch(path)):
+                space = agent.space(match[1], me["person"])
+                self._download(space, urllib.parse.unquote(match[2]))
             elif (match := _CONVERSATION.fullmatch(path)) and not match[2]:
                 if (conversation := agent.conversation(match[1], me["person"])) is None:
                     raise NotFound(f"there is no conversation {match[1]}")
@@ -188,9 +192,9 @@ class _Handler(BaseHTTPRequestHandler):
                 agent.delete(match[1], person)
             elif match := _PROJECT.fullmatch(path):
                 agent.delete_project(match[1], person)
-            elif path.startswith("/api/files/") and agent.workspace is not None:
-                agent.workspace.delete(urllib.parse.unquote(path.removeprefix("/api/files/")))
-                agent.files_changed()
+            elif path.startswith("/api/") and (match := _FILE.fullmatch(path)):
+                agent.space(match[1], person).delete(urllib.parse.unquote(match[2]))
+                agent.files_changed(match[1], person)
             elif match := _DEVICE.fullmatch(path):  # the owner's, or a device unpairing itself
                 if int(match[1]) != me["id"]:
                     _owner(me)
@@ -223,19 +227,21 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(200, {})
 
     def do_PUT(self) -> None:
-        # a file uploaded to the workspace, by a name of its own: its answer says the one it got
+        # a file uploaded to a person's own files, or a project's, by a name of its own: its answer
+        # says the one it got
         if not self._trusted(write=True):
             return self._error(403, "requests from other sites' pages are refused")
         path, agent = urllib.parse.urlsplit(self.path).path, self.server.agent
         with self._answering():
-            self._device()
-            if not path.startswith("/api/files/") or agent.workspace is None:
+            person = self._device()["person"]
+            if not path.startswith("/api/") or not (match := _FILE.fullmatch(path)):
                 return self._error(404, f"there is no PUT {path}")
+            space = agent.space(match[1], person)
             if (size := self._length()) > UPLOAD:
                 return self._error(413, f"a file may be {UPLOAD >> 20} MB at most")
-            name = agent.workspace.free(urllib.parse.unquote(path.removeprefix("/api/files/")))
-            agent.workspace.path(name).write_bytes(self.rfile.read(size))
-            agent.files_changed()
+            name = space.free(urllib.parse.unquote(match[2]))
+            space.path(name).write_bytes(self.rfile.read(size))
+            agent.files_changed(match[1], person)
             self._json(200, {"name": name})
 
     @contextlib.contextmanager
@@ -285,12 +291,11 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(202, {})
         self._json(200, {}, secret)
 
-    def _download(self, name: str) -> None:
-        # a file of the workspace's, shown in the page if it is of a kind that cannot act there,
-        # as the content security policy's sandbox has every one
-        workspace = self.server.agent.workspace
+    def _download(self, space: Workspace, name: str) -> None:
+        # a file of a space's, shown in the page if it is of a kind that cannot act there, as the
+        # content security policy's sandbox has every one
         try:
-            file = workspace.path(name) if workspace else None
+            file = space.path(name)
         except ValueError:
             file = None
         if file is None or not file.is_file():
@@ -318,8 +323,10 @@ class _Handler(BaseHTTPRequestHandler):
         agent, person = self.server.agent, me["person"]
         with agent.events.watch() as events, contextlib.suppress(OSError):
             self._event({"type": "conversations", "conversations": agent.conversations(person)})
-            self._event({"type": "projects", "projects": agent.projects(person)})
-            self._event(agent.files_event())
+            projects = agent.projects(person)
+            self._event({"type": "projects", "projects": projects})
+            for project in [None, *(p["id"] for p in projects)]:
+                self._event(agent.files_event(project, person))
             if me["owner"]:
                 self._event(self.server.accounts.state())
             self._event(agent.models_event())

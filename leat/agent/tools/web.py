@@ -78,12 +78,10 @@ that answers it: the facts, numbers, names and dates, briefly, quoting what matt
 word. If the page does not answer it, say so in a line. Add nothing the page does not say."""
 
 
-def tools(
-    searxng: str, workspace: Workspace | None = None, reader: Client | None = None
-) -> list[Tool]:
+def tools(searxng: str, reader: Client | None = None) -> list[Tool]:
     """search, through the SearXNG at `searxng`, and fetch, which reads pages in the sandbox of
-    `workspace`, and saves them there, if given, and reads them for a question by the model
-    `reader` serves, if given."""
+    its call's conversation's workspace, and saves them there, if it has one, and reads them for
+    a question by the model `reader` serves, if given."""
     return [
         Tool(
             "search",
@@ -102,7 +100,9 @@ def tools(
                     "itself, for one the user asked you to read",
                 ),
             ),  # fmt: skip
-            lambda context, url, question=None: fetch(url, workspace, context, question, reader),
+            lambda context, url, question=None: fetch(
+                url, context.workspace, context, question, reader
+            ),
         ),
     ]
 

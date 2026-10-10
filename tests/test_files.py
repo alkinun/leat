@@ -199,15 +199,16 @@ def agent(workspace, tmp_path) -> Agent:
 
 
 def test_attached(agent, workspace):
-    # the files attached to a message, named for the model, which must be in the workspace
-    files.write(workspace, "plan.md", "Buy milk.")
+    # the files attached to a message, named for the model, which must be in its space
+    files.write(agent.space(), "plan.md", "Buy milk.")
     with pytest.raises(NotFound):
         agent.send(None, "Read it", attached=["nothing.md"])
     message = {"role": "user", "content": "Read it", "info": {"files": ["plan.md"]}}
     assert _api(message)["content"] == "Read it\n\n(Attached, in the workspace: plan.md)"
     with agent.events.watch() as events:
         agent.files_changed()
-        assert events.get(timeout=1)["files"][0]["name"] == "plan.md"
+        event = events.get(timeout=1)
+        assert event["files"][0]["name"] == "plan.md" and event["to"] is None
         agent.files_changed()  # unchanged: nothing
         assert events.empty()
 
@@ -218,8 +219,8 @@ def test_images_seen(engine, workspace, tmp_path, vision):
     # text, if it sees images; if not, the user's are named, and a tool's said to be unseen
     engine.vision = vision
     store = Store(tmp_path / "leat.db")
-    agent = Agent(store, Client(engine.url), files.tools(workspace), workspace)
-    (workspace.root / "cat.png").write_bytes(b"\x89PNG cat")
+    agent = Agent(store, Client(engine.url), files.tools(), workspace)
+    (agent.space().root / "cat.png").write_bytes(b"\x89PNG cat")
     engine.replies.put([{"tool_calls": [calling("read", {"path": "cat.png"})]}])
     engine.replies.put([{"content": "A cat."}])
     with agent.events.watch() as events:
@@ -260,8 +261,9 @@ def call(url: str, method: str = "GET", data: bytes | None = None):
         return e.code, e.headers, e.read()
 
 
-def test_api_files(server, workspace, monkeypatch):
-    # uploads, by a free name, downloads, which a page cannot act in, and deletes
+def test_api_files(server, agent, monkeypatch):
+    # uploads to the person's own files, by a free name, downloads, which a page cannot act in,
+    # and deletes
     status, _, body = call(f"{server}/api/files/My%20notes.txt", "PUT", b"Buy milk.")
     assert status == 200 and json.loads(body) == {"name": "My notes.txt"}
     assert json.loads(call(f"{server}/api/files/My%20notes.txt", "PUT", b"x")[2])["name"] == (
@@ -270,7 +272,8 @@ def test_api_files(server, workspace, monkeypatch):
     assert status == 200 and body == b"Buy milk."
     assert headers["Content-Security-Policy"] == "sandbox"
     assert headers["Content-Disposition"] == "inline; filename*=UTF-8''My%20notes.txt"
-    files.write(workspace, "page.html", "<script>fetch('/api/events')</script>")
+    assert agent.space(None, 1).path("My notes.txt").read_bytes() == b"Buy milk."
+    files.write(agent.space(None, 1), "page.html", "<script>fetch('/api/events')</script>")
     assert call(f"{server}/files/page.html")[1]["Content-Disposition"].startswith("attachment")
     for path in ("/files/..%2Fleat.db", "/files/nothing.txt"):
         assert call(f"{server}{path}")[0] == 404
@@ -286,7 +289,79 @@ def test_api_files(server, workspace, monkeypatch):
     chunked.add_unredirected_header("Transfer-Encoding", "chunked")
     with pytest.raises(urllib.error.HTTPError, match="400"):
         urllib.request.urlopen(chunked)
-    assert not workspace.path("c.txt").exists()
+    assert not agent.space(None, 1).path("c.txt").exists()
     monkeypatch.setattr("leat.agent.server.UPLOAD", 4)
     assert call(f"{server}/api/files/big.bin", "PUT", b"12345")[0] == 413
     assert call(f"{server}/files")[0] == 200  # the app's page of them
+
+
+def test_spaces(agent, workspace, engine, tmp_path):
+    # each person's own files, and each project's, apart: a conversation's tools work in its
+    # space alone, and a person reaches the spaces they see alone
+    owner, ada = agent.store.add_person("Alkın")["id"], agent.store.add_person("Ada")["id"]
+    project = agent.add_project("Yılmaz Ltd", owner)["id"]
+    files.write(agent.space(None, owner), "mine.txt", "mine")
+    files.write(agent.space(project, owner), "contract.txt", "the contract")
+    assert agent.space(None, owner).root == workspace.root / "people" / str(owner)
+    assert agent.space(project, owner).root == workspace.root / "projects" / project
+    with pytest.raises(NotFound):
+        agent.space(project, ada)
+    with pytest.raises(NotFound):
+        agent.send(None, "Read it", attached=["mine.txt"], person=owner, project=project)
+    store = agent.store
+    agent = Agent(store, Client(engine.url), files.tools(), workspace)
+    engine.replies.put([{"tool_calls": [calling("read", {"path": "contract.txt"})]}])
+    engine.replies.put([{"content": "Read."}])
+    with agent.events.watch() as events:
+        id = agent.send(None, "Read it", attached=["contract.txt"], person=owner, project=project)
+        until(events, ended)
+    assert store.messages(id)[-2]["content"] == "the contract"
+    # deleted, a project takes its files
+    agent.delete_project(project, owner)
+    assert not (workspace.root / "projects" / project).exists()
+
+
+def test_settled(tmp_path):
+    # the files of the workspace before it had spaces, and those of no one's, become the owner's
+    workspace = Workspace(tmp_path / "workspace")
+    (workspace.root / "old.txt").write_text("old")
+    (workspace.root / ".web").mkdir()
+    store = Store(tmp_path / "leat.db")
+    agent = Agent(store, Client("http://127.0.0.1:9"), [], workspace)
+    assert [f["name"] for f in agent.space().files()] == ["old.txt"]
+    assert (workspace.root / "people" / "0" / ".web").is_dir()
+    owner = store.add_person("Alkın")["id"]
+    (workspace.root / "people" / str(owner)).mkdir(parents=True)
+    (workspace.root / "people" / str(owner) / "old.txt").write_text("kept")
+    agent.settle()
+    assert sorted(f["name"] for f in agent.space(None, owner).files()) == ["old (2).txt", "old.txt"]
+    assert not any((workspace.root / "people" / "0").iterdir())
+
+
+def test_api_project_files(server, agent):
+    # a project's files, uploaded, downloaded and deleted by those who see it alone
+    project = agent.add_project("Payroll", 1)["id"]
+    base = f"{server}/api/projects/{project}/files"
+    assert json.loads(call(f"{base}/March.xlsx", "PUT", b"cells")[2])["name"] == "March.xlsx"
+    assert agent.space(project, 1).path("March.xlsx").read_bytes() == b"cells"
+    assert call(f"{server}/projects/{project}/files/March.xlsx")[2] == b"cells"
+    assert call(f"{server}/files/March.xlsx")[0] == 404  # not the person's own
+    assert call(f"{server}/projects/{project}")[0] == 200  # the app's page of it
+    ada = agent.store.add_person("Ada")["id"]
+    other = agent.add_project("Hers", ada)["id"]
+    for method, url in [("PUT", f"{server}/api/projects/{other}/files/x.txt"),
+                        ("GET", f"{server}/projects/{other}/files/x.txt"),
+                        ("DELETE", f"{server}/api/projects/{other}/files/x.txt")]:  # fmt: skip
+        assert call(url, method, b"x" if method == "PUT" else None)[0] == 404
+    assert call(f"{base}/March.xlsx", "DELETE")[0] == 200
+    assert agent.space(project, 1).files() == []
+
+
+@sandboxed
+def test_sandbox_sees_its_space(agent):
+    # code a conversation runs sees its space's files, and no other's
+    project = agent.add_project("Payroll")["id"]
+    files.write(agent.space(), "mine.txt", "mine")
+    files.write(agent.space(project), "theirs.txt", "theirs")
+    ran = files.run(agent.space(project), "import os; print(sorted(os.listdir('.')))")
+    assert ran.content.startswith("['theirs.txt']")

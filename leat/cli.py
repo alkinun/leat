@@ -181,7 +181,7 @@ def _agent(args: argparse.Namespace) -> None:
     environment = args.data / "sandbox"
     workspace = Workspace(args.data / "workspace", environment if environment.exists() else None)
     engine = Client(args.engine, os.environ.get("LEAT_ENGINE_KEY"))
-    tools = [*web.tools(args.search, workspace, engine), *files.tools(workspace)]
+    tools = [*web.tools(args.search, engine), *files.tools()]
     agent = Agent(Store(args.data / "leat.db"), engine, tools, workspace)
     agent.start()
     with AgentServer(agent, args.host, args.port) as server:

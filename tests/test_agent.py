@@ -1015,7 +1015,7 @@ def test_events(server, agent, engine):
 
     assert event() == {"type": "conversations", "conversations": []}
     assert event() == {"type": "projects", "projects": []}
-    assert event() == {"type": "files", "files": []}
+    assert event() == {"type": "files", "project": None, "files": []}
     assert event()["type"] == "accounts"  # the owner's
     assert event()["type"] == "models"
     engine.replies.put(REPLY)
