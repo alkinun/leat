@@ -325,7 +325,7 @@ def test_bad_calls(agent, engine, events):
     id = agent.send(None, "Hi")
     until(events, ended)
     answers = [m["content"] for m in agent.store.messages(id) if m["role"] == "tool"]
-    assert answers[0] == "error: there is no tool 'nothing'"
+    assert answers[0] == "error: there is no tool 'nothing'; the tools are echo"
     assert answers[1] == "error: the arguments must be a JSON object, not '{not JSON'"
     assert answers[2] == "error: the arguments must be a JSON object, not [1]"
     assert answers[3].startswith("error: ") and "'words'" in answers[3]

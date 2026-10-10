@@ -237,7 +237,10 @@ _PARAMETER = re.compile(r"<parameter=([^>\s]+)>\n?(.*?)\n?</parameter>\s*", re.S
 
 def parse_tool_calls(reply: str, tools: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
     """The text of a reply before its calls to `tools`, and those calls, each {"name": ...,
-    "arguments": {...}}; or the whole reply and no calls, if one is malformed or names no tool.
+    "arguments": {...}}; or the whole reply and no calls, if one is malformed. A call between a
+    call's markers is one whatever tool it names, so that a client answers one of a tool it lacks,
+    as a model trained in another harness calls its tools, by saying so, and the model calls
+    another; a reply of JSON alone calls a tool of `tools` alone, as it may be an answer.
 
     Llama 3 calls a tool by replying with nothing but {"name": ..., "parameters": {...}}, Qwen
     with <tool_call>{"name": ..., "arguments": {...}}</tool_call> after any text, Qwen3.5 with
@@ -250,9 +253,9 @@ def parse_tool_calls(reply: str, tools: list[dict[str, Any]]) -> tuple[str, list
         call = _json_call(reply, functions)
         return ("", [call]) if call else (reply, [])
     calls = [
-        (_json_call(b[1], functions) or _xml_call(b[1], functions))
+        (_json_call(b[1]) or _xml_call(b[1], functions))
         if b[1] is not None
-        else _gemma_call(b[2], b[3], functions)
+        else _gemma_call(b[2], b[3])
         for b in blocks
     ]
     if any(call is None for call in calls):
@@ -271,26 +274,29 @@ def tool_call_start(text: str) -> int:
     return len(text[: len(text) - max(partial, default=0)].rstrip())
 
 
-def _json_call(text: str, names: Container[str]) -> dict[str, Any] | None:
+def _json_call(text: str, names: Container[str] | None = None) -> dict[str, Any] | None:
+    # a call of JSON, of a tool of `names` if given, else of any
     try:
         call = json.loads(text)
     except (ValueError, RecursionError):  # not JSON, or nested too deep for Python's parser
         return None
     name = call.get("name") if isinstance(call, dict) else None
-    if not isinstance(name, str) or name not in names:
+    if not isinstance(name, str) or names is not None and name not in names:
         return None
     arguments = call.get("parameters", call.get("arguments"))
     return {"name": call["name"], "arguments": arguments} if isinstance(arguments, dict) else None
 
 
 def _xml_call(text: str, functions: dict[str, Any]) -> dict[str, Any] | None:
-    if not (match := _FUNCTION.fullmatch(text)) or match[1] not in functions:
+    # a call of Qwen3.5's, its values typed as its tool's schema has them, if it is one of
+    # `functions`
+    if not (match := _FUNCTION.fullmatch(text)):
         return None
     if _PARAMETER.sub("", match[2]).strip():  # anything but parameters
         return None
     arguments: dict[str, Any] = {}
     for key, value in _PARAMETER.findall(match[2]):
-        kind = _schema(functions[match[1]], "parameters", "properties", key, "type")
+        kind = _schema(functions.get(match[1]), "parameters", "properties", key, "type")
         types = {kind} if isinstance(kind, str) else set(kind) if isinstance(kind, list) else set()
         arguments[key] = _typed(value, types)
     return {"name": match[1], "arguments": arguments}
@@ -321,12 +327,12 @@ def _schema(value: Any, *keys: str) -> Any:
     return value
 
 
-def _gemma_call(name: str, text: str, names: Container[str]) -> dict[str, Any] | None:
+def _gemma_call(name: str, text: str) -> dict[str, Any] | None:
     try:
         arguments, end = _gemma_value(text, 0)
     except (ValueError, IndexError, RecursionError):
         return None
-    called = name in names and end == len(text) and isinstance(arguments, dict)
+    called = end == len(text) and isinstance(arguments, dict)
     return {"name": name, "arguments": arguments} if called else None
 
 

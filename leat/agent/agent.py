@@ -944,8 +944,9 @@ class _Turn:
         # runs a call's tool, and puts its answer in its message, unless the turn stopped first
         a = self.agent
         try:
-            if (tool := self.tools.get(message["name"])) is None:
-                raise ValueError(f"there is no tool {message['name']!r}")
+            if (tool := self.tools.get(message["name"])) is None:  # as of another harness's
+                raise ValueError(f"there is no tool {message['name']!r}; the tools are "
+                                 f"{', '.join(self.tools)}")  # fmt: skip
             called = arguments(message["info"]["arguments"])
             progress = functools.partial(self._progress, message, index)
             context = Context(

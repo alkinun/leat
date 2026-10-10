@@ -280,7 +280,6 @@ def test_tool_call_parameters():
         '{"name": "news", "parameters": {}}',
         '{"name": "weather"}',
         '<tool_call>{"name": "weather", "arguments": {}</tool_call>',
-        "<|tool_call>call:news{}<tool_call|>",
         "<tool_call>\n<function=weather>\nParis\n</function>\n</tool_call>",
         "<|tool_call>call:weather{city:Paris}<tool_call|>",
         # what is no call however malformed, nested too deep to parse even
@@ -291,6 +290,20 @@ def test_tool_call_parameters():
 )
 def test_text_is_not_a_tool_call(reply):
     assert parse_tool_calls(reply, WEATHER) == (reply, [])
+
+
+def test_call_of_a_tool_not_declared():
+    # a call between a call's markers is one whatever tool it names, as a model trained in
+    # another harness calls its own, for the client to say there is none; JSON alone is not
+    replies = [
+        '<tool_call>{"name": "list", "arguments": {"path": "."}}</tool_call>',
+        "<tool_call>\n<function=list>\n<parameter=path>\n.\n</parameter>\n</function>\n</tool_call>",
+        "<|tool_call>call:list{path:<|\"|>.<|\"|>}<tool_call|>",
+    ]  # fmt: skip
+    listed = {"name": "list", "arguments": {"path": "."}}
+    for reply in replies:
+        assert parse_tool_calls(reply, WEATHER) == ("", [listed])
+    assert parse_tool_calls('{"name": "list", "arguments": {}}', WEATHER)[1] == []
 
 
 def test_tool_call_start():
