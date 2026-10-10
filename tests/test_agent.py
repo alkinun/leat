@@ -166,7 +166,7 @@ def test_turn(agent, engine, events):
     messages = agent.store.messages(id)
     system, user, reply = messages
     assert system["role"] == "system"
-    assert "Each of the user's messages begins with the date and time" in system["content"]
+    assert "Each of the user's messages starts with the date and time" in system["content"]
     assert (reply["reasoning_content"], reply["content"]) == ("Hmm.", "Hello there.")
     info = reply["info"]
     assert info["model"] == "fake" and info["tokens"] == 5 and info["rate"] == pytest.approx(40.0)
@@ -382,8 +382,10 @@ def test_projects(agent, engine, events):
     mine = agent.send(None, "Hi", person=me, project=project["id"])
     until(events, ended)
     system = agent.store.messages(mine)[0]["content"]
-    assert system.endswith('in the project "Yılmaz Ltd". Its instructions, which hold for every '
-                           "conversation in it:\n\nAnswer in German.\n\n")  # fmt: skip
+    assert system.endswith(
+        'in the project "Yılmaz Ltd". Follow its instructions, which hold for '
+        "every conversation in it:\n\nAnswer in German."
+    )
     assert agent.conversations(me)[0]["project"] == project["id"]
     # shared, it is everyone's to see and change, but not to unshare, nor to delete
     with pytest.raises(NotFound):

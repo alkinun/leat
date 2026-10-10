@@ -1,6 +1,6 @@
 ---
 name: pptx
-description: PowerPoint slides, as presentations and decks
+description: PowerPoint slides, such as presentations and decks
 ---
 # PowerPoint slides
 

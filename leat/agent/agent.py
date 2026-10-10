@@ -38,60 +38,64 @@ from leat.agent.sync import SYNC, mirror
 from leat.agent.tools import Context, Result, Tool, arguments, files, numbered
 from leat.agent.workspace import Workspace
 
-# the system prompt, fixed when a conversation starts so that every prompt after extends the last
+# the system prompt, fixed when a conversation starts so that every prompt after extends the last:
+# who Leat is, then a section of each of what it has, as the conversation has it
 SYSTEM = """\
-You are Leat, an assistant that runs on a computer of the user's own, which keeps what they say \
-and the files they share private.{named} Each of the user's messages begins with the date and time \
-they sent it.
-
-{sources}
-{workspace}"""
+You are Leat, an assistant that runs on the user's own computer: what they say and the files they \
+share stay on it.{named} Each of the user's messages starts with the date and time they sent it."""
 # of the system prompt, when the agent searches the web
 WEB = """\
-When a question needs facts you may not know, or that may have changed since you learned them, \
-call search, then fetch the few pages most likely to answer, three or so, at once, each with the \
-question you want it to answer, more only if they fall short. When the user asks you to research \
-something, search it in several ways and read the pages that matter, ten or so, before you answer \
-with a report: what you found, in sections, and what stays unsure."""
+## The web
+- When a question needs facts you may not know, or that may have changed, call search, then fetch \
+the two or three pages most likely to answer, at once, each with the question it should answer. \
+Fetch more only if they fall short.
+- When the user asks you to research something, search in several ways, read the pages that \
+matter, ten or so, and answer with a report in sections that ends with what stays unsure."""
 # and when it is kept from the internet
 OFFLINE = """\
-This Leat is kept from the internet: answer from what you know and the user's files, and say so \
-when a question needs what you cannot reach, as today's news."""
-CITE = """Cite what you use by the numbers the tools give their sources, as [1] or [2][3], after \
-the words they support."""
+## The web
+This Leat has no internet: answer from what you know and the user's files, and say so when a \
+question needs what you cannot reach, as today's news."""
 WEB_TOOLS = ("search", "fetch")  # the tools that reach the internet, which offline takes away
 # of the system prompt, when the agent has a workspace
-WORKSPACE = """
-The user's files are in a workspace, where you read, write and edit them, and run Python among \
-them in a sandbox without the network; the files they attach are named in their message, and the \
-images among them shown, as those you read are, when you can see images. To make \
-a document, first read the skill for its kind, then make it with run, and name its file in your \
-answer, without a link: the app shows the user the files you make. An amount written as German \
-and much of Europe write it, 1.234,56, is 1234.56: code that reads such amounts must take the \
-dots away and make the comma a point; and before you trust what your code finds, check it against \
-a figure you can see in the file.{search}{ask}{office} The skills:
-{skills}
-"""
-# of the system prompt, when the agent searches the files
-SEARCH = """ A question of the user's own work, as their \
-clients, documents or rules, is answered from their files, never the web, which must not learn of \
-it: call search_files for the passages that say it, in several ways if the first falls short, and \
-read on in the files where the passages do. Cite each passage you use by its number, as [1], \
-after the words it supports; if the files do not say it, say so."""
-# and when it has the office's tools, which are exact, and keep a document's formatting, as the
-# model's own code is and does not
-OFFICE = """ Use the tools made for an office's work rather \
-than code of your own, which is less exact: suggest_edits for changes to a Word document, and \
-fill_template for a template's fields."""
+WORKSPACE = """\
+## The user's files
+The user's files are in a workspace, where you read, write and edit them, and run Python on them \
+in a sandbox without the internet. The files the user attaches are named in their message, and \
+images are shown to you when you can see them.
+- Answer questions of the user's own work, as their clients, cases, documents or rules, from \
+their files, never the web, which must not learn of them.{search}{ask}
+- To make a document, first read the skill for its kind, then make it with run. Name the file in \
+your answer, without a link: the app shows the user the files you make.{office}
+- Amounts are written differently across countries: 1.234,56 in much of Europe is 1234.56. Code \
+that reads amounts from files must read them so; check what it finds against a figure you can see \
+in the file.
+
+The skills:
+{skills}"""
+# of the workspace's section, when the agent searches the files
+SEARCH = """
+- Call search_files for the passages that answer, and search again in other words if the first \
+try falls short; read on in a file where a passage does. If the files do not say it, say so."""
 # and when it asks every file
-ASK = """ To answer a question of every file, or of many, as \
-each invoice's total, call ask_files once rather than reading them; then answer with its table, \
-or the first rows of a long one, and say what stands out."""
+ASK = """
+- For a question of every file, or of many, as each invoice's total, call ask_files once rather \
+than reading them; answer with its table, or a long one's first rows, and say what stands out."""
+# and when it has the office's tools, which keep a document's formatting, as the model's own code
+# does not
+OFFICE = """
+- To change a Word document, call suggest_edits, which makes tracked changes the user accepts or \
+rejects; to fill a Word template's fields, call fill_template. Both keep its formatting."""
+# of the system prompt, always
+CITE = """\
+## Sources
+Cite each source you use, a page or a passage of a file, by the number its tool gave it, as [1] or \
+[2][3], after the words it supports."""
 # of the system prompt, of a conversation in a project
-PROJECT = """
-This conversation is in the project "{name}".{instructions}
-"""
-INSTRUCTIONS = " Its instructions, which hold for every conversation in it:\n\n{text}\n"
+PROJECT = """\
+## This project
+This conversation is in the project "{name}".{instructions}"""
+INSTRUCTIONS = " Follow its instructions, which hold for every conversation in it:\n\n{text}"
 TITLE = 60  # characters of a conversation's title at most: its first message's start
 ROUNDS = 25  # replies a turn takes at most; the last answers, told so, and may call no tools
 LAST = "(You have made all the tool calls this message allows: answer now, from what you found.)"
@@ -985,23 +989,24 @@ def _system(
     tools: Collection[str] = (), offline: bool = False,
 ) -> dict[str, Any]:  # fmt: skip
     # the system prompt of a conversation begun now with the user, of a `name` if the box has
-    # people, the workspace's tools if `workspace`, and of those named in `tools` search's,
-    # search_files's and ask_files's, that the internet is out of reach if `offline`, and the
-    # project it is held in, if one
-    skills = "\n".join(f"- {path}: {about}" for path, about in files.skills())
-    search, ask = SEARCH * ("search_files" in tools), ASK * ("ask_files" in tools)
-    office = OFFICE * ("suggest_edits" in tools)
-    space = (
-        WORKSPACE.format(skills=skills, search=search, ask=ask, office=office) if workspace else ""
-    )
-    named = f" The user is {name}." if name else ""
-    web = WEB if "search" in tools else OFFLINE if offline else ""
-    content = SYSTEM.format(named=named, sources=f"{web} {CITE}".strip(), workspace=space)
+    # people: the web's section if the tools named in `tools` search it, or if `offline` that it is
+    # out of reach; the workspace's if `workspace`, with search_files', ask_files' and the office's
+    # tools' rules as `tools` has them; citing; and the project it is held in, if one
+    sections = [SYSTEM.format(named=f" The user is {name}." if name else "")]
+    if "search" in tools or offline:
+        sections.append(WEB if "search" in tools else OFFLINE)
+    if workspace:
+        sections.append(WORKSPACE.format(
+            skills="\n".join(f"- {path}: {about}" for path, about in files.skills()),
+            search=SEARCH * ("search_files" in tools), ask=ASK * ("ask_files" in tools),
+            office=OFFICE * ("suggest_edits" in tools),
+        ))  # fmt: skip
+    sections.append(CITE)
     if project is not None:
         text = project["instructions"].strip()
         instructions = INSTRUCTIONS.format(text=text) if text else ""
-        content += PROJECT.format(name=project["name"], instructions=instructions)
-    return {"role": "system", "content": content}
+        sections.append(PROJECT.format(name=project["name"], instructions=instructions))
+    return {"role": "system", "content": "\n\n".join(sections)}
 
 
 def _did(

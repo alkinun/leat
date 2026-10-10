@@ -88,7 +88,7 @@ def absent(o: Outcome) -> str | None:
 
 def unsure(o: Outcome) -> str | None:
     # an answer that says it does not know, rather than one made up
-    known = r"(n['’]t|not)( \w+){0,2} (know|have|remember|told|mention)|not sure"
+    known = r"(n['’]t|not)( \w+){0,2} (know|have|remember|told|mention|find)|not sure"
     return None if re.search(known, o.answer, re.I) else "did not say it does not know"
 
 

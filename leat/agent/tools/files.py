@@ -21,44 +21,51 @@ LIBRARIES = "python-docx, openpyxl, python-pptx, fpdf2, pypdf, matplotlib, panda
 def tools(index: Index | None = None) -> list[Tool]:
     """read, write, edit and run, each in its call's conversation's workspace, and with an index
     search_files, of the index's passages."""
-    start = {"type": "integer", "description": "the character to read from, in a long file"}
-    path = {"type": "string", "description": "the file's path in the workspace, as 'notes.txt'"}
+    start = {
+        "type": "integer",
+        "description": "the character to start from, to read on in a long file",
+    }
+    path = {
+        "type": "string",
+        "description": "the file's or folder's path in the workspace, as 'notes.txt'",
+    }
     reading = {"type": "object", "properties": {"path": path, "start": start}, "required": ["path"]}
     return [
         Tool(
             "read",
-            "Read a file in the workspace as text, a PDF or a Word, Excel or PowerPoint file too, "
-            "or list a folder's files, '.' the workspace's",
+            "Read a file in the workspace as text, PDF, Word, Excel and PowerPoint files too, or "
+            "list a folder's files, '.' for the whole workspace",
             reading,
             lambda context, path, start=0: read(context.space(), path, start, index),
         ),
         Tool(
             "write",
-            "Write a text file in the workspace, in place of any of its name",
-            strings(path="the file's path in the workspace", content="the text"),
+            "Write a text file in the workspace, replacing any file of its name",
+            strings(path="the file's path in the workspace", content="the file's text"),
             lambda context, path, content: write(context.space(), path, content),
         ),
         Tool(
             "edit",
-            "Replace a passage of a text file in the workspace",
+            "Replace a passage of a text file in the workspace; a Word document's are changed by "
+            "suggest_edits",
             strings(
                 path="the file's path in the workspace",
-                old="the passage, as it is in the file",
-                new="what replaces it",
+                old="the passage, exactly as it is in the file",
+                new="the text that replaces it",
             ),  # fmt: skip
             lambda context, path, old, new: edit(context.space(), path, old, new),
         ),
         Tool(
             "run",
-            "Run Python code in the workspace, in a sandbox without the network: what it prints, "
-            "and the files it makes or changes",
-            strings(code=f"Python 3; its libraries are {LIBRARIES}"),
+            "Run Python code in the workspace, in a sandbox without the internet. Returns what it "
+            "prints, and the files it made or changed",
+            strings(code=f"Python 3 code; its libraries are {LIBRARIES}"),
             lambda context, code: run(context.space(), code),
         ),
     ] + ([Tool(
         "search_files",
-        "Search the text of the workspace's files, documents too, for the passages that say "
-        "something: the likeliest few, each numbered, with its file and where in it",
+        "Search the workspace's files, documents too, by their words and what they mean. Returns "
+        "the passages likeliest to answer, each numbered, with its file and where in it",
         strings(query="what to find, in the words a passage would use"),
         lambda context, query: search(index, context, query),
     )] if index is not None else [])  # fmt: skip

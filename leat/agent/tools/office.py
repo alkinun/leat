@@ -175,13 +175,13 @@ def tools() -> list[Tool]:
     return [
         Tool(
             "fill_template",
-            "Fill a Word template's fields, written {{Client name}} or «Client name», with "
-            "values, keeping its formatting: a new document, the template unchanged; says which "
-            "fields were filled, and which had no value. For many, call it once for each",
+            "Fill a Word template's fields, written {{Client name}} or «Client name», keeping its "
+            "formatting. Makes a new document, the template unchanged, and says which fields had "
+            "no value. Call it once for each document",
             {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "the template, a .docx"},
+                    "path": {"type": "string", "description": "the template, a .docx file"},
                     "values": {
                         "type": "object",
                         "additionalProperties": {"type": "string"},
@@ -189,7 +189,7 @@ def tools() -> list[Tool]:
                     },
                     "name": {
                         "type": "string",
-                        "description": "the new document's name, as 'Letter - Yılmaz Ltd.docx'",
+                        "description": "the new document's name, as 'Letter - Hartley.docx'",
                     },
                 },
                 "required": ["path", "values", "name"],
@@ -199,24 +199,27 @@ def tools() -> list[Tool]:
         Tool(
             "suggest_edits",
             "Suggest edits to a Word document as tracked changes, which the user accepts or "
-            "rejects in Word: each a passage of it and what replaces it, with a comment that says "
-            "why if one; a new document, the original unchanged. Each passage must be written "
-            "once in the document, within a paragraph, as it is there",
+            "rejects in Word, each with a comment that says why. Makes a new document, the "
+            "original unchanged. Each passage must be written exactly once in the document, "
+            "within one paragraph",
             {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "the document, a .docx"},
+                    "path": {"type": "string", "description": "the document, a .docx file"},
                     "edits": {
                         "type": "array",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "find": {"type": "string", "description": "the passage"},
+                                "find": {
+                                    "type": "string",
+                                    "description": "the passage, exactly as it is written there",
+                                },
                                 "replace": {
                                     "type": "string",
-                                    "description": "what replaces it; nothing to delete it",
+                                    "description": "the text that replaces it; empty to delete it",
                                 },
-                                "comment": {"type": "string", "description": "why, if it says"},
+                                "comment": {"type": "string", "description": "why"},
                             },
                             "required": ["find", "replace"],
                         },

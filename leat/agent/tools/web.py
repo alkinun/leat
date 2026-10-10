@@ -85,19 +85,21 @@ def tools(searxng: str, reader: Client | None = None) -> list[Tool]:
     return [
         Tool(
             "search",
-            "Search the web: the top results' titles, links and snippets, each numbered",
+            "Search the web. Returns the top results, each numbered, with its title, link and "
+            "snippet",
             strings(query="what to search for"),
             lambda context, query: search(searxng, query, context),
         ),
         Tool(
             "fetch",
-            "Read a web page, numbered: what it says of a question, or the page itself",
+            "Read a web page, numbered. With a question, returns what the page says of it; "
+            "without one, the page's text",
             schema(
-                url=("string", "the page's address, as a search result's"),
+                url=("string", "the page's address, as a search result's link"),
                 question=(
                     "string",
-                    "what you want the page to answer; without one, the page "
-                    "itself, for one the user asked you to read",
+                    "what you want to learn from the page; leave it out to read the whole page, "
+                    "as one the user asked you to read",
                 ),
             ),  # fmt: skip
             lambda context, url, question=None: fetch(

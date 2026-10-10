@@ -68,16 +68,16 @@ def tools(reader: Client, index: Index | None = None) -> list[Tool]:
     parameters = {
         "type": "object",
         "properties": {
-            "question": {"type": "string", "description": "what to find out of each file"},
+            "question": {"type": "string", "description": "what to find out from each file"},
             "columns": {
                 "type": "array", "items": {"type": "string"},
-                "description": "the table's columns, each a thing to find, as 'Date' and 'Total'; "
-                "without them, one, the answer",
+                "description": "the table's columns, each one thing to find, as 'Date' and "
+                "'Total'; leave them out for one column, the answer",
             },
             "files": {
                 "type": "array", "items": {"type": "string"},
-                "description": "the files to ask, by their paths, a folder's every file by "
-                "its; without them, every file",
+                "description": "the files or folders to ask, by their paths; leave them out to ask "
+                "every file",
             },
             "name": {"type": "string", "description": "the spreadsheet's name, as 'Invoices.xlsx'"},
         },
@@ -86,9 +86,9 @@ def tools(reader: Client, index: Index | None = None) -> list[Tool]:
     return [
         Tool(
             "ask_files",
-            "Ask each of the workspace's files the same question, one by one, for a question of "
-            "every file, as each invoice's date and total, or which contracts renew themselves: "
-            "a table of the answers, a row a file, each numbered, saved as a spreadsheet too",
+            "Ask every file in the workspace, or those named, the same question, one by one, as "
+            "each invoice's date and total, or which contracts renew themselves. Returns a table "
+            "of the answers, a row a file, each numbered, saved as a spreadsheet too",
             parameters,
             lambda context, question, columns=None, files=None, name=None: ask(
                 reader, index, context, question, columns, files, name

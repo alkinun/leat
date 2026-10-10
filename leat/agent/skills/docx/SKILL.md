@@ -1,6 +1,6 @@
 ---
 name: docx
-description: Word documents, as letters, CVs and reports
+description: Word documents, such as letters, CVs and reports
 ---
 # Word documents
 

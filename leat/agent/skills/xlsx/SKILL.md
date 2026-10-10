@@ -1,6 +1,6 @@
 ---
 name: xlsx
-description: Excel spreadsheets, as budgets, lists and tables of numbers
+description: Excel spreadsheets, such as budgets, lists and tables of numbers
 ---
 # Excel spreadsheets
 
