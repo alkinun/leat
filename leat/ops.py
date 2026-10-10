@@ -350,7 +350,10 @@ def _attention(
         k, v = (cache[i, slot : slot + 1].cast(q.dtype) for i in (0, 1))
         mask = _ring_mask(T, int(cache.shape[3]), start_pos, window, causal, q.max_shape[2])
     else:
-        k, v = (cache[i, slot : slot + 1, :, : start_pos + T].cast(q.dtype) for i in (0, 1))
+        # the positions up to the span's end, within the cache's, as a span ends where the context
+        # does at the latest, though its start's and its length's bounds add to more
+        end = _smaller(start_pos + T, int(cache.shape[3]))
+        k, v = (cache[i, slot : slot + 1, :, :end].cast(q.dtype) for i in (0, 1))
     if not ring and (window or causal):
         full = Tensor.full((1, 1, T, k.shape[2]), float("-inf"), dtype=q.dtype)
         # later positions, where the span sees only those before each token, and positions

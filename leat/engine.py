@@ -169,8 +169,10 @@ class Engine:
         special = self.tokenizer.special_ids
         self._text = Tensor([i not in special for i in range(vocab)]).realize()
         self.max_context, self.prefill_chunk, self.slots = max_context, prefill_chunk, slots
-        self._len = UOp.variable("chunk_len", 1, prefill_chunk)
-        self._few = UOp.variable("few_len", 1, min(FEW_TOKENS, prefill_chunk))
+        # a chunk's tokens, fewer than the context's, as a prompt's are
+        longest = max(min(prefill_chunk, max_context - 1), 1)
+        self._len = UOp.variable("chunk_len", 1, longest)
+        self._few = UOp.variable("few_len", 1, min(FEW_TOKENS, longest))
         # the slot and position of each row of a decode step, the first a chunk's too
         rows = range(most)
         self._slot_vars = [UOp.variable(f"slot{i}", 0, cache_slots - 1) for i in rows]
