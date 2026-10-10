@@ -67,9 +67,10 @@ print("{}")
 """
 # the system prompt's rule of asking every file
 RULE = (
-    "For a question of every file, or of many, as each invoice's total, call ask_files once rather "
-    "than reading them; answer with its table, or a long one's first rows, its totals, and the "
-    "files that gave no answer, and say what stands out."
+    "For a question of every file, or of many, even of a few, as what the invoices come to or "
+    "each one's date, call ask_files once rather than reading them, as it reads every one; answer "
+    "with its table, or a long one's first rows, its totals, and the files that gave no answer, "
+    "and say what stands out."
 )
 NAMED = 20  # files a call names at most of those that gave no answer, or could not be read
 # a currency, as a symbol or a code, of those Europe's offices write most

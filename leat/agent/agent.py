@@ -55,7 +55,8 @@ The user's files are in a workspace, where you read, write and edit them, and ru
 in a sandbox without the internet. The files the user attaches are named in their message, and \
 images are shown to you when you can see them.
 - Answer questions of the user's own work, as their clients, cases, documents or rules, from \
-their files, never the web, which must not learn of them.{rules}
+their files, never the web, which must not learn of them; and look in the files before you write \
+of it, as a letter to a client.{rules}
 - Name each file you make in your answer, without a link: the app shows the user the files you \
 make.
 - Amounts are written differently across countries: 1.234,56 in much of Europe is 1234.56. Code \
