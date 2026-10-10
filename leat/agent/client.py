@@ -1,10 +1,13 @@
-"""The engine as the agent reaches it: leat serve's OpenAI chat API, over HTTP."""
+"""The engine as the agent reaches it: leat serve's OpenAI chat API, over HTTP, or any server's of
+the API, as llama-server's or vLLM's, which says less of its models: a model of no status is
+loaded, and one of no context has the context the client is given, if any."""
 
 import contextlib
 import http.client
 import json
 import socket
 import urllib.parse
+import uuid
 from collections.abc import Iterator
 from typing import Any
 
@@ -58,20 +61,32 @@ LIST = 10
 
 
 class Client:
-    """leat serve at `url`, as http://127.0.0.1:8080, with its API key if it asks for one."""
+    """leat serve at `url`, as http://127.0.0.1:8080, with its API key if it asks for one; or
+    another server of the API, whose models' context is `context` tokens where it does not say."""
 
-    def __init__(self, url: str, key: str | None = None):
+    def __init__(self, url: str, key: str | None = None, context: int | None = None):
         parts = urllib.parse.urlsplit(url)
         if parts.scheme != "http" or not parts.hostname:
             raise ValueError(f"the engine's URL must be http://host:port, not {url!r}")
         self.url, self._host, self._port = url.rstrip("/"), parts.hostname, parts.port or 80
+        self.context = context
         self._headers = {"Content-Type": "application/json"}
         if key:
             self._headers["Authorization"] = f"Bearer {key}"
 
     def models(self) -> list[dict[str, Any]]:
-        """The models it has, each with its status: "loaded", "loading" or "unloaded"."""
-        return self._json("GET", "/v1/models", timeout=LIST).get("data", [])
+        """The models it has, each with its status: "loaded", "loading" or "unloaded"; and its
+        context, max_context, if it or the client says."""
+        models = self._json("GET", "/v1/models", timeout=LIST).get("data", [])
+        for model in models:  # of another server's, as leat serve's are
+            status = model.get("status")
+            if not isinstance(status, str):  # none, or llama-server's of several, {"value": …}
+                model["status"] = status.get("value", "loaded") if isinstance(status, dict) else (
+                    "loaded")  # fmt: skip
+            context = model.get("max_context") or model.get("max_model_len") or self.context
+            if context:
+                model["max_context"] = context
+        return models
 
     def load(self, model: str) -> None:
         """Loads a model in place of the loaded one; returns once it is ready."""
@@ -139,12 +154,32 @@ def whole(completion: Completion) -> dict[str, Any]:
     """A completion's reply, whole, to its end or a close(): its content, and its tool calls if
     any."""
     reply: dict[str, Any] = {"role": "assistant", "content": ""}
+    calls: list[dict[str, Any]] = []
     for chunk in completion:
         delta = chunk["choices"][0]["delta"] if chunk["choices"] else {}
         reply["content"] += delta.get("content") or ""
-        if calls := delta.get("tool_calls"):
-            reply["tool_calls"] = [{k: c[k] for k in ("id", "type", "function")} for c in calls]
-    return reply
+        merge(calls, delta.get("tool_calls") or [])
+    return reply | ({"tool_calls": calls} if calls else {})
+
+
+def merge(calls: list[dict[str, Any]], parts: list[dict[str, Any]]) -> None:
+    """Merges a chunk's tool calls into a reply's so far, each by its index: leat serve sends
+    each whole, at the end; OpenAI's API, as llama-server and vLLM serve it, in parts, the first
+    with the call's id and name, then its arguments, a piece at a time. A call of no id is given
+    one, as the conversation's answers to its calls are matched to them by their ids."""
+    for part in parts:
+        at = part.get("index", len(calls))
+        while len(calls) <= at:
+            calls.append({"id": f"call_{uuid.uuid4().hex[:24]}", "type": "function",
+                          "function": {"name": "", "arguments": ""}})  # fmt: skip
+        call, function = calls[at], part.get("function") or {}
+        call["id"] = part.get("id") or call["id"]
+        call["function"]["name"] = function.get("name") or call["function"]["name"]
+        arguments = function.get("arguments")
+        if isinstance(arguments, str) and isinstance(call["function"]["arguments"], str):
+            call["function"]["arguments"] += arguments
+        elif arguments is not None:  # an object, whole, as a server may send them
+            call["function"]["arguments"] = arguments
 
 
 def _close(sock: socket.socket, response: http.client.HTTPResponse) -> None:

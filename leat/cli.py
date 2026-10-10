@@ -45,7 +45,12 @@ def main(argv: list[str] | None = None) -> None:
     )
     agent.add_argument(
         "--engine", default="http://127.0.0.1:8080",
-        help="leat serve's address; its API key, if it asks for one, in LEAT_ENGINE_KEY",
+        help="leat serve's address, or another OpenAI-compatible server's, as llama-server's; "
+        "its API key, if it asks for one, in LEAT_ENGINE_KEY",
+    )  # fmt: skip
+    agent.add_argument(
+        "--context", type=_positive,
+        help="the model's context in tokens, of an engine that does not say, as llama-server",
     )  # fmt: skip
     agent.add_argument(
         "--search", default="http://127.0.0.1:8888", help="a SearXNG's address, for web search"
@@ -195,7 +200,7 @@ def _agent(args: argparse.Namespace) -> None:
     args.data.mkdir(parents=True, exist_ok=True)
     environment = (args.data / "sandbox").resolve()  # a link to one elsewhere, as the demo's
     workspace = Workspace(args.data / "workspace", environment if environment.exists() else None)
-    engine = Client(args.engine, os.environ.get("LEAT_ENGINE_KEY"))
+    engine = Client(args.engine, os.environ.get("LEAT_ENGINE_KEY"), args.context)
     index = Index(args.data / "index.db", workspace, Transcriber(engine), Embedder(engine))
     tools = every(args.search, engine, index)
     agent = Agent(Store(args.data / "leat.db"), engine, tools, workspace, index)

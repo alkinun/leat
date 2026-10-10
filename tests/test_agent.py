@@ -1,4 +1,5 @@
 import contextlib
+import copy
 import http.client
 import http.cookiejar
 import json
@@ -44,6 +45,7 @@ class FakeEngine(ThreadingHTTPServer):
         self.vision = False  # whether it sees images
         self.reasoning: dict[str, Any] | None = None  # the efforts it takes, if it is told any
         self.authorized: list[str | None] = []  # each request's Authorization header
+        self.models: list[dict[str, Any]] | None = None  # listed as they are, if set, as another's
         super().__init__(("127.0.0.1", 0), _FakeHandler)
 
     @property
@@ -59,6 +61,8 @@ class _FakeHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         self.server.authorized.append(self.headers.get("Authorization"))
+        if self.server.models is not None:
+            return self._json(200, {"object": "list", "data": copy.deepcopy(self.server.models)})
         model = {"id": "fake", "status": self.server.status}
         if self.server.vision:
             model |= {"vision": True, "image_tokens": 300}
@@ -87,7 +91,10 @@ class _FakeHandler(BaseHTTPRequestHandler):
                     self.server.released.wait(timeout=5)
                 elif "finish_reason" in delta:
                     finish = delta["finish_reason"]
-                else:
+                else:  # a delta's calls numbered as leat serve numbers them, but for parts'
+                    if calls := delta.get("tool_calls"):
+                        numbered = [{"index": i} | c for i, c in enumerate(calls)]
+                        delta = delta | {"tool_calls": numbered}
                     self._chunk({"choices": [{"index": 0, "delta": delta}]})
             # the prompt's tokens, three characters each, none cached
             read = len(json.dumps(body["messages"])) // 3
@@ -146,9 +153,9 @@ REPLY = [{"reasoning_content": "Hmm."}, {"content": "Hello"}, {"content": " ther
 
 
 def call(name: str, arguments: Any, id: str = "call_1") -> dict:
-    """A reply's call of a tool, as leat serve sends it, its arguments as JSON text."""
+    """A reply's call of a tool, as leat serve sends it, whole, its arguments as JSON text."""
     text = arguments if isinstance(arguments, str) else json.dumps(arguments)
-    return {"index": 0, "id": id, "type": "function", "function": {"name": name, "arguments": text}}
+    return {"id": id, "type": "function", "function": {"name": name, "arguments": text}}
 
 
 def test_turn(agent, engine, events):
@@ -227,6 +234,43 @@ def test_next_turn(agent, engine, events):
     until(events, ended)
     again = Agent(agent.store, agent.engine)
     assert [c["id"] for c in again.conversations()] == [other, id]
+
+
+def test_calls_in_parts(agent, engine, events):
+    # calls streamed in parts, as OpenAI's API, llama-server and vLLM send them: each by its
+    # index, the first part its id and name, then its arguments, a piece at a time; one sent with
+    # no id given one
+    parts = [
+        {"tool_calls": [{"index": 0, "id": "call_a", "type": "function",
+                         "function": {"name": "echo", "arguments": ""}}]},
+        {"tool_calls": [{"index": 0, "function": {"arguments": '{"text": '}}]},
+        {"tool_calls": [{"index": 1, "type": "function",
+                         "function": {"name": "echo", "arguments": '{"text": "b"}'}}]},
+        {"tool_calls": [{"index": 0, "function": {"arguments": '"a"}'}}]},
+    ]  # fmt: skip
+    engine.replies.put(parts)
+    engine.replies.put([{"content": "Both said."}])
+    id = agent.send(None, "Echo a and b")
+    until(events, ended)
+    step, *answers = agent.store.messages(id)[2:4]
+    first, second = step["tool_calls"]
+    assert first == {"id": "call_a", "type": "function",
+                     "function": {"name": "echo", "arguments": '{"text": "a"}'}}  # fmt: skip
+    assert second["id"].startswith("call_") and second["function"]["arguments"] == '{"text": "b"}'
+    assert agent.store.messages(id)[3]["content"] == "echo: a"
+    assert agent.store.messages(id)[4] | {"info": {}} == {
+        "role": "tool", "tool_call_id": second["id"], "name": "echo", "content": "echo: b",
+        "info": {}}  # fmt: skip
+
+
+def test_other_servers(engine):
+    # a server that says less of its models than leat serve: one of no status loaded, its
+    # context the client's, or as vLLM says it
+    loading = {"value": "loading"}
+    engine.models = [{"id": "a"}, {"id": "b", "max_model_len": 8192, "status": loading}]
+    listed = [(m["status"], m["max_context"]) for m in Client(engine.url, context=4096).models()]
+    assert listed == [("loaded", 4096), ("loading", 8192)]
+    assert "max_context" not in Client(engine.url).models()[0]
 
 
 def test_tools(agent, engine, events):

@@ -5,6 +5,9 @@ cache held.
 
     uv run python scripts/evaluate.py [--engine http://127.0.0.1:8080] [-n 3] [--effort E] [-k name]
 
+Another OpenAI-compatible server is measured as leat serve is, as llama-server's of a model leat
+does not run yet, with its context given by --context where it does not say it.
+
 The agent runs in this process, with leat agent's tools, against leat serve at --engine, the SearXNG
 at --search, and the sandbox's environment at --sandbox, with leat serve's key in LEAT_ENGINE_KEY if
 it asks for one, as leat agent's; the states are temporary, and the user's own untouched. A
@@ -203,7 +206,13 @@ CASES = [
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--engine", default="http://127.0.0.1:8080", help="leat serve's address")
+    parser.add_argument(
+        "--engine", default="http://127.0.0.1:8080",
+        help="leat serve's address, or another OpenAI-compatible server's, as llama-server's",
+    )  # fmt: skip
+    parser.add_argument(
+        "--context", type=int, help="the model's context in tokens, of an engine that does not say"
+    )
     parser.add_argument("--search", default="http://127.0.0.1:8888", help="a SearXNG's address")
     parser.add_argument(
         "--sandbox", type=Path, default=Path.home() / ".local/share/leat/sandbox",
@@ -243,7 +252,7 @@ def _run(case: Case, args: argparse.Namespace) -> Outcome:
     with tempfile.TemporaryDirectory() as data:
         environment = args.sandbox if args.sandbox.exists() else None
         workspace = Workspace(Path(data) / "workspace", environment)
-        engine = Client(args.engine, os.environ.get("LEAT_ENGINE_KEY"))
+        engine = Client(args.engine, os.environ.get("LEAT_ENGINE_KEY"), args.context)
         index = Index(Path(data) / "index.db", workspace, embedder=Embedder(engine))
         tools = every(args.search, engine, index)
         agent = Agent(Store(Path(data) / "leat.db"), engine, tools, workspace, index)

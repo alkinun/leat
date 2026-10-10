@@ -31,7 +31,7 @@ from typing import Any
 
 from leat.agent import context
 from leat.agent.background import Background
-from leat.agent.client import Client, Completion, EngineError, whole
+from leat.agent.client import Client, Completion, EngineError, merge, whole
 from leat.agent.index import Index
 from leat.agent.store import Store
 from leat.agent.sync import SYNC, mirror
@@ -707,9 +707,8 @@ class _Turn:
                                  "to": self.person}  # fmt: skip
                         a.events.publish(event | {"key": key, "at": len(reply[key]), "text": text})
                         reply[key] += text
-                if calls := delta.get("tool_calls"):  # leat serve sends them whole, at the end
-                    keys = ("id", "type", "function")
-                    reply["tool_calls"] = [{k: call[k] for k in keys} for call in calls]
+                if parts := delta.get("tool_calls"):  # whole, or in parts, as servers send them
+                    merge(reply.setdefault("tool_calls", []), parts)
                 if timings := chunk.get("timings"):
                     info |= _speed(timings)
         if finish == "length" and self.limit and not self.redone:
