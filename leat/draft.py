@@ -9,7 +9,7 @@ from tinygrad import Tensor, UOp
 
 from leat import ops
 from leat.gguf import GGUF
-from leat.model import Transformer, rope_table
+from leat.model import QWEN35, Transformer, rope_table
 from leat.ops import Span
 
 Rows = list[int | UOp]  # a value for each sequence of a draft
@@ -49,7 +49,7 @@ def load(path: str | Path, target: Transformer) -> Drafter:
     arch = gguf.metadata["general.architecture"]
     if arch == "gemma4-assistant":
         return Gemma4Assistant(gguf, target)
-    if gguf.metadata.get(f"{arch}.nextn_predict_layers") and arch == "qwen35moe":
+    if gguf.metadata.get(f"{arch}.nextn_predict_layers") and arch in QWEN35:
         return Qwen35Mtp(gguf, target)
     raise ValueError(f"a {arch} model drafts for no {target.config.arch} model")
 

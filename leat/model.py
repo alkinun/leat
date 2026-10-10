@@ -29,8 +29,9 @@ _EXPERTS = ("ffn_gate_inp", "ffn_down_exps")  # the router, and the experts' dow
 # "neox" mode, rather than adjacent pairs, its "normal" mode, as GGUF lays out llama's q and k
 _ROPE_HALVES = {
     "llama": False, "qwen2": True, "qwen3": True, "qwen3moe": True, "gemma3": True,
-    "gemma4": True, "gpt-oss": True, "phi3": True, "qwen35moe": True,
+    "gemma4": True, "gpt-oss": True, "phi3": True, "qwen35": True, "qwen35moe": True,
 }  # fmt: skip
+QWEN35 = ("qwen35", "qwen35moe")  # Qwen3.5's and Qwen3.6's architectures: dense, and of experts
 # the period of attention.sliding_window_pattern where a GGUF has none, as llama.cpp's
 _SLIDING_EVERY = {"gemma3": 6, "gpt-oss": 2}
 
@@ -162,14 +163,14 @@ class Config:
             scales=scales,
             recurrent=recurrent,
             delta_net=delta_net,
-            q_gate=arch == "qwen35moe",
+            q_gate=arch in QWEN35,
             experts=m.get("expert_count", 0),
             experts_used=m.get("expert_used_count", 0),
             glu={"gemma3": "gelu", "gemma4": "gelu", "gpt-oss": "oai"}.get(arch, "silu"),
             embed_scale=math.sqrt(dim) if arch in ("gemma3", "gemma4") else 1.0,
             v_norm=arch == "gemma4",
             logit_cap=m.get("final_logit_softcapping", 0.0),
-            mrope=tuple(m.get("rope.dimension_sections", [])[:3]) if arch == "qwen35moe" else (),
+            mrope=tuple(m.get("rope.dimension_sections", [])[:3]) if arch in QWEN35 else (),
         )
 
     def uses(self, name: str) -> bool:
@@ -607,7 +608,7 @@ def _unfuse(layer: dict[str, QTensor], c: Config, i: int) -> None:
     if "ffn_up" in layer and "ffn_gate" not in layer and not c.experts:
         up, hidden = layer["ffn_up"], layer["ffn_up"].shape[0] // 2
         layer["ffn_gate"], layer["ffn_up"] = _rows(up, 0, hidden), _rows(up, hidden, 2 * hidden)
-    if c.arch in ("gpt-oss", "qwen35moe") and "post_attention_norm" in layer:
+    if (c.arch == "gpt-oss" or c.arch in QWEN35) and "post_attention_norm" in layer:
         layer["ffn_norm"] = layer.pop("post_attention_norm")
 
 

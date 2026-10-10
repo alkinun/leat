@@ -33,6 +33,7 @@ ARCHS = [
     "gemma3",
     "gpt-oss",
     "phi3",
+    "qwen35",
     "qwen35moe",
 ]
 
@@ -205,7 +206,7 @@ def test_generate_matches_reference(tiny, arch):
     # a prompt that extends the previous one reuses the cache: only the new tokens are prefilled,
     # but for a model with recurrent state, which holds every token its slot ran
     longer = PROMPT + out[:3] + [7]
-    assert engine.cached_prefix(longer) == (0 if arch == "qwen35moe" else len(PROMPT) + 3)
+    assert engine.cached_prefix(longer) == (0 if arch.startswith("qwen35") else len(PROMPT) + 3)
     again = list(engine.generate(longer, 4))
     assert again == list(Engine(path, max_context=CONTEXT, prefill_chunk=5).generate(longer, 4))
 

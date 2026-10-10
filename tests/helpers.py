@@ -244,8 +244,8 @@ def reference_logits(
         return _reference_gemma4(w, tokens, images)
     if arch == "gemma3":
         return _reference_gemma3(w, tokens, images)
-    if arch == "qwen35moe":
-        return _reference_qwen35moe(w, tokens, images, grids)
+    if arch in ("qwen35", "qwen35moe"):
+        return _reference_qwen35(w, tokens, images, grids)
     if arch in _REFERENCES:
         return _REFERENCES[arch](w, tokens)
 
@@ -1094,16 +1094,20 @@ Q35_K_HEADS, Q35_V_HEADS, Q35_DIM, Q35_CONV, Q35_SHARED = 2, 4, 32, 4, 128
 Q35_CHANNELS = (2 * Q35_K_HEADS + Q35_V_HEADS) * Q35_DIM
 
 
-def _write_qwen35moe(path: Path) -> dict[str, np.ndarray]:
-    w, weights, add = _writer(path, "qwen35moe", Q_IMAGE)
-    a = "qwen35moe."
+def _write_qwen35(path: Path, arch: str) -> dict[str, np.ndarray]:
+    # Qwen3.5's and Qwen3.6's, of an MLP in each layer, qwen35, or of experts beside a shared one,
+    # qwen35moe
+    w, weights, add = _writer(path, arch, Q_IMAGE)
+    a, moe = f"{arch}.", arch == "qwen35moe"
+    feed_forward = [("expert_count", EXPERTS), ("expert_used_count", USED),
+                    ("expert_feed_forward_length", EXPERT_HIDDEN),
+                    ("expert_shared_feed_forward_length", Q35_SHARED),
+                    ] if moe else [("feed_forward_length", HIDDEN)]  # fmt: skip
     for key, value in [("block_count", Q35_EVERY + 1), ("nextn_predict_layers", 1),
                        ("embedding_length", D), ("attention.head_count", HEADS),
                        ("attention.head_count_kv", KV_HEADS), ("attention.key_length", Q35_HEAD),
                        ("attention.value_length", Q35_HEAD),
-                       ("rope.dimension_count", Q35_ROTATED), ("expert_count", EXPERTS),
-                       ("expert_used_count", USED), ("expert_feed_forward_length", EXPERT_HIDDEN),
-                       ("expert_shared_feed_forward_length", Q35_SHARED),
+                       ("rope.dimension_count", Q35_ROTATED), *feed_forward,
                        ("ssm.conv_kernel", Q35_CONV), ("ssm.state_size", Q35_DIM),
                        ("ssm.group_count", Q35_K_HEADS), ("ssm.time_step_rank", Q35_V_HEADS),
                        ("ssm.inner_size", Q35_V_HEADS * Q35_DIM),
@@ -1140,12 +1144,13 @@ def _write_qwen35moe(path: Path) -> dict[str, np.ndarray]:
             add(b + "attn_output.weight", (D, HEADS * Q35_HEAD), GGMLType.Q4_K, 2e-4)
             for name in ("attn_q_norm", "attn_k_norm"):
                 add(b + name + ".weight", (Q35_HEAD,))
-        for name in MOE:
+        for name in MOE if moe else MLP:
             add(b + name + ".weight", *TENSORS[name])
-        add(b + "ffn_gate_inp_shexp.weight", (D,), GGMLType.F32, 1.2)
-        add(b + "ffn_gate_shexp.weight", (Q35_SHARED, D), GGMLType.Q4_K, 2e-4)
-        add(b + "ffn_up_shexp.weight", (Q35_SHARED, D), GGMLType.Q6_K, 5e-5)
-        add(b + "ffn_down_shexp.weight", (D, Q35_SHARED), GGMLType.Q8_0, 1e-3)
+        if moe:
+            add(b + "ffn_gate_inp_shexp.weight", (D,), GGMLType.F32, 1.2)
+            add(b + "ffn_gate_shexp.weight", (Q35_SHARED, D), GGMLType.Q4_K, 2e-4)
+            add(b + "ffn_up_shexp.weight", (Q35_SHARED, D), GGMLType.Q6_K, 5e-5)
+            add(b + "ffn_down_shexp.weight", (D, Q35_SHARED), GGMLType.Q8_0, 1e-3)
     b = f"blk.{Q35_EVERY}.nextn."
     for name in ("enorm", "hnorm", "shared_head_norm"):
         add(b + name + ".weight", (D,))
@@ -1154,7 +1159,7 @@ def _write_qwen35moe(path: Path) -> dict[str, np.ndarray]:
     return weights
 
 
-def _reference_qwen35moe(
+def _reference_qwen35(
     w: dict[str, np.ndarray], tokens: list[int], images: dict[int, np.ndarray] | None = None,
     grids: dict[int, tuple[int, int]] | None = None,
 ) -> np.ndarray:  # fmt: skip
@@ -1192,9 +1197,9 @@ def _mrope_places(tokens: list[int], grids: dict[int, tuple[int, int]]) -> np.nd
 def _qwen35_layer(
     lw: dict[str, np.ndarray], x: np.ndarray, recurrent: bool, places: np.ndarray
 ) -> np.ndarray:
-    # a Gated DeltaNet or full-attention layer of tokens at M-RoPE's places (T, 3), then its
-    # experts and shared expert; frequency j turns by height if j % 3 is 1 within the height's
-    # section, by width if 2 within the width's, else by time
+    # a Gated DeltaNet or full-attention layer of tokens at M-RoPE's places (T, 3), then its MLP,
+    # or its experts and shared expert; frequency j turns by height if j % 3 is 1 within the
+    # height's section, by width if 2 within the width's, else by time
     T = len(x)
     half = Q35_ROTATED // 2
     axes = [1 if j % 3 == 1 and j < 3 * Q35_SECTIONS[1] else 2 if j % 3 == 2 and
@@ -1219,6 +1224,8 @@ def _qwen35_layer(
         out = out * sigmoid(gate.reshape(T, -1)) @ lw["attn_output"].T
     x = x + out
     h = norm(x, lw["post_attention_norm"])
+    if "ffn_gate_inp" not in lw:
+        return x + mlp(h, lw["ffn_gate"], lw["ffn_up"], lw["ffn_down"])
     x = x + experts(
         h,
         h @ lw["ffn_gate_inp"].T,
@@ -1299,7 +1306,8 @@ def _mask(T: int, window: int, image: np.ndarray | None = None) -> np.ndarray:
 
 _WRITERS = {
     "gemma3": _write_gemma3, "gpt-oss": _write_gpt_oss, "phi3": _write_phi3,
-    "qwen35moe": _write_qwen35moe,
+    "qwen35": lambda path: _write_qwen35(path, "qwen35"),
+    "qwen35moe": lambda path: _write_qwen35(path, "qwen35moe"),
 }  # fmt: skip
 _REFERENCES = {
     "gpt-oss": _reference_gpt_oss, "phi3": _reference_phi3,

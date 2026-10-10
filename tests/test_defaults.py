@@ -15,7 +15,8 @@ def test_recommended():
     thinks, plain = recommended({"general.architecture": "qwen3", "general.name": "Qwen3 8B"})
     assert (thinks["temperature"], thinks["top_p"], thinks["top_k"]) == (0.6, 0.95, 20)
     assert (plain["temperature"], plain["top_p"], plain["top_k"]) == (0.7, 0.8, 20)
-    assert recommended({"general.architecture": "qwen35moe"})[0]["presence_penalty"] == 1.5
+    for arch in ("qwen35", "qwen35moe"):  # Qwen3.6 27B's, and 35B A3B's
+        assert recommended({"general.architecture": arch})[0]["presence_penalty"] == 1.5
     # of one architecture, by the maker its name says
     llama = {"general.architecture": "llama"}
     assert recommended(llama | {"general.name": "Meta Llama 3.1 8B Instruct"})[0]["top_p"] == 0.9

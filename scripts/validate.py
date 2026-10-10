@@ -28,6 +28,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from leat.gguf import GGUF  # noqa: E402
+from leat.model import QWEN35  # noqa: E402
 
 # a reply to this, streamed from the server, shows the model loads, generates and detokenizes
 SERVER_PROMPT = "Name three primary colors, one per line."
@@ -178,7 +179,7 @@ def _drafter(model: Path, candidates: list[Path]) -> Path | None:
     # Qwen3.5's own file, with its MTP layer, or a Gemma 4 assistant for Gemma 4
     metadata = GGUF.open(model).metadata
     arch = metadata["general.architecture"]
-    if arch == "qwen35moe" and metadata.get(f"{arch}.nextn_predict_layers"):
+    if arch in QWEN35 and metadata.get(f"{arch}.nextn_predict_layers"):
         return model
     if arch == "gemma4":
         return next((c for c in candidates if _is_drafter(c)), None)

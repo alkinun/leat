@@ -7,9 +7,9 @@ from leat.sampler import GREEDY, Sampling
 from tests.helpers import CONTEXT, Oracle, reference_drafts, reference_mtp_drafts
 
 PROMPT = [5, 77, 120, 3, 299, 42, 8, 150, 61, 200, 9, 33]
-# Gemma 4 with its assistant, and Qwen3.5 with its MTP layer, of recurrent state that a step
-# goes back on where it keeps fewer tokens than it ran
-ARCHS = ["gemma4", "qwen35moe"]
+# Gemma 4 with its assistant, and Qwen3.5 with its MTP layer, dense and of experts, of recurrent
+# state that a step goes back on where it keeps fewer tokens than it ran
+ARCHS = ["gemma4", "qwen35", "qwen35moe"]
 
 
 def models(tiny, tiny_assistant, arch: str):

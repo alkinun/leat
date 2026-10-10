@@ -27,16 +27,20 @@ _KEYS = {"general.sampling.temp": "temperature", "general.sampling.top_k": "top_
          "general.sampling.top_p": "top_p", "general.sampling.min_p": "min_p"}  # fmt: skip
 
 Options = dict[str, float]
+# Qwen3.6's cards, "Best Practices", of 27B and 35B A3B alike: thinking for general tasks, and
+# instruct
+_QWEN36: tuple[Options, Options] = (
+    {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5},
+    {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5},
+)
 # each family's, as its makers recommend it: by general.architecture and, where several makers'
 # models share one, a word of general.name; the set as the model reasons, and as it does not, if
 # its makers recommend another
 _FAMILIES: list[tuple[str, str, Options, Options | None]] = [
     # OpenAI's README: "We recommend sampling with temperature=1.0 and top_p=1.0"
     ("gpt-oss", "", {"temperature": 1.0, "top_p": 1.0}, None),
-    # Qwen3.6's card, "Best Practices": thinking for general tasks, and instruct
-    ("qwen35moe", "",
-     {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5},
-     {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5}),
+    ("qwen35", "", *_QWEN36),
+    ("qwen35moe", "", *_QWEN36),
     # Qwen3's cards: thinking mode, and non-thinking
     ("qwen3", "", {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0},
      {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "min_p": 0.0}),
