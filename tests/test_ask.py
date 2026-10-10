@@ -95,6 +95,43 @@ def test_unreadable(engine, space):
     assert "| fine.txt [2] | (It could not be asked: the model is not loaded) |" in result.content
 
 
+def test_gaps_and_totals(engine, space):
+    # the files that gave no answer, and those not read, named after the table; a column of
+    # amounts totalled by code, a column of numbers that are not amounts, as an invoice's, not
+    files.write(space, "a.txt", "Invoice 0047: £1,664.70")
+    files.write(space, "b.txt", "Invoice 0048: £448.00")
+    files.write(space, "c.txt", "A letter")
+    files.write(space, "d.pdf", "not a PDF")
+    for reply in answers({"Number": "0047", "Total": "£1,664.70"},
+                         {"Number": "0048", "Total": "£448.00"}, {"Number": "", "Total": ""}):
+        engine.replies.put(reply)
+    result = ask.ask(Client(engine.url), None, context(space), "Each invoice's number and total?",
+                     ["Number", "Total"])  # fmt: skip
+    assert "| c.txt [3] |   |   |" in result.content
+    assert "| d.pdf [4] | (It could not be read:" in result.content
+    assert result.content.split("\n")[6] == "| Total |   | £2,112.70 |"
+    assert "(Totals of all 4 rows, added by code.)" in result.content
+    assert "No answer in 1 of the 4 files, which may not say it: c.txt." in result.content
+    assert "Not read or not asked, as their rows say: d.pdf." in result.content
+    assert result.info["unanswered"] == ["c.txt"] and result.info["unread"] == ["d.pdf"]
+
+
+def test_amounts():
+    # an amount as each country writes it, its currency before or after; a date, an invoice's
+    # number or a count, not one
+    said = {"£1,664.70": 1664.7, "1.502,00": 1502, "730,00 EUR": 730, "€ 1.234,56": 1234.56,
+            "-12.50": -12.5, "1 234,56": 1234.56, "CHF 1'234.50": 1234.5,
+            "900 TL": 900}  # fmt: skip
+    assert {text: ask._amount(text)["value"] for text in said} == said  # type: ignore[index]
+    assert ask._amount("09.03.2026") is None and ask._amount("NG-5531447") is None
+    assert not ask._amount("0047")["marked"]  # type: ignore[index]
+    euros = ask._totals(["T"], [{"T": "1.502,00 EUR"}, {"T": ""}, {"T": "730,00 EUR"}])["T"]
+    assert euros["said"] == "2.232,00 EUR" and euros["values"] == [1502.0, None, 730.0]
+    assert ask._totals(["T"], [{"T": "1,00 EUR"}, {"T": "2,00 GBP"}]) == {}  # two currencies
+    assert ask._totals(["T"], [{"T": "£5.00"}, {"T": "soon"}]) == {}  # not every one an amount
+    assert ask._totals(["T"], [{"T": "0047"}, {"T": "0048"}]) == {}  # numbers, not amounts
+
+
 def test_stop(space):
     # once the turn is stopped, no more files are read: the rows so far are kept, and said to be
     for name in ("a.txt", "b.txt", "c.txt"):
@@ -145,6 +182,17 @@ def test_saved(engine, space):
     read = files.read(space, "Sums.xlsx").content
     assert read.startswith("## Answers\n\n\n| File | Total |\n| --- | --- |\n| a.txt | 900 | TL |")
     assert not any(f["name"].startswith(".ask") for f in space.files())
+    # amounts as numbers, the currency in the heading, and their total
+    files.write(space, "b.txt", "Invoice 2")
+    for reply in answers({"Total": "1.502,00 €"}, {"Total": "730,00 €"}):
+        engine.replies.put(reply)
+    ask.ask(Client(engine.url), None, context(space), "Totals?", ["Total"], ["a.txt", "b.txt"],
+            "Euros")  # fmt: skip
+    cells = files.run(space, """
+from openpyxl import load_workbook
+print([[c.value for c in row] for row in load_workbook("Euros.xlsx").active.rows])
+""").content.splitlines()[0]
+    assert cells == "[['File', 'Total (€)'], ['a.txt', 1502], ['b.txt', 730], ['Total', 2232]]"
 
 
 def test_in_a_turn(engine, tmp_path):

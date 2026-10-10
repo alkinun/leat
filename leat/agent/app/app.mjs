@@ -1284,7 +1284,9 @@ function what(m) {
   if (m.name === "ask_files") { // what it asked of each file, and the spreadsheet of the answers
     const asked = element("p", "", `Asked of each file: ${args?.question ?? ""}`);
     const columns = m.info?.columns?.length > 1 ? [element("p", "meta", `Columns: ${m.info.columns.join(", ")}`)] : [];
-    return [asked, ...columns, cards(m.info?.files ?? [])];
+    const gaps = [["No answer in", m.info?.unanswered], ["Not read", m.info?.unread]]
+      .filter(([, names]) => names?.length).map(([said, names]) => element("p", "meta", `${said}: ${names.join(", ")}`));
+    return [asked, ...columns, ...gaps, cards(m.info?.files ?? [])];
   }
   if (m.name === "search_files" && results?.length) {
     return [cited(listed(results.map((r) => sourceLink(r, r.title))), results)];

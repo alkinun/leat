@@ -143,6 +143,19 @@ INVOICES = {
     ]
 }
 
+# a month's invoices, many, of amounts with cents, which a model adds up less surely than code, and
+# what they come to, as written in English
+BILLED = [
+    (f"{101 + i:04d}", ["Calder Freight", "Northgrid Energy", "Ancoats Bakehouse"][i % 3],
+     round(87.35 + i * 7919 % 2311 + i * 37 % 100 / 100, 2))
+    for i in range(24)
+]  # fmt: skip
+MONTH = {
+    f"Invoices/{n}.txt": f"INVOICE {n}\nDate: {int(n) % 28 + 1:02d}/03/2026\nSupplier: {supplier}\n"
+    f"Total due: £{amount:,.2f}"
+    for n, supplier, amount in BILLED
+}
+TOTAL = re.escape(f"{sum(amount for _, _, amount in BILLED):,.2f}")
 
 NONE = ("search_web", "fetch", "read", "run")
 CASES = [
@@ -174,6 +187,10 @@ CASES = [
          [called("search_files"), absent, uncalled("search_web")], FIRM, attach=False),
     Case("every file", "Make a table of every invoice's date, seller and total.",
          [called("ask_files"), makes(r"\.xlsx$"), says("1.502|1,502")], INVOICES, attach=False),
+    Case("totals", "How much do the invoices come to in all?",
+         [called("ask_files"), says("6.339,75|6,339.75")], INVOICES, attach=False),
+    Case("totals of many", "What do this month's invoices come to in all?",
+         [called("ask_files"), says(TOTAL)], MONTH, attach=False),
     Case("fills a template", "Fill the fee letter template for Weber Logistik: March, 1.200 EUR, "
          "due 10 April, signed by Clara Becker.", [called("fill_template"),
                                                   makes(r"Weber.*\.docx$")],
