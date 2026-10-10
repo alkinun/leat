@@ -7,6 +7,10 @@ description: Word documents, as letters, CVs and reports
 Make them with python-docx, in one run, and save them in the workspace under a name that says what
 they are. Fill in the user's own details; leave none of the template's.
 
+To fill a Word template the user has, whose fields are written {{Client name}} or «Client name»,
+call fill_template rather than writing code: it keeps the template's formatting, and says which
+fields had no value.
+
 Write of the user only what they told you: never invent their experience, duties, results,
 courses or skill levels. Where the document wants more, leave a gap
 marked as "[your duties at Springfield General]", and say in your answer what they may add.
