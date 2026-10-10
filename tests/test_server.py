@@ -145,6 +145,26 @@ def test_completion_waits_for_a_load(tiny_model, tmp_path, monkeypatch):
         loading.join()
 
 
+def test_completion_waits_for_every_load(tiny_model, tmp_path, monkeypatch):
+    # a completion asked for while two loads wait, the first done, waits for the second too, and
+    # is the second's, rather than rendered by the first's template and failing once it is gone
+    (other := tmp_path / "other.gguf").symlink_to(tiny_model[0])
+    warm_up = Engine.warm_up
+    monkeypatch.setattr(Engine, "warm_up", lambda self: time.sleep(0.5) or warm_up(self))
+    with serving(tiny_model[0], other, max_context=CONTEXT) as server:
+        client = connect(server)
+        loads = [threading.Thread(target=server.load, args=(name,)) for name in ("tiny", "other")]
+        for loading in loads:
+            loading.start()
+            while not loading.is_alive() or server.ready.is_set():
+                time.sleep(0.001)
+        while server.loading != "other":  # the first done
+            time.sleep(0.001)
+        assert chat(client, "hello", max_tokens=2).model == "other"
+        for loading in loads:
+            loading.join()
+
+
 def test_api_alone(server):
     # the API and nothing else: the app is leat agent's
     with pytest.raises(urllib.error.HTTPError, match="404"):
@@ -775,6 +795,7 @@ def test_worker_error(client, monkeypatch):
 def test_worker_error_ends_a_waiting_load(server):
     # completions waiting for a load the error ended go on, rather than waiting forever
     server.ready.clear()
+    server._loads += 1  # as load() asks for one
     load = _Load("tiny")
     server._fail(KeyError("a bug"), collections.deque([load]), {})
     assert isinstance(load.done.get(), KeyError) and server.ready.is_set()

@@ -197,9 +197,11 @@ class Server(ThreadingHTTPServer):
         self.busy = self.queued = 0  # completions running, and waiting for a slot, as last stepped
         self.loaded: _Loaded | None = None
         self.loading: str | None = None  # the id of the model the worker is loading
-        self.ready = threading.Event()  # clear from a load's request till it is done, which
-        # completions wait for
+        self.ready = threading.Event()  # clear from a load's request till every load asked for
+        # is done, which completions wait for
         self.ready.set()
+        self._loads = 0  # loads asked for, not yet done
+        self._loads_lock = threading.Lock()
         self.requests: queue.SimpleQueue[_Completion | _Load | None] = queue.SimpleQueue()
         super().__init__((host, port), _Handler)
         threading.Thread(target=self._work, name="leat engine", daemon=True).start()
@@ -209,7 +211,10 @@ class Server(ThreadingHTTPServer):
         and compiles its graphs; returns when it is ready. Loading the loaded model does nothing."""
         if name not in self.models:
             raise ValueError(f"there is no model {name!r}")
-        self.ready.clear()  # a completion asked from now on waits for it, rendered by its template
+        with self._loads_lock:  # a completion asked from now on waits for it, rendered by its
+            # template
+            self._loads += 1
+            self.ready.clear()
         self.requests.put(load := _Load(name))
         if (error := load.done.get()) is not None:
             raise RuntimeError(f"loading {name} failed: {error!r}") from error
@@ -258,7 +263,7 @@ class Server(ThreadingHTTPServer):
         for request in waiting:
             (request.done if isinstance(request, _Load) else request.out).put(error)
             if isinstance(request, _Load):  # completions waiting for it go on, with no load
-                self.ready.set()
+                self._loaded()
         running.clear()
         waiting.clear()
 
@@ -335,7 +340,7 @@ class Server(ThreadingHTTPServer):
     def _load(self, load: _Load) -> None:
         # replaces the loaded model, whose memory is freed first: a GPU holds one model at most
         if self.loaded is not None and self.loaded.name == load.name:
-            self.ready.set()
+            self._loaded()
             return load.done.put(None)
         self.loaded, self.loading = None, load.name
         gc.collect()  # an engine's graphs refer back to it
@@ -345,8 +350,16 @@ class Server(ThreadingHTTPServer):
         except Exception as e:  # for the client; the server carries on with no model
             error = e
         self.loading = None
-        self.ready.set()
+        self._loaded()
         load.done.put(error)
+
+    def _loaded(self) -> None:
+        # a load done: completions go on once every load asked for is, rather than rendered by a
+        # model's template that one asked for later replaces, or finding none loaded meanwhile
+        with self._loads_lock:
+            self._loads -= 1
+            if not self._loads:
+                self.ready.set()
 
     def _engine(self, path: Path) -> tuple[Engine, ChatTemplate]:
         # a model's engine, warmed up, and its template; with the vision encoder the options
