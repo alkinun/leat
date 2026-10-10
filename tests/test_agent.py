@@ -486,14 +486,15 @@ def test_api_workflows(server, agent):
 
 def test_offline(engine, tmp_path):
     # kept from the internet, the model is offered no tool that reaches it, and told so; let
-    # reach it again, it is offered them, and told how to use them
-    from leat.agent.agent import OFFLINE, WEB
+    # reach it again, it is offered them, and told how to use them, by their rules
+    from leat.agent.agent import OFFLINE
+    from leat.agent.tools import WEB
 
-    def tool(name: str) -> Tool:
-        return Tool(name, name, strings(text="x"), echo)
+    def tool(name: str, section: str = "files") -> Tool:
+        return Tool(name, name, strings(text="x"), echo, (f"Call {name}.",), section)
 
     agent = Agent(Store(tmp_path / "leat.db"), Client(engine.url),
-                  [tool("search_web"), tool("fetch"), tool("echo")])  # fmt: skip
+                  [tool("search_web", WEB), tool("fetch", WEB), tool("echo")])  # fmt: skip
     with agent.events.watch() as told:
         agent.set_offline(True)
         assert told.get() == {"type": "settings", "offline": True}
@@ -502,7 +503,7 @@ def test_offline(engine, tmp_path):
         id = agent.send(None, "What's new?")
         until(events, ended)
     assert OFFLINE in agent.store.messages(id)[0]["content"]
-    assert WEB not in agent.store.messages(id)[0]["content"]
+    assert "Call search_web." not in agent.store.messages(id)[0]["content"]
     assert [t["function"]["name"] for t in engine.requests[-1]["tools"]] == ["echo"]
     agent.set_offline(False)
     assert agent.store.setting("offline") is None and list(agent.offered()) == [
@@ -511,7 +512,8 @@ def test_offline(engine, tmp_path):
     with agent.events.watch() as events:
         id = agent.send(None, "What's new?")
         until(events, ended)
-    assert WEB in agent.store.messages(id)[0]["content"]
+    system = agent.store.messages(id)[0]["content"]
+    assert "## The web\n- Call search_web.\n- Call fetch." in system and OFFLINE not in system
 
 
 def test_api_offline(server, agent):

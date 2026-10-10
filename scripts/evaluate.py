@@ -30,7 +30,7 @@ from leat.agent.client import Client  # noqa: E402
 from leat.agent.embeddings import Embedder  # noqa: E402
 from leat.agent.index import Index  # noqa: E402
 from leat.agent.store import Store  # noqa: E402
-from leat.agent.tools import ask, files, office, web  # noqa: E402
+from leat.agent.tools import every  # noqa: E402
 from leat.agent.workspace import Workspace  # noqa: E402
 from leat.chat import EFFORTS  # noqa: E402
 
@@ -228,10 +228,7 @@ def _run(case: Case, args: argparse.Namespace) -> Outcome:
         workspace = Workspace(Path(data) / "workspace", environment)
         engine = Client(args.engine, os.environ.get("LEAT_ENGINE_KEY"))
         index = Index(Path(data) / "index.db", workspace, embedder=Embedder(engine))
-        tools = [
-            *web.tools(args.search, engine), *files.tools(index), *ask.tools(engine, index),
-            *office.tools(),
-        ]  # fmt: skip
+        tools = every(args.search, engine, index)
         agent = Agent(Store(Path(data) / "leat.db"), engine, tools, workspace, index)
         space = agent.space()  # no one's own, as the conversation is
         for name, text in case.files.items():

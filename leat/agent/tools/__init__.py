@@ -1,14 +1,22 @@
 """The tools the model calls. Each takes a few arguments, and answers with text for the model to
-read and info for people to see of it, such as the pages it read."""
+read and info for people to see of it, such as the pages it read.
+
+A tool carries its rules, what the system prompt tells the model of when and how to call it, in a
+section of the prompt's, the web's or the files', as a bundle of a feature's tools and instructions
+does: the prompt is made of the tools offered, and a tool taken away takes its rules with it."""
 
 import contextlib
 import json
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from leat.agent.workspace import Workspace
+
+if TYPE_CHECKING:
+    from leat.agent.client import Client
+    from leat.agent.index import Index
 
 
 @dataclass(frozen=True)
@@ -40,12 +48,17 @@ class Result:
     info: dict[str, Any] = field(default_factory=dict)  # what people see of it
 
 
+WEB, FILES = "web", "files"  # the sections of the system prompt a tool's rules are in
+
+
 @dataclass(frozen=True)
 class Tool:
     name: str
     description: str
     parameters: dict[str, Any]  # its arguments, as a JSON schema
     run: Callable[..., Result]  # of the call's Context and the arguments, by name
+    rules: tuple[str, ...] = ()  # the system prompt's rules of it, each a line of its section
+    section: str = FILES  # WEB, of a tool that reaches the internet, which offline takes away
 
     def declaration(self) -> dict[str, Any]:
         """The tool as OpenAI's API declares it."""
@@ -90,3 +103,17 @@ def strings(**arguments: str) -> dict[str, Any]:
     """The schema of arguments that are strings, each required, given by name and description."""
     properties = {name: {"type": "string", "description": d} for name, d in arguments.items()}
     return {"type": "object", "properties": properties, "required": list(arguments)}
+
+
+def every(searxng: str, engine: "Client", index: "Index | None" = None) -> list[Tool]:
+    """The tools leat agent offers, in the order the model is told of them, those made for a task
+    before the general ones, files.GENERAL: the web's, through the SearXNG at `searxng`, the
+    files', ask_files and the office's, whose readers and pages the model `engine` serves reads,
+    and which find the files' passages by `index`."""
+    from leat.agent.tools import ask, files, office, web
+
+    tools = [
+        *web.tools(searxng, engine), *files.tools(index), *ask.tools(engine, index),
+        *office.tools(),
+    ]  # fmt: skip
+    return sorted(tools, key=lambda tool: tool.name in files.GENERAL)

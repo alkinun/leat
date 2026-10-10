@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from leat.agent.client import Client, EngineError
-from leat.agent.tools import Context, Result, Tool, schema, strings
+from leat.agent.tools import WEB, Context, Result, Tool, schema, strings
 from leat.agent.workspace import Workspace
 
 RESULTS = 6  # search results the model reads
@@ -73,6 +73,14 @@ _AGENT = "Mozilla/5.0 (compatible; leat)"
 WHOLE = 4000
 READER = 24000  # characters of a page a reader reads at most, its start
 FOUND = 600  # tokens of a reader's findings at most
+# the system prompt's rules of searching the web and reading its pages
+RULES = (
+    "When a question needs facts you may not know, or that may have changed, call search_web, "
+    "then fetch the two or three pages most likely to answer, at once, each with the question it "
+    "should answer. Fetch more only if they fall short.",
+    "When the user asks you to research something, search in several ways, read the pages that "
+    "matter, ten or so, and answer with a report in sections that ends with what stays unsure.",
+)
 # a reader's instructions, of a page and a question
 READING = """\
 You read a web page for Leat, an assistant, who must answer a question. Say what the page says \
@@ -91,6 +99,8 @@ def tools(searxng: str, reader: Client | None = None) -> list[Tool]:
             "snippet",
             strings(query="what to search for"),
             lambda context, query: search(searxng, query, context),
+            RULES,
+            WEB,
         ),
         Tool(
             "fetch",
@@ -107,6 +117,7 @@ def tools(searxng: str, reader: Client | None = None) -> list[Tool]:
             lambda context, url, question=None: fetch(
                 url, context.workspace, context, question, reader
             ),
+            section=WEB,
         ),
     ]
 

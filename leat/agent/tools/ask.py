@@ -31,7 +31,6 @@ START = 4000  # of a longer one's, its start, before the passages likeliest to a
 ANSWER = 500  # tokens of a reader's answer at most
 SHOWN = 50  # rows of the table the model reads; the spreadsheet holds every one
 CELL = 300  # characters of an answer the model reads in the table, at most
-# a reader's instructions, of the answers' keys
 # writes the table of the JSON at sys.argv[1], its first row its heading, as the workbook
 # sys.argv[2]: its heading bold, frozen and filtered, each column as wide as it needs
 _SAVE = """
@@ -56,6 +55,12 @@ for column in sheet.columns:
 book.save(sys.argv[2])
 print("{}")
 """
+# the system prompt's rule of asking every file
+RULE = (
+    "For a question of every file, or of many, as each invoice's total, call ask_files once rather "
+    "than reading them; answer with its table, or a long one's first rows, and say what stands out."
+)
+# a reader's instructions, of the answers' keys
 READING = """\
 You read one file for Leat, an assistant, who asks the same of many files. Answer from this file \
 alone, as a JSON object of these keys: {keys}. Each value is short: what the file says, a number \
@@ -93,6 +98,7 @@ def tools(reader: Client, index: Index | None = None) -> list[Tool]:
             lambda context, question, columns=None, files=None, name=None: ask(
                 reader, index, context, question, columns, files, name
             ),
+            (RULE,),
         )
     ]
 

@@ -339,6 +339,19 @@ print("{}")
 """
 
 
+# the system prompt's rules of the office's tools, which lay out a document and keep one's
+# formatting, as the model's own code does not
+MAKE = (
+    "To make a letter, memo or report, call make_document with its text in markdown, and the "
+    "user's letterhead, a Word template, if they have one."
+)
+FILL = "To fill a Word template's fields, call fill_template, which keeps its formatting."
+SUGGEST = (
+    "To change a Word document, call suggest_edits, which makes tracked changes the user accepts "
+    "or rejects, keeping its formatting."
+)
+
+
 def tools() -> list[Tool]:
     """make_document, fill_template and suggest_edits, in their call's conversation's
     workspace."""
@@ -368,6 +381,7 @@ def tools() -> list[Tool]:
                 "required": ["name", "content"],
             },  # fmt: skip
             lambda context, name, content, template=None: make(context, name, content, template),
+            (MAKE,),
         ),
         Tool(
             "fill_template",
@@ -391,6 +405,7 @@ def tools() -> list[Tool]:
                 "required": ["path", "values", "name"],
             },  # fmt: skip
             lambda context, path, values, name: fill(context, path, values, name),
+            (FILL,),
         ),
         Tool(
             "suggest_edits",
@@ -428,6 +443,7 @@ def tools() -> list[Tool]:
                 "required": ["path", "edits", "name"],
             },  # fmt: skip
             lambda context, path, edits, name: suggest(context, path, edits, name),
+            (SUGGEST,),
         ),
     ]
 

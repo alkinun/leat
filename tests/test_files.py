@@ -239,12 +239,13 @@ def test_images_seen(engine, workspace, tmp_path, vision):
 
 
 def test_system_prompt(agent, tmp_path):
-    # the workspace and the skills, when the agent has a workspace
+    # the workspace, when the agent has one, with its tools' rules: run's, of the skills
     from leat.agent.agent import _system
 
-    with_workspace, without = (_system(w)["content"] for w in (True, False))
-    assert "- skills/docx/SKILL.md: Word documents" in with_workspace
-    assert "workspace" not in without
+    with_workspace, without = (_system(w, tools=files.tools())["content"] for w in (True, False))
+    assert "with run. The skills:\n  - skills/docx/SKILL.md: Word documents" in with_workspace
+    assert "workspace" not in without and "skills" not in without
+    assert "skills" not in _system(True)["content"]  # without run
 
 
 @pytest.fixture

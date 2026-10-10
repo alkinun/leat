@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from leat.agent import documents
-from leat.agent.agent import SEARCH, Agent, _system
+from leat.agent.agent import Agent, _system
 from leat.agent.client import Client
 from leat.agent.index import PASSAGE, Index, _match, fold, passages
 from leat.agent.store import Store
@@ -176,8 +176,8 @@ def test_agent(engine, workspace, index, tmp_path):
         index.update("people/0")
         states = [events.get(timeout=5)["files"][0].get("state") for _ in range(3)]
     assert states == [None, "reading", "failed"]
-    assert SEARCH in _system(True, tools={"search_files"})["content"]
-    assert "search_files" not in _system(True)["content"]
+    assert files.SEARCH in _system(True, tools=files.tools(index))["content"]
+    assert "search_files" not in _system(True, tools=files.tools())["content"]
     assert "search_files" in agent.tools
 
 

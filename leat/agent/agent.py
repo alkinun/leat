@@ -25,7 +25,7 @@ import shutil
 import threading
 import time
 import urllib.parse
-from collections.abc import Collection, Iterable, Iterator
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +35,7 @@ from leat.agent.client import Client, Completion, EngineError, whole
 from leat.agent.index import Index
 from leat.agent.store import Store
 from leat.agent.sync import SYNC, mirror
-from leat.agent.tools import Context, Result, Tool, arguments, files, numbered
+from leat.agent.tools import FILES, WEB, Context, Result, Tool, arguments, numbered
 from leat.agent.workspace import Workspace
 
 # the system prompt, fixed when a conversation starts so that every prompt after extends the last:
@@ -43,55 +43,24 @@ from leat.agent.workspace import Workspace
 SYSTEM = """\
 You are Leat, an assistant that runs on the user's own computer: what they say and the files they \
 share stay on it.{named} Each of the user's messages starts with the date and time they sent it."""
-# of the system prompt, when the agent searches the web
-WEB = """\
-## The web
-- When a question needs facts you may not know, or that may have changed, call search_web, then \
-fetch the two or three pages most likely to answer, at once, each with the question it should \
-answer. Fetch more only if they fall short.
-- When the user asks you to research something, search in several ways, read the pages that \
-matter, ten or so, and answer with a report in sections that ends with what stays unsure."""
-# and when it is kept from the internet
+# of the system prompt, when the agent is kept from the internet
 OFFLINE = """\
 ## The web
 This Leat has no internet: answer from what you know and the user's files, and say so when a \
 question needs what you cannot reach, as today's news."""
-WEB_TOOLS = ("search_web", "fetch")  # the tools that reach the internet, which offline takes away
-# of the system prompt, when the agent has a workspace
+# of the system prompt, when the agent has a workspace, with its tools' rules
 WORKSPACE = """\
 ## The user's files
 The user's files are in a workspace, where you read, write and edit them, and run Python on them \
 in a sandbox without the internet. The files the user attaches are named in their message, and \
 images are shown to you when you can see them.
 - Answer questions of the user's own work, as their clients, cases, documents or rules, from \
-their files, never the web, which must not learn of them.{search}{ask}
-- {make} Name the file in your answer, without a link: the app shows the user the files you \
-make.{office}
+their files, never the web, which must not learn of them.{rules}
+- Name each file you make in your answer, without a link: the app shows the user the files you \
+make.
 - Amounts are written differently across countries: 1.234,56 in much of Europe is 1234.56. Code \
 that reads amounts from files must read them so; check what it finds against a figure you can see \
-in the file.
-
-The skills:
-{skills}"""
-# of the workspace's section, when the agent searches the files
-SEARCH = """
-- Call search_files for the passages that answer, and search again in other words if the first \
-try falls short; read on in a file where a passage does. If the files do not say it, say so."""
-# and when it asks every file
-ASK = """
-- For a question of every file, or of many, as each invoice's total, call ask_files once rather \
-than reading them; answer with its table, or a long one's first rows, and say what stands out."""
-# of the workspace's section, how the agent makes a document: with run alone, of a skill
-MAKE = "To make a document, first read the skill for its kind, then make it with run."
-# and when it has the office's tools, which lay out a document and keep one's formatting, as the
-# model's own code does not
-MAKE_OFFICE = """\
-To make a letter, memo or report, call make_document with its text in markdown, and the user's \
-letterhead, a Word template, if they have one. For what markdown cannot hold, as spreadsheets, \
-slides and charts, first read the skill for its kind, then make it with run."""
-OFFICE = """
-- To change a Word document, call suggest_edits, which makes tracked changes the user accepts or \
-rejects; to fill a Word template's fields, call fill_template. Both keep its formatting."""
+in the file."""
 # of the system prompt, always
 CITE = """\
 ## Sources
@@ -236,7 +205,7 @@ class Agent:
             if id is None:
                 who = (self.store.person(person) or {}) if person else {}
                 system = _system(self.workspace is not None, who.get("name"), held,
-                                 self.offered(), self.offline())  # fmt: skip
+                                 self.offered().values(), self.offline())  # fmt: skip
                 title = _title(content)
                 id = self.store.create(title, [system, message], person, project)["id"]
                 start = 1
@@ -381,7 +350,7 @@ class Agent:
         """The tools the model is offered: all, but for those that reach the internet while the
         agent is kept from it."""
         offline = self.offline()
-        return {n: t for n, t in self.tools.items() if not (offline and n in WEB_TOOLS)}
+        return {n: t for n, t in self.tools.items() if not (offline and t.section == WEB)}
 
     def sync(self, id: str, source: str | None, person: int | None = None) -> None:
         """Syncs a project's files with a folder of the box's from now on, in a folder of its name,
@@ -992,22 +961,24 @@ class _Stopped(Exception):
 
 def _system(
     workspace: bool, name: str | None = None, project: dict[str, Any] | None = None,
-    tools: Collection[str] = (), offline: bool = False,
+    tools: Iterable[Tool] = (), offline: bool = False,
 ) -> dict[str, Any]:  # fmt: skip
     # the system prompt of a conversation begun now with the user, of a `name` if the box has
-    # people: the web's section if the tools named in `tools` search it, or if `offline` that it is
-    # out of reach; the workspace's if `workspace`, with search_files', ask_files' and the office's
-    # tools' rules as `tools` has them; citing; and the project it is held in, if one
+    # people: the web's section of the rules of the `tools` that reach it, or if `offline` that it
+    # is out of reach; the workspace's if `workspace`, of the rules of the tools of the files;
+    # citing; and the project it is held in, if one
+    tools = list(tools)
+
+    def rules(section: str) -> str:
+        return "".join(f"\n- {rule}" for t in tools if t.section == section for rule in t.rules)
+
     sections = [SYSTEM.format(named=f" The user is {name}." if name else "")]
-    if "search_web" in tools or offline:
-        sections.append(WEB if "search_web" in tools else OFFLINE)
+    if offline:
+        sections.append(OFFLINE)
+    elif web := rules(WEB):
+        sections.append(f"## The web{web}")
     if workspace:
-        sections.append(WORKSPACE.format(
-            skills="\n".join(f"- {path}: {about}" for path, about in files.skills()),
-            search=SEARCH * ("search_files" in tools), ask=ASK * ("ask_files" in tools),
-            make=MAKE_OFFICE if "make_document" in tools else MAKE,
-            office=OFFICE * ("suggest_edits" in tools),
-        ))  # fmt: skip
+        sections.append(WORKSPACE.format(rules=rules(FILES)))
     sections.append(CITE)
     if project is not None:
         text = project["instructions"].strip()

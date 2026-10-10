@@ -16,11 +16,23 @@ READ = 12000  # characters of a file read at once
 LISTED = 20  # files a search that finds nothing names, the first by name
 SKILLS = Path(__file__).parent.parent / "skills"
 LIBRARIES = "python-docx, openpyxl, python-pptx, fpdf2, pypdf, matplotlib, pandas"
+# the tools that do what others do more surely, as run makes documents, which a model is offered
+# after every other, and told of last
+GENERAL = ("write", "edit", "run")
+# the system prompt's rules of searching the files, and of making a document with run, of a skill
+SEARCH = (
+    "Call search_files for the passages that answer, and search again in other words if the first "
+    "try falls short; read on in a file where a passage does. If the files do not say it, say so."
+)
+MAKE = (
+    "To make a spreadsheet, slides, a chart or any document no other tool makes, first read the "
+    "skill for its kind, then make it with run. The skills:"
+)
 
 
 def tools(index: Index | None = None) -> list[Tool]:
-    """read, write, edit and run, each in its call's conversation's workspace, and with an index
-    search_files, of the index's passages."""
+    """read, with an index search_files, of the index's passages, then the tools of GENERAL:
+    write, edit and run, each in its call's conversation's workspace."""
     start = {
         "type": "integer",
         "description": "the character to start from, to read on in a long file",
@@ -30,14 +42,22 @@ def tools(index: Index | None = None) -> list[Tool]:
         "description": "the file's or folder's path in the workspace, as 'notes.txt'",
     }
     reading = {"type": "object", "properties": {"path": path, "start": start}, "required": ["path"]}
-    return [
-        Tool(
-            "read",
-            "Read a file in the workspace as text, PDF, Word, Excel and PowerPoint files too, or "
-            "list a folder's files, '.' for the whole workspace",
-            reading,
-            lambda context, path, start=0: read(context.space(), path, start, index),
-        ),
+    reading_tool = Tool(
+        "read",
+        "Read a file in the workspace as text, PDF, Word, Excel and PowerPoint files too, or list "
+        "a folder's files, '.' for the whole workspace",
+        reading,
+        lambda context, path, start=0: read(context.space(), path, start, index),
+    )
+    searching = [Tool(
+        "search_files",
+        "Search the workspace's files, documents too, by their words and what they mean. Returns "
+        "the passages likeliest to answer, each numbered, with its file and where in it",
+        strings(query="what to find, in the words a passage would use"),
+        lambda context, query: search(index, context, query),
+        (SEARCH,),
+    )] if index is not None else []  # fmt: skip
+    general = [
         Tool(
             "write",
             "Write a text file in the workspace, replacing any file of its name",
@@ -61,14 +81,10 @@ def tools(index: Index | None = None) -> list[Tool]:
             "prints, and the files it made or changed",
             strings(code=f"Python 3 code; its libraries are {LIBRARIES}"),
             lambda context, code: run(context.space(), code),
+            ("\n".join([MAKE, *(f"  - {path}: {about}" for path, about in skills())]),),
         ),
-    ] + ([Tool(
-        "search_files",
-        "Search the workspace's files, documents too, by their words and what they mean. Returns "
-        "the passages likeliest to answer, each numbered, with its file and where in it",
-        strings(query="what to find, in the words a passage would use"),
-        lambda context, query: search(index, context, query),
-    )] if index is not None else [])  # fmt: skip
+    ]
+    return [reading_tool, *searching, *general]
 
 
 def read(

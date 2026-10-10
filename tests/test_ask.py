@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from leat.agent.agent import ASK, Agent, _system
+from leat.agent.agent import Agent, _system
 from leat.agent.client import Client
 from leat.agent.index import Index
 from leat.agent.store import Store
@@ -163,8 +163,8 @@ def test_in_a_turn(engine, tmp_path):
     shown = [e["message"]["info"] for e in seen if e["type"] == "message"
              and e["message"]["role"] == "tool" and not e["message"]["content"]]  # fmt: skip
     assert [(i.get("done"), i.get("total")) for i in shown] == [(None, None), (0, 1), (1, 1)]
-    assert ASK in _system(True, tools={"ask_files"})["content"]
-    assert ASK in agent.store.messages(agent.conversations()[0]["id"])[0]["content"]
+    assert ask.RULE in _system(True, tools=ask.tools(Client(engine.url)))["content"]
+    assert ask.RULE in agent.store.messages(agent.conversations()[0]["id"])[0]["content"]
 
 
 def test_image(engine, space):
