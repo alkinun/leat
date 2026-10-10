@@ -537,10 +537,16 @@ function listFiles(project) {
     remover.title = "Delete";
     remover.onclick = () => confirm(`Delete “${f.name}”? It cannot be undone.`)
       && del(`/api${place(project)}/files/${encodeURIComponent(f.name)}`);
-    item.append(fileLink(f.name, project), element("span", "meta", `${bytes(f.size)} · ${day(f.modified)}`), remover);
+    const about = element("span", "meta", [STATES[f.state], bytes(f.size), day(f.modified)].filter(Boolean).join(" · "));
+    about.title = f.error ?? "";
+    about.classList.toggle("failed", f.state === "failed");
+    item.append(fileLink(f.name, project), about, remover);
     return item;
   });
 }
+
+// what a file's state in the index says, while it is not read: being read, or not readable
+const STATES = { reading: "Reading…", failed: "Couldn't read" };
 
 // the files of a project's space, or of the person's own
 function filesOf(project) {
@@ -783,6 +789,7 @@ function fold(start, indexes, unanswered) {
 // what each tool's calls did, in a few words: one call, and n
 const DID = {
   search: ["searched the web", (n) => `searched the web ${n} times`],
+  search_files: ["searched the files", (n) => `searched the files ${n} times`],
   fetch: ["read a page", (n) => `read ${n} pages`],
   read: ["read a file", (n) => `read ${n} files`],
   run: ["ran code", (n) => `ran code ${n} times`],
@@ -893,6 +900,8 @@ function work(m, index) {
 const LINES = {
   search: (a) => [`Searching for “${a.query}”…`, `Searched for “${a.query}”`,
     `Couldn't search for “${a.query}”`],
+  search_files: (a) => [`Searching the files for “${a.query}”…`, `Searched the files for “${a.query}”`,
+    `Couldn't search the files for “${a.query}”`],
   fetch: (a, i) => [`Reading ${host(a.url)}…`, `Read ${i.title || host(i.url ?? a.url)}`,
     `Couldn't read ${host(a.url)}`],
   read: (a) => [`Reading ${named(a.path)}…`, `Read ${named(a.path)}`, `Couldn't read ${named(a.path)}`],
@@ -915,7 +924,10 @@ function what(m) {
   const { arguments: args, results, url, title, error } = m.info ?? {};
   if (error || !m.content) return [element("p", "", error ?? "")];
   if (m.name === "search" && results?.length) {
-    return [listed(results.map((r) => link(r.url, r.title)), true)];
+    return [cited(listed(results.map((r) => link(r.url, r.title)), true), results)];
+  }
+  if (m.name === "search_files" && results?.length) {
+    return [cited(listed(results.map((r) => sourceLink(r, r.title))), results)];
   }
   if (m.name === "fetch") { // and the question it was read for, if one
     const asked = m.info?.question ? [element("p", "meta", `Read for: ${m.info.question}`)] : [];
@@ -995,7 +1007,7 @@ function numbered() {
   for (const m of shown?.messages ?? []) {
     const info = m.role === "tool" ? (m.info ?? {}) : {};
     for (const s of [info, ...(info.results ?? [])]) {
-      if (s.n && s.url && !all.has(s.n)) all.set(s.n, { n: s.n, url: s.url, title: s.title });
+      if (s.n && s.url && !all.has(s.n)) all.set(s.n, s);
     }
   }
   return all;
@@ -1007,7 +1019,7 @@ function cite(element) {
   for (const sup of element.querySelectorAll("sup.cite:not(.linked)")) {
     const s = all.get(Number(sup.textContent));
     if (!s) continue;
-    sup.replaceChildren(Object.assign(link(s.url, sup.textContent), { title: s.title || s.url }));
+    sup.replaceChildren(Object.assign(sourceLink(s, sup.textContent), { title: s.title || s.url }));
     sup.classList.add("linked");
   }
 }
@@ -1029,10 +1041,21 @@ function sources(m) {
   return pages;
 }
 
-function source({ url, title, n }) {
-  const a = link(url, n ? `${n} · ${host(url)}` : host(url));
+function source(s) {
+  const named = s.file ? s.title : host(s.url);
+  const a = sourceLink(s, s.n ? `${s.n} · ${named}` : named);
   a.className = "source";
-  a.title = title || url;
+  a.title = s.title || s.url;
+  return a;
+}
+
+// a link to a source: a page of the web, or a passage of a file, which opens it, a PDF at its page
+function sourceLink(s, text) {
+  if (!s.file) return link(s.url, text);
+  const a = fileLink(s.file);
+  a.textContent = text;
+  const page = s.place?.match(/^page (\d+)$/)?.[1];
+  if (page && /\.pdf$/i.test(s.file)) a.href += `#page=${page}`;
   return a;
 }
 
@@ -1056,6 +1079,12 @@ function listed(items, hosts = false) {
   return list;
 }
 
+// a list of sources, each numbered as the conversation cites it, rather than by its place there
+function cited(list, sources) {
+  [...list.children].forEach((item, i) => sources[i].n && (item.value = sources[i].n));
+  return list;
+}
+
 // a web address's site, as people name it
 function host(url) {
   try {
@@ -1068,6 +1097,7 @@ function host(url) {
 // the icon of a tool's line
 const ICONS = {
   search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
+  search_files: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
   fetch: '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/>',
   read: '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/>',
   write: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',

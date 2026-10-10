@@ -143,6 +143,7 @@ body:is(.files, .settings, .projects) :is(#log, #composer, #greeting), body.proj
 .page li a { color: var(--text); text-decoration: none; }
 .page li a:hover { text-decoration: underline; }
 .page .meta { color: var(--muted); font-size: 0.8125rem; white-space: nowrap; }
+.page .meta.failed { color: var(--error); cursor: help; }
 .page li button { padding: 0 8px; color: var(--muted); font-size: 1.125rem; }
 /* a project's page: back to the projects, its name, in place, whom it is shared with, and below
    its chats, files and instructions */
