@@ -492,6 +492,57 @@ function showProject(id, push = true) {
   $("input").focus();
 }
 
+// whether a project's files are synced with a folder of the box's, and how the last sync went; the
+// owner's to set up, with the folder's path, or to stop
+let choosing = false; // the owner choosing the folder, its form shown
+function renderSyncing(p) {
+  const box = $("syncing"), owner = me?.owner;
+  if (choosing && owner && !p.source) {
+    if (box.querySelector("form")) return; // as they type
+    const form = element("form"), path = element("input"), ok = element("button", "", "Sync"), cancel = element("button", "", "Cancel");
+    Object.assign(path, { placeholder: "The folder's path, as /mnt/office/Yılmaz", spellcheck: false });
+    cancel.type = "button";
+    cancel.onclick = () => (choosing = false, renderSyncing(p));
+    form.onsubmit = async (event) => {
+      event.preventDefault();
+      try {
+        await post(`/api/projects/${p.id}/sync`, { source: path.value.trim() });
+        choosing = false;
+      } catch (error) {
+        status(error.message, true);
+      }
+    };
+    form.append(path, ok, cancel);
+    box.replaceChildren(form);
+    return path.focus();
+  }
+  const parts = [];
+  if (p.source) {
+    const said = p.unsynced ? `Couldn't sync with ${p.source}: ${p.unsynced}`
+      : p.synced ? `Synced from ${p.source} · ${ago(p.synced)}` : `Syncing with ${p.source}…`;
+    parts.push(element("span", p.unsynced ? "warning" : "meta", said));
+    if (owner) {
+      const stop = element("button", "", "Stop syncing");
+      stop.onclick = () => confirm(`Stop syncing with ${p.source}? The files copied so far stay.`)
+        && post(`/api/projects/${p.id}/sync`, { source: null }).catch((e) => status(e.message, true));
+      parts.push(stop);
+    }
+  } else if (owner) {
+    const start = element("button", "", "Sync with a folder on this computer…");
+    start.title = "Keep a copy of a folder here, as a network drive's, in this project's files";
+    start.onclick = () => (choosing = true, renderSyncing(p));
+    parts.push(start);
+  }
+  box.replaceChildren(...parts);
+}
+
+// a time, in seconds, as how long ago it was
+function ago(seconds) {
+  const minutes = Math.round((Date.now() / 1000 - seconds) / 60);
+  return minutes < 1 ? "just now" : minutes < 60 ? `${minutes} min ago`
+    : minutes < 1440 ? `${Math.round(minutes / 60)} h ago` : day(seconds);
+}
+
 // a project this person sees, by its id
 function project(id) {
   return projects?.find((p) => p.id === id);
@@ -840,6 +891,7 @@ function renderProject() {
     return button;
   }));
   $("discard").hidden = !mine && !me?.owner;
+  renderSyncing(p);
   $("chats").replaceChildren(...conversations.filter((c) => c.project === p.id).map((c) => {
     const item = element("li"), a = element("a", "", c.title);
     a.href = `/c/${c.id}`;

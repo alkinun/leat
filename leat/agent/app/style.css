@@ -184,6 +184,18 @@ body.project :is(#log, #greeting) {
 }
 #instructions:focus { border-color: var(--muted); }
 #saved { margin: 6px 0 0; }
+/* whether a project's files are synced with a folder, and the owner's controls of it */
+#syncing { display: flex; align-items: center; gap: 12px; margin: 4px 0 6px; font-size: 0.8125rem; }
+#syncing:empty { display: none; }
+#syncing .meta { color: var(--muted); }
+#syncing .warning { color: var(--error); }
+#syncing button { padding: 2px 8px; border-radius: var(--round); background: none; color: var(--muted); }
+#syncing button:hover { background: var(--bubble); color: var(--text); }
+#syncing form { display: flex; gap: 4px; flex: 1; margin: 0; }
+#syncing input {
+  flex: 1; padding: 4px 10px; border: 1px solid var(--line); border-radius: var(--round);
+  background: var(--card); font: inherit; color: var(--text); outline: none;
+}
 #discard {
   margin: calc(40px * var(--density)) 0 calc(24px * var(--density)); padding: 6px 12px;
   border: 1px solid var(--line); border-radius: var(--round); color: var(--error); font-size: 0.875rem;
