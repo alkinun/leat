@@ -95,19 +95,23 @@ class Index:
         self._keep(folder, name, stat.st_size, stat.st_mtime, text)
         return text
 
-    def search(self, space: Workspace, query: str, n: int = FOUND) -> list[dict[str, Any]]:
-        """The passages of a space's files likeliest to say what a query asks, n at most, EACH of
-        a file: each's file, place, its start in the file's text, and its text."""
+    def search(
+        self, space: Workspace, query: str, n: int = FOUND, file: str | None = None
+    ) -> list[dict[str, Any]]:
+        """The passages of a space's files, or of one `file`, likeliest to say what a query asks,
+        n at most, EACH of a file of all: each's file, place, its start in the file's text, and
+        its text."""
         if not (match := _match(query)):
             return []
         with self._lock:
             rows = self._db.execute(
-                "SELECT name, place, start, text FROM passages WHERE passages MATCH ?"
-                " AND folder = ? ORDER BY rank LIMIT ?", (match, self._folder(space), n * EACH),
+                "SELECT name, place, start, text FROM passages WHERE passages MATCH ?1"
+                " AND folder = ?2 AND (?3 IS NULL OR name = ?3) ORDER BY rank LIMIT ?4",
+                (match, self._folder(space), file, n * EACH),
             ).fetchall()  # fmt: skip
         found: list[dict[str, Any]] = []
         for name, place, start, text in rows:
-            if sum(f["name"] == name for f in found) < EACH and len(found) < n:
+            if (file or sum(f["name"] == name for f in found) < EACH) and len(found) < n:
                 found.append({"name": name, "place": place, "start": start, "text": text})
         return found
 
@@ -153,7 +157,7 @@ class Index:
         gone = [name for name in known if name not in on_disk]
         stale = [
             name for name, f in on_disk.items()
-            if known.get(name) != (f["size"], f["modified"]) and _readable(space, name)
+            if known.get(name) != (f["size"], f["modified"]) and documents.readable(space, name)
         ]  # fmt: skip
         with self._lock, self._db:
             self._db.execute("BEGIN")
@@ -250,12 +254,3 @@ def _match(query: str) -> str:
         elif len(word) > 1:
             terms.append(f'"{word}"')
     return " OR ".join(terms)
-
-
-def _readable(space: Workspace, name: str) -> bool:
-    # whether a file has text to read: a document, or text, not an image
-    try:
-        with space.path(name).open("rb") as f:
-            return documents.readable(name, f.read(documents.SNIFF))
-    except OSError:
-        return False

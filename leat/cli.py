@@ -21,7 +21,7 @@ from leat.agent.client import Client
 from leat.agent.index import Index
 from leat.agent.server import Server as AgentServer
 from leat.agent.store import Store
-from leat.agent.tools import files, web
+from leat.agent.tools import ask, files, web
 from leat.agent.workspace import Workspace
 from leat.defaults import Overrides
 from leat.keys import Keys
@@ -184,7 +184,7 @@ def _agent(args: argparse.Namespace) -> None:
     workspace = Workspace(args.data / "workspace", environment if environment.exists() else None)
     engine = Client(args.engine, os.environ.get("LEAT_ENGINE_KEY"))
     index = Index(args.data / "index.db", workspace)
-    tools = [*web.tools(args.search, engine), *files.tools(index)]
+    tools = [*web.tools(args.search, engine), *files.tools(index), *ask.tools(engine, index)]
     agent = Agent(Store(args.data / "leat.db"), engine, tools, workspace, index)
     agent.start()
     with AgentServer(agent, args.host, args.port) as server:

@@ -113,9 +113,15 @@ def text(workspace: Workspace, name: str) -> str:
     return data.decode("utf-8", "replace")
 
 
-def readable(name: str, head: bytes) -> bool:
-    """Whether a file has text to read, by its name and its first bytes: a document, or text."""
-    return name.lower().endswith(DOCUMENTS) or b"\0" not in head[:SNIFF]
+def readable(workspace: Workspace, name: str) -> bool:
+    """Whether a file has text to read: a document, or text, not an image, by its name and its
+    first bytes."""
+    try:
+        with workspace.path(name).open("rb") as f:
+            head = f.read(SNIFF)
+    except (OSError, ValueError):
+        return False
+    return name.lower().endswith(DOCUMENTS) or b"\0" not in head
 
 
 def places(name: str, text: str) -> list[tuple[int, str]]:

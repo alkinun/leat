@@ -172,6 +172,6 @@ def test_agent(engine, workspace, index, tmp_path):
         index.update("people/0")
         states = [events.get(timeout=5)["files"][0].get("state") for _ in range(3)]
     assert states == [None, "reading", "failed"]
-    assert SEARCH in _system(True, search=True)["content"]
+    assert SEARCH in _system(True, tools={"search_files"})["content"]
     assert "search_files" not in _system(True)["content"]
     assert "search_files" in agent.tools

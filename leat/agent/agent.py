@@ -16,13 +16,14 @@ and watches the events after misses nothing, and an event it gets twice changes 
 import base64
 import contextlib
 import copy
+import functools
 import json
 import mimetypes
 import queue
 import shutil
 import threading
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Collection, Iterable, Iterator
 from typing import Any
 
 from leat.agent import context
@@ -52,13 +53,17 @@ The user's files are in a workspace, where you read, write and edit them, and ru
 them in a sandbox without the network; the files they attach are named in their message, and the \
 images among them shown, as those you read are, when you can see images. To make \
 a document, first read the skill for its kind, then make it with run, and name its file in your \
-answer, without a link: the app shows the user the files you make.{search} The skills:
+answer, without a link: the app shows the user the files you make.{search}{ask} The skills:
 {skills}
 """
 # of the system prompt, when the agent searches the files
 SEARCH = """ To answer from the files, call search_files \
 for the passages that say it, in several ways if the first falls short, and read on in the files \
 where the passages do; cite them by their numbers, as you cite pages."""
+# and when it asks every file
+ASK = """ To answer a question of every file, or of many, as \
+each invoice's total, call ask_files once rather than reading them; then answer with its table, \
+or the first rows of a long one, and say what stands out."""
 # of the system prompt, of a conversation in a project
 PROJECT = """
 This conversation is in the project "{name}".{instructions}
@@ -196,8 +201,7 @@ class Agent:
                 info["files"] = attached
             if id is None:
                 who = (self.store.person(person) or {}) if person else {}
-                search = "search_files" in self.tools
-                system = _system(self.workspace is not None, who.get("name"), held, search)
+                system = _system(self.workspace is not None, who.get("name"), held, self.tools)
                 title = _title(content)
                 id = self.store.create(title, [system, message], person, project)["id"]
                 start = 1
@@ -725,7 +729,10 @@ class _Turn:
             if (tool := self.tools.get(message["name"])) is None:
                 raise ValueError(f"there is no tool {message['name']!r}")
             called = arguments(message["info"]["arguments"])
-            context = Context(self.id, self._cite, self.person, self.workspace)
+            progress = functools.partial(self._progress, message, index)
+            context = Context(
+                self.id, self._cite, self.person, self.workspace, progress, self.stopped
+            )
             result = tool.run(context, **called)
         except Exception as e:  # for the model, which may try again
             result = Result(f"error: {e}", {"error": str(e)})
@@ -735,6 +742,13 @@ class _Turn:
                 message["info"] |= result.info
                 a._publish_message(self.id, self.person, index, message)
         answered.put(index)
+
+    def _progress(self, message: dict[str, Any], index: int, info: dict[str, Any]) -> None:
+        # shows how far a call is, in its message's info, while it runs
+        with self.agent._lock:
+            if not message["content"]:
+                message["info"] |= info
+                self.agent._publish_message(self.id, self.person, index, message)
 
     def _cite(self, url: str, title: str) -> int:
         # a source's number in the conversation: its own, if it was read before, or the next
@@ -810,13 +824,14 @@ class _Stopped(Exception):
 
 def _system(
     workspace: bool, name: str | None = None, project: dict[str, Any] | None = None,
-    search: bool = False,
+    tools: Collection[str] = (),
 ) -> dict[str, Any]:  # fmt: skip
     # the system prompt of a conversation begun now with the user, of a `name` if the box has
-    # people, the workspace's tools if `workspace`, search_files's if `search`, and the project
-    # it is held in, if one
+    # people, the workspace's tools if `workspace`, and of those named in `tools` search_files's
+    # and ask_files's, and the project it is held in, if one
     skills = "\n".join(f"- {path}: {about}" for path, about in files.skills())
-    space = WORKSPACE.format(skills=skills, search=SEARCH if search else "") if workspace else ""
+    search, ask = SEARCH * ("search_files" in tools), ASK * ("ask_files" in tools)
+    space = WORKSPACE.format(skills=skills, search=search, ask=ask) if workspace else ""
     named = f" The user is {name}." if name else ""
     content = SYSTEM.format(named=named, workspace=space)
     if project is not None:

@@ -3,6 +3,7 @@ read and info for people to see of it, such as the pages it read."""
 
 import contextlib
 import json
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -13,7 +14,8 @@ from leat.agent.workspace import Workspace
 @dataclass(frozen=True)
 class Context:
     """What a call is made in: its conversation, the numbering of the sources read in it, whose
-    the conversation is, and the files it works among."""
+    the conversation is, the files it works among, how a long call tells how far it is, and
+    whether the turn is stopped, at which a long call ends."""
 
     conversation: str  # the id of the conversation
     # a source's number, of its address and title, the same each time it is read, for the model to
@@ -21,6 +23,9 @@ class Context:
     cite: Callable[[str, str], int] = lambda url, title: 0
     person: int | None = None  # the id of the person whose conversation it is, if anyone's
     workspace: Workspace | None = None  # the conversation's space: its project's, or its person's
+    # tells the apps how far the call is, as info its message shows while it runs
+    progress: Callable[[dict[str, Any]], None] = lambda info: None
+    stopped: threading.Event = field(default_factory=threading.Event)  # set once the turn stops
 
     def space(self) -> Workspace:
         """The conversation's workspace. Raises ValueError if it has none."""
