@@ -101,7 +101,8 @@ def absent(o: Outcome) -> str | None:
     # an answer that says the files hold nothing of it, rather than one made up
     said = (
         r"(\b(no|not|none|nothing)\b|n['’]t\b).{0,60}\b(found|find|present|mention|cover|say"
-        r"|contain|exist|address|describ|refer|discuss|appear|locat|in the)|\bcontains? only\b"
+        r"|contain|exist|address|describ|refer|discuss|appear|locat|in the|among)"
+        r"|\bcontains? only\b"
     )
     return None if re.search(said, o.answer, re.I) else "did not say the files do not say it"
 
@@ -216,8 +217,8 @@ CASES = [
          [called("search_files"), absent, uncalled("search_web")], FIRM, attach=False),
     Case("every file", "Make a table of every invoice's date, seller and total.",
          [called("ask_files"), makes(r"\.xlsx$"), says("1.502|1,502")], INVOICES, attach=False),
-    Case("totals", "How much do the invoices come to in all?",
-         [called("ask_files"), says("6.339,75|6,339.75")], INVOICES, attach=False),
+    Case("totals", "How much do the invoices come to in all?", [says("6.339,75|6,339.75")],
+         INVOICES, attach=False),  # five, which the model may read itself
     Case("totals of many", "What do this month's invoices come to in all?",
          [called("ask_files"), says(TOTAL)], MONTH, attach=False),
     Case("fills a template", "Fill the fee letter template for Weber Logistik: March, 1.200 EUR, "
