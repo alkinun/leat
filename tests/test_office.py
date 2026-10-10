@@ -1,5 +1,6 @@
-"""Word documents changed as an office does, in the sandbox: a template's fields filled. These need
-LEAT_SANDBOX, as tests/test_files.py's documents do."""
+"""Documents made and changed as an office does, in the sandbox: made of markdown, a template's
+fields filled, and edits suggested. Those made need LEAT_SANDBOX, as tests/test_files.py's
+documents do."""
 
 import json
 import os
@@ -11,7 +12,6 @@ from leat.agent.tools import Context, files, office
 from leat.agent.workspace import Workspace
 from tests.test_files import documents as needs_sandbox
 
-pytestmark = needs_sandbox
 SANDBOX = os.environ.get("LEAT_SANDBOX")
 
 
@@ -39,6 +39,7 @@ print(json.dumps([[[r.text, bool(r.bold)] for r in p.runs] for p in ps if p.runs
     return json.loads(ran.content.splitlines()[0])
 
 
+@needs_sandbox
 def test_fill(space):
     # each field filled, however Word split it among runs, with the formatting of its first
     # character; in tables and headers too; a value's lines as lines; the template unchanged
@@ -69,6 +70,7 @@ d.save("Letter.docx")
     assert runs(space, "Letter.docx")[0][1] == ["{{Cli", True]  # the template as it was
 
 
+@needs_sandbox
 def test_refused(space):
     files.write(space, "notes.txt", "{{x}}")
     with pytest.raises(ValueError, match="not a Word document"):
@@ -108,6 +110,7 @@ print(json.dumps({{
     return json.loads(ran.content.splitlines()[0])
 
 
+@needs_sandbox
 def test_suggest(space):
     # each edit a tracked change of Leat's, over runs Word split, with its comment; one whose
     # passage is not there, or there twice, not made and said to be; the original unchanged
@@ -177,3 +180,111 @@ def test_named():
     assert office._named("Letter") == "Letter.docx" and office._named("a.DOCX") == "a.DOCX"
     assert office._named("Letter - March.pdf") == "Letter - March.docx"
     assert office._named("Notes v1.2") == "Notes v1.2.docx"
+
+
+def test_blocks():
+    # a paragraph's lines kept, as an address's; headings, lists by their depths, labelled as
+    # written, a quote, code, a rule and a table, its columns aligned as its divider says; a
+    # document fenced whole read within its fence
+    letter = """# Fees
+
+Emma Hartley
+14 Jersey Street
+
+1. First
+   still the first
+2. Second
+   - within it
+- after
+
+> Paid by transfer.
+
+```
+x = 1
+```
+
+---
+| Item | Total |
+|:--|--:|
+| Fee | £1,850 |
+| VAT |"""
+    assert office.blocks(letter) == [
+        ["heading", 1, [["Fees", ""]]],
+        ["paragraph", [["Emma Hartley\n14 Jersey Street", ""]]],
+        ["item", 0, "1.", [["First\nstill the first", ""]]],
+        ["item", 0, "2.", [["Second", ""]]],
+        ["item", 1, "–", [["within it", ""]]],
+        ["item", 0, "•", [["after", ""]]],
+        ["quote", [["Paid by transfer.", ""]]],
+        ["code", "x = 1"],
+        ["rule"],
+        ["table", [[["Item", ""]], [["Total", ""]]], [[[["Fee", ""]], [["£1,850", ""]]],
+                                                      [[["VAT", ""]]]], ["LEFT", "RIGHT"]],
+    ]  # fmt: skip
+    assert office.blocks("```markdown\n# A\n\nB<br>C\n```") == [
+        ["heading", 1, [["A", ""]]], ["paragraph", [["B\nC", ""]]]]  # fmt: skip
+    assert office.blocks("  \n\n") == []
+
+
+def test_spans():
+    # bold, italic and code, which a delimiter opens before a non-space and closes after one, an
+    # _ not within a word; one that nothing closes, and arithmetic, as text; links as their text
+    assert office.spans("Fee **£1,850** *net*, `code`") == [
+        ["Fee ", ""], ["£1,850", "b"], [" ", ""], ["net", "i"], [", ", ""], ["code", "c"],
+    ]  # fmt: skip
+    assert office.spans("***both*** and _it_") == [["both", "bi"], [" and ", ""], ["it", "i"]]
+    assert office.spans("5 * 3, snake_case_name, **open") == [
+        ["5 * 3, snake_case_name, **open", ""]]  # fmt: skip
+    assert office.spans(r"\*not\* [terms](https://x.io), [https://x.io](https://x.io)") == [
+        ["*not* terms (https://x.io), https://x.io", ""]]  # fmt: skip
+
+
+@needs_sandbox
+def test_make(space):
+    # a Word document in Leat's style, its headings styled, its bold bold, an address's lines as
+    # lines and a table's heading bold; in a template's header and footer, its body left out; a
+    # PDF of every letter; a PDF of a template, and a document of nothing, refused
+    context = Context("c", workspace=space)
+    letter = (
+        "# Fees\n\nEmma Hartley\n14 Jersey Street\n\nThe fee is **£1,850** – Kündigung.\n\n"
+        "| Item | Total |\n|---|--:|\n| Fee | £1,850 |"
+    )
+    assert office.make(context, "Fees - March", letter).content == "Made Fees - March.docx."
+    made = files.run(space, """
+import json
+from docx import Document
+d = Document("Fees - March.docx")
+shown = [[p.style.name, [[r.text, bool(r.bold)] for r in p.runs]] for p in d.paragraphs]
+cells = [[[r.text, bool(r.bold)] for r in c.paragraphs[0].runs] for c in d.tables[0]._cells]
+print(json.dumps(shown + cells))
+""")  # fmt: skip
+    shown = json.loads(made.content.splitlines()[0])
+    assert shown[:3] == [
+        ["Heading 1", [["Fees", False]]],
+        ["Normal", [["Emma Hartley\n", False], ["14 Jersey Street", False]]],  # a break
+        ["Normal", [["The fee is ", False], ["£1,850", True], [" – Kündigung.", False]]],
+    ]  # fmt: skip
+    cells = [[["Item", True]], [["Total", True]], [["Fee", False]], [["£1,850", False]]]
+    assert shown[-4:] == cells
+    make(space, """
+d = Document()
+d.sections[0].header.paragraphs[0].text = "Whitfield & Partners"
+d.sections[0].footer.paragraphs[0].text = "1 King Street"
+d.add_paragraph("A letter of last year")
+d.save("Letterhead.docx")
+""")  # fmt: skip
+    result = office.make(context, "Fees - letterhead.docx", letter, "Letterhead.docx")
+    assert result.content == (
+        "Made Fees - letterhead.docx, in the styles, headers and footers of Letterhead.docx."
+    )
+    assert result.info == {"files": ["Fees - letterhead.docx"]}
+    headed = runs(space, "Fees - letterhead.docx")
+    assert headed[-1] == [["Whitfield & Partners", False]]
+    assert ["A letter of last year", False] not in [run for p in headed for run in p]
+    assert office.make(context, "Fees.pdf", letter).content == "Made Fees.pdf."
+    read = files.read(space, "Fees.pdf").content
+    assert "£1,850" in read and "Kündigung" in read and "14 Jersey Street" in read
+    with pytest.raises(ValueError, match="Word document alone"):
+        office.make(context, "Fees.pdf", letter, "Letterhead.docx")
+    with pytest.raises(ValueError, match="no text"):
+        office.make(context, "Empty", "\n\n")

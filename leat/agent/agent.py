@@ -65,8 +65,8 @@ in a sandbox without the internet. The files the user attaches are named in thei
 images are shown to you when you can see them.
 - Answer questions of the user's own work, as their clients, cases, documents or rules, from \
 their files, never the web, which must not learn of them.{search}{ask}
-- To make a document, first read the skill for its kind, then make it with run. Name the file in \
-your answer, without a link: the app shows the user the files you make.{office}
+- {make} Name the file in your answer, without a link: the app shows the user the files you \
+make.{office}
 - Amounts are written differently across countries: 1.234,56 in much of Europe is 1234.56. Code \
 that reads amounts from files must read them so; check what it finds against a figure you can see \
 in the file.
@@ -81,8 +81,14 @@ try falls short; read on in a file where a passage does. If the files do not say
 ASK = """
 - For a question of every file, or of many, as each invoice's total, call ask_files once rather \
 than reading them; answer with its table, or a long one's first rows, and say what stands out."""
-# and when it has the office's tools, which keep a document's formatting, as the model's own code
-# does not
+# of the workspace's section, how the agent makes a document: with run alone, of a skill
+MAKE = "To make a document, first read the skill for its kind, then make it with run."
+# and when it has the office's tools, which lay out a document and keep one's formatting, as the
+# model's own code does not
+MAKE_OFFICE = """\
+To make a letter, memo or report, call make_document with its text in markdown, and the user's \
+letterhead, a Word template, if they have one. For what markdown cannot hold, as spreadsheets, \
+slides and charts, first read the skill for its kind, then make it with run."""
 OFFICE = """
 - To change a Word document, call suggest_edits, which makes tracked changes the user accepts or \
 rejects; to fill a Word template's fields, call fill_template. Both keep its formatting."""
@@ -999,6 +1005,7 @@ def _system(
         sections.append(WORKSPACE.format(
             skills="\n".join(f"- {path}: {about}" for path, about in files.skills()),
             search=SEARCH * ("search_files" in tools), ask=ASK * ("ask_files" in tools),
+            make=MAKE_OFFICE if "make_document" in tools else MAKE,
             office=OFFICE * ("suggest_edits" in tools),
         ))  # fmt: skip
     sections.append(CITE)
@@ -1019,6 +1026,8 @@ def _did(
         did.append(("read", info["file"]))
     elif name in ("fill_template", "suggest_edits"):
         did.append(("read", arguments.get("path")))
+    elif name == "make_document" and arguments.get("template"):
+        did.append(("read", arguments["template"]))
     elif name == "ask_files" and info.get("total"):
         did.append(("read", f"{info['done']} files"))
     elif name == "search_files":

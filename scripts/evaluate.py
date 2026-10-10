@@ -159,7 +159,9 @@ CASES = [
          files={"invitation.txt": "You're invited to Mia's 30th! Saturday 18 October, 7 pm, at "
                 "22 Oak Road. Please bring a salad or a dessert."}),
     Case("document", "Make a Word document with a packing list for a weekend camping trip.",
-         [called("run"), makes(r"\.docx$")]),
+         [called("make_document"), makes(r"\.docx$")]),
+    Case("letter", "Write a short letter to our landlord, Mr Patel, asking to repaint the office "
+         "in May, as a PDF.", [called("make_document"), makes(r"\.pdf$")]),
     Case("spreadsheet", "Make an Excel budget: rent 900, food 350 and transport 80 a month, with "
          "yearly totals.", [called("run"), makes(r"\.xlsx$")]),
     Case("doesn't know", "What's my sister's name?", [unsure, uncalled("search_web")]),

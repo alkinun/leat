@@ -1130,6 +1130,7 @@ function fold(start, indexes, unanswered) {
 // what each tool's calls did, in a few words: one call, and n
 const DID = {
   ask_files: ["read the files", (n) => `read the files ${n} times`],
+  make_document: ["made a document", (n) => `made ${n} documents`],
   fill_template: ["filled a template", (n) => `filled ${n} templates`],
   suggest_edits: ["suggested edits", (n) => `suggested edits ${n} times`],
   search_web: ["searched the web", (n) => `searched the web ${n} times`],
@@ -1255,6 +1256,7 @@ const LINES = {
     `Couldn't read ${host(a.url)}`],
   read: (a) => [`Reading ${named(a.path)}…`, `Read ${named(a.path)}`, `Couldn't read ${named(a.path)}`],
   write: (a) => [`Writing ${a.path}…`, `Wrote ${a.path}`, `Couldn't write ${a.path}`],
+  make_document: (a, i) => [`Making ${a.name}…`, `Made ${i.files?.[0] ?? a.name}`, `Couldn't make ${a.name}`],
   fill_template: (a, i) => [`Filling ${a.path}…`, `Filled ${a.path} as ${i.files?.[0] ?? a.name}`,
     `Couldn't fill ${a.path}`],
   suggest_edits: (a, i) => [`Suggesting edits to ${a.path}…`,
@@ -1292,7 +1294,7 @@ function what(m) {
     return [link(url, title || url), ...asked];
   }
   if (m.name === "write" || m.name === "edit") return [fileLink(args.path)];
-  if (m.name === "suggest_edits") return [cards(m.info?.files ?? [])]; // the document made
+  if (m.name === "suggest_edits" || m.name === "make_document") return [cards(m.info?.files ?? [])]; // the document made
   if (m.name === "fill_template") { // the document made, and the fields it left as they were
     const left = m.info?.missing?.length ? [element("p", "meta", `Without values: ${m.info.missing.join(", ")}`)] : [];
     return [cards(m.info?.files ?? []), ...left];
@@ -1481,6 +1483,7 @@ const ICONS = {
   read: '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/>',
   write: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
   fill_template: '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M8 13h8M8 17h5"/>',
+  make_document: '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M12 12v6M9 15h6"/>',
   suggest_edits: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
   edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
   run: '<path d="m4 17 6-6-6-6"/><path d="M12 19h8"/>',

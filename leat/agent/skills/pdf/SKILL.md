@@ -4,8 +4,10 @@ description: PDF documents, to print or send as they are
 ---
 # PDF documents
 
-Make them with fpdf2, in one run, and save them in the workspace. For a document the user may want
-to change, make a Word document instead.
+A letter, memo or report is made by make_document, of its text in markdown, named .pdf, rather
+than by writing code. Make with fpdf2, in one run, only what markdown cannot hold, as pictures or a
+layout of its own, and save it in the workspace. For a document the user may want to change, make
+a Word document instead.
 
 ```python
 from pathlib import Path

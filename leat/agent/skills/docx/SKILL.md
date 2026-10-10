@@ -4,8 +4,11 @@ description: Word documents, such as letters, CVs and reports
 ---
 # Word documents
 
-Make them with python-docx, in one run, and save them in the workspace under a name that says what
-they are. Fill in the user's own details; leave none of the template's.
+A letter, memo or report is made by make_document, of its text in markdown, in the office's
+letterhead if they have one, rather than by writing code. Make with python-docx, in one run, only
+what markdown cannot hold, as pictures, columns or a layout of its own, and save it in the
+workspace under a name that says what it is. Fill in the user's own details; leave none of the
+template's.
 
 To fill a Word template the user has, whose fields are written {{Client name}} or «Client name»,
 call fill_template rather than writing code: it keeps the template's formatting, and says which
