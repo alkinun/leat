@@ -15,6 +15,8 @@ uv sync
 DEV=NV uv run leat run Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf
 ```
 
+Without `DEV`, the engine's commands run on NV where an NVIDIA GPU is, and on AMD where an AMD one is, as Strix Halo's, rather than tinygrad's own choice, which may be CUDA, a load then mixing the two.
+
 As a server, for any OpenAI client:
 
 ```bash

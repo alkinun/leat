@@ -177,11 +177,28 @@ def main(argv: list[str] | None = None) -> None:
     quality.add_argument("--json", action="store_true", help="print one JSON object")
 
     args = parser.parse_args(argv)
+    if args.command in ("run", "serve", "bench", "perplexity"):
+        _device()
     handlers = {
         "agent": _agent, "run": _run, "serve": _serve, "keys": _keys, "bench": _bench,
         "perplexity": _perplexity,
     }  # fmt: skip
     handlers[args.command](args)
+
+
+# the files of each device of a GPU leat's kernels run on, by tinygrad's name for it, in the order
+# one is chosen
+_GPUS = (("NV", "/dev/nvidiactl"), ("AMD", "/dev/kfd"))
+
+
+def _device() -> None:
+    # tinygrad's device, where DEV does not say it: NV of an NVIDIA GPU, as leat's kernels are
+    # written for, rather than CUDA, which tinygrad may choose instead, a load then putting some
+    # tensors on each and hanging; or AMD's, as Strix Halo's
+    if "DEV" not in os.environ:
+        found = next((dev for dev, path in _GPUS if Path(path).exists()), None)
+        if found is not None:
+            os.environ["DEV"] = found
 
 
 def _data() -> Path:

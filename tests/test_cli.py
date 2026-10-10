@@ -1,4 +1,5 @@
 import json
+import os
 import struct
 import threading
 
@@ -6,7 +7,7 @@ import jinja2
 import numpy as np
 import pytest
 
-from leat import bench
+from leat import bench, cli
 from leat.chat import ChatTemplate
 from leat.cli import main
 from leat.engine import Engine
@@ -298,3 +299,19 @@ def test_run_refused_chat(tiny_model, monkeypatch):
     monkeypatch.setattr("builtins.input", lambda prompt: "hello")
     with pytest.raises(SystemExit, match="refuses this chat: Only user and assistant"):
         main(["run", str(tiny_model[0]), "--max-context", "64", "--system", "Be brief."])
+
+
+def test_device(tmp_path, monkeypatch):
+    # the engine's device, where DEV does not say it: NV of an NVIDIA GPU, AMD of an AMD one, or
+    # tinygrad's own choice of none; DEV given kept
+    nv, kfd = tmp_path / "nvidiactl", tmp_path / "kfd"
+    monkeypatch.setattr(cli, "_GPUS", (("NV", str(nv)), ("AMD", str(kfd))))
+    for made, chosen in (([], None), ([kfd], "AMD"), ([nv, kfd], "NV")):
+        monkeypatch.delenv("DEV")
+        for path in made:
+            path.touch()
+        cli._device()
+        assert os.environ.get("DEV") == chosen
+        monkeypatch.setenv("DEV", "CPU")
+    cli._device()
+    assert os.environ["DEV"] == "CPU"
