@@ -54,10 +54,11 @@ def tools() -> list[Tool]:
     return [
         Tool(
             "reconcile",
-            "Reconcile a bank statement with the books, the ledger's entries, each a table, a CSV "
-            "or a spreadsheet: which of the bank's lines match an entry, by a document's number "
-            "both name or by the same amount a few days apart, which match but in their amount, "
-            "and which are in one alone; saved as a spreadsheet too",
+            "Reconcile a bank statement with the books, the ledger's entries, as a Kontoabstimmung "
+            "or Bankabstimmung does, each a table, a CSV or a spreadsheet: which of the bank's "
+            "lines match an entry, by a document's number both name or by the same amount a few "
+            "days apart, which match but in their amount, and which are in one alone; saved as a "
+            "spreadsheet too",
             {
                 "type": "object",
                 "properties": {

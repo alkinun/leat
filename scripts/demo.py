@@ -1,18 +1,18 @@
-"""Makes a demo of Leat for an accounting firm, in a new state of its own: a client's project, its
-month's invoices, two of them scanned, its bank statement and ledger, which differ where a
-reconciliation should find them out, a lease, a fee letter's template, and workflows of what an
-accountant asks of them each month. Then `leat agent --data DIR` serves it, and whoever first opens
-the app owns it, the demo theirs.
+"""Makes a demo of Leat for a small German law and tax office, in a new state of its own: a client's
+books, its month's invoices, two of them scanned, its bank statement and ledger, which differ where
+a reconciliation should find them out, its lease and a fee letter's template; and an employment
+case, its contract, with clauses an employee's lawyer would change. Each project has workflows of
+what the office asks of it. Then `leat agent --data DIR` serves it, and whoever first opens the app
+owns it, the demo theirs.
 
     uv run python scripts/demo.py DIR [--sandbox ~/.local/share/leat/sandbox]
 
-The documents are made in the sandbox, with its libraries, as the agent's are, in Turkish, as a
-Turkish firm's would be, written in a font of the box's that has Turkish's letters. Asking the
-scanned invoices of their text needs a model that sees images.
+The documents are made in the sandbox, with its libraries, as the agent's are, in a font of the
+box's. Asking the scanned invoices of their text needs a model that sees images.
 """
 
 import argparse
-import json
+import datetime
 import shutil
 import subprocess
 import sys
@@ -26,59 +26,96 @@ from leat.agent.client import Client  # noqa: E402
 from leat.agent.store import Store  # noqa: E402
 from leat.agent.workspace import Workspace  # noqa: E402
 
-CLIENT = "Yılmaz Tekstil"
-INSTRUCTIONS = """\
-Müşterimiz Yılmaz Tekstil Ltd. Şti., Bursa'da bir tekstil toptancısı; vergi numarası 8340021957, \
-mali yılı Haziran'da biter. Türkçe yanıt ver, tutarları Türk biçiminde yaz (1.234,56 TL), her \
-rakamın hangi belgeden geldiğini göster ve emin olmadığın yeri söyle."""
-# the month's invoices: number, date, seller, net amount, VAT rate in percent, and whether it is
+# the client whose books the office keeps, and the instructions of its project
+CLIENT = "Hofmann Textil GmbH"
+BOOKS = """\
+Mandantin ist die Hofmann Textil GmbH, ein Textilgroßhandel in München, USt-IdNr. DE284719350; \
+das Geschäftsjahr endet am 30. Juni. Antworte auf Deutsch, schreibe Beträge wie 1.234,56 EUR, \
+nenne zu jeder Zahl den Beleg, aus dem sie stammt, und sage, wo du unsicher bist."""
+# the month's invoices: number, date, supplier, net amount, VAT rate in percent, and whether it is
 # scanned, an image of a page rather than its text
 INVOICES = [
-    ("A-2026-0311", "02.03.2026", "Akın İplik A.Ş.", 38_500.00, 20, False),
-    ("BK-118342", "03.03.2026", "Bursa Kumaş San. ve Tic.", 61_250.00, 20, False),
-    ("EL-2026-077", "05.03.2026", "Ege Lojistik", 9_800.00, 20, False),
-    ("ME-5530182", "06.03.2026", "Marmara Enerji", 14_240.50, 20, False),
-    ("KA-00932", "09.03.2026", "Kaya Ambalaj", 7_125.00, 20, True),
-    ("A-2026-0347", "12.03.2026", "Akın İplik A.Ş.", 42_000.00, 20, False),
-    ("DB-2026-215", "14.03.2026", "Deniz Boya Kimya", 18_960.00, 20, False),
-    ("BK-118690", "18.03.2026", "Bursa Kumaş San. ve Tic.", 27_400.00, 20, False),
-    ("TS-44102", "20.03.2026", "Toros Servis", 3_150.00, 20, True),
-    ("EL-2026-091", "24.03.2026", "Ege Lojistik", 11_300.00, 20, False),
-    ("YB-7781", "26.03.2026", "Yeşil Bahçe Gıda", 4_480.00, 10, False),
-    ("ME-5531447", "30.03.2026", "Marmara Enerji", 13_870.25, 20, False),
+    ("RE-2026-0342", "02.03.2026", "Müller Bürobedarf GmbH", 1_000.00, 19, False),
+    ("2026-118342", "03.03.2026", "Weberei Lindner KG", 14_250.00, 19, False),
+    ("LG-77310", "05.03.2026", "Weber Logistik KG", 2_380.00, 19, False),
+    ("SWM-5530182", "06.03.2026", "Stadtwerke München", 1_424.50, 19, False),
+    ("KA-00932", "09.03.2026", "Kaya Verpackungen", 712.50, 19, True),
+    ("2026-118690", "12.03.2026", "Weberei Lindner KG", 9_800.00, 19, False),
+    ("FB-2026-215", "14.03.2026", "Färberei Brandt GmbH", 3_960.00, 19, False),
+    ("RE-2026-0350", "18.03.2026", "Schmidt IT-Service", 2_000.00, 19, False),
+    ("TS-44102", "20.03.2026", "Technik Service Ost", 315.00, 19, True),
+    ("LG-77391", "24.03.2026", "Weber Logistik KG", 1_130.00, 19, False),
+    ("BK-7781", "26.03.2026", "Bäckerei Kraus", 448.00, 7, False),
+    ("SWM-5531447", "30.03.2026", "Stadtwerke München", 1_387.25, 19, False),
 ]
 # where the books differ from the bank, for the reconciliation to find: the invoice paid but not
-# entered in the ledger, the one entered but not paid, and the one paid other than it was entered
-UNENTERED, UNPAID, MISPAID = "DB-2026-215", "TS-44102", "BK-118690"
+# booked, the one booked but not paid, and the one paid other than it was booked
+UNBOOKED, UNPAID, MISPAID = "FB-2026-215", "TS-44102", "2026-118690"
 LEASE = [
-    ("Kira Sözleşmesi", None),
-    ("Taraflar", "Kiraya veren Bursa Gayrimenkul A.Ş. ile kiracı Yılmaz Tekstil Ltd. Şti. "
-     "arasında, Nilüfer, Bursa'daki depo için yapılmıştır."),
-    ("Süre", "Sözleşme 1 Mart 2026'da başlar ve üç yıl sürer."),
-    ("Kira", "Aylık kira 40.000 TL olup her ayın 5'inde ödenir. Kira her yıl TÜFE oranında "
-     "artırılır."),
-    ("Depozito", "Kiracı, iki aylık kira tutarında, 80.000 TL depozito öder."),
-    ("Fesih", "Taraflardan her biri doksan gün önceden yazılı bildirimle sözleşmeyi "
-     "feshedebilir."),
-    ("Uyuşmazlık", "Uyuşmazlıklarda Bursa mahkemeleri ve icra daireleri yetkilidir."),
+    ("Gewerbemietvertrag", None),
+    ("§ 1 Mietsache", "Vermietet wird die Lagerhalle Am Gewerbering 12, 85748 Garching, von der "
+     "Kühn Immobilien GmbH an die Hofmann Textil GmbH."),
+    ("§ 2 Mietzeit", "Das Mietverhältnis beginnt am 1. März 2026 und läuft auf unbestimmte Zeit."),
+    ("§ 3 Miete", "Die monatliche Miete beträgt 4.200 EUR zuzüglich Umsatzsteuer und ist bis zum "
+     "dritten Werktag eines jeden Monats im Voraus zu zahlen."),
+    ("§ 4 Kaution", "Die Mieterin leistet eine Kaution in Höhe von drei Monatsmieten."),
+    ("§ 5 Kündigung", "Die Kündigungsfrist beträgt sechs Monate zum Ende eines "
+     "Kalendervierteljahres."),
+    ("§ 6 Gerichtsstand", "Gerichtsstand ist München."),
 ]  # fmt: skip
 LETTER = [
-    "Sayın {{Müşteri}},",
-    "{{Ay}} ayına ait muhasebe ve beyanname hizmetlerimizin ücreti {{Ücret}} olup son ödeme "
-    "tarihi {{Son ödeme tarihi}}'dir.",
-    "Ekte bu ayın beyannamelerinin ve mutabakatın bir özetini bulabilirsiniz.",
-    "Saygılarımızla,",
-    "{{Ortak}}",
+    "Hofmann Textil GmbH",
+    "z. Hd. {{Ansprechpartner}}",
+    "Honorarabrechnung {{Monat}}",
+    "Sehr geehrte Frau Hofmann,",
+    "für die laufende Finanzbuchhaltung und Lohnabrechnung im {{Monat}} berechnen wir Ihnen "
+    "{{Honorar}} zuzüglich Umsatzsteuer, zahlbar bis zum {{Fälligkeit}}.",
+    "Mit freundlichen Grüßen",
+    "{{Partner}}",
 ]
-WORKFLOWS = [
-    ("Fatura tablosu", "Faturalar klasöründeki her faturanın numarasını, tarihini, satıcısını, "
-     "KDV'sini ve toplamını bir tabloya çıkar, ve en çok ödediğimiz üç satıcıyı söyle."),
-    ("Banka mutabakatı", "Mart banka ekstresini muhasebe kayıtlarıyla karşılaştır: eşleşmeyen her "
-     "hareketi, tarihi, tutarı ve olası nedeniyle bir tabloda listele."),
-    ("Aylık ücret mektubu", "Ücret mektubu şablonunu Mart ayı için doldur: ücret 6.000 TL, son "
-     "ödeme tarihi 10 Nisan 2026, imzalayan Ayşe Kaya."),
+BOOKS_WORKFLOWS = [
+    ("Rechnungsübersicht", "Erstelle eine Tabelle aller Rechnungen im Ordner Rechnungen mit "
+     "Rechnungsnummer, Datum, Lieferant, Umsatzsteuer und Bruttobetrag, und nenne die drei "
+     "Lieferanten, an die wir am meisten gezahlt haben."),
+    ("Kontoabstimmung", "Stimme den Kontoauszug März 2026 mit den Buchungen März 2026 ab und "
+     "erkläre jede Abweichung."),
+    ("Honorarschreiben", "Fülle die Vorlage für das Honorarschreiben für März 2026 aus: Honorar "
+     "1.850 EUR, fällig am 10. April 2026, Ansprechpartnerin Anna Hofmann, gezeichnet von "
+     "Dr. Clara Becker."),
 ]  # fmt: skip
-# makes the documents of the JSON at sys.argv[1], in the font at sys.argv[2], in the sandbox
+# the employment case, its instructions, its contract and its workflows
+CASE = "Schulz ./. Bauer Logistik GmbH"
+CASE_INSTRUCTIONS = """\
+Wir vertreten den Arbeitnehmer Markus Schulz gegen seine Arbeitgeberin, die Bauer Logistik GmbH. \
+Prüfe Klauseln nach deutschem Arbeitsrecht, nenne die Vorschrift, auf die du dich stützt, und \
+antworte auf Deutsch, außer man bittet dich um eine andere Sprache."""
+CONTRACT = [
+    ("Arbeitsvertrag", None),
+    ("§ 1 Parteien", "Zwischen der Bauer Logistik GmbH, Hamburg (Arbeitgeberin), und Herrn "
+     "Markus Schulz (Arbeitnehmer) wird folgender Arbeitsvertrag geschlossen."),
+    ("§ 2 Tätigkeit", "Der Arbeitnehmer wird als Disponent eingestellt. Die Arbeitgeberin kann ihm "
+     "jederzeit jede andere Tätigkeit an jedem Ort zuweisen."),
+    ("§ 3 Arbeitszeit", "Die regelmäßige Arbeitszeit beträgt 40 Stunden in der Woche. Überstunden "
+     "sind mit dem Gehalt abgegolten."),
+    ("§ 4 Vergütung", "Der Arbeitnehmer erhält ein Bruttomonatsgehalt von 3.900 EUR."),
+    ("§ 5 Urlaub", "Der Arbeitnehmer hat Anspruch auf 18 Arbeitstage Urlaub im Kalenderjahr."),
+    ("§ 6 Kündigung", "Das Arbeitsverhältnis kann von beiden Seiten mit einer Frist von zwei "
+     "Wochen gekündigt werden."),
+    ("§ 7 Wettbewerbsverbot", "Der Arbeitnehmer darf zwei Jahre nach Ende des Arbeitsverhältnisses "
+     "für kein Unternehmen der Logistikbranche tätig werden."),
+    ("§ 8 Ausschlussfrist", "Ansprüche aus dem Arbeitsverhältnis verfallen, wenn sie nicht "
+     "innerhalb von vier Wochen nach Fälligkeit schriftlich geltend gemacht werden."),
+]  # fmt: skip
+CASE_WORKFLOWS = [
+    ("Vertragsprüfung", "Prüfe den Arbeitsvertrag auf Klauseln, die unwirksam oder für unseren "
+     "Mandanten nachteilig sind, und schlage Änderungen als Nachverfolgung in Word vor, jede mit "
+     "einer Begründung und der Vorschrift."),
+    ("Übersetzung", "Übersetze den Arbeitsvertrag ins Englische, für den Konzernanwalt der "
+     "Arbeitgeberin."),
+]  # fmt: skip
+# makes the documents of the JSON at sys.argv[1], in the font it names, in the sandbox: PDFs,
+# of lines, each of its text or, scanned, an image of it; workbooks, of a sheet's rows, the first
+# its heading; CSVs, of rows, in an encoding; and Word documents, of headings and paragraphs
 _MAKE = """
 import json, sys
 from pathlib import Path
@@ -88,64 +125,55 @@ from openpyxl import Workbook
 from openpyxl.styles import Font
 from PIL import Image, ImageDraw, ImageFont
 
-spec, font = json.load(open(sys.argv[1], encoding="utf-8")), sys.argv[2]
-Path("Faturalar").mkdir(exist_ok=True)
-for invoice in spec["invoices"]:
-    lines = invoice["lines"]
-    path = f"Faturalar/{invoice['number']}.pdf"
+spec = json.load(open(sys.argv[1], encoding="utf-8"))
+font = spec["font"]
+for name, lines, scanned in spec["pdfs"]:
+    Path(name).parent.mkdir(parents=True, exist_ok=True)
     pdf = FPDF()
-    pdf.add_font("Noto", fname=font)
+    pdf.add_font("Sans", fname=font)
     pdf.add_page()
-    if invoice["scanned"]:  # an image of the page, slightly askew, as a scanner's
+    if scanned:  # an image of the page, slightly askew, as a scanner's
         page = Image.new("L", (1240, 1754), 248)
         draw, face = ImageDraw.Draw(page), ImageFont.truetype(font, 34)
         for i, line in enumerate(lines):
             draw.text((110, 140 + i * 62), line, fill=30, font=face)
-        page = page.rotate(0.6, fillcolor=248)
-        page.save(f".{invoice['number']}.png")
-        pdf.image(f".{invoice['number']}.png", x=0, y=0, w=210)
-        Path(f".{invoice['number']}.png").unlink()
+        page.rotate(0.6, fillcolor=248).save(".scan.png")
+        pdf.image(".scan.png", x=0, y=0, w=210)
+        Path(".scan.png").unlink()
     else:
-        pdf.set_font("Noto", size=16)
+        pdf.set_font("Sans", size=16)
         pdf.cell(text=lines[0], new_x="LMARGIN", new_y="NEXT")
-        pdf.set_font("Noto", size=11)
+        pdf.set_font("Sans", size=11)
         for line in lines[1:]:
             if line:
                 pdf.cell(text=line, new_x="LMARGIN", new_y="NEXT", h=8)
             else:
                 pdf.ln(8)
-    pdf.output(path)
-
-book = Workbook()
-sheet = book.active
-sheet.title = "Mart 2026"
-sheet.append(["Tarih", "Belge no", "Hesap", "Açıklama", "Borç", "Alacak"])
-for cell in sheet[1]:
-    cell.font = Font(bold=True)
-for row in spec["ledger"]:
-    sheet.append(row)
-for column, width in zip("ABCDEF", (12, 16, 22, 40, 14, 14)):
-    sheet.column_dimensions[column].width = width
-book.save("Muhasebe kayıtları Mart 2026.xlsx")
-
-with open("Banka ekstresi Mart 2026.csv", "w", encoding="utf-8-sig") as f:
-    f.write("Tarih;Açıklama;Tutar;Bakiye\\n")
-    for row in spec["bank"]:
-        f.write(";".join(row) + "\\n")
-
-document = Document()
-for heading, text in spec["lease"]:
-    if text is None:
-        document.add_heading(heading, level=0)
-    else:
-        document.add_heading(heading, level=1)
-        document.add_paragraph(text)
-document.save("Kira Sözleşmesi.docx")
-
-document = Document()
-for line in spec["letter"]:
-    document.add_paragraph(line)
-document.save("Ücret mektubu şablonu.docx")
+    pdf.output(name)
+for name, title, rows in spec["workbooks"]:
+    book = Workbook()
+    sheet = book.active
+    sheet.title = title
+    for row in rows:
+        sheet.append(row)
+    for cell in sheet[1]:
+        cell.font = Font(bold=True)
+    for column in sheet.columns:
+        width = max(len(str(cell.value or "")) for cell in column)
+        sheet.column_dimensions[column[0].column_letter].width = min(50, width + 2)
+    book.save(name)
+for name, encoding, rows in spec["csvs"]:
+    with open(name, "w", encoding=encoding, newline="") as f:
+        f.writelines(";".join(row) + "\\r\\n" for row in rows)
+for name, blocks in spec["documents"]:
+    document = Document()
+    for heading, text in blocks:
+        if heading is not None:
+            document.add_heading(heading, level=0 if text is None else 1)
+        if text is not None:
+            document.add_paragraph(text)
+    document.save(name)
+print("{}")
 """
 
 
@@ -166,86 +194,101 @@ def main() -> None:
     args.data.mkdir(parents=True, exist_ok=True)
     workspace = Workspace(args.data / "workspace", args.sandbox)
     agent = Agent(Store(args.data / "leat.db"), Client("http://127.0.0.1:9"), [], workspace)
-    project = agent.add_project(CLIENT, None, INSTRUCTIONS, shared=True)["id"]
-    space = agent.space(project)
-    spec = {"invoices": [_invoice(*i) for i in INVOICES], "ledger": _ledger(), "bank": _bank(),
-            "lease": LEASE, "letter": LETTER}  # fmt: skip
-    space.path(".spec.json").write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+    books = agent.add_project(CLIENT, None, BOOKS, shared=True)["id"]
+    case = agent.add_project(CASE, None, CASE_INSTRUCTIONS, shared=True)["id"]
+    made = {
+        books: {
+            "pdfs": [[f"Rechnungen/{i[0]}.pdf", _invoice(*i[:5]), i[5]] for i in INVOICES],
+            "workbooks": [["Buchungen März 2026.xlsx", "Buchungen", _ledger()]],
+            "csvs": [["Kontoauszug März 2026.csv", "cp1252", _statement()]],
+            "documents": [
+                ["Gewerbemietvertrag.docx", LEASE],
+                ["Honorarschreiben Vorlage.docx", [(None, line) for line in LETTER]],
+            ],
+        },  # fmt: skip
+        case: {
+            "pdfs": [],
+            "workbooks": [],
+            "csvs": [],
+            "documents": [["Arbeitsvertrag.docx", CONTRACT]],
+        },  # fmt: skip
+    }
     try:
-        ran = space.run(_MAKE, "/workspace/.spec.json", font, timeout=300)
-    finally:
-        space.path(".spec.json").unlink(missing_ok=True)
-    if ran.status != 0:
+        for project, spec in made.items():
+            agent.space(project).given(_MAKE, spec | {"font": font}, timeout=300)
+    except ValueError as e:
         shutil.rmtree(args.data)  # rather than a demo half made
-        raise SystemExit(f"the documents could not be made:\n{ran.output}")
-    for name, prompt in WORKFLOWS:
-        agent.add_workflow(name, prompt, None, project)
-    made = sorted(f["name"] for f in space.files())
-    print(f"A demo of {len(made)} files in the project {CLIENT}, at {args.data}:")
-    print("\n".join(f"  {name}" for name in made))
+        raise SystemExit(f"the documents could not be made: {e}") from e
+    for project, workflows in ((books, BOOKS_WORKFLOWS), (case, CASE_WORKFLOWS)):
+        for name, prompt in workflows:
+            agent.add_workflow(name, prompt, None, project)
+    for project in (books, case):
+        names = sorted(f["name"] for f in agent.space(project).files())
+        counted = f"{len(names)} {'file' if len(names) == 1 else 'files'}"
+        print(f"{(agent.store.project(project) or {})['name']}, {counted}:")
+        print("\n".join(f"  {name}" for name in names))
     print(f"\nServe it with: uv run leat agent --data {args.data}")
 
 
 def _font() -> str:
-    # a font of the box's with Turkish's letters, its file's path, under /usr, which the sandbox
-    # sees
-    found = subprocess.run(["fc-match", "-f", "%{file}", "sans-serif:lang=tr"],
+    # a font of the box's with German's letters, its file's path, under /usr, which the sandbox sees
+    found = subprocess.run(["fc-match", "-f", "%{file}", "sans-serif:lang=de"],
                            capture_output=True, text=True, check=False).stdout  # fmt: skip
     if not found.startswith("/usr/") or not Path(found).is_file():
-        raise SystemExit("no font with Turkish letters was found: install one, as Noto Sans")
+        raise SystemExit("no font was found: install one, as Noto Sans or DejaVu Sans")
     return found
 
 
-def _invoice(number: str, date: str, seller: str, net: float, rate: int, scanned: bool) -> dict:
+def _invoice(number: str, date: str, supplier: str, net: float, rate: int) -> list[str]:
     # an invoice's lines, as its page shows them
     vat = round(net * rate / 100, 2)
-    return {
-        "number": number, "scanned": scanned,
-        "lines": [
-            f"FATURA  {number}", f"Tarih: {date}", f"Satıcı: {seller}",
-            "Alıcı: Yılmaz Tekstil Ltd. Şti., Nilüfer, Bursa (VKN 8340021957)", "",
-            f"Mal ve hizmet toplamı: {_tl(net)}", f"KDV (%{rate}): {_tl(vat)}",
-            f"Genel toplam: {_tl(net + vat)}", "", "Ödeme: fatura tarihinden itibaren 15 gün.",
-        ],
-    }  # fmt: skip
+    return [
+        f"RECHNUNG  {number}", f"Rechnungsdatum: {date}", f"Lieferant: {supplier}",
+        "Rechnungsempfänger: Hofmann Textil GmbH, Lindwurmstraße 88, 80337 München", "",
+        f"Nettobetrag: {_eur(net)}", f"Umsatzsteuer {rate} %: {_eur(vat)}",
+        f"Rechnungsbetrag: {_eur(net + vat)}", "", "Zahlbar innerhalb von 14 Tagen ohne Abzug.",
+    ]  # fmt: skip
 
 
 def _ledger() -> list[list]:
-    # the month's entries, each invoice's but one, the rent and the salaries
+    # the month's bookings, each invoice's but one, the rent and the salaries, as a ledger's
+    # export heads them
     rows: list[list] = []
-    for number, date, seller, net, rate, _ in INVOICES:
-        if number == UNENTERED:
-            continue
-        total = round(net * (1 + rate / 100), 2)
-        rows.append([date, number, "320 Satıcılar", f"{seller} faturası", None, total])
-    rows.append(["05.03.2026", "KİRA-03", "770 Genel yönetim gid.", "Mart kirası", 40_000.00, None])
-    rows.append(["31.03.2026", "BORDRO-03", "335 Personele borçlar", "Mart maaşları", None,
-                 186_400.00])  # fmt: skip
-    return sorted(rows, key=lambda row: row[0].split(".")[::-1])
+    for number, date, supplier, net, rate, _ in INVOICES:
+        if number != UNBOOKED:
+            gross = round(net * (1 + rate / 100), 2)
+            rows.append([date, number, "1600 Verbindlichkeiten", supplier, None, gross])
+    rows.append(["03.03.2026", "MIETE-03", "4210 Miete", "Miete März Lagerhalle", 4_998.00, None])
+    rows.append(["31.03.2026", "LOHN-03", "1740 Löhne", "Löhne März", None, 38_640.00])
+    rows.sort(key=lambda row: datetime.datetime.strptime(row[0], "%d.%m.%Y"))
+    return [["Belegdatum", "Belegnr.", "Konto", "Buchungstext", "Soll", "Haben"], *rows]
 
 
-def _bank() -> list[list[str]]:
-    # the month's payments, each invoice's but the unpaid one, one other than its invoice says
-    balance, rows = 1_250_000.00, []
-    payments = []
-    for number, date, seller, net, rate, _ in INVOICES:
+def _statement() -> list[list[str]]:
+    # the month's payments, as a Sparkasse's CSV export has them: each invoice's but the unpaid
+    # one, one less than its invoice says, the rent and the salaries
+    iban, payments = "DE89701500000012345678", []
+    for number, date, supplier, net, rate, _ in INVOICES:
         if number == UNPAID:
             continue
-        total = round(net * (1 + rate / 100), 2) - (500.0 if number == MISPAID else 0.0)
-        day = f"{min(int(date[:2]) + 3, 31):02d}{date[2:]}"
-        payments.append((day, f"EFT {seller} {number}", -total))
-    payments.append(("05.03.2026", "Bursa Gayrimenkul A.Ş. Mart kirası", -40_000.00))
-    payments.append(("31.03.2026", "Maaş ödemeleri Mart 2026", -186_400.00))
-    for day, said, amount in sorted(payments, key=lambda p: p[0].split(".")[::-1]):
-        balance += amount
-        rows.append([day, said, _tl(amount, unit=False), _tl(balance, unit=False)])
-    return rows
+        gross = round(net * (1 + rate / 100), 2) - (500.0 if number == MISPAID else 0.0)
+        day = min(
+            datetime.datetime.strptime(date, "%d.%m.%Y") + datetime.timedelta(days=4),
+            datetime.datetime(2026, 3, 31),
+        )  # within the statement's month
+        payments.append((day, f"{number} {supplier}", supplier, -gross))
+    payments.append((datetime.datetime(2026, 3, 3), "Miete März", "Kühn Immobilien GmbH", -4998.0))
+    payments.append((datetime.datetime(2026, 3, 31), "Lohn März", "Lohnzahlungen", -38_640.00))
+    heading = ["Auftragskonto", "Buchungstag", "Verwendungszweck",
+               "Begünstigter/Zahlungspflichtiger", "Betrag", "Währung"]  # fmt: skip
+    return [heading] + [[iban, f"{day:%d.%m.%Y}", said, who, _eur(amount, unit=False), "EUR"]
+                        for day, said, who, amount in sorted(payments)]  # fmt: skip
 
 
-def _tl(amount: float, unit: bool = True) -> str:
-    # an amount as Turkish writes it, 1.234,56, with its currency if `unit`
+def _eur(amount: float, unit: bool = True) -> str:
+    # an amount as German writes it, 1.234,56, with its currency if `unit`
     said = f"{amount:,.2f}".replace(",", "x").replace(".", ",").replace("x", ".")
-    return f"{said} TL" if unit else said
+    return f"{said} EUR" if unit else said
 
 
 if __name__ == "__main__":

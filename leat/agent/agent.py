@@ -82,7 +82,8 @@ after the words it supports; if the files do not say it, say so."""
 # and when it has the office's tools, which are exact, and keep a document's formatting, as the
 # model's own code is and does not
 OFFICE = """ Use the tools made for an office's work rather \
-than code of your own, which is less exact: reconcile for a bank statement and the books, \
+than code of your own, which is less exact: reconcile for a bank statement and the books, as a \
+Kontoabstimmung, \
 suggest_edits for changes to a Word document, fill_template for a template's fields, and \
 translate_document to translate one."""
 # and when it asks every file
