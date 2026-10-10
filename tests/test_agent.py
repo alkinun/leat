@@ -857,6 +857,9 @@ def test_joining(server, agent, engine, events):
     connection.close()
     assert ask(f"/api/pairings/{asked['id']}")[0] == 401  # asked after by a POST alone
     assert ask(f"/api/pairings/{asked['id']}", "POST")[0] == 202  # waiting
+    for person in ([1], {"id": 1}, "1", True):  # no person's id: said so, the request waiting on
+        allowing = request(f"{server}/api/pairings/{asked['id']}/allow", "POST", {"person": person})
+        assert allowing[0] == 400 and b"person must be the id" in allowing[1]
     status, ada = request(f"{server}/api/pairings/{asked['id']}/allow", "POST", {})
     assert status == 200 and json.loads(ada)["name"] == "Ada"
     assert ask(f"/api/pairings/{asked['id']}", "POST")[0] == 200  # its cookie, taken once

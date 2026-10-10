@@ -155,8 +155,10 @@ class _Handler(BaseHTTPRequestHandler):
             elif (match := _REQUEST.fullmatch(path)) and match[2]:
                 _owner(me)
                 to = body.get("person")
+                if to is not None and (not isinstance(to, int) or isinstance(to, bool)):
+                    raise ValueError("person must be the id of one of this Leat's people")
                 name = body.get("name") if isinstance(body.get("name"), str) else None
-                self._json(200, accounts.allow(match[1], int(to) if to else None, name))
+                self._json(200, accounts.allow(match[1], to, name))
             elif path == "/api/models/load":
                 _owner(me)
                 agent.load(_text(body, "model"))
