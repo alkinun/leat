@@ -4,8 +4,9 @@ tinygrad renders C for AMD GPUs and compiles it with ROCm's comgr; without ROCm,
 falls back to rendering LLVM IR, which the kernels' inline intrinsics are not. This compiles that C
 with clang's own HIP support instead, which needs clang with the AMDGPU target, as most distros'
 is, and lld on PATH: a shell script named lld that runs `python -m ziglang ld.lld` without its
-first two arguments, `-flavor gnu`, will do. The emulator itself is tinygrad's, in the tests of
-its source tree, which PYTHONPATH must hold: the commit pyproject.toml pins.
+first two arguments, `-flavor gnu`, will do, as will a link named lld to the rust-lld of a Rust
+toolchain, in rustup's toolchains/*/lib/rustlib/*/bin. The emulator itself is tinygrad's, in the
+tests of its source tree, which PYTHONPATH must hold: the commit pyproject.toml pins.
 
     PYTHONPATH=path/to/tinygrad DEV=MOCK+AMD uv run pytest tests/test_kernels.py -k matvec
 """
