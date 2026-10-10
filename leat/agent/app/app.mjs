@@ -1132,7 +1132,7 @@ const DID = {
   ask_files: ["read the files", (n) => `read the files ${n} times`],
   fill_template: ["filled a template", (n) => `filled ${n} templates`],
   suggest_edits: ["suggested edits", (n) => `suggested edits ${n} times`],
-  search: ["searched the web", (n) => `searched the web ${n} times`],
+  search_web: ["searched the web", (n) => `searched the web ${n} times`],
   search_files: ["searched the files", (n) => `searched the files ${n} times`],
   fetch: ["read a page", (n) => `read ${n} pages`],
   read: ["read a file", (n) => `read ${n} files`],
@@ -1247,7 +1247,7 @@ const LINES = {
   ask_files: (a, i) => [i.total ? `Reading ${i.done ?? 0} of ${i.total} files…` : "Reading the files…",
     i.done < i.total ? `Read ${i.done} of ${i.total} files` : `Read ${i.total === 1 ? "1 file" : `${i.total ?? 0} files`}`,
     "Couldn't read the files"],
-  search: (a) => [`Searching for “${a.query}”…`, `Searched for “${a.query}”`,
+  search_web: (a) => [`Searching for “${a.query}”…`, `Searched for “${a.query}”`,
     `Couldn't search for “${a.query}”`],
   search_files: (a) => [`Searching the files for “${a.query}”…`, `Searched the files for “${a.query}”`,
     `Couldn't search the files for “${a.query}”`],
@@ -1276,7 +1276,7 @@ function line(m) {
 function what(m) {
   const { arguments: args, results, url, title, error } = m.info ?? {};
   if (error || !m.content) return [element("p", "", error ?? "")];
-  if (m.name === "search" && results?.length) {
+  if (m.name === "search_web" && results?.length) {
     return [cited(listed(results.map((r) => link(r.url, r.title)), true), results)];
   }
   if (m.name === "ask_files") { // what it asked of each file, and the spreadsheet of the answers
@@ -1475,7 +1475,7 @@ function host(url) {
 // the icon of a tool's line
 const ICONS = {
   ask_files: '<path d="M3 5h18M3 12h18M3 19h18M9 5v14"/>',
-  search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
+  search_web: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
   search_files: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
   fetch: '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/>',
   read: '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/>',

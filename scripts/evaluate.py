@@ -144,16 +144,16 @@ INVOICES = {
 }
 
 
-NONE = ("search", "fetch", "read", "run")
+NONE = ("search_web", "fetch", "read", "run")
 CASES = [
     Case("chat", "Write a haiku about autumn.", [uncalled(*NONE)]),
     Case("arithmetic", "What is 17 * 23?", [says(r"391"), uncalled(*NONE)]),
     Case("known fact", "What is the capital of Australia?", [says("Canberra")]),
-    Case("news", "What's in the news today about space exploration?", [called("search")]),
+    Case("news", "What's in the news today about space exploration?", [called("search_web")]),
     Case("reads pages", "When does the British Museum open tomorrow? Check its website.",
          [called("fetch")]),
     Case("research", "Research the pros and cons of heat pumps for a house in a cold climate.",
-         [called("search", 2), called("fetch", 4), says(CITES)]),
+         [called("search_web", 2), called("fetch", 4), says(CITES)]),
     Case("attachment", "What time does it start, and what should I bring?",
          [called("read"), says("7"), says("salad|dessert")],
          files={"invitation.txt": "You're invited to Mia's 30th! Saturday 18 October, 7 pm, at "
@@ -162,14 +162,14 @@ CASES = [
          [called("run"), makes(r"\.docx$")]),
     Case("spreadsheet", "Make an Excel budget: rent 900, food 350 and transport 80 a month, with "
          "yearly totals.", [called("run"), makes(r"\.xlsx$")]),
-    Case("doesn't know", "What's my sister's name?", [unsure, uncalled("search")]),
+    Case("doesn't know", "What's my sister's name?", [unsure, uncalled("search_web")]),
     Case("finds in files", "How much are meals on client visits reimbursed?",
          [called("search_files"), says("45"), says(CITES)], FIRM, attach=False),
     Case("finds in German", "Bis wann muss der Jahresabschluss von Hofmann Textil eingereicht "
-         "werden?", [called_any("search_files", "read"), uncalled("search"),
+         "werden?", [called_any("search_files", "read"), uncalled("search_web"),
                      says("30\\.? September|30\\.09")], FIRM, attach=False),
     Case("not in files", "What is our policy on working from home?",
-         [called("search_files"), absent, uncalled("search")], FIRM, attach=False),
+         [called("search_files"), absent, uncalled("search_web")], FIRM, attach=False),
     Case("every file", "Make a table of every invoice's date, seller and total.",
          [called("ask_files"), makes(r"\.xlsx$"), says("1.502|1,502")], INVOICES, attach=False),
     Case("fills a template", "Fill the fee letter template for Weber Logistik: March, 1.200 EUR, "

@@ -79,12 +79,12 @@ word. If the page does not answer it, say so in a line. Add nothing the page doe
 
 
 def tools(searxng: str, reader: Client | None = None) -> list[Tool]:
-    """search, through the SearXNG at `searxng`, and fetch, which reads pages in the sandbox of
+    """search_web, through the SearXNG at `searxng`, and fetch, which reads pages in the sandbox of
     its call's conversation's workspace, and saves them there, if it has one, and reads them for
     a question by the model `reader` serves, if given."""
     return [
         Tool(
-            "search",
+            "search_web",
             "Search the web. Returns the top results, each numbered, with its title, link and "
             "snippet",
             strings(query="what to search for"),

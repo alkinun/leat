@@ -46,9 +46,9 @@ share stay on it.{named} Each of the user's messages starts with the date and ti
 # of the system prompt, when the agent searches the web
 WEB = """\
 ## The web
-- When a question needs facts you may not know, or that may have changed, call search, then fetch \
-the two or three pages most likely to answer, at once, each with the question it should answer. \
-Fetch more only if they fall short.
+- When a question needs facts you may not know, or that may have changed, call search_web, then \
+fetch the two or three pages most likely to answer, at once, each with the question it should \
+answer. Fetch more only if they fall short.
 - When the user asks you to research something, search in several ways, read the pages that \
 matter, ten or so, and answer with a report in sections that ends with what stays unsure."""
 # and when it is kept from the internet
@@ -56,7 +56,7 @@ OFFLINE = """\
 ## The web
 This Leat has no internet: answer from what you know and the user's files, and say so when a \
 question needs what you cannot reach, as today's news."""
-WEB_TOOLS = ("search", "fetch")  # the tools that reach the internet, which offline takes away
+WEB_TOOLS = ("search_web", "fetch")  # the tools that reach the internet, which offline takes away
 # of the system prompt, when the agent has a workspace
 WORKSPACE = """\
 ## The user's files
@@ -993,8 +993,8 @@ def _system(
     # out of reach; the workspace's if `workspace`, with search_files', ask_files' and the office's
     # tools' rules as `tools` has them; citing; and the project it is held in, if one
     sections = [SYSTEM.format(named=f" The user is {name}." if name else "")]
-    if "search" in tools or offline:
-        sections.append(WEB if "search" in tools else OFFLINE)
+    if "search_web" in tools or offline:
+        sections.append(WEB if "search_web" in tools else OFFLINE)
     if workspace:
         sections.append(WORKSPACE.format(
             skills="\n".join(f"- {path}: {about}" for path, about in files.skills()),
@@ -1023,7 +1023,7 @@ def _did(
         did.append(("read", f"{info['done']} files"))
     elif name == "search_files":
         did.append(("searched the files", None))
-    elif name == "search":
+    elif name == "search_web":
         did.append(("searched the web", None))
     elif name == "fetch" and info.get("url"):
         did.append(("read a page of", urllib.parse.urlsplit(info["url"]).hostname))

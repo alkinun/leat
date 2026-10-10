@@ -493,7 +493,7 @@ def test_offline(engine, tmp_path):
         return Tool(name, name, strings(text="x"), echo)
 
     agent = Agent(Store(tmp_path / "leat.db"), Client(engine.url),
-                  [tool("search"), tool("fetch"), tool("echo")])  # fmt: skip
+                  [tool("search_web"), tool("fetch"), tool("echo")])  # fmt: skip
     with agent.events.watch() as told:
         agent.set_offline(True)
         assert told.get() == {"type": "settings", "offline": True}
@@ -506,7 +506,7 @@ def test_offline(engine, tmp_path):
     assert [t["function"]["name"] for t in engine.requests[-1]["tools"]] == ["echo"]
     agent.set_offline(False)
     assert agent.store.setting("offline") is None and list(agent.offered()) == [
-        "search", "fetch", "echo"]  # fmt: skip
+        "search_web", "fetch", "echo"]  # fmt: skip
     engine.replies.put(REPLY)
     with agent.events.watch() as events:
         id = agent.send(None, "What's new?")
@@ -622,11 +622,20 @@ def test_migration(tmp_path):
                                PRIMARY KEY (conversation, position));
         INSERT INTO conversations VALUES ('0123456789ab', 'Bulbs', 0, 0);
         INSERT INTO messages VALUES ('0123456789ab', 0, '{"role": "system", "content": "tulips"}'),
-                                    ('0123456789ab', 1, '{"role": "user", "content": "Tulips?"}');
+                                    ('0123456789ab', 1, '{"role": "user", "content": "Tulips?"}'),
+            ('0123456789ab', 2, '{"role": "assistant", "content": "", "tool_calls": [{"id": "1", '
+             || '"type": "function", "function": {"name": "search", "arguments": "{}"}}]}'),
+            ('0123456789ab', 3, '{"role": "tool", "tool_call_id": "1", "name": "search", '
+             || '"content": "{\\"name\\": \\"search\\", \\"tulips\\": 1}"}');
     """)  # fmt: skip
     db.close()
     store = Store(tmp_path / "leat.db")
-    assert [m["content"] for m in store.messages("0123456789ab")] == ["tulips", "Tulips?"]
+    messages = store.messages("0123456789ab")
+    assert [m["content"] for m in messages[:2]] == ["tulips", "Tulips?"]
+    # the web's search, renamed search_web, in its calls and answers, but not in what they said
+    assert messages[2]["tool_calls"][0]["function"]["name"] == "search_web"
+    assert messages[3]["name"] == "search_web"
+    assert messages[3]["content"] == '{"name": "search", "tulips": 1}'
     assert Store(tmp_path / "leat.db").conversations()[0]["id"] == "0123456789ab"
     # of the household's features gone, nothing is left
     tables = {

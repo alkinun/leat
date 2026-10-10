@@ -19,7 +19,8 @@ its person's alone, and seen only while they see the project.
 A workflow is a request saved to make again, by its name: a project's, seen by those who see the
 project, or a person's own.
 
-The settings are the box's, each a value of JSON by its key, as where it backs up to.
+The settings are the box's, each a value of JSON by its key, as whether it is kept from the
+internet.
 
 The activity is what was done on the box, by whom, and where, as its owner looks back on it: a
 chat begun, a file uploaded or read for one, a project shared; never what anyone asked, nor what
@@ -253,6 +254,13 @@ _MIGRATIONS = [
     ALTER TABLE projects ADD COLUMN source TEXT;
     ALTER TABLE projects ADD COLUMN synced REAL;
     ALTER TABLE projects ADD COLUMN unsynced TEXT;
+    """,
+    # the web's search tool renamed search_web, beside search_files: its calls and their answers.
+    # In a message's JSON '"name": "search"' is a name's alone, as the quotes of text are escaped
+    """
+    UPDATE messages SET message = replace(replace(message,
+      '"name": "search",', '"name": "search_web",'), '"name": "search"}', '"name": "search_web"}')
+    WHERE json_extract(message, '$.role') IN ('assistant', 'tool');
     """,
 ]
 KEPT = 365 * 86400  # seconds the activity is kept
