@@ -49,7 +49,7 @@ body.menu nav { display: none; } /* on a narrow screen, the menu shows it instea
 #conversations { flex: 1; overflow-y: auto; margin-top: calc(12px * var(--density)); }
 /* the pages beside the conversations, at the sidebar's foot */
 .place { display: flex; gap: 10px; align-items: center; padding: calc(8px * var(--density)) 10px; border-radius: var(--round); }
-.place:hover, body.files #filed, body.settings #set, body:is(.projects, .project) #held {
+.place:hover, body.files #filed, body:is(.settings, .activity) #set, body:is(.projects, .project) #held {
   background: var(--bubble);
 }
 .conversation {
@@ -108,10 +108,12 @@ main.empty #greeting { display: block; margin-bottom: calc(28px * var(--density)
 
 /* a page, as the files', in place of a conversation */
 .page { display: none; flex: 1; overflow-y: auto; padding: calc(16px * var(--density)) max(24px, calc(50% - 368px)); }
-body.files #files, body.settings #settings, body.projects #projects, body.project #project {
+body.files #files, body.settings #settings, body.projects #projects, body.project #project,
+body.activity #activity {
   display: block;
 }
-body:is(.files, .settings, .projects) :is(#log, #composer, #greeting), body.project :is(#log, #greeting) {
+body:is(.files, .settings, .projects, .activity) :is(#log, #composer, #greeting),
+body.project :is(#log, #greeting) {
   display: none;
 }
 .page h1 { margin: calc(24px * var(--density)) 0 calc(8px * var(--density)); font: var(--display-weight) 1.875rem/1.3 var(--font-display); }
@@ -159,12 +161,12 @@ body:is(.files, .settings, .projects) :is(#log, #composer, #greeting), body.proj
 .page li button { padding: 0 8px; color: var(--muted); font-size: 1.125rem; }
 /* a project's page: back to the projects, its name, in place, whom it is shared with, and below
    its chats, files and instructions */
-#back {
+.back {
   display: inline-flex; align-items: center; gap: 2px; margin-top: calc(16px * var(--density));
   color: var(--muted); font-size: 0.875rem; text-decoration: none;
 }
-#back:hover { color: var(--text); }
-#back svg { width: 16px; height: 16px; }
+.back:hover { color: var(--text); }
+.back svg { width: 16px; height: 16px; }
 .page #title {
   display: block; width: 100%; margin: 4px 0 calc(8px * var(--density)); padding: 0;
   border: none; border-radius: 0; background: none; outline: none;
@@ -446,7 +448,17 @@ body.gated #gate { display: grid; flex: 1; place-items: center; min-height: 100v
   padding: 4px 12px; border-radius: var(--round); background: var(--accent); color: var(--on-accent);
   font-size: 0.875rem;
 }
-/* the box as its owner looks after it */
+/* the box as its owner looks after it, and what was done on it */
+#seeActivity { font-weight: 400; color: var(--muted); text-decoration: none; }
+#seeActivity:hover { color: var(--text); }
+#seeActivity::after { content: " ›"; }
+#activity .what { display: flex; gap: 10px; align-items: baseline; min-width: 0; }
+#activity .what .meta { flex: none; font-family: var(--font-mono); }
+#activity .what b { flex: none; font-weight: 600; }
+#activity li { font-size: 0.9375rem; }
+#older { margin: 16px 0 24px; padding: 6px 14px; border: 1px solid var(--line); border-radius: var(--round); }
+#older:hover { background: var(--bubble); }
+#older[hidden] { display: none; }
 #overview[hidden] { display: none; }
 #room { margin: 4px 0 4px; font-size: 0.875rem; }
 #room.meta { color: var(--muted); }

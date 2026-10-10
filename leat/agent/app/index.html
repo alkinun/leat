@@ -57,7 +57,7 @@
   <section id="settings" class="page">
     <h1>Settings</h1>
     <div id="overview" hidden>
-      <h2>This Leat</h2>
+      <h2>This Leat <a id="seeActivity" href="/activity">Activity</a></h2>
       <p id="room"></p>
       <ul id="use"></ul>
     </div>
@@ -95,8 +95,17 @@
     </form>
     <ul id="listed"></ul>
   </section>
+  <section id="activity" class="page">
+    <a id="toSettings" class="back" href="/settings">
+      <svg viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg>Settings
+    </a>
+    <h1>Activity</h1>
+    <p>What was done on this Leat, by whom and where, kept a year. What anyone asks, and what Leat answers, is never kept here.</p>
+    <div id="done"></div>
+    <button id="older" class="quiet" type="button" hidden>Show older</button>
+  </section>
   <section id="project" class="page">
-    <a id="back" href="/projects">
+    <a id="back" class="back" href="/projects">
       <svg viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg>Projects
     </a>
     <input id="title" maxlength="80" autocomplete="off" aria-label="The project's name">

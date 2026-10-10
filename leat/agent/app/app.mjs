@@ -31,8 +31,8 @@ let heading = "leat"; // the shown page's title, as the window's says it
 const opened = new Map(); // whether each fold is open, as the user left it: work, calls, reasoning
 // the pages beside the conversations, each a section of its own name, and their titles; a
 // project's page, "project", has its name
-const PAGES = ["projects", "project", "files", "settings"];
-const TITLES = { projects: "Projects", files: "Files", settings: "Settings" };
+const PAGES = ["projects", "project", "files", "settings", "activity"];
+const TITLES = { projects: "Projects", files: "Files", settings: "Settings", activity: "Activity" };
 
 $("new").onclick = () => {
   open(null);
@@ -61,6 +61,13 @@ $("back").onclick = (event) => {
   event.preventDefault();
   turnTo("projects");
 };
+for (const [link, page] of [["toSettings", "settings"], ["seeActivity", "activity"]]) {
+  $(link).onclick = (event) => {
+    event.preventDefault();
+    turnTo(page);
+  };
+}
+$("older").onclick = () => renderActivity(true);
 $("crumb").onclick = (event) => {
   event.preventDefault();
   showProject(shown.project);
@@ -469,6 +476,7 @@ function turnTo(name, push = true) {
   heading = TITLES[name];
   render();
   if (name === "settings") renderOverview();
+  if (name === "activity") renderActivity();
 }
 
 // shows a project's page: its chats, files and instructions, and the composer, which begins a chat
@@ -656,6 +664,49 @@ async function renderOverview() {
   } catch (error) {
     status(error.message, true);
   }
+}
+
+// what was done on the box, the owner's to look back on, by day, the latest first: each at its time,
+// by whom, or by Leat for whom, what, and where; asked anew, or `older`, after what is shown
+let activity = [];
+async function renderActivity(older = false) {
+  const before = older && activity.length ? `?before=${activity.at(-1).id}` : "";
+  try {
+    const response = await fetch(`/api/activity${before}`);
+    if (!response.ok) throw new Error((await response.json()).error.message);
+    const more = (await response.json()).activity;
+    activity = older ? [...activity, ...more] : more;
+    $("older").hidden = more.length < 100;
+  } catch (error) {
+    status(error.message, true);
+  }
+  const days = new Map();
+  for (const a of activity) {
+    const day = dayOf(a.at);
+    days.set(day, [...(days.get(day) ?? []), a]);
+  }
+  $("done").replaceChildren(...[...days].flatMap(([day, done]) => {
+    const list = element("ul");
+    list.append(...done.map((a) => {
+      const item = element("li"), time = new Date(a.at * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+      const who = a.leat ? (a.person ? `Leat, for ${a.person}` : "Leat") : (a.person ?? "Someone removed");
+      const what = element("span", "what");
+      what.append(element("span", "meta", time), element("b", "", who), `${a.action}${a.detail ? ` ${a.detail}` : ""}`);
+      item.append(what);
+      if (a.place) item.append(element("span", "meta", a.place));
+      return item;
+    }));
+    return [element("h2", "", day), list];
+  }));
+  if (!activity.length) $("done").replaceChildren(element("p", "meta", "Nothing yet."));
+}
+
+// a time, in seconds, as the day it fell on: today, yesterday, or its date
+function dayOf(seconds) {
+  const at = new Date(seconds * 1000), today = new Date();
+  const days = Math.round((new Date(today.toDateString()) - new Date(at.toDateString())) / 86400000);
+  return days === 0 ? "Today" : days === 1 ? "Yesterday"
+    : at.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" });
 }
 
 // whether Leat may reach the internet, the owner's to choose, and what each choice means
