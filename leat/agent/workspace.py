@@ -20,6 +20,7 @@ TIMEOUT = 120  # seconds a run may take
 MEMORY = 4 << 30  # bytes of memory a run may take
 OUTPUT = 20000  # bytes of a run's output kept, its start and its end
 LONGEST = 50_000_000  # bytes of a document's text kept, which is read whole
+NAME = 255  # bytes of a file's name at most, as Linux's file systems take
 # the sandbox's view of the box: the system, read-only, and fonts' settings, for charts
 _SYSTEM = [
     "--ro-bind", "/usr", "/usr", "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64",
@@ -48,6 +49,8 @@ class Workspace:
     def path(self, name: str) -> Path:
         """The path of a file in the workspace, named relative to it. Raises ValueError for a
         name outside it, such as an absolute one, or one up from it."""
+        if any(len(part.encode()) > NAME for part in Path(name).parts):
+            raise ValueError(f"a file's name is {NAME} bytes at most")
         path = (self.root / name.lstrip("/")).resolve()
         if not path.is_relative_to(self.root):
             raise ValueError(f"{name} is outside the workspace")
@@ -75,6 +78,11 @@ class Workspace:
         numbered as "notes (2).txt" if a file has it."""
         base = Path(name.replace("\\", "/").split("/")[-1].lstrip(". ")).name or "file"
         stem, suffix = Path(base).stem, Path(base).suffix
+        if len(base.encode()) > NAME - 8:  # its start and its kind, as long as a name may be with
+            # room for a number, " (2)"
+            suffix = suffix if len(suffix.encode()) < 16 else ""
+            stem = stem.encode()[: NAME - 8 - len(suffix.encode())].decode(errors="ignore")
+            base = stem + suffix
         n, candidate = 1, base
         while (self.root / candidate).exists():
             n += 1

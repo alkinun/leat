@@ -62,6 +62,15 @@ def test_files(workspace, tmp_path):
     # a name for an upload: at the top, free, and of no path
     assert workspace.free("b.txt") == "b (2).txt" and workspace.free("../../x.pdf") == "x.pdf"
     assert workspace.free(".bashrc") == "bashrc" and workspace.free("") == "file"
+    # a name past what a file system takes: refused, or for an upload, its start and its kind
+    with pytest.raises(ValueError, match="255 bytes at most"):
+        workspace.path("é" * 128)
+    long = workspace.free("é" * 200 + ".txt")
+    assert long.endswith("é.txt") and len(long.encode()) <= 247
+    (workspace.root / long).write_text("x")
+    numbered = workspace.free("é" * 200 + ".txt")
+    assert numbered == long.removesuffix(".txt") + " (2).txt" and len(numbered.encode()) <= 255
+    workspace.delete(long)
     workspace.delete("b.txt")
     with pytest.raises(FileNotFoundError):
         workspace.delete("b.txt")
