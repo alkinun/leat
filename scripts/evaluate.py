@@ -49,6 +49,8 @@ class Outcome:
     files: list[str]
     seconds: float
     cached: float  # of the prompts' tokens, the share the engine's cache held
+    calls: list[dict] = field(default_factory=list)  # each call's arguments, in turn, by name
+    texts: dict[str, str] = field(default_factory=dict)  # the text files' text after, by name
 
 
 Check = Callable[[Outcome], str | None]  # why an outcome fails, or None if it passes
@@ -61,6 +63,21 @@ def called(name: str, times: int = 1) -> Check:
 
 def called_any(*names: str) -> Check:
     return lambda o: None if set(names) & set(o.tools) else f"called none of {', '.join(names)}"
+
+
+def called_with(name: str, argument: str) -> Check:
+    def check(o: Outcome) -> str | None:
+        given = any(c["name"] == name and c["arguments"].get(argument) for c in o.calls)
+        return None if given else f"called {name} without {argument}"
+
+    return check
+
+
+def holds(name: str, pattern: str) -> Check:
+    def check(o: Outcome) -> str | None:
+        return None if re.search(pattern, o.texts.get(name, "")) else f"{name} holds no /{pattern}/"
+
+    return check
 
 
 def uncalled(*names: str) -> Check:
@@ -105,7 +122,8 @@ class Case:
     setup: str = ""  # Python run in the sandbox, in the workspace, that makes more of its files
 
 
-# a lease and a fee letter's template, as Word documents, made in the sandbox, in German
+# a lease, a fee letter's template and the office's letterhead, as Word documents, made in the
+# sandbox, in German
 LEASE = """
 from docx import Document
 d = Document()
@@ -120,6 +138,10 @@ d.add_paragraph("Sehr geehrte Damen und Herren der {{Mandant}},")
 d.add_paragraph("unser Honorar für {{Monat}} beträgt {{Honorar}}, zahlbar bis {{Fälligkeit}}.")
 d.add_paragraph("Mit freundlichen Grüßen, {{Partner}}")
 d.save("Honorarschreiben Vorlage.docx")
+d = Document()
+d.sections[0].header.paragraphs[0].text = "Becker & Partner Steuerberatung · Leopoldstraße 12"
+d.sections[0].footer.paragraphs[0].text = "80802 München · USt-IdNr. DE123456789"
+d.save("Briefkopf.docx")
 """
 # a firm's files, among which one passage answers each question
 FIRM = {
@@ -201,6 +223,27 @@ CASES = [
     Case("redlines", "Suggest changes to the lease: three months' notice instead of six, and a "
          "deposit of two months' rent.", [called("suggest_edits"), makes(r"\.docx$")],
          setup=LEASE, attach=False),
+    Case("letterhead", "Write a short letter to Anna Hofmann of Hofmann Textil confirming our "
+         "meeting on 14 November at 10:00, on our letterhead.",
+         [called_with("make_document", "template"), makes(r"\.docx$")], setup=LEASE,
+         attach=False),
+    Case("letter in German", "Schreibe einen kurzen Brief an Jonas Weber von Weber Logistik: die "
+         "Lohnabrechnung für November erfolgt am 25. Als PDF, bitte.",
+         [called("make_document"), makes(r"\.pdf$")]),
+    Case("fills a template in German", "Fülle die Honorarschreiben-Vorlage für Hofmann Textil "
+         "aus: Oktober, 1.850 EUR, fällig am 10. November, unterschrieben von Clara Becker.",
+         [called("fill_template"), makes(r"(?i)hofmann.*\.docx$")], setup=LEASE, attach=False),
+    Case("redlines in German", "Schlage im Mietvertrag Änderungen vor: drei Monate "
+         "Kündigungsfrist statt sechs und eine Kaution von zwei Monatsmieten.",
+         [called("suggest_edits"), makes(r"\.docx$")], setup=LEASE, attach=False),
+    Case("totals in German", "Wie hoch sind alle Rechnungen zusammen?",
+         [called("ask_files"), says("6.339,75|6,339.75")], INVOICES, attach=False),
+    Case("edits a note", "Change the meeting time in notes.txt to 11:30.",
+         [called_any("edit", "write", "run"), holds("notes.txt", "11:30")],
+         files={"notes.txt": "Meeting with Anna Hofmann at 10:00 in Munich, at her office."}),
+    Case("finds, then writes", "Write Anna Hofmann a short letter reminding her when the annual "
+         "accounts are due, as a Word document.",
+         [called_any("search_files", "read"), called("make_document")], FIRM, attach=False),
 ]  # fmt: skip
 
 
@@ -222,9 +265,11 @@ def main() -> None:
     parser.add_argument(
         "--effort", choices=EFFORTS, help="the effort the model reasons at; by default its own"
     )
-    parser.add_argument("-k", help="the cases whose names hold this alone")
+    parser.add_argument(
+        "-k", action="append", help="the cases whose names hold this alone; again, or any of these"
+    )
     args = parser.parse_args()
-    cases = [case for case in CASES if not args.k or args.k in case.name]
+    cases = [case for case in CASES if not args.k or any(k in case.name for k in args.k)]
     rows, passed = [], 0
     for case in cases:
         failures, seconds, cached = [], [], []
@@ -275,7 +320,11 @@ def _run(case: Case, args: argparse.Namespace) -> Outcome:
         infos = [m["info"] for m in messages if m["role"] == "assistant" and "read" in m["info"]]
         held, read = sum(i["cached"] or 0 for i in infos), sum(i["read"] for i in infos)
         share = held / (held + read) if held + read else 0.0
-        return Outcome(tools_called, answer or "", names, seconds, share)
+        calls = [{"name": m["name"], "arguments": m.get("info", {}).get("arguments") or {}}
+                 for m in messages if m["role"] == "tool"]  # fmt: skip
+        texts = {f["name"]: space.path(f["name"]).read_text(errors="replace")
+                 for f in space.files() if f["name"].endswith((".txt", ".md"))}  # fmt: skip
+        return Outcome(tools_called, answer or "", names, seconds, share, calls, texts)
 
 
 def _wait(agent: Agent, id: str) -> list[dict]:
