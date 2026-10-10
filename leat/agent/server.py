@@ -70,6 +70,7 @@ _SHOWN = {"image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf
 # or delete it
 _CONVERSATION = re.compile(r"/api/conversations/([0-9a-f]{12})(/messages|/stop)?")
 _PROJECT = re.compile(r"/api/projects/([0-9a-f]{12})")
+_WORKFLOW = re.compile(r"/api/workflows/([0-9]+)")
 _PROJECT_PAGE = re.compile(r"/projects/[0-9a-f]{12}")
 _REQUEST = re.compile(r"/api/pairings/([0-9a-f]{16})(/allow)?")
 _DEVICE = re.compile(r"/api/devices/([0-9]+)")
@@ -153,14 +154,13 @@ class _Handler(BaseHTTPRequestHandler):
             me = self._device()
             person, match = me["person"], _CONVERSATION.fullmatch(path)
             if path == "/api/conversations":  # in a project, if the body names one
-                project = body.get("project")
-                if project is not None and not isinstance(project, str):
-                    raise ValueError("project must be the id of a project")
-                id = agent.send(None, *_message(body), person=person, project=project)
+                id = agent.send(None, *_message(body), person=person, project=_held(body))
                 self._json(200, {"id": id})
             elif path == "/api/projects":
                 fields = _project(body, new=True)
                 self._json(200, agent.add_project(fields.pop("name"), person, **fields))
+            elif path == "/api/workflows":  # a project's, if the body names one
+                self._json(200, agent.add_workflow(*_workflow(body), person, _held(body)))
             elif match and match[2] == "/messages":
                 self._json(200, {"id": agent.send(match[1], *_message(body), person=person)})
             elif match and match[2] == "/stop":
@@ -192,6 +192,8 @@ class _Handler(BaseHTTPRequestHandler):
                 agent.delete(match[1], person)
             elif match := _PROJECT.fullmatch(path):
                 agent.delete_project(match[1], person)
+            elif match := _WORKFLOW.fullmatch(path):
+                agent.delete_workflow(int(match[1]), person)
             elif path.startswith("/api/") and (match := _FILE.fullmatch(path)):
                 agent.space(match[1], person).delete(urllib.parse.unquote(match[2]))
                 agent.files_changed(match[1], person)
@@ -335,6 +337,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._event({"type": "conversations", "conversations": agent.conversations(person)})
             projects = agent.projects(person)
             self._event({"type": "projects", "projects": projects})
+            self._event({"type": "workflows", "workflows": agent.workflows(person)})
             for project in [None, *(p["id"] for p in projects)]:
                 self._event(agent.files_event(project, person))
             if me["owner"]:
@@ -441,6 +444,22 @@ def _text(body: dict[str, Any], key: str) -> str:
     if not isinstance(text := body.get(key), str) or not text.strip():
         raise ValueError(f"{key} must be some text")
     return text
+
+
+def _workflow(body: dict[str, Any]) -> tuple[str, str]:
+    # a workflow's name and request, of a body; raises ValueError if they are not as they must be
+    name, prompt = _text(body, "name").strip(), _text(body, "prompt").strip()
+    if len(name) > PROJECT_NAME or len(prompt) > INSTRUCTIONS:
+        raise ValueError(f"a workflow's name is {PROJECT_NAME} characters at most, and its "
+                         f"request {INSTRUCTIONS}")  # fmt: skip
+    return name, prompt
+
+
+def _held(body: dict[str, Any]) -> str | None:
+    # the project a body names, if any; raises ValueError if it names one by other than its id
+    if (project := body.get("project")) is not None and not isinstance(project, str):
+        raise ValueError("project must be the id of a project")
+    return project
 
 
 def _project(body: dict[str, Any], new: bool = False) -> dict[str, Any]:

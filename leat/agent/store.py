@@ -15,6 +15,9 @@ every conversation is no one's, and becomes the owner's.
 A project is a client's or a matter's: its files, instructions for the model, and the conversations
 held in it. It is a person's own, or shared with everyone on the box; a conversation in it is still
 its person's alone, and seen only while they see the project.
+
+A workflow is a request saved to make again, by its name: a project's, seen by those who see the
+project, or a person's own.
 """
 
 import json
@@ -209,6 +212,17 @@ _MIGRATIONS = [
     );
     ALTER TABLE conversations ADD COLUMN project TEXT REFERENCES projects (id);
     """,
+    # the workflows, each a request saved by its name, a project's or a person's own
+    """
+    CREATE TABLE workflows (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      project TEXT REFERENCES projects (id) ON DELETE CASCADE,
+      person INTEGER REFERENCES people (id) ON DELETE CASCADE,
+      created REAL NOT NULL
+    );
+    """,
 ]
 # a conversation's columns as the apps list it
 _SUMMARY = "id, title, created, updated, person, project"
@@ -351,8 +365,34 @@ class Store:
         """Deletes a project, with every conversation in it, whoever's."""
         with self._lock, self._db:
             self._db.execute("BEGIN")
-            self._db.execute("DELETE FROM conversations WHERE project = ?", (id,))
+            for table in ("conversations", "workflows"):
+                self._db.execute(f"DELETE FROM {table} WHERE project = ?", (id,))
             self._db.execute("DELETE FROM projects WHERE id = ?", (id,))
+
+    def workflows(self, person: int | None = None) -> list[dict[str, Any]]:
+        """The workflows a person sees, their own and those of the projects they see, by name."""
+        sql = (
+            "SELECT * FROM workflows WHERE (project IS NULL AND person IS ?) OR project IN"
+            f" (SELECT id FROM projects WHERE {_SEEN}) ORDER BY name COLLATE NOCASE"
+        )
+        return [dict(row) for row in self._query(sql, person, person)]
+
+    def workflow(self, id: int) -> dict[str, Any] | None:
+        rows = self._query("SELECT * FROM workflows WHERE id = ?", id)
+        return dict(rows[0]) if rows else None
+
+    def add_workflow(
+        self, name: str, prompt: str, person: int | None = None, project: str | None = None
+    ) -> dict[str, Any]:
+        """A new workflow: a project's, if one, or else a person's own."""
+        rows = self._query(
+            "INSERT INTO workflows (name, prompt, project, person, created) VALUES (?, ?, ?, ?, ?)"
+            " RETURNING *", name, prompt, project, None if project else person, time.time(),
+        )  # fmt: skip
+        return dict(rows[0])
+
+    def delete_workflow(self, id: int) -> None:
+        self._query("DELETE FROM workflows WHERE id = ?", id)
 
     def people(self) -> list[dict[str, Any]]:
         """The box's people, the owner first."""
@@ -374,7 +414,7 @@ class Store:
             )  # fmt: skip
             assert person is not None
             if first:
-                for table in ("conversations", "projects"):
+                for table in ("conversations", "projects", "workflows"):
                     sql = f"UPDATE {table} SET person = ? WHERE person IS NULL"
                     self._db.execute(sql, (person["id"],))
         return person
@@ -386,11 +426,12 @@ class Store:
         with self._lock, self._db:
             self._db.execute("BEGIN")
             own = "SELECT id FROM projects WHERE person = ? AND NOT shared"
-            self._db.execute(f"DELETE FROM conversations WHERE project IN ({own})", (id,))
+            for table in ("conversations", "workflows"):
+                self._db.execute(f"DELETE FROM {table} WHERE project IN ({own})", (id,))
             self._db.execute("DELETE FROM projects WHERE person = ? AND NOT shared", (id,))
             owner = "SELECT id FROM people WHERE owner"
             self._db.execute(f"UPDATE projects SET person = ({owner}) WHERE person = ?", (id,))
-            for table in ("conversations", "devices"):
+            for table in ("conversations", "devices", "workflows"):
                 self._db.execute(f"DELETE FROM {table} WHERE person = ?", (id,))
             self._db.execute("DELETE FROM people WHERE id = ? AND NOT owner", (id,))
 

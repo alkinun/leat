@@ -282,6 +282,30 @@ class Agent:
                 self.events.publish({"type": "deleted", "id": c["id"], "to": c["person"]})
             self._publish_projects()
 
+    def workflows(self, person: int | None = None) -> list[dict[str, Any]]:
+        """The workflows a person sees, their own and their projects', by name."""
+        return [_workflow(w) for w in self.store.workflows(person)]
+
+    def add_workflow(
+        self, name: str, prompt: str, person: int | None = None, project: str | None = None
+    ) -> dict[str, Any]:
+        """Saves a request as a workflow: a project's, if one the person sees, for all who see
+        it, or else the person's own. Raises NotFound if they see no such project."""
+        with self._lock:
+            if project is not None:
+                self._project(project, person)
+            workflow = self.store.add_workflow(name, prompt, person, project)
+            self._publish_workflows()
+        return _workflow(workflow)
+
+    def delete_workflow(self, id: int, person: int | None = None) -> None:
+        """Deletes a workflow a person sees. Raises NotFound if they see none of that id."""
+        with self._lock:
+            if not any(w["id"] == id for w in self.store.workflows(person)):
+                raise NotFound(f"there is no workflow {id}")
+            self.store.delete_workflow(id)
+            self._publish_workflows()
+
     def projects_changed(self) -> None:
         """Tells each person's apps of the projects they see, as they changed."""
         with self._lock:
@@ -444,9 +468,15 @@ class Agent:
 
     def _publish_projects(self) -> None:
         # each person's projects, to their apps alone, as a project shared or no longer is seen
-        # by others or no longer
+        # by others or no longer, and so its workflows
         for person in self._everyone():
             event = {"type": "projects", "projects": self.projects(person), "to": person}
+            self.events.publish(event)
+        self._publish_workflows()
+
+    def _publish_workflows(self) -> None:
+        for person in self._everyone():
+            event = {"type": "workflows", "workflows": self.workflows(person), "to": person}
             self.events.publish(event)
 
     def _publish_conversations(self) -> None:
@@ -851,6 +881,11 @@ def _folder(project: str | None, person: int | None) -> str:
 def _sees(project: dict[str, Any] | None, person: int | None) -> bool:
     # whether a person sees a project: their own, or one shared
     return project is not None and (bool(project["shared"]) or project["person"] == person)
+
+
+def _workflow(w: dict[str, Any]) -> dict[str, Any]:
+    # a workflow as the apps show it
+    return {k: w[k] for k in ("id", "name", "prompt", "project")}
 
 
 def _project(p: dict[str, Any]) -> dict[str, Any]:

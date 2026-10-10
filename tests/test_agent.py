@@ -444,6 +444,44 @@ def test_api_projects(server, engine, agent, events):
     assert request(url, "DELETE")[0] == 404
 
 
+def test_workflows(agent):
+    # a person's own workflows, and their projects', seen by those who see the project alone
+    me, ada = agent.store.add_person("Alkın")["id"], agent.store.add_person("Ada")["id"]
+    project = agent.add_project("Payroll", me)["id"]
+    with agent.events.watch() as told:
+        mine = agent.add_workflow("Monthly letter", "Write the monthly letter.", me)
+        events = [told.get(), told.get()]
+    assert {e["to"]: len(e["workflows"]) for e in events} == {me: 1, ada: 0}
+    agent.add_workflow("Payslips", "Check the payslips.", ada, None)
+    held = agent.add_workflow("Reconcile", "Reconcile the bank.", me, project)
+    assert [w["name"] for w in agent.workflows(me)] == ["Monthly letter", "Reconcile"]
+    assert held == {"id": held["id"], "name": "Reconcile", "prompt": "Reconcile the bank.",
+                    "project": project}  # fmt: skip
+    with pytest.raises(NotFound):
+        agent.add_workflow("Mine", "x", ada, project)
+    with pytest.raises(NotFound):
+        agent.delete_workflow(mine["id"], ada)
+    agent.change_project(project, me, shared=True)
+    assert [w["name"] for w in agent.workflows(ada)] == ["Payslips", "Reconcile"]
+    agent.delete_workflow(held["id"], ada)  # anyone's who sees its project
+    agent.delete_project(project, me)
+    assert [w["name"] for w in agent.workflows(me)] == ["Monthly letter"]
+
+
+def test_api_workflows(server, agent):
+    status, body = request(
+        f"{server}/api/workflows", "POST", {"name": "Letter", "prompt": "Write."}
+    )
+    assert status == 200 and json.loads(body)["project"] is None
+    assert request(f"{server}/api/workflows", "POST", {"name": "x", "prompt": " "})[0] == 400
+    assert request(f"{server}/api/workflows", "POST", {"name": "x" * 81, "prompt": "y"})[0] == 400
+    asked = {"name": "x", "prompt": "y", "project": "0123456789ab"}
+    assert request(f"{server}/api/workflows", "POST", asked)[0] == 404
+    assert request(f"{server}/api/workflows/{json.loads(body)['id']}", "DELETE")[0] == 200
+    assert request(f"{server}/api/workflows/1", "DELETE")[0] == 404
+    assert agent.workflows(1) == []
+
+
 def test_person_to_the_engine(agent, engine, events):
     # each request of a person's conversation names them to the engine, which keeps the prefixes
     # it caches of their prompts to theirs: their turns', and the naming of their conversations;
@@ -555,7 +593,7 @@ def test_migration(tmp_path):
     # of the household's features gone, nothing is left
     tables = {name for (name,) in store._db.execute("SELECT name FROM sqlite_schema")}
     assert {t for t in tables if not t.startswith("sqlite_")} == {
-        "conversations", "messages", "people", "devices", "projects"}  # fmt: skip
+        "conversations", "messages", "people", "devices", "projects", "workflows"}  # fmt: skip
     columns = [row[1] for row in store._db.execute("PRAGMA table_info(conversations)")]
     assert columns == ["id", "title", "created", "updated", "context", "named", "person", "project"]
     # and a conversation deleted takes its messages with it, as the state's references hold
@@ -1015,6 +1053,7 @@ def test_events(server, agent, engine):
 
     assert event() == {"type": "conversations", "conversations": []}
     assert event() == {"type": "projects", "projects": []}
+    assert event() == {"type": "workflows", "workflows": []}
     assert event() == {"type": "files", "project": None, "files": []}
     assert event()["type"] == "accounts"  # the owner's
     assert event()["type"] == "models"
