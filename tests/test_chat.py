@@ -72,6 +72,9 @@ def test_openai_messages():
     assert c.render(messages) == "a\nb;Oslo;c;"
     with pytest.raises(ValueError, match="text, image or image_url"):
         c.render([{"role": "user", "content": [{"type": "input_audio"}]}])
+    for content in ({"text": "a"}, 5, True):  # of none of OpenAI's kinds
+        with pytest.raises(ValueError, match="content must be text, a list of parts, or null"):
+            c.render([{"role": "user", "content": content}])
     # a call's content of None, as OpenAI's clients send it, as text to templates that take text,
     # as Qwen3's slices it
     sliced = chat("{% for m in messages %}{{ m.content[:3] }}|{{ m.content is none }};{% endfor %}")

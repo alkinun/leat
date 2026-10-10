@@ -393,6 +393,9 @@ def _message(message: dict[str, Any]) -> dict[str, Any]:
     # of replies that called tools, it keeps it until the turn's answer, and of those with text
     # too, it takes the text for their reasoning, and refuses both
     message = dict(message)
+    if not isinstance(message.get("content"), str | list | None):  # which a template would read
+        # as text, and fail on as it may, as Qwen3's slicing an object
+        raise ValueError("a message's content must be text, a list of parts, or null")
     if "content" in message and message["content"] is None:  # as OpenAI's clients send a call's,
         # which templates that take content for text, as Qwen3's and Gemma 3's, cannot read: as
         # llama.cpp gives it, where every template that reads None renders it as it does ""
