@@ -394,6 +394,11 @@ class Agent:
             self._project(id, person)
             self.store.change_project(id, source=source, synced=None, unsynced=None)
             self._publish_projects()
+        # noted here, rather than by the server as people's doings are, before the first sync,
+        # which notes its own
+        self.note(
+            person, "chose to sync the files with" if source else "stopped syncing", id, source
+        )
         if source is not None:
             threading.Thread(target=self.synced, args=(id,), daemon=True).start()
 

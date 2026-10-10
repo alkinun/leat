@@ -182,9 +182,7 @@ class _Handler(BaseHTTPRequestHandler):
                 _owner(me)
                 if (source := body.get("source")) is not None and not isinstance(source, str):
                     raise ValueError("source must be a folder's path, or null")
-                agent.sync(synced[1], source := (source or "").strip() or None, person)
-                agent.note(person, "chose to sync the files with" if source else "stopped syncing",
-                           synced[1], source)  # fmt: skip
+                agent.sync(synced[1], (source or "").strip() or None, person)
                 self._json(200, {})
             elif path == "/api/workflows":  # a project's, if the body names one
                 workflow = agent.add_workflow(*_workflow(body), person, _held(body))
