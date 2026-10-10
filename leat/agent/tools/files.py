@@ -100,7 +100,9 @@ def search(index: Index, context: Context, query: str) -> Result:
         n = context.cite(url, where)
         results.append({"n": n, "url": url, "title": where, "file": name, "place": place})
         said.append(f"[{n}] {where} (read on from start={found['start']})\n{found['text']}")
-    content = "\n\n".join(said) or "No passage of the files says that."
+    if not said:
+        return Result("No passage of the files says that.", {"query": query, "results": []})
+    content = "\n\n".join(said) + "\n\n(Cite each passage you use by its number, as [1].)"
     return Result(content, {"query": query, "results": results})
 
 

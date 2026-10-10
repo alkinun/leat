@@ -63,9 +63,22 @@ def says(pattern: str) -> Check:
     return lambda o: None if re.search(pattern, o.answer, re.I) else f"did not say /{pattern}/"
 
 
+# a citation, [1], or as gpt-oss writes one, 【1】
+CITES = r"\[\d+\]|【\d+"
+
+
 def makes(pattern: str) -> Check:
     made = lambda o: any(re.search(pattern, name) for name in o.files)  # noqa: E731
     return lambda o: None if made(o) else f"made no file /{pattern}/"
+
+
+def absent(o: Outcome) -> str | None:
+    # an answer that says the files hold nothing of it, rather than one made up
+    said = (
+        r"(\b(no|not|none|nothing)\b|n['’]t\b).{0,60}\b(found|find|present|mention|cover|say"
+        r"|contain|exist|address|describ|refer|discuss|appear|locat|in the)|\bcontains? only\b"
+    )
+    return None if re.search(said, o.answer, re.I) else "did not say the files do not say it"
 
 
 def unsure(o: Outcome) -> str | None:
@@ -133,7 +146,7 @@ CASES = [
     Case("reads pages", "When does the British Museum open tomorrow? Check its website.",
          [called("fetch")]),
     Case("research", "Research the pros and cons of heat pumps for a house in a cold climate.",
-         [called("search", 2), called("fetch", 4), says(r"\[\d+\]")]),
+         [called("search", 2), called("fetch", 4), says(CITES)]),
     Case("attachment", "What time does it start, and what should I bring?",
          [called("read"), says("7"), says("salad|dessert")],
          files={"invitation.txt": "You're invited to Mia's 30th! Saturday 18 October, 7 pm, at "
@@ -144,11 +157,12 @@ CASES = [
          "yearly totals.", [called("run"), makes(r"\.xlsx$")]),
     Case("doesn't know", "What's my sister's name?", [unsure, uncalled("search")]),
     Case("finds in files", "How much are meals on client visits reimbursed?",
-         [called("search_files"), says("750"), says(r"\[\d+\]")], FIRM, attach=False),
+         [called("search_files"), says("750"), says(CITES)], FIRM, attach=False),
     Case("finds in Turkish", "Yılmaz Tekstil'in hesapları ne zamana kadar teslim edilmeli?",
-         [called("search_files"), says("30 Eylül|30 September|30\\.09")], FIRM, attach=False),
+         [called("search_files"), uncalled("search"), says("30 Eylül|30 September|30\\.09")],
+         FIRM, attach=False),
     Case("not in files", "What is our policy on working from home?",
-         [called("search_files"), unsure], FIRM, attach=False),
+         [called("search_files"), absent, uncalled("search")], FIRM, attach=False),
     Case("every file", "Make a table of every invoice's date, seller and total.",
          [called("ask_files"), makes(r"\.xlsx$"), says("15.020|15,020")], INVOICES, attach=False),
     Case("fills a template", "Fill the fee letter template for Ege Lojistik: March, 6.000 TL, due "
@@ -187,7 +201,8 @@ def main() -> None:
             cached.append(outcome.cached)
             why = [w for check in case.checks if (w := check(outcome))]
             failures += why[:1]
-            print(f"{case.name}: {why[0] if why else 'passed'}", file=sys.stderr, flush=True)
+            said = f" ({' '.join(outcome.answer.split())[:160]!r})" if why else ""
+            print(f"{case.name}: {why[0] if why else 'passed'}{said}", file=sys.stderr, flush=True)
         passed += args.runs - len(failures)
         failed = "; ".join(sorted(set(failures)))
         rows.append(f"| {case.name} | {args.runs - len(failures)}/{args.runs} | "
@@ -225,6 +240,7 @@ def _run(case: Case, args: argparse.Namespace) -> Outcome:
         seconds = time.monotonic() - start
         tools_called = [m["name"] for m in messages if m["role"] == "tool"]
         answer = messages[-1]["content"] if messages and messages[-1]["role"] == "assistant" else ""
+        answer = re.sub(r"\s", " ", answer or "")  # every space one, as a narrow one some write
         names = [f["name"] for f in space.files() if f["name"] not in before]  # made by it
         infos = [m["info"] for m in messages if m["role"] == "assistant" and "read" in m["info"]]
         held, read = sum(i["cached"] or 0 for i in infos), sum(i["read"] for i in infos)

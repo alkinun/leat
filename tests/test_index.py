@@ -131,7 +131,8 @@ def test_search_files(workspace, index):
     context = Context("c", lambda url, title: numbers.setdefault(url, len(numbers) + 1),
                       workspace=space)  # fmt: skip
     result = files.search(index, context, "rent")
-    said = "[1] lease.md, Rent (read on from start=0)\n# Rent\n\nRent is 900 a month."
+    said = ("[1] lease.md, Rent (read on from start=0)\n# Rent\n\nRent is 900 a month.\n\n"
+            "(Cite each passage you use by its number, as [1].)")  # fmt: skip
     assert result.content == said
     assert result.info["results"] == [{"n": 1, "url": "file:lease.md#Rent",
                                        "title": "lease.md, Rent", "file": "lease.md",

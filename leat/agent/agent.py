@@ -69,9 +69,11 @@ answer, without a link: the app shows the user the files you make.{search}{ask} 
 {skills}
 """
 # of the system prompt, when the agent searches the files
-SEARCH = """ To answer from the files, call search_files \
-for the passages that say it, in several ways if the first falls short, and read on in the files \
-where the passages do; cite them by their numbers, as you cite pages."""
+SEARCH = """ A question of the user's own work, as their \
+clients, documents or rules, is answered from their files, never the web, which must not learn of \
+it: call search_files for the passages that say it, in several ways if the first falls short, and \
+read on in the files where the passages do. Cite each passage you use by its number, as [1], \
+after the words it supports; if the files do not say it, say so."""
 # and when it asks every file
 ASK = """ To answer a question of every file, or of many, as \
 each invoice's total, call ask_files once rather than reading them; then answer with its table, \
