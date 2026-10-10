@@ -171,18 +171,20 @@ def test_run_past_the_context(tiny_model, monkeypatch, capsys):
 
 
 def test_serve_directories(tiny_model, tmp_path, monkeypatch, capsys):
-    # of directories alone, the first file found loads at start, served meanwhile; a server on
-    # every address is browsed at this machine's, and needs keys; a model that fails to load stops
-    # the server
+    # of directories alone, the first file found loads at start, served meanwhile, a model's MTP
+    # layer beside it not a model; a server on every address is browsed at this machine's, and
+    # needs keys; a model that fails to load stops the server
     (models := tmp_path / "models").mkdir()
+    (models / "mtp-tiny.gguf").symlink_to(tiny_model[0])
     (models / "tiny.gguf").symlink_to(tiny_model[0])
-    loaded, failing, keys, samplings = [], [], [], []
+    loaded, failing, keys, samplings, served = [], [], [], [], []
 
     class Fake:
         server_port = 8080
 
         def __init__(self, files, host, port, given, sampling, **options):
             self.files, self.stopped = files, threading.Event()
+            served.append(files)
             keys.append(given)
             samplings.append(sampling)
 
@@ -213,6 +215,7 @@ def test_serve_directories(tiny_model, tmp_path, monkeypatch, capsys):
     main(["serve", str(models), "--host", "0.0.0.0", "--keys", str(tmp_path / "keys.json")])
     out = capsys.readouterr().out
     assert loaded == ["tiny"] and "the API at http://127.0.0.1:8080/v1, compiling..." in out
+    assert [f.name for f in served[-1]] == ["tiny.gguf"]
     assert keys[-1].path == tmp_path / "keys.json"
     main(["serve", str(models), "--host", "::1"])  # this machine's alone: no keys needed
     assert keys[-1] is None and samplings[-1] is None

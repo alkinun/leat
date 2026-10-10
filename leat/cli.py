@@ -76,11 +76,10 @@ def main(argv: list[str] | None = None) -> None:
         "its name, if any. `/image PATH` attaches an image to the next message",
     )  # fmt: skip
     run.add_argument(
-        "--draft",
-        type=Path,
-        help="a drafter's GGUF, for speculative decoding: Gemma 4's assistant for Gemma 4, or "
-        "for Qwen3.5's MTP layer the model's own",
-    )
+        "--draft", type=Path,
+        help="a drafter's GGUF, for speculative decoding, as Gemma 4's assistant for Gemma 4; by "
+        "default the model's own MTP layer, if any, in its file or the mtp-*.gguf beside it",
+    )  # fmt: skip
 
     serve = commands.add_parser("serve", help="serve the OpenAI chat completions API")
     serve.add_argument(
@@ -95,8 +94,10 @@ def main(argv: list[str] | None = None) -> None:
         help="sequences generating at once, each in a slot of the KV cache that keeps its tokens",
     )  # fmt: skip
     serve.add_argument(
-        "--draft", type=Path, help="a drafter's GGUF, for speculative decoding, of the one model"
-    )
+        "--draft", type=Path,
+        help="a drafter's GGUF, for speculative decoding, of the one model; by default each model "
+        "drafts with its own MTP layer, if any, in its file or the mtp-*.gguf beside it",
+    )  # fmt: skip
     serve.add_argument(
         "--mmproj", type=Path,
         help="a vision encoder's GGUF, of the one model; by default each model takes the "
@@ -213,12 +214,13 @@ def _run(args: argparse.Namespace) -> None:
     from tinygrad import Device
 
     from leat.chat import ChatTemplate, split_reply
+    from leat.draft import own_drafter
     from leat.engine import Engine
     from leat.sampler import Sampling
     from leat.vision import Image, beside
 
-    vision = args.mmproj or beside(args.model)
-    engine = Engine(args.model, max_context=args.max_context, draft=args.draft, vision=vision)
+    vision, draft = args.mmproj or beside(args.model), args.draft or own_drafter(args.model)
+    engine = Engine(args.model, max_context=args.max_context, draft=draft, vision=vision)
     chat, tok = ChatTemplate(engine.gguf.metadata, engine.tokenizer), engine.tokenizer
     sampling = Sampling(args.temperature, args.top_k, args.top_p, args.min_p, args.presence_penalty)
     first = [{"role": "system", "content": args.system}] if args.system else []
@@ -302,11 +304,13 @@ def _show(parts, shown: tuple[str, str]) -> tuple[str, str]:
 def _serve(args: argparse.Namespace) -> None:
     from tinygrad import Device
 
+    from leat.draft import mtp
     from leat.server import Server
     from leat.vision import projector
 
     models = [f for p in args.models for f in (sorted(p.glob("*.gguf")) if p.is_dir() else [p])]
-    models = [f for f in models if not projector(f)]  # each model's vision encoder, not a model
+    # each model's vision encoder and MTP layer, not models
+    models = [f for f in models if not projector(f) and not mtp(f)]
     if not models:
         raise SystemExit("no GGUF files: give some, or directories that hold some")
     for flag in ("draft", "mmproj"):

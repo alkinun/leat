@@ -1159,6 +1159,31 @@ def _write_qwen35(path: Path, arch: str) -> dict[str, np.ndarray]:
     return weights
 
 
+def split_mtp(path: Path, folder: Path, name: str) -> tuple[Path, Path]:
+    # a Qwen3.5 GGUF with its MTP layer as llama.cpp's converters write Qwen3.8's: the model's
+    # file without the layer, and mtp-*.gguf of the layer, the embeddings and the output, each of
+    # the model's metadata and general.name `name`
+    reader = gguf.GGUFReader(path)
+    arch = reader.fields["general.architecture"].contents()
+    layer = f"blk.{reader.fields[f'{arch}.block_count'].contents() - 1}."
+    files = {
+        folder / f"{name}.gguf": lambda n: not n.startswith(layer),
+        folder / f"mtp-{name}.gguf": lambda n: n.startswith(layer) or not n.startswith("blk."),
+    }
+    for file, keep in files.items():
+        w = gguf.GGUFWriter(file, arch=arch)
+        w.add_name(name)
+        for field in reader.fields.values():
+            if not field.name.startswith("GGUF.") and field.name != "general.architecture":
+                sub = field.types[-1] if field.types[0] == gguf.GGUFValueType.ARRAY else None
+                w.add_key_value(field.name, field.contents(), field.types[0], sub)
+        for t in reader.tensors:
+            if keep(t.name):
+                w.add_tensor(t.name, t.data, raw_dtype=t.tensor_type)
+        _finish(w)
+    return tuple(files)  # type: ignore[return-value]
+
+
 def _reference_qwen35(
     w: dict[str, np.ndarray], tokens: list[int], images: dict[int, np.ndarray] | None = None,
     grids: dict[int, tuple[int, int]] | None = None,

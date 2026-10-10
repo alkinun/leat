@@ -27,8 +27,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from leat.draft import mtp, own_drafter  # noqa: E402
 from leat.gguf import GGUF  # noqa: E402
-from leat.model import QWEN35  # noqa: E402
 
 # a reply to this, streamed from the server, shows the model loads, generates and detokenizes
 SERVER_PROMPT = "Name three primary colors, one per line."
@@ -170,19 +170,18 @@ def _ggufs(paths: list[Path]) -> list[Path]:
 
 
 def _is_drafter(path: Path) -> bool:
+    # a Gemma 4 assistant, or a model's MTP layer alone
     with contextlib.suppress(Exception):
-        return GGUF.open(path).metadata["general.architecture"] == "gemma4-assistant"
+        return mtp(path) or GGUF.open(path).metadata["general.architecture"] == "gemma4-assistant"
     return False
 
 
 def _drafter(model: Path, candidates: list[Path]) -> Path | None:
-    # Qwen3.5's own file, with its MTP layer, or a Gemma 4 assistant for Gemma 4
-    metadata = GGUF.open(model).metadata
-    arch = metadata["general.architecture"]
-    if arch in QWEN35 and metadata.get(f"{arch}.nextn_predict_layers"):
-        return model
-    if arch == "gemma4":
-        return next((c for c in candidates if _is_drafter(c)), None)
+    # the model's own MTP layer, in its file or beside it, or a Gemma 4 assistant for Gemma 4
+    if (own := own_drafter(model)) is not None:
+        return own
+    if GGUF.open(model).metadata["general.architecture"] == "gemma4":
+        return next((c for c in candidates if _is_drafter(c) and not mtp(c)), None)
     return None
 
 

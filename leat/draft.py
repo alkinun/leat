@@ -1,6 +1,10 @@
 """Drafters for speculative decoding: small models that guess the tokens a target model will
-generate next, which the target then checks all at once, reading its weights once for them all."""
+generate next, which the target then checks all at once, reading its weights once for them all.
 
+A Qwen3.5 model's own drafter is its MTP layer, past its layers in its GGUF, or in a GGUF of its
+own beside it, as llama.cpp's converters write it: mtp-*.gguf, of the model's general.name."""
+
+import re
 from dataclasses import replace
 from pathlib import Path
 from typing import Protocol
@@ -43,15 +47,51 @@ class Drafter(Protocol):
 
 
 def load(path: str | Path, target: Transformer) -> Drafter:
-    """The drafter in a GGUF for a target model: Gemma 4's assistant, or the target's own file
-    for Qwen3.5's MTP layer."""
+    """The drafter in a GGUF for a target model: Gemma 4's assistant, or Qwen3.5's MTP layer, in
+    the target's own file or one of its own. Raises ValueError of a GGUF of no drafter for it."""
     gguf = GGUF.open(path)
     arch = gguf.metadata["general.architecture"]
     if arch == "gemma4-assistant":
         return Gemma4Assistant(gguf, target)
-    if gguf.metadata.get(f"{arch}.nextn_predict_layers") and arch in QWEN35:
+    if arch in QWEN35 and _mtp_layer(gguf.metadata, gguf.tensors):
+        if gguf.metadata[f"{arch}.embedding_length"] != target.config.dim:
+            raise ValueError(f"{Path(path).name}'s MTP layer is of another model")
         return Qwen35Mtp(gguf, target)
+    if arch in QWEN35:
+        raise ValueError(f"{Path(path).name} holds no MTP layer: give the mtp-*.gguf beside it")
     raise ValueError(f"a {arch} model drafts for no {target.config.arch} model")
+
+
+def mtp(path: Path) -> bool:
+    """Whether a GGUF is a model's MTP layer alone, as llama.cpp's converters name it, mtp-*."""
+    return path.name.lower().startswith("mtp-")
+
+
+def own_drafter(model: Path) -> Path | None:
+    """A model's own drafter, if it has one: a Qwen3.5 model's MTP layer, in its file or else in
+    the mtp-*.gguf beside it of its general.name, the largest, most exact, of several."""
+    gguf = GGUF.open(model)
+    m, arch = gguf.metadata, gguf.metadata["general.architecture"]
+    if arch not in QWEN35 or not m.get(f"{arch}.nextn_predict_layers"):
+        return None
+    if _mtp_layer(m, gguf.tensors):
+        return model
+    name = _named(m.get("general.name", ""))
+    found = [p for p in model.parent.glob("*.gguf") if mtp(p)
+             and _named(GGUF.open(p).metadata.get("general.name", "")) == name]  # fmt: skip
+    return max(found, key=lambda p: p.stat().st_size, default=None) if name else None
+
+
+def _mtp_layer(m: dict, tensors: dict) -> bool:
+    # whether a Qwen3.5 GGUF holds its MTP layer, past the model's layers
+    arch = m["general.architecture"]
+    layers = m[f"{arch}.block_count"] - m.get(f"{arch}.nextn_predict_layers", 0)
+    return f"blk.{layers}.nextn.eh_proj.weight" in tensors
+
+
+def _named(name: str) -> str:
+    # a general.name but for case and punctuation, as converters vary them
+    return re.sub(r"[^a-z0-9]", "", str(name).lower())
 
 
 _LAYER = (

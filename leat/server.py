@@ -45,6 +45,7 @@ from leat.chat import (
     tool_call_start,
 )
 from leat.defaults import Overrides, recommended
+from leat.draft import own_drafter
 from leat.engine import Engine, Sequence
 from leat.gguf import GGUF
 from leat.keys import Keys
@@ -197,7 +198,9 @@ class Server(ThreadingHTTPServer):
 
     One model is loaded at a time, none until load(), as Engine(path, **options); it answers every
     request, whatever model it names. A model's id is its file name without .gguf. Unless the
-    options name a vision encoder, a model takes the projector beside it, if any, of its name. An
+    options name a vision encoder, a model takes the projector beside it, if any, of its name, and
+    unless they name a drafter, it drafts with its own MTP layer, if any, as draft.own_drafter
+    finds it; either is left out where the GPU has no room for it. An
     embedding model, `embed`, if given, loads at start beside it, and stays, and answers every
     request for embeddings.
     """
@@ -409,19 +412,28 @@ class Server(ThreadingHTTPServer):
                 self.ready.set()
 
     def _engine(self, path: Path) -> tuple[Engine, ChatTemplate]:
-        # a model's engine, warmed up, and its template; with the vision encoder the options
-        # name, or else the projector beside it, but where the GPU has no room for that too
-        given = self.options.get("vision")
-        if given is None and (vision := beside(path)) is not None:
-            with contextlib.suppress(MemoryError):
-                return self._warmed(path, vision)
-            gc.collect()  # what the try took, its traceback gone
-            print(f"{path.stem}: the GPU has no room for {vision.name} beside it, so it takes "
-                  "no images", file=sys.stderr, flush=True)  # fmt: skip
-        return self._warmed(path, given)
+        # a model's engine, warmed up, and its template: with the vision encoder and drafter the
+        # options name, or else the projector beside it and its own drafter, each left out, the
+        # drafter first, where the GPU has no room for it too
+        extras = {"draft": self.options.get("draft"), "vision": self.options.get("vision")}
+        found = {"draft": own_drafter(path), "vision": beside(path)}
+        optional = [k for k, given in extras.items() if given is None and found[k] is not None]
+        extras |= {k: found[k] for k in optional}
+        while True:
+            try:
+                return self._warmed(path, extras)
+            except MemoryError:
+                if not optional:
+                    raise
+                left = optional.pop(0)
+                gc.collect()  # what the try took, its traceback gone
+                said = "decodes without drafting" if left == "draft" else "takes no images"
+                print(f"{path.stem}: the GPU has no room for {found[left]} beside it, so it "
+                      f"{said}", file=sys.stderr, flush=True)  # fmt: skip
+                extras[left] = None
 
-    def _warmed(self, path: Path, vision: Path | None) -> tuple[Engine, ChatTemplate]:
-        engine = Engine(path, **self.options | {"vision": vision})
+    def _warmed(self, path: Path, extras: dict[str, Path | None]) -> tuple[Engine, ChatTemplate]:
+        engine = Engine(path, **self.options | extras)
         chat = ChatTemplate(engine.gguf.metadata, engine.tokenizer)
         engine.warm_up()
         return engine, chat

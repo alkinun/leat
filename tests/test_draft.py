@@ -2,9 +2,10 @@ import numpy as np
 import pytest
 from tinygrad import Tensor
 
+from leat.draft import mtp, own_drafter
 from leat.engine import DRAFT_TOKENS, KEEP_BACK, Engine
 from leat.sampler import GREEDY, Sampling
-from tests.helpers import CONTEXT, Oracle, reference_drafts, reference_mtp_drafts
+from tests.helpers import CONTEXT, Oracle, reference_drafts, reference_mtp_drafts, split_mtp
 
 PROMPT = [5, 77, 120, 3, 299, 42, 8, 150, 61, 200, 9, 33]
 # Gemma 4 with its assistant, and Qwen3.5 with its MTP layer, dense and of experts, of recurrent
@@ -168,6 +169,35 @@ def test_speculative_several(tiny, tiny_assistant, arch, guessed):
 def test_drafter_needs_its_target(tiny_model, tiny_assistant):
     with pytest.raises(ValueError, match="drafts for no llama model"):
         Engine(tiny_model[0], max_context=CONTEXT, draft=tiny_assistant[0])
+
+
+@pytest.mark.usefixtures("reference_ops")
+def test_own_drafter(tiny, tiny_model, tmp_path):
+    # a Qwen3.5 model's MTP layer, in its own file, or in the mtp-*.gguf beside it of its name, as
+    # Qwen3.8's converters write it, which drafts as the layer in its file does; none of a model
+    # without either, whose file as a drafter is refused, nor of another architecture
+    whole = tiny("qwen35")[0]
+    assert own_drafter(whole) == whole and own_drafter(tiny_model[0]) is None
+    model, layer = split_mtp(whole, tmp_path, "Tiny Qwen")
+    assert own_drafter(model) == layer and mtp(layer) and not mtp(model)
+
+    def drafted(path, draft) -> tuple[list[int], int]:  # its tokens, and the speculative steps
+        engine, steps = Engine(path, max_context=CONTEXT, draft=draft), 0
+        speculative = engine._speculative
+
+        def counted(sequences):
+            nonlocal steps
+            steps += 1
+            return speculative(sequences)
+
+        engine._speculative = counted  # type: ignore[method-assign]
+        return list(engine.generate(PROMPT, 12)), steps
+
+    assert drafted(model, layer) == drafted(whole, whole)
+    layer.unlink()
+    assert own_drafter(model) is None
+    with pytest.raises(ValueError, match="holds no MTP layer"):
+        Engine(model, max_context=CONTEXT, draft=model)
 
 
 @pytest.mark.gpu
