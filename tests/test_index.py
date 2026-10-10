@@ -8,9 +8,10 @@ from pathlib import Path
 import pytest
 
 from leat.agent import documents
+from leat.agent import index as index_module
 from leat.agent.agent import Agent, _system
 from leat.agent.client import Client
-from leat.agent.index import PASSAGE, Index, _match, fold, passages
+from leat.agent.index import COMMON, PASSAGE, Index, _match, fold, passages
 from leat.agent.store import Store
 from leat.agent.tools import Context, files
 from leat.agent.workspace import Workspace
@@ -63,6 +64,28 @@ def test_words():
     assert _match("Die Kündigung der Miete, bitte") == '"kündig"* OR "miete"*'
     assert _match("What is it?") == '"what"* OR "is" OR "it"'  # all common: all kept
     assert _match("termination") == '"terminat"*' and _match("?!") == ""
+
+
+def test_common_words(workspace, index, monkeypatch):
+    # in any language, the words in more than half of the index's passages, once it holds SEEN,
+    # are left out of a search, as French's here; before, English's and German's alone
+    space = workspace.space("people/1")
+    said = {
+        "a.txt": "Le loyer de la boutique est de 900 euros.",
+        "b.txt": "La facture de mars.",
+        "c.txt": "Le contrat de la société.",
+        "d.txt": "Le délai de préavis est de trois mois.",
+    }
+    for name, text in said.items():
+        files.write(space, name, text)
+    index.update("people/1")
+    question = "Quel est le loyer de la boutique ?"
+    assert index.common(question) == COMMON  # too few passages to tell
+    monkeypatch.setattr(index_module, "SEEN", 4)
+    assert index.common(question) - COMMON == {"de", "la", "le"}  # "est" is in two of four
+    # the rent's passage first, the one that shares "est" after, and none that shares only "le"
+    assert [f["name"] for f in index.search(space, question)] == ["a.txt", "d.txt"]
+    assert index._held("préavis") == 1  # its accents taken off, as the tokenizer does
 
 
 def test_search(workspace, index):

@@ -7,7 +7,9 @@ words they share with a query, the likeliest first. The index is a copy of what 
 kept beside the agent's state, and one of another version is made anew from them.
 
 A query's words find those written as they are and those that begin as they do, as German's
-endings and compounds and English's endings change a word: one of more than STEM letters finds the
+endings and compounds and English's endings change a word, but for the words of every sentence:
+English's and German's, and in any language those in more than half of the index's passages once
+it holds SEEN, too many to be any word's but such a one's: one of more than STEM letters finds the
 words that begin with its first letters but its last three, STEM at least, so that "Kündigung"
 finds "Kündigungsfrist" and "kündigen", and "termination" "terminate". A letter and its accented
 forms are one, as ü and u, and ß is ss, as Switzerland writes it.
@@ -28,6 +30,7 @@ import queue
 import re
 import sqlite3
 import threading
+import unicodedata
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -58,6 +61,7 @@ um als wie was wer wo wann warum welche welcher welches nicht kein keine noch nu
 dann hat haben hatte gibt viel viele bitte
 """
 COMMON = frozenset(_COMMON.split())
+SEEN = 200  # passages of the index past which its words in more than half of them are common
 CANDIDATES = 50  # passages found by their words, and by what they mean, before they are ranked
 # the similarity, a cosine, of a passage found by what it means, at least, and below the most
 # similar's at most: Qwen3-Embedding 0.6B's cosines of a firm's files and questions of them were
@@ -110,6 +114,8 @@ class Index:
                 self._db.execute(f"DROP TABLE IF EXISTS {table}")
             self._db.executescript(_TABLES)
             self._db.execute(f"PRAGMA user_version = {VERSION}")
+        # each word of the passages, and how many hold it, of this connection's alone
+        self._db.execute("CREATE VIRTUAL TABLE temp.counted USING fts5vocab(main, passages, row)")
         self._lock = threading.Lock()
         self._waiting: queue.SimpleQueue[str] = queue.SimpleQueue()
         self._reading: dict[str, set[str]] = {}  # each space's files still to read, by folder
@@ -173,9 +179,27 @@ class Index:
                 found.append({"name": name, "place": place, "start": start, "text": text})
         return found
 
+    def common(self, query: str) -> frozenset[str]:
+        """The words of a query that are in every sentence: English's and German's, and those in
+        more than half of the index's passages, once it holds SEEN."""
+        words = re.findall(r"\w+", fold(query))
+        with self._lock:
+            (total,) = self._db.execute("SELECT count(*) FROM passages").fetchone()
+            if total < SEEN:
+                return COMMON
+            said = {w for w in words if 2 * self._held(w) > total}
+        return COMMON | said
+
+    def _held(self, word: str) -> int:
+        # the passages that hold a word, as the index's tokenizer has it, its accents taken off
+        parts = unicodedata.normalize("NFKD", word)
+        bare = "".join(c for c in parts if not unicodedata.combining(c))
+        row = self._db.execute("SELECT doc FROM temp.counted WHERE term = ?", (bare,)).fetchone()
+        return row[0] if row else 0
+
     def _worded(self, folder: str, query: str, file: str | None) -> list[int]:
         # the passages that share the query's words, the likeliest first, by their rows
-        if not (match := _match(query)):
+        if not (match := _match(query, self.common(query))):
             return []
         with self._lock:
             return [row for (row,) in self._db.execute(
@@ -387,12 +411,11 @@ def _lines(text: str, start: int, end: int) -> list[tuple[int, int]]:
     return spans
 
 
-def _match(query: str) -> str:
+def _match(query: str, common: frozenset[str] = COMMON) -> str:
     # an FTS5 query of a search's words: any of them, as written or begun, but for those of a
-    # letter alone, and the words of every sentence, English's and German's, unless it has no
-    # others
+    # letter alone, and the words of every sentence, `common`, unless it has no others
     words = list(dict.fromkeys(re.findall(r"\w+", fold(query))))
-    words = [w for w in words if w not in COMMON] or words
+    words = [w for w in words if w not in common] or words
     terms = []
     for word in words:
         if len(word) > STEM:
