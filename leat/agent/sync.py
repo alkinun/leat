@@ -17,8 +17,9 @@ SYNC = 300  # seconds between a project's syncs
 FILES = 50000  # files of a folder synced at most
 
 
-def mirror(source: Path, target: Path) -> tuple[int, int]:
-    """Makes `target` a copy of `source`'s files; returns how many files it copied and deleted.
+def mirror(source: Path, target: Path) -> tuple[list[str], int]:
+    """Makes `target` a copy of `source`'s files; returns the files it copied, by their paths in
+    it, and how many it deleted.
     Raises OSError if the folder is not there, or cannot be read, ValueError if it holds more than
     FILES files."""
     if not source.is_dir():
@@ -33,14 +34,14 @@ def mirror(source: Path, target: Path) -> tuple[int, int]:
             wanted[path.relative_to(source)] = path
             if len(wanted) > FILES:
                 raise ValueError(f"{source} holds more than {FILES} files: choose a folder in it")
-    copied = deleted = 0
+    copied, deleted = [], 0
     for relative, path in wanted.items():
         copy, stat = target / relative, path.stat()
         if copy.is_file() and _same(copy.stat(), stat):
             continue
         copy.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, copy)
-        copied += 1
+        copied.append(relative.as_posix())
     for copy in sorted(target.rglob("*"), reverse=True) if target.is_dir() else []:
         if copy.is_file() and copy.relative_to(target) not in wanted:
             copy.unlink()

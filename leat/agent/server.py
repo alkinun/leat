@@ -325,6 +325,7 @@ class _Handler(BaseHTTPRequestHandler):
                     unpacked = space.unpack(name)
             finally:
                 agent.files_changed(match[1], person)
+            agent.arrived(match[1], person, [unpacked[0] if unpacked else name])
             if unpacked is not None:
                 agent.note(person, "uploaded", match[1], f"{unpacked[0]}, {unpacked[1]} files")
                 return self._json(200, {"name": unpacked[0], "files": unpacked[1]})

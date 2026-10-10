@@ -38,6 +38,7 @@ def test_due():
 
 def test_normal():
     assert schedule.normal(" Weekly  MON 08:00 ") == "weekly mon 08:00"
+    assert schedule.normal("Files") == "files" and not schedule.due("files", 0, 1e12)
     for wrong in ("hourly", "daily 8:00", "daily 24:00", "monthly 32 08:00", "weekly x 08:00"):
         with pytest.raises(ValueError):
             schedule.normal(wrong)

@@ -39,14 +39,14 @@ def test_mirror(tmp_path, monkeypatch):
     (source / "2026" / "march.txt").write_text("invoice")
     (source / ".DS_Store").write_text("junk")
     (source / "out").symlink_to(tmp_path / "secret.txt")
-    assert mirror(source, target) == (2, 0)
+    assert mirror(source, target) == (["lease.txt", "2026/march.txt"], 0)
     assert sorted(p.relative_to(target).as_posix() for p in target.rglob("*")) == [
         "2026", "2026/march.txt", "lease.txt"]  # fmt: skip
-    assert mirror(source, target) == (0, 0)  # unchanged
+    assert mirror(source, target) == ([], 0)  # unchanged
     (source / "lease.txt").write_text("rent, raised")
     os.utime(source / "lease.txt", (time.time() + 5, time.time() + 5))
     (source / "2026" / "march.txt").unlink()
-    assert mirror(source, target) == (1, 1)
+    assert mirror(source, target) == (["lease.txt"], 1)
     assert (target / "lease.txt").read_text() == "rent, raised" and not (target / "2026").exists()
     monkeypatch.setattr(sync, "FILES", 0)
     with pytest.raises(ValueError, match="more than 0 files"):
@@ -63,6 +63,8 @@ def test_sync(server, agent, tmp_path):
     source.mkdir(parents=True)
     (source / "lease.txt").write_text("rent")
     project = agent.add_project("Yılmaz Ltd", 1)["id"]
+    flow = agent.add_workflow("New files", "Read the new files.", 1, project)
+    agent.schedule_workflow(flow["id"], "files", 1)  # which the files synced start
     url = f"{server}/api/projects/{project}/sync"
     for wrong in ("nas", str(tmp_path / "gone"), "/", 1):
         assert request(url, "POST", {"source": wrong})[0] in (400, 404)
@@ -73,6 +75,7 @@ def test_sync(server, agent, tmp_path):
         time.sleep(0.02)
     space = agent.space(project, 1)
     assert [f["name"] for f in space.files()] == ["Yılmaz Arşiv/lease.txt"]
+    assert list(agent._arrived[f"projects/{project}"]) == ["Yılmaz Arşiv/lease.txt"]
     held = agent.projects(1)[0]
     assert held["source"] == str(source) and held["unsynced"] is None
     assert agent.syncs_due() == []

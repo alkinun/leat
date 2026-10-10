@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from leat.agent import agent as agent_module
 from leat.agent import workspace as workspace_module
 from leat.agent.agent import Agent, NotFound
 from leat.agent.client import Client
@@ -303,6 +304,32 @@ def test_api_files(server, agent, monkeypatch):
     monkeypatch.setattr("leat.agent.server.UPLOAD", 4)
     assert call(f"{server}/api/files/big.bin", "PUT", b"12345")[0] == 413
     assert call(f"{server}/files")[0] == 200  # the app's page of them
+
+
+def test_workflow_on_arrival(server, agent, engine, monkeypatch):
+    # a workflow run as files arrive in its project, uploaded or synced, once they settle, the
+    # files attached, those uploaded together in one run; not by files Leat makes, nor again by
+    # those it ran for; one gone since, not attached
+    monkeypatch.setattr(agent_module, "SETTLE", 0)
+    agent.engine = Client(engine.url)
+    project = agent.add_project("Payroll", 1)["id"]
+    flow = agent.add_workflow("New scans", "Read each new scan.", 1, project)
+    agent.arrived(project, 1, ["early.txt"])  # before any workflow runs on arrival: not kept
+    agent.schedule_workflow(flow["id"], "files", 1)
+    for name in ("a.txt", "b.txt"):
+        assert call(f"{server}/api/projects/{project}/files/{name}", "PUT", b"x")[0] == 200
+    files.write(agent.space(project, 1), "made.txt", "by a tool")  # made by Leat: not arrived
+    engine.replies.put([{"content": "Read."}])
+    with agent.events.watch() as events:
+        agent.run_due()
+        until(events, ended)
+    (run,) = agent.conversations(1)
+    assert agent.store.messages(run["id"])[1]["info"]["files"] == ["a.txt", "b.txt"]
+    agent.run_due()
+    assert len(agent.conversations(1)) == 1  # nothing new arrived
+    agent.arrived(project, None, ["gone.txt"])  # synced, then deleted before it settled
+    agent.run_due()
+    assert len(agent.conversations(1)) == 1
 
 
 def test_spaces(agent, workspace, engine, tmp_path):

@@ -805,25 +805,28 @@ function renderWorkflows() {
   }));
 }
 
-// when a workflow runs by itself, as a chat of the person who set it: on request alone, or every
-// day, weekday, a day of the week or the month's first, at a time of the box's
-const EVERY = [["", "On request"], ["daily", "Every day"], ["weekdays", "Every weekday"],
+// when a workflow runs by itself, as a chat of the person who set it: on request alone, as files
+// arrive in its project, or every day, weekday, a day of the week or the month's first, at a time
+// of the box's
+const EVERY = [["", "On request"], ["files", "When files arrive"], ["daily", "Every day"],
+  ["weekdays", "Every weekday"],
   ...["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
     .map((day) => [`weekly ${day.slice(0, 3).toLowerCase()}`, `Every ${day}`]),
   ["monthly 1", "On the 1st of each month"]];
 
 function scheduler(w) {
   const every = element("select"), at = element("input");
-  const words = (w.schedule ?? "").split(" "), kind = words.slice(0, -1).join(" ");
+  const timed = w.schedule && w.schedule !== "files", words = (w.schedule ?? "").split(" ");
+  const kind = timed ? words.slice(0, -1).join(" ") : w.schedule ?? "";
   const kinds = EVERY.some(([k]) => k === kind) ? EVERY : [...EVERY, [kind, kind]];
   every.replaceChildren(...kinds.map(([value, label]) => new Option(label, value)));
   every.value = kind;
-  Object.assign(at, { type: "time", value: w.schedule ? words.at(-1) : "08:00", hidden: !w.schedule });
+  Object.assign(at, { type: "time", value: timed ? words.at(-1) : "08:00", hidden: !timed });
   every.title = "When it runs by itself, as a chat of yours";
   every.onchange = at.onchange = () => {
-    at.hidden = !every.value;
-    post(`/api/workflows/${w.id}`, { schedule: every.value ? `${every.value} ${at.value || "08:00"}` : null }, "PATCH")
-      .catch((error) => status(error.message, true));
+    at.hidden = !every.value || every.value === "files";
+    const schedule = !every.value ? null : every.value === "files" ? "files" : `${every.value} ${at.value || "08:00"}`;
+    post(`/api/workflows/${w.id}`, { schedule }, "PATCH").catch((error) => status(error.message, true));
   };
   return [every, at];
 }

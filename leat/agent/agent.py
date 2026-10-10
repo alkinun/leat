@@ -73,6 +73,8 @@ This conversation is in the project "{name}".{instructions}"""
 INSTRUCTIONS = " Follow its instructions, which hold for every conversation in it:\n\n{text}"
 TITLE = 60  # characters of a conversation's title at most: its first message's start
 FORGET = 86400  # seconds between forgettings of the files' oldest earlier versions
+SETTLE = 60  # seconds after the last file arrived in a space before its workflows run, so that
+# files uploaded or synced together start one run
 ROUNDS = 25  # replies a turn takes at most; the last answers, told so, and may call no tools
 LAST = "(You have made all the tool calls this message allows: answer now, from what you found.)"
 # times a reply of nothing, neither text nor a call, is asked again at most: a model may end its
@@ -145,6 +147,9 @@ class Agent:
         self._syncing = threading.Lock()  # held while a project's files are synced
         self._forgotten = 0.0  # when the files' oldest earlier versions were last forgotten
         self._runs: dict[int, str] = {}  # each scheduled workflow's last run, by its id
+        # the files arrived in each space, by its folder, uploaded or synced, and when, which
+        # start the workflows run as files arrive once they settle
+        self._arrived: dict[str, dict[str, float]] = {}
         self.settle()
 
     def start(self) -> None:
@@ -319,25 +324,51 @@ class Agent:
             self._publish_workflows()
         return _workflow(self.store.workflow(id) or {})
 
+    def arrived(self, project: str | None, person: int | None, names: list[str]) -> None:
+        """Notes files arrived in a space, uploaded or synced, which start its workflows that run
+        as files arrive, once they settle."""
+        if names and self.store.scheduled():
+            with self._lock:
+                arrived = self._arrived.setdefault(_folder(project, person), {})
+                arrived |= dict.fromkeys(names, time.time())
+
     def run_due(self) -> None:
-        """Starts each workflow whose schedule is due, as a conversation of the person who set it,
-        in its project, named as the workflow and the day: once the engine has a model loaded,
-        and its last run ended. One the person may no longer run, as of a project they no longer
-        see, waits for its next time."""
+        """Starts each workflow whose schedule is due, and each that runs as files arrive in its
+        space once they settled SETTLE seconds, the files attached: as a conversation of the
+        person who set it, in its project, named as the workflow and the day, once the engine has
+        a model loaded and its last run ended. One the person may no longer run, as of a project
+        they no longer see, waits for its next time; files arrived while it may not are not
+        kept for it."""
         now = time.time()
-        due = [w for w in self.store.scheduled() if w["by"] is not None
-               and schedule.due(w["schedule"], w["since"], now)]  # fmt: skip
+        due: list[tuple[dict[str, Any], list[str]]] = [
+            (w, []) for w in self.store.scheduled()
+            if w["by"] is not None and schedule.due(w["schedule"], w["since"], now)
+        ]  # fmt: skip
+        with self._lock:
+            settled = {folder: sorted(names) for folder, names in self._arrived.items()
+                       if max(names.values()) < now - SETTLE}  # fmt: skip
+            for folder in settled:
+                del self._arrived[folder]
+        for w in self.store.scheduled():
+            folder = _folder(w["project"], w["person"] if w["project"] is None else None)
+            if w["schedule"] == schedule.ARRIVING and w["by"] is not None and folder in settled:
+                due.append((w, settled[folder]))
         try:
             if not due or not self.loaded():
                 return
         except EngineError:
             return
-        for w in due:
+        for w, names in due:
             if (last := self._runs.get(w["id"])) and self.running(last):
                 continue
             self.store.ran_workflow(w["id"], now)
+            space = self._space(w["project"], w["by"]) if self.workspace else None
+            attached = [n for n in names if space is not None and space.path(n).exists()]
+            if names and not attached:
+                continue
             try:
-                id = self.send(None, w["prompt"], person=w["by"], project=w["project"])
+                id = self.send(None, w["prompt"], attached=attached or None, person=w["by"],
+                               project=w["project"])  # fmt: skip
             except (NotFound, Busy):
                 continue
             self._runs[w["id"]] = id
@@ -452,9 +483,10 @@ class Agent:
             else:
                 self.store.change_project(id, synced=time.time(), unsynced=None)
                 if copied or deleted:
-                    did = f"{copied} copied, {deleted} deleted, from {source}"
+                    did = f"{len(copied)} copied, {deleted} deleted, from {source}"
                     self.note(None, "synced the files", id, did, leat=True)
                     self.files_changed(id)
+                    self.arrived(id, None, [f"{source.name}/{name}" for name in copied])
         self.projects_changed()
 
     def projects_changed(self) -> None:
