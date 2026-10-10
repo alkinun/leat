@@ -297,19 +297,22 @@ class Agent:
         no one's own, at people/0."""
         if self.workspace is None:
             return
-        root = self.workspace.root
+        root, no_one = self.workspace.root, self.workspace.root / "people" / "0"
         owner = next((p["id"] for p in self.store.people() if p["owner"]), None)
-        home = self._space(None, owner)
         strays = [path for path in root.iterdir() if path.name not in ("people", "projects")]
-        if owner is not None and (no_one := root / "people" / "0").is_dir():
+        if owner is not None and no_one.is_dir():
             strays += list(no_one.iterdir())
-        for path in strays:  # each by a name free there; a hidden one, of saved pages, kept once
-            if not path.name.startswith("."):
-                path.rename(home.root / home.free(path.name))
-            elif (home.root / path.name).exists():
-                shutil.rmtree(path, ignore_errors=True)
-            else:
-                path.rename(home.root / path.name)
+        if strays:
+            home = self._space(None, owner)
+            for path in strays:  # each by a name free there; a hidden one, of saved pages, once
+                if not path.name.startswith("."):
+                    path.rename(home.root / home.free(path.name))
+                elif (home.root / path.name).exists():
+                    shutil.rmtree(path, ignore_errors=True)
+                else:
+                    path.rename(home.root / path.name)
+        if owner is not None and no_one.is_dir():
+            no_one.rmdir()
 
     def models(self) -> list[dict[str, Any]]:
         """The engine's models, as it lists them. Raises EngineError."""

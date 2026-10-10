@@ -335,7 +335,7 @@ def test_settled(tmp_path):
     (workspace.root / "people" / str(owner) / "old.txt").write_text("kept")
     agent.settle()
     assert sorted(f["name"] for f in agent.space(None, owner).files()) == ["old (2).txt", "old.txt"]
-    assert not any((workspace.root / "people" / "0").iterdir())
+    assert not (workspace.root / "people" / "0").exists()
 
 
 def test_api_project_files(server, agent):
