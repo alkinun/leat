@@ -319,6 +319,10 @@ def test_workflow_on_arrival(server, agent, engine, monkeypatch):
     for name in ("a.txt", "b.txt"):
         assert call(f"{server}/api/projects/{project}/files/{name}", "PUT", b"x")[0] == 200
     files.write(agent.space(project, 1), "made.txt", "by a tool")  # made by Leat: not arrived
+    engine.status = "unloaded"
+    agent.run_due()  # no model to run it: the files kept for when there is
+    assert agent.conversations(1) == []
+    engine.status = "loaded"
     engine.replies.put([{"content": "Read."}])
     with agent.events.watch() as events:
         agent.run_due()

@@ -347,8 +347,6 @@ class Agent:
         with self._lock:
             settled = {folder: sorted(names) for folder, names in self._arrived.items()
                        if max(names.values()) < now - SETTLE}  # fmt: skip
-            for folder in settled:
-                del self._arrived[folder]
         for w in self.store.scheduled():
             folder = _folder(w["project"], w["person"] if w["project"] is None else None)
             if w["schedule"] == schedule.ARRIVING and w["by"] is not None and folder in settled:
@@ -358,6 +356,9 @@ class Agent:
                 return
         except EngineError:
             return
+        with self._lock:  # taken once they may run, so that none arrived is lost meanwhile
+            for folder in settled:
+                self._arrived.pop(folder, None)
         for w, names in due:
             if (last := self._runs.get(w["id"])) and self.running(last):
                 continue
