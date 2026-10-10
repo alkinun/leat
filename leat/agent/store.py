@@ -478,16 +478,6 @@ class Store:
             sql = "INSERT OR REPLACE INTO settings VALUES (?, ?)"
             self._query(sql, key, json.dumps(value, ensure_ascii=False))
 
-    def backup(self, path: Path) -> None:
-        """Copies the state, whole, to a new file at `path`, by SQLite's backup, which writes
-        meanwhile do not tear."""
-        target = sqlite3.connect(path)
-        try:
-            with self._lock:
-                self._db.backup(target)
-        finally:
-            target.close()
-
     def people(self) -> list[dict[str, Any]]:
         """The box's people, the owner first."""
         return [dict(row) for row in self._query("SELECT * FROM people ORDER BY id")]

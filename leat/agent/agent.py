@@ -31,7 +31,6 @@ from typing import Any
 
 from leat.agent import context
 from leat.agent.background import Background
-from leat.agent.backup import Backups
 from leat.agent.client import Client, Completion, EngineError, whole
 from leat.agent.index import Index
 from leat.agent.store import Store
@@ -166,7 +165,6 @@ class Agent:
         self._turns: dict[str, _Turn] = {}  # the running ones, by their conversation's id
         self._lock = threading.Lock()
         self._syncing = threading.Lock()  # held while a project's files are synced
-        self.backups = Backups(self)
         self.settle()
 
     def start(self) -> None:

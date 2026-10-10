@@ -4,9 +4,9 @@ are, every SYNC seconds and once it is chosen.
 
 A file new or changed in the folder, as its size and time of change tell, is copied, and one gone
 from it deleted from the copy; links out of the folder and hidden files are not copied. A copy
-rather than the folder itself keeps the index, the sandbox and the backups as they are for every
-file, and the project's files there while the drive is away. A folder of more than FILES files is
-refused, as one chosen by mistake, a whole drive's.
+rather than the folder itself keeps the index and the sandbox as they are for every file, and the
+project's files there while the drive is away. A folder of more than FILES files is refused, as
+one chosen by mistake, a whole drive's.
 """
 
 import os

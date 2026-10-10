@@ -475,17 +475,9 @@ body.gated #gate { display: grid; flex: 1; place-items: center; min-height: 100v
 #room { margin: 4px 0 4px; font-size: 0.875rem; }
 #room.meta { color: var(--muted); }
 #room.warning { color: var(--error); }
-/* the backups, the owner's to set up */
-#backups[hidden], #internet[hidden] { display: none; }
-:is(#backups, #internet) .about { margin: 4px 0 12px; color: var(--muted); font-size: 0.875rem; }
-#backed { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-#backed p { margin: 0; font-size: 0.875rem; }
-#backed .meta { color: var(--muted); }
-#backed .warning { color: var(--error); }
-#backed button {
-  flex: none; padding: 6px 12px; border: 1px solid var(--line); border-radius: var(--round); font-size: 0.875rem;
-}
-#backed button:hover:enabled { background: var(--bubble); }
+/* whether Leat may reach the internet, the owner's to choose */
+#internet[hidden] { display: none; }
+#internet .about { margin: 4px 0 12px; color: var(--muted); font-size: 0.875rem; }
 /* a choice of a few, as the mode Leat's look is in, and whom a project is shared with */
 #modes, .choice {
   display: inline-flex; gap: 2px; margin: 8px 0; padding: 3px;

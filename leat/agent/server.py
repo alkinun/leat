@@ -23,7 +23,6 @@ import queue
 import re
 import socket
 import sys
-import threading
 import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -214,20 +213,6 @@ class _Handler(BaseHTTPRequestHandler):
                 agent.set_offline(offline)
                 agent.note(person, f"turned the internet {'off' if offline else 'on'}")
                 self._json(200, {})
-            elif path == "/api/backups":  # the folder backed up to, or none
-                _owner(me)
-                if (folder := body.get("folder")) is not None and not isinstance(folder, str):
-                    raise ValueError("folder must be a folder's path, or null")
-                agent.backups.choose(folder := (folder or "").strip() or None)
-                agent.note(person, "chose to back up to" if folder else "stopped backing up",
-                           detail=folder)  # fmt: skip
-                self._json(200, {})
-            elif path == "/api/backups/now":
-                _owner(me)
-                if not agent.backups.state()["folder"]:
-                    raise ValueError("choose a folder to back up to first")
-                threading.Thread(target=agent.backups.run, daemon=True).start()
-                self._json(200, {})
             else:
                 self._error(404, f"there is no POST {path}")
 
@@ -416,7 +401,6 @@ class _Handler(BaseHTTPRequestHandler):
                 self._event(agent.files_event(project, person))
             if me["owner"]:
                 self._event(self.server.accounts.state())
-                self._event(agent.backups.state())
             self._event(agent.models_event())
             self._event(agent.settings_event())
             checked = time.monotonic()
