@@ -17,7 +17,7 @@ import mimetypes
 import re
 from typing import Any
 
-from leat.agent import documents, sheets
+from leat.agent import documents
 from leat.agent.client import Client, EngineError
 from leat.agent.context import picture
 from leat.agent.index import Index
@@ -32,6 +32,30 @@ ANSWER = 500  # tokens of a reader's answer at most
 SHOWN = 50  # rows of the table the model reads; the spreadsheet holds every one
 CELL = 300  # characters of an answer the model reads in the table, at most
 # a reader's instructions, of the answers' keys
+# writes the table of the JSON at sys.argv[1], its first row its heading, as the workbook
+# sys.argv[2]: its heading bold, frozen and filtered, each column as wide as it needs
+_SAVE = """
+import json, sys
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font
+book = Workbook()
+sheet = book.active
+sheet.title = "Answers"
+for row in json.load(open(sys.argv[1], encoding="utf-8")):
+    sheet.append(row)
+for cell in sheet[1]:
+    cell.font = Font(bold=True)
+for row in sheet.iter_rows(min_row=2):
+    for cell in row:
+        cell.alignment = Alignment(vertical="top", wrap_text=True)
+sheet.freeze_panes = "A2"
+sheet.auto_filter.ref = sheet.dimensions
+for column in sheet.columns:
+    width = max(len(str(cell.value or "")) for cell in column)
+    sheet.column_dimensions[column[0].column_letter].width = min(60, max(12, width + 2))
+book.save(sys.argv[2])
+print("{}")
+"""
 READING = """\
 You read one file for Leat, an assistant, who asks the same of many files. Answer from this file \
 alone, as a JSON object of these keys: {keys}. Each value is short: what the file says, a number \
@@ -222,11 +246,17 @@ def _parsed(said: str, keys: list[str]) -> dict[str, str]:
 
 
 def _save(space: Workspace, table: list[list[str]], name: str) -> tuple[str | None, str]:
-    # saves a table as a spreadsheet of the space's; returns its name, or None and why not
+    # saves a table as a spreadsheet of the space's, by a name free there, in the sandbox, with
+    # its libraries; returns its name, or None and why not
+    if space.environment is None:
+        return None, "the sandbox has no spreadsheet library"
+    name = space.free(name if name.lower().endswith(".xlsx") else f"{name}.xlsx", folders=True)
+    space.path(name).parent.mkdir(parents=True, exist_ok=True)
     try:
-        return sheets.write(space, [("Answers", table)], name), ""
+        space.given(_SAVE, table, name)
     except ValueError as e:
         return None, str(e)
+    return name, ""
 
 
 def _named(question: str) -> str:

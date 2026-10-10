@@ -1,35 +1,20 @@
 """Word documents changed as an office changes them, as tools: fill_template fills a template's
-fields, suggest_edits suggests edits as tracked changes, which the user accepts or rejects in
-Word, and translate_document translates one, its paragraphs read in batches by the model. Each
-works on a copy, in the sandbox, with python-docx, so that a document made to attack its parser
-attacks nothing else, and keeps the document's formatting: new text takes the formatting of the
-first character of what it replaces, however Word split that among its runs.
+fields, and suggest_edits suggests edits as tracked changes, which the user accepts or rejects in
+Word. Each works on a copy, in the sandbox, with python-docx, so that a document made to attack
+its parser attacks nothing else, and keeps the document's formatting: new text takes the
+formatting of the first character of what it replaces, however Word split that among its runs.
 
 A field is written "{{Client name}}", or as Word shows a merge field, "«Client name»"; values are
 matched to fields whatever their case and spaces. An edit is of a passage written once in the
 document, within a paragraph, which it deletes and puts its replacement after, both marked as
-Leat's, with a comment if it has one. A translation keeps each paragraph's place and style, its
-text in the formatting of its first character; one stopped is not saved.
+Leat's, with a comment if it has one.
 """
 
-import concurrent.futures
-import json
 from pathlib import PurePosixPath
 from typing import Any
 
-from leat.agent.client import Client, EngineError
 from leat.agent.tools import Context, Result, Tool
 from leat.agent.workspace import Workspace
-
-BATCH = 3000  # characters of paragraphs translated at once, at most
-READERS = 4  # batches translated at once, as many as leat serve's slots by default
-WORDS = 4000  # tokens of a batch's translation at most
-# the model's instructions, of the language to translate into
-TRANSLATING = """\
-Translate each paragraph of the JSON array the user sends into {language}, as a translator of \
-contracts and letters would: the meaning exact, names, numbers, dates and amounts as they are, the \
-register kept. Answer with a JSON array of as many strings, each the translation of the paragraph \
-in its place, and nothing else."""
 
 # the paragraphs of the document at sys.argv[2], its body's, its tables', its headers' and
 # footers', in which a function `change` of each paragraph's text and of the spans of its runs
@@ -185,34 +170,8 @@ print(json.dumps(found))
 )
 
 
-# prints the text of each paragraph of the document at sys.argv[2], as a JSON array
-_READ = (
-    _PARAGRAPHS
-    + """
-document = Document(sys.argv[2])
-print(json.dumps(["".join(run.text for run in p.runs) for p in paragraphs(document)]))
-"""
-)
-# writes each paragraph's text of the JSON at sys.argv[1], an array of the paragraphs' new texts or
-# null, in place of the text of the document at sys.argv[2], and saves it at sys.argv[3]
-_WRITE = (
-    _PARAGRAPHS
-    + """
-texts = json.load(open(sys.argv[1]))
-document = Document(sys.argv[2])
-for paragraph, new in zip(paragraphs(document), texts):
-    old = "".join(run.text for run in paragraph.runs)
-    if new is not None and old:
-        replace(paragraph, 0, len(old), new)
-document.save(sys.argv[3])
-print("{}")
-"""
-)
-
-
-def tools(reader: Client | None = None) -> list[Tool]:
-    """fill_template and suggest_edits, in their call's conversation's workspace, and with the
-    model `reader` serves translate_document."""
+def tools() -> list[Tool]:
+    """fill_template and suggest_edits, in their call's conversation's workspace."""
     return [
         Tool(
             "fill_template",
@@ -271,24 +230,7 @@ def tools(reader: Client | None = None) -> list[Tool]:
             },  # fmt: skip
             lambda context, path, edits, name: suggest(context, path, edits, name),
         ),
-    ] + ([Tool(
-        "translate_document",
-        "Translate a Word document into a language, keeping its formatting, its tables, "
-        "headings and styles, as a translator would: a new document, the original unchanged",
-        {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "the document, a .docx"},
-                "language": {"type": "string", "description": "the language, as 'English'"},
-                "name": {
-                    "type": "string",
-                    "description": "the new document's name, as 'Lease (English).docx'",
-                },
-            },
-            "required": ["path", "language", "name"],
-        },
-        lambda context, path, language, name: translate(reader, context, path, language, name),
-    )] if reader is not None else [])  # fmt: skip
+    ]
 
 
 def fill(context: Context, path: str, values: dict[str, Any], name: str) -> Result:
@@ -326,91 +268,6 @@ def suggest(context: Context, path: str, edits: list[dict[str, Any]], name: str)
             where = "is not in it" if n == 0 else f"is in it {n} times: give more of it"
             lines.append(f"Not made: “{edit['find'][:80]}” {where}.")
     return Result("\n".join(lines), {"files": [made], "suggested": done, "edits": len(edits)})
-
-
-def translate(reader: Client, context: Context, path: str, language: str, name: str) -> Result:
-    space = context.space()
-    document = _docx(space, path)
-    texts: list[str] = space.given(_READ, None, document)
-    batches = _batches(texts)
-    translated: list[str | None] = [None] * len(texts)
-    done = 0
-    context.progress({"done": 0, "total": len(batches)})
-
-    def work(batch: list[int]) -> list[str | None] | None:  # none once the turn is stopped
-        if context.stopped.is_set():
-            return None
-        return _translated(reader, [texts[i] for i in batch], language, context.person)
-
-    with concurrent.futures.ThreadPoolExecutor(READERS) as pool:
-        futures = {pool.submit(work, batch): batch for batch in batches}
-        for future in concurrent.futures.as_completed(futures):
-            if (answer := future.result()) is not None:
-                for i, text in zip(futures[future], answer, strict=True):
-                    translated[i] = text
-                done += 1
-                context.progress({"done": done, "total": len(batches)})
-    if context.stopped.is_set():
-        return Result("Stopped before the whole document was translated: nothing was saved.")
-    made = space.free(_named(name), folders=True)
-    space.path(made).parent.mkdir(parents=True, exist_ok=True)
-    space.given(_WRITE, translated, document, made)
-    left = sum(1 for i, text in enumerate(texts) if text.strip() and translated[i] is None)
-    said = f"Made {made}, {document} in {language}, {len(texts) - left} paragraphs translated."
-    if left:
-        said += f" {left} could not be, as the model failed, and are as they were."
-    return Result(said, {"files": [made], "done": done, "total": len(batches)})
-
-
-def _batches(texts: list[str]) -> list[list[int]]:
-    # the paragraphs with text to translate, by their indexes, in batches of BATCH characters at
-    # most, but for a longer paragraph, alone
-    batches: list[list[int]] = []
-    size = 0
-    for i, text in enumerate(texts):
-        if not text.strip():
-            continue
-        if not batches or size + len(text) > BATCH:
-            batches.append([])
-            size = 0
-        batches[-1].append(i)
-        size += len(text)
-    return batches
-
-
-def _translated(
-    reader: Client, texts: list[str], language: str, person: int | None
-) -> list[str | None]:
-    # the translations of paragraphs, asked at once, or one by one if the model's answer is not as
-    # many; None of each the model failed to translate
-    if (said := _ask(reader, texts, language, person)) is not None:
-        found: list[str | None] = [*said]
-        return found
-    if len(texts) == 1:
-        return [None]
-    return [said[0] if (said := _ask(reader, [text], language, person)) else None for text in texts]
-
-
-def _ask(reader: Client, texts: list[str], language: str, person: int | None) -> list[str] | None:
-    # the model's translations of paragraphs, or None if it fails, or answers other than an array
-    # of as many strings
-    body = {
-        "messages": [
-            {"role": "system", "content": TRANSLATING.format(language=language)},
-            {"role": "user", "content": json.dumps(texts, ensure_ascii=False)},
-        ],
-        "max_tokens": WORDS,
-        "temperature": 0.2,
-        "reasoning_effort": "none",
-    }
-    try:
-        reply = reader.reply(body, person)["content"]
-        said = json.loads(reply[reply.index("[") : reply.rindex("]") + 1])
-    except (EngineError, ValueError):
-        return None
-    if not isinstance(said, list) or len(said) != len(texts):
-        return None
-    return [str(s) for s in said]
 
 
 def _edit(given: Any) -> dict[str, str]:

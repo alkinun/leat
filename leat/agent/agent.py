@@ -81,10 +81,8 @@ after the words it supports; if the files do not say it, say so."""
 # and when it has the office's tools, which are exact, and keep a document's formatting, as the
 # model's own code is and does not
 OFFICE = """ Use the tools made for an office's work rather \
-than code of your own, which is less exact: reconcile for a bank statement and the books, as a \
-Kontoabstimmung, \
-suggest_edits for changes to a Word document, fill_template for a template's fields, and \
-translate_document to translate one."""
+than code of your own, which is less exact: suggest_edits for changes to a Word document, and \
+fill_template for a template's fields."""
 # and when it asks every file
 ASK = """ To answer a question of every file, or of many, as \
 each invoice's total, call ask_files once rather than reading them; then answer with its table, \
@@ -992,7 +990,7 @@ def _system(
     # project it is held in, if one
     skills = "\n".join(f"- {path}: {about}" for path, about in files.skills())
     search, ask = SEARCH * ("search_files" in tools), ASK * ("ask_files" in tools)
-    office = OFFICE * ("reconcile" in tools or "suggest_edits" in tools)
+    office = OFFICE * ("suggest_edits" in tools)
     space = (
         WORKSPACE.format(skills=skills, search=search, ask=ask, office=office) if workspace else ""
     )
@@ -1014,7 +1012,7 @@ def _did(
     did: list[tuple[str, str | None]] = []
     if name == "read" and info.get("file") and not str(info["file"]).startswith("skills/"):
         did.append(("read", info["file"]))
-    elif name in ("fill_template", "suggest_edits", "translate_document"):
+    elif name in ("fill_template", "suggest_edits"):
         did.append(("read", arguments.get("path")))
     elif name == "ask_files" and info.get("total"):
         did.append(("read", f"{info['done']} files"))

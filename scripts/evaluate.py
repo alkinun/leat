@@ -30,7 +30,7 @@ from leat.agent.client import Client  # noqa: E402
 from leat.agent.embeddings import Embedder  # noqa: E402
 from leat.agent.index import Index  # noqa: E402
 from leat.agent.store import Store  # noqa: E402
-from leat.agent.tools import ask, files, office, reconcile, web  # noqa: E402
+from leat.agent.tools import ask, files, office, web  # noqa: E402
 from leat.agent.workspace import Workspace  # noqa: E402
 from leat.chat import EFFORTS  # noqa: E402
 
@@ -102,8 +102,7 @@ class Case:
     setup: str = ""  # Python run in the sandbox, in the workspace, that makes more of its files
 
 
-# a lease and a fee letter's template, as Word documents, made in the sandbox, in German; and a
-# bank's statement and the books of its month, which differ where a reconciliation should find out
+# a lease and a fee letter's template, as Word documents, made in the sandbox, in German
 LEASE = """
 from docx import Document
 d = Document()
@@ -118,21 +117,6 @@ d.add_paragraph("Sehr geehrte Damen und Herren der {{Mandant}},")
 d.add_paragraph("unser Honorar für {{Monat}} beträgt {{Honorar}}, zahlbar bis {{Fälligkeit}}.")
 d.add_paragraph("Mit freundlichen Grüßen, {{Partner}}")
 d.save("Honorarschreiben Vorlage.docx")
-with open("Kontoauszug März 2026.csv", "w", encoding="cp1252") as f:
-    f.write("Buchungstag;Verwendungszweck;Begünstigter/Zahlungspflichtiger;Betrag;Währung\\n")
-    f.write("05.03.2026;RE-2026-0342;Müller Bürobedarf;-1.190,00;EUR\\n")
-    f.write("06.03.2026;Miete März;Kühn Immobilien GmbH;-2.500,00;EUR\\n")
-    f.write("12.03.2026;RE-2026-0350;Schmidt IT;-2.000,00;EUR\\n")
-    f.write("30.03.2026;Kontoführung;Sparkasse;-12,90;EUR\\n")
-from openpyxl import Workbook
-book = Workbook()
-sheet = book.active
-sheet.append(["Belegdatum", "Belegnr.", "Buchungstext", "Soll", "Haben"])
-sheet.append(["02.03.2026", "RE-2026-0342", "Müller Bürobedarf", None, 1190.0])
-sheet.append(["03.03.2026", "MIETE-03", "Miete März", 2500.0, None])
-sheet.append(["09.03.2026", "RE-2026-0350", "Schmidt IT", None, 2380.0])
-sheet.append(["20.03.2026", "RE-2026-0361", "Telekom", None, 59.0])
-book.save("Buchungen März 2026.xlsx")
 """
 # a firm's files, among which one passage answers each question
 FIRM = {
@@ -195,12 +179,6 @@ CASES = [
     Case("redlines", "Suggest changes to the lease: three months' notice instead of six, and a "
          "deposit of two months' rent.", [called("suggest_edits"), makes(r"\.docx$")],
          setup=LEASE, attach=False),
-    Case("reconciles", "Reconcile March's bank statement with the books.",
-         [called("reconcile"), makes(r"\.xlsx$"), says("380|2.380|2,380"), says("12[.,]90")],
-         setup=LEASE, attach=False),
-    Case("translates", "Translate the lease into English.",
-         [called("translate_document"), makes(r"\.docx$")], setup=LEASE,
-         attach=False),
 ]  # fmt: skip
 
 
@@ -250,7 +228,7 @@ def _run(case: Case, args: argparse.Namespace) -> Outcome:
         index = Index(Path(data) / "index.db", workspace, embedder=Embedder(engine))
         tools = [
             *web.tools(args.search, engine), *files.tools(index), *ask.tools(engine, index),
-            *office.tools(engine), *reconcile.tools(),
+            *office.tools(),
         ]  # fmt: skip
         agent = Agent(Store(Path(data) / "leat.db"), engine, tools, workspace, index)
         space = agent.space()  # no one's own, as the conversation is
