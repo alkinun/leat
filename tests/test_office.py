@@ -79,3 +79,89 @@ def test_refused(space):
     with pytest.raises(ValueError, match="it failed"):
         office.fill(Context("c", workspace=space), "broken.docx", {}, "x")
     assert not any(f["name"].startswith(".office") for f in space.files())
+
+
+def versions(space: Workspace, name: str) -> dict:
+    # each paragraph's text with every tracked change accepted, and rejected, its tracked
+    # changes' authors, and its comments
+    ran = files.run(space, f"""
+import json
+from docx import Document
+from docx.oxml.ns import qn
+d = Document({name!r})
+def text(p, keep):
+    out = []
+    for e in p._p.iter():
+        inside = {{a.tag for a in e.iterancestors()}}
+        if e.tag == qn("w:t") and (keep == "accepted" or qn("w:ins") not in inside):
+            out.append(e.text or "")
+        if e.tag == qn("w:delText") and keep == "rejected":
+            out.append(e.text or "")
+    return "".join(out)
+print(json.dumps({{
+    "accepted": [text(p, "accepted") for p in d.paragraphs],
+    "rejected": [text(p, "rejected") for p in d.paragraphs],
+    "authors": sorted({{e.get(qn("w:author")) for e in d.element.iter(qn("w:ins"), qn("w:del"))}}),
+    "comments": [c.text for c in d.comments],
+}}))
+""")  # fmt: skip
+    return json.loads(ran.content.splitlines()[0])
+
+
+def test_suggest(space):
+    # each edit a tracked change of Leat's, over runs Word split, with its comment; one whose
+    # passage is not there, or there twice, not made and said to be; the original unchanged
+    make(space, """
+d = Document()
+p = d.add_paragraph("Either party may end it with ")
+p.add_run("ninety").bold = True
+p.add_run(" days' notice.")
+d.add_paragraph("The rent is due monthly. The rent is fixed.")
+d.add_paragraph("Disputes go to the courts of Bursa, in all cases.")
+d.save("Lease.docx")
+""")  # fmt: skip
+    edits = [
+        {
+            "find": "ninety days'",
+            "replace": "thirty days' written",
+            "comment": "Shorter, and in writing.",
+        },  # fmt: skip
+        {"find": ", in all cases", "replace": ""},
+        {"find": "The rent", "replace": "Rent"},
+        {"find": "a clause not there", "replace": "x"},
+    ]
+    result = office.suggest(Context("c", workspace=space), "Lease.docx", edits, "Lease - suggested")
+    assert result.content == (
+        "Made Lease - suggested.docx, of Lease.docx: 2 of 4 edits suggested, as tracked changes, "
+        "which the user accepts or rejects in Word.\n"
+        "Not made: “The rent” is in it 2 times: give more of it.\n"
+        "Not made: “a clause not there” is not in it.")  # fmt: skip
+    seen = versions(space, "Lease - suggested.docx")
+    assert seen["accepted"] == ["Either party may end it with thirty days' written notice.",
+                                "The rent is due monthly. The rent is fixed.",
+                                "Disputes go to the courts of Bursa."]  # fmt: skip
+    assert seen["rejected"] == ["Either party may end it with ninety days' notice.",
+                                "The rent is due monthly. The rent is fixed.",
+                                "Disputes go to the courts of Bursa, in all cases."]  # fmt: skip
+    assert seen["authors"] == ["Leat"] and seen["comments"] == ["Shorter, and in writing."]
+    assert versions(space, "Lease.docx")["authors"] == []
+    # the inserted text in the formatting of the first it replaces: bold, as "ninety" was
+    assert ["thirty days' written", True] in runs_inserted(space, "Lease - suggested.docx")
+    with pytest.raises(ValueError, match="edits must be"):
+        office.suggest(Context("c", workspace=space), "Lease.docx", [{"replace": "x"}], "x")
+
+
+def runs_inserted(space: Workspace, name: str) -> list:
+    ran = files.run(space, f"""
+import json
+from docx import Document
+from docx.oxml.ns import qn
+d = Document({name!r})
+found = []
+for ins in d.element.iter(qn("w:ins")):
+    for r in ins.iter(qn("w:r")):
+        found.append(["".join(t.text for t in r.iter(qn("w:t"))), r.find(qn("w:rPr")) is not None
+                      and r.find(qn("w:rPr")).find(qn("w:b")) is not None])
+print(json.dumps(found))
+""")  # fmt: skip
+    return json.loads(ran.content.splitlines()[0])

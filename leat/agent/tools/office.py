@@ -1,10 +1,13 @@
 """Word documents changed as an office changes them, as tools: fill_template fills a template's
-fields. Each works on a copy, in the sandbox, with python-docx, so that a document made to attack
-its parser attacks nothing else, and keeps the document's formatting: a field's value takes the
-formatting of the field's first character, however Word split the field among its runs.
+fields, and suggest_edits suggests edits as tracked changes, which the user accepts or rejects in
+Word. Each works on a copy, in the sandbox, with python-docx, so that a document made to attack its
+parser attacks nothing else, and keeps the document's formatting: new text takes the formatting of
+the first character of what it replaces, however Word split that among its runs.
 
 A field is written "{{Client name}}", or as Word shows a merge field, "«Client name»"; values are
-matched to fields whatever their case and spaces.
+matched to fields whatever their case and spaces. An edit is of a passage written once in the
+document, within a paragraph, which it deletes and puts its replacement after, both marked as
+Leat's, with a comment if it has one.
 """
 
 import json
@@ -85,8 +88,92 @@ print(json.dumps({"filled": sorted(filled), "missing": sorted(missing - filled),
 )
 
 
+# suggests the edits of the JSON at sys.argv[1], each {"find", "replace", "comment"}, to the
+# document at sys.argv[2] as tracked changes, and saves it at sys.argv[3]; prints how many times
+# each edit's passage was found, as JSON, those found once made
+_SUGGEST = (
+    _PARAGRAPHS
+    + """
+import copy, datetime
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.text.run import Run
+
+edits = json.load(open(sys.argv[1]))
+document = Document(sys.argv[2])
+when = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+taken = [int(v) for e in document.element.iter() if (v := e.get(qn("w:id"))) and v.isdigit()]
+ids = iter(range(max(taken, default=0) + 1, 1 << 31))
+
+def split(paragraph, at):
+    # splits the run that holds the paragraph's character `at` there, so that a run begins at it
+    position = 0
+    for run in paragraph.runs:
+        n = len(run.text)
+        if position < at < position + n:
+            text, twin = run.text, copy.deepcopy(run._r)
+            run._r.addnext(twin)
+            run.text, Run(twin, paragraph).text = text[: at - position], text[at - position:]
+            return
+        position += n
+
+def covering(paragraph, start, end):
+    # the runs that hold the paragraph's text from start to end, and no more
+    split(paragraph, start)
+    split(paragraph, end)
+    runs, position = [], 0
+    for run in paragraph.runs:
+        if start <= position < end and run.text:
+            runs.append(run)
+        position += len(run.text)
+    return runs
+
+def change(tag):
+    # a tracked change of Leat's, made now
+    element = OxmlElement(tag)
+    for key, value in (("w:id", str(next(ids))), ("w:author", "Leat"), ("w:date", when)):
+        element.set(qn(key), value)
+    return element
+
+found = []
+for edit in edits:
+    find, new, note = edit["find"], edit.get("replace") or "", edit.get("comment")
+    places = []
+    for paragraph in paragraphs(document):
+        text, at = "".join(run.text for run in paragraph.runs), 0
+        while find and (at := text.find(find, at)) >= 0:
+            places.append((paragraph, at))
+            at += len(find)
+    found.append(len(places))
+    if len(places) != 1:
+        continue
+    paragraph, start = places[0]
+    runs = covering(paragraph, start, start + len(find))
+    deleted = change("w:del")
+    runs[0]._r.addprevious(deleted)
+    for run in runs:
+        for t in run._r.findall(qn("w:t")):
+            t.tag = qn("w:delText")
+        deleted.append(run._r)
+    marked = runs
+    if new:
+        inserted, r = change("w:ins"), copy.deepcopy(runs[0]._r)
+        for child in [c for c in r if c.tag != qn("w:rPr")]:
+            r.remove(child)
+        inserted.append(r)
+        deleted.addnext(inserted)
+        Run(r, paragraph).text = new
+        marked = [Run(r, paragraph)]
+    if note:
+        document.add_comment(marked, note, author="Leat", initials="L")
+document.save(sys.argv[3])
+print(json.dumps(found))
+"""
+)
+
+
 def tools() -> list[Tool]:
-    """fill_template, in its call's conversation's workspace."""
+    """fill_template and suggest_edits, in their call's conversation's workspace."""
     return [
         Tool(
             "fill_template",
@@ -110,7 +197,41 @@ def tools() -> list[Tool]:
                 "required": ["path", "values", "name"],
             },  # fmt: skip
             lambda context, path, values, name: fill(context, path, values, name),
-        )
+        ),
+        Tool(
+            "suggest_edits",
+            "Suggest edits to a Word document as tracked changes, which the user accepts or "
+            "rejects in Word: each a passage of it and what replaces it, with a comment that says "
+            "why if one; a new document, the original unchanged. Each passage must be written "
+            "once in the document, within a paragraph, as it is there",
+            {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "the document, a .docx"},
+                    "edits": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "find": {"type": "string", "description": "the passage"},
+                                "replace": {
+                                    "type": "string",
+                                    "description": "what replaces it; nothing to delete it",
+                                },
+                                "comment": {"type": "string", "description": "why, if it says"},
+                            },
+                            "required": ["find", "replace"],
+                        },
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "the new document's name, as 'Lease - suggested.docx'",
+                    },
+                },
+                "required": ["path", "edits", "name"],
+            },  # fmt: skip
+            lambda context, path, edits, name: suggest(context, path, edits, name),
+        ),
     ]
 
 
@@ -129,6 +250,24 @@ def fill(context: Context, path: str, values: dict[str, Any], name: str) -> Resu
     if not filled and not missing:
         lines.append("The template has no fields, written {{Name}} or «Name».")
     return Result(" ".join(lines), {"files": [made]} | said)
+
+
+def suggest(context: Context, path: str, edits: list[dict[str, Any]], name: str) -> Result:
+    space = context.space()
+    document = _docx(space, path)
+    if not isinstance(edits, list) or not all(isinstance(e, dict) and e.get("find") for e in edits):
+        raise ValueError("edits must be a list of objects, each with the passage to find")
+    made = space.free(_named(name), folders=True)
+    space.path(made).parent.mkdir(parents=True, exist_ok=True)
+    found = _run(space, _SUGGEST, edits, document, made)
+    done = sum(n == 1 for n in found)
+    lines = [f"Made {made}, of {document}: {done} of {len(edits)} edits suggested, as tracked "
+             "changes, which the user accepts or rejects in Word."]  # fmt: skip
+    for edit, n in zip(edits, found, strict=True):
+        if n != 1:
+            where = "is not in it" if n == 0 else f"is in it {n} times: give more of it"
+            lines.append(f"Not made: “{edit['find'][:80]}” {where}.")
+    return Result("\n".join(lines), {"files": [made], "suggested": done, "edits": len(edits)})
 
 
 def _docx(space: Workspace, path: str) -> str:
