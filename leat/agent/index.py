@@ -6,11 +6,11 @@ tell; and its passages, each some lines of one of its places, which SQLite's FTS
 words they share with a query, the likeliest first. The index is a copy of what the files say,
 kept beside the agent's state, and one of another version is made anew from them.
 
-A query's words find those written as they are and those that begin as they do, as Turkish's
-suffixes and English's endings change a word: one of more than STEM letters finds the words that
-begin with its first letters but its last three, STEM at least, so that "sözleşmesi" finds
-"sözleşmenin", and "termination" "terminate". Dotted and dotless i are one letter, and a letter
-and its accented forms are one.
+A query's words find those written as they are and those that begin as they do, as German's
+endings and compounds and English's endings change a word: one of more than STEM letters finds the
+words that begin with its first letters but its last three, STEM at least, so that "Kündigung"
+finds "Kündigungsfrist" and "kündigen", and "termination" "terminate". A letter and its accented
+forms are one, as ü and u, and ß is ss, as Switzerland writes it.
 
 With a transcriber, an image's text is read too, and a PDF's scanned pages', by the model that sees
 images; while none does, a PDF's scans are left unread, and read once one does, at rescan().
@@ -39,20 +39,23 @@ from leat.agent.embeddings import Embedder, similarity
 from leat.agent.ocr import Transcriber
 from leat.agent.workspace import Workspace
 
-VERSION = 3  # of the index's tables: one of another is made anew
+VERSION = 4  # of the index's tables: one of another is made anew
 PASSAGE = 1200  # characters of a passage at most
 FOUND = 8  # passages a search finds at most
 EACH = 3  # of one file at most
 STEM = 5  # letters of a word's beginning that a query's word finds at least
-# the words of every sentence, English's and Turkish's, as fold() has them, which a search leaves
+# the words of every sentence, English's and German's, as fold() has them, which a search leaves
 # out
 _COMMON = """
 a an the is are was were be been am of to in on at for and or but with by from as it its this that
 these those what which who whom how why when where much many do does did can could should would
 will shall may might must about into than then there their they them your you my me i we our us he
 she his her has have had not no if so any all some
-ve veya ile bu şu o bir için de da mi mu mü ne nasil kaç ki gibi daha en çok ama fakat ya hangi
-neden niye nerede kim olan olarak var yok her kadar
+der die das den dem des ein eine einen einem einer eines und oder aber ist sind war waren wird
+werden wurde kann können soll sollen muss müssen darf ich du er sie es wir ihr mich mir uns ihnen
+sein seine ihre unser unsere mit von zu zur zum im an am auf aus bei für über unter nach vor bis
+um als wie was wer wo wann warum welche welcher welches nicht kein keine noch nur auch dass ob wenn
+dann hat haben hatte gibt viel viele bitte
 """
 COMMON = frozenset(_COMMON.split())
 CANDIDATES = 50  # passages found by their words, and by what they mean, before they are ranked
@@ -365,9 +368,8 @@ def passages(name: str, text: str) -> list[tuple[int, str, str]]:
 
 
 def fold(text: str) -> str:
-    """Text as the index matches it: in lowercase, with dotted and dotless i one letter, as
-    Turkish's İ and ı, and English's I and i, are."""
-    return text.lower().replace("ı", "i").replace("̇", "")
+    """Text as the index matches it: in lowercase, ß as ss."""
+    return text.lower().replace("ß", "ss")
 
 
 def _lines(text: str, start: int, end: int) -> list[tuple[int, int]]:
@@ -387,7 +389,7 @@ def _lines(text: str, start: int, end: int) -> list[tuple[int, int]]:
 
 def _match(query: str) -> str:
     # an FTS5 query of a search's words: any of them, as written or begun, but for those of a
-    # letter alone, and the words of every sentence, English's and Turkish's, unless it has no
+    # letter alone, and the words of every sentence, English's and German's, unless it has no
     # others
     words = list(dict.fromkeys(re.findall(r"\w+", fold(query))))
     words = [w for w in words if w not in COMMON] or words

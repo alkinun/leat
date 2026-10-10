@@ -477,3 +477,16 @@ def test_activity(server, agent, engine, tmp_path):
     _, body = request(f"{server}/api/activity")
     assert json.loads(body)["activity"][0]["action"] == "deleted the project"
     assert json.loads(body)["activity"][0]["place"] == "Yılmaz Ltd"
+
+
+def test_missing(workspace):
+    # a file there is not, said with the nearest names there are, as one named in another language
+    files.write(workspace, "Kontoauszug März 2026.csv", "x")
+    files.write(workspace, "Notes.txt", "x")
+    with pytest.raises(FileNotFoundError, match="the nearest: Kontoauszug März 2026.csv$"):
+        files.read(workspace, "Kontoauszug March 2026.csv")
+    with pytest.raises(FileNotFoundError, match="^there is no file zzz$"):
+        files.read(workspace, "zzz")
+    files.write(workspace, "lease.docx", "not text")
+    with pytest.raises(ValueError, match="suggest_edits suggests edits to a Word document"):
+        files.edit(workspace, "lease.docx", "not", "now")

@@ -311,8 +311,10 @@ def fill(context: Context, path: str, values: dict[str, Any], name: str) -> Resu
 def suggest(context: Context, path: str, edits: list[dict[str, Any]], name: str) -> Result:
     space = context.space()
     document = _docx(space, path)
-    if not isinstance(edits, list) or not all(isinstance(e, dict) and e.get("find") for e in edits):
-        raise ValueError("edits must be a list of objects, each with the passage to find")
+    edits = [_edit(e) for e in edits] if isinstance(edits, list) else []
+    if not edits or not all(e["find"] for e in edits):
+        raise ValueError('edits must be a list of objects, each {"find": "the passage, as it is '
+                         'written", "replace": "what replaces it", "comment": "why"}')  # fmt: skip
     made = space.free(_named(name), folders=True)
     space.path(made).parent.mkdir(parents=True, exist_ok=True)
     found = space.given(_SUGGEST, edits, document, made)
@@ -411,11 +413,22 @@ def _ask(reader: Client, texts: list[str], language: str, person: int | None) ->
     return [str(s) for s in said]
 
 
+def _edit(given: Any) -> dict[str, str]:
+    # an edit as suggest_edits takes it, of the names a model may give its parts: the passage, as
+    # "find" or "old", its replacement, as "replace" or "new", and why, as "comment" or "reason"
+    if not isinstance(given, dict):
+        return {"find": ""}
+    first = lambda *keys: next((str(given[k]) for k in keys if given.get(k)), "")  # noqa: E731
+    return {"find": first("find", "old", "passage", "text", "original"),
+            "replace": first("replace", "new", "replacement", "with"),
+            "comment": first("comment", "reason", "why", "note")}  # fmt: skip
+
+
 def _docx(space: Workspace, path: str) -> str:
     # a Word document's name in the space. Raises FileNotFoundError, or ValueError of another kind
     file = space.path(path)
     if not file.is_file():
-        raise FileNotFoundError(f"there is no file {path}")
+        raise space.missing(path)
     if file.suffix.lower() != ".docx":
         raise ValueError(f"{path} is not a Word document, a .docx")
     return file.relative_to(space.root).as_posix()

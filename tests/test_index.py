@@ -1,4 +1,4 @@
-"""The index: documents' places, passages, the matching of words, Turkish's too, reading files as
+"""The index: documents' places, passages, the matching of words, German's too, reading files as
 they change, and searching them, through search_files as the model does. Reading PDFs needs
 LEAT_SANDBOX, as tests/test_files.py's documents do."""
 
@@ -57,9 +57,10 @@ def test_passages():
 
 
 def test_words():
-    # dotted and dotless i one letter; a word found as it is begun, a long one by its stem
-    assert fold("İSTANBUL Iğdır ılık") == "istanbul iğdir ilik"
-    assert _match("Sözleşmesi feshi a ve kira") == '"sözleşm"* OR "feshi"* OR "kira"*'
+    # ß as ss; a word found as it is begun, a long one by its stem; the words of every sentence
+    # left out, German's and English's
+    assert fold("Straße GRÜN") == "strasse grün"
+    assert _match("Die Kündigung der Miete, bitte") == '"kündig"* OR "miete"*'
     assert _match("What is it?") == '"what"* OR "is" OR "it"'  # all common: all kept
     assert _match("termination") == '"terminat"*' and _match("?!") == ""
 
@@ -68,19 +69,19 @@ def test_search(workspace, index):
     # a space's files read, their passages found by their words, the likeliest first, of the
     # space's alone
     space, other = workspace.space("projects/a"), workspace.space("projects/b")
-    lease = ("# Rent\n\nKira aylık 40.000 TL.\n\n# Termination\n\n"
-             "Sözleşmenin feshi için 90 gün önceden bildirim gerekir.")  # fmt: skip
+    lease = ("# Miete\n\nDie Miete beträgt 2.500 EUR im Monat.\n\n# Kündigung\n\n"
+             "Die Kündigungsfrist beträgt drei Monate zum Quartalsende.")  # fmt: skip
     files.write(space, "lease.md", lease)
-    files.write(space, "notes.txt", "Yılmaz Ltd pays on the 5th of each month.")
+    files.write(space, "notes.txt", "Weißbier GmbH pays on the 5th of each month.")
     files.write(other, "secret.txt", "Another client's confidential terms.")
     (space.root / "logo.png").write_bytes(b"\x89PNG\x00\x00")
     index.update("projects/a")
     index.update("projects/b")
-    found = index.search(space, "sözleşmesi fesih")
-    assert [(f["name"], f["place"]) for f in found] == [("lease.md", "Termination")]
-    assert found[0]["text"].startswith("# Termination")
-    assert found[0]["start"] == lease.index("# Termination")
-    assert index.search(space, "YILMAZ")[0]["name"] == "notes.txt"  # dotless, in capitals
+    found = index.search(space, "Wie lang ist die Kündigung?")
+    assert [(f["name"], f["place"]) for f in found] == [("lease.md", "Kündigung")]
+    assert found[0]["text"].startswith("# Kündigung")
+    assert found[0]["start"] == lease.index("# Kündigung")
+    assert index.search(space, "WEISSBIER")[0]["name"] == "notes.txt"  # ß as ss, in capitals
     assert index.search(space, "confidential") == index.search(space, "logo") == []
     assert index.states("projects/a") == {}
 
@@ -269,11 +270,11 @@ def test_transcriber(engine):
 
 
 class Meaning:
-    """An embedder whose embeddings point along each concept a text names, in English or Turkish,
+    """An embedder whose embeddings point along each concept a text names, in English or German,
     or, for a text that names none, along one of seven other directions, by its checksum; that may
     fail."""
 
-    CONCEPTS = [("rent", "kira"), ("deposit", "depozito"), ("notice", "bildirim")]
+    CONCEPTS = [("rent", "miete"), ("deposit", "kaution"), ("notice", "kündigung")]
 
     def __init__(self):
         self.embedded: list[str] = []
@@ -309,7 +310,7 @@ class Meaning:
 
 
 def test_meaning(workspace, tmp_path, monkeypatch):
-    # a passage found by what it means, as an English question finds a Turkish lease's, beside
+    # a passage found by what it means, as an English question finds a German lease's, beside
     # those found by their words; none that means too little; passages embedded once, in
     # batches, after their files are read, and again as their files change; those the embedder
     # failed to, at the next update
@@ -319,21 +320,21 @@ def test_meaning(workspace, tmp_path, monkeypatch):
     meaning = Meaning()
     index = Index(tmp_path / "index.db", workspace, embedder=meaning)  # type: ignore[arg-type]
     space = workspace.space("people/1")
-    files.write(space, "kira.md", "# Kira\n\nAylık kira 40.000 TL.\n\n# Depozito\n\nİki aylık.")
+    files.write(space, "miete.md", "# Miete\n\nMonatlich 2.500 EUR.\n\n# Kaution\n\nZwei Monate.")
     files.write(space, "notes.txt", "The deposit question came up on Monday.")
     files.write(space, "menu.txt", "Lunch is at noon.")
     index.update("people/1")
     assert len(meaning.embedded) == 4  # each passage, in batches of two
     found = [(f["name"], f["place"]) for f in index.search(space, "How much is the deposit?")]
-    assert found == [("notes.txt", ""), ("kira.md", "Depozito")]  # by words and meaning first
+    assert found == [("notes.txt", ""), ("miete.md", "Kaution")]  # by words and meaning first
     assert [f["name"] for f in index.search(space, "lunch")] == ["menu.txt"]  # by words alone
     assert index.search(space, "What is the weather?") == []  # nothing means it
-    files.write(space, "kira.md", "# Bildirim\n\nDoksan gün önceden.")
+    files.write(space, "miete.md", "# Kündigung\n\nDrei Monate zum Quartalsende.")
     meaning.fails = True
     index.update("people/1")
     assert index.search(space, "notice period") == []  # not yet embedded
     meaning.fails = False
     index.update("people/1")
-    assert [f["place"] for f in index.search(space, "notice period")] == ["Bildirim"]
+    assert [f["place"] for f in index.search(space, "notice period")] == ["Kündigung"]
     count = index._db.execute("SELECT count(*) FROM vectors").fetchone()[0]
     assert count == 3  # the changed file's old passages' vectors gone

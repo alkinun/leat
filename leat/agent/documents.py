@@ -115,7 +115,7 @@ def text(workspace: Workspace, name: str) -> str:
     Raises FileNotFoundError if there is no such file, ValueError if it cannot be read as text."""
     file = workspace.path(name)
     if not file.is_file():
-        raise FileNotFoundError(f"there is no file {name}")
+        raise workspace.missing(name)
     if file.suffix.lower() in DOCUMENTS:
         inside = f"/workspace/{file.relative_to(workspace.root).as_posix()}"
         ran = workspace.run(_EXTRACT, inside, kept=None)

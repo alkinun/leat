@@ -12,6 +12,7 @@ there too, so that a file made to attack its parser attacks the sandbox. Python 
 that a file of the workspace's, as docx.py, cannot take a library's place, and writes no bytecode.
 """
 
+import difflib
 import json
 import os
 import shutil
@@ -124,6 +125,14 @@ class Workspace:
             found.append({"name": name, "size": stat.st_size, "modified": stat.st_mtime})
         return sorted(found, key=lambda f: f["modified"], reverse=True)
 
+    def missing(self, name: str) -> FileNotFoundError:
+        """The error of a file there is not, which names the files of names nearest its, as a
+        model that wrote one wrongly, or in another language, may take the one it meant."""
+        names = [f["name"] for f in self.files()]
+        near = difflib.get_close_matches(name, names, n=3, cutoff=0.5)
+        said = f"; the nearest: {', '.join(near)}" if near else ""
+        return FileNotFoundError(f"there is no file {name}{said}")
+
     def free(self, name: str, folders: bool = False) -> str:
         """A name for a new file at the workspace's top, as `name` but for what makes it a path,
         numbered as "notes (2).txt" if a file has it; or with `folders` in the folders `name`
@@ -153,7 +162,7 @@ class Workspace:
         elif path.is_file():
             path.unlink()
         else:
-            raise FileNotFoundError(f"there is no file {name}")
+            raise self.missing(name)
 
     def unpack(self, name: str) -> tuple[str, int]:
         """Unpacks a zip into a folder of its name, free at its place, in the sandbox, and deletes

@@ -63,7 +63,7 @@ def read(space: Workspace, name: str) -> list[list[Any]]:
     """A table's rows, of a CSV or a workbook's first sheet, the empty ones left out. Raises
     FileNotFoundError, or ValueError if it cannot be read."""
     if not space.path(name).is_file():
-        raise FileNotFoundError(f"there is no file {name}")
+        raise space.missing(name)
     return space.given(_READ, None, name)
 
 

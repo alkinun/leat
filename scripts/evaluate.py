@@ -102,42 +102,60 @@ class Case:
     setup: str = ""  # Python run in the sandbox, in the workspace, that makes more of its files
 
 
-# a lease, as a Word document, made in the sandbox, its Turkish and its English
+# a lease and a fee letter's template, as Word documents, made in the sandbox, in German; and a
+# bank's statement and the books of its month, which differ where a reconciliation should find out
 LEASE = """
 from docx import Document
 d = Document()
-d.add_heading("Kira Sözleşmesi", level=1)
-d.add_paragraph("Kiracı: Yılmaz Tekstil Ltd. Kiraya veren: Bursa Gayrimenkul A.Ş.")
-d.add_paragraph("Aylık kira 40.000 TL olup her ayın 5'inde ödenir.")
-d.add_paragraph("Depozito iki aylık kira tutarındadır.")
-d.add_paragraph("Taraflar doksan gün önceden yazılı bildirimle sözleşmeyi feshedebilir.")
-d.save("Kira Sözleşmesi.docx")
+d.add_heading("Mietvertrag", level=1)
+d.add_paragraph("Mieter: Hofmann Textil GmbH. Vermieter: Kühn Immobilien GmbH, München.")
+d.add_paragraph("Die monatliche Miete beträgt 2.500 EUR und ist zum 3. jedes Monats fällig.")
+d.add_paragraph("Der Mieter leistet eine Kaution in Höhe von drei Monatsmieten.")
+d.add_paragraph("Die Kündigungsfrist beträgt sechs Monate zum Quartalsende.")
+d.save("Mietvertrag.docx")
 d = Document()
-d.add_paragraph("Dear {{Client name}},")
-d.add_paragraph("Your fee for {{Month}} is {{Fee}}, due on {{Due date}}.")
-d.add_paragraph("Kind regards, {{Partner}}")
-d.save("Fee letter template.docx")
+d.add_paragraph("Sehr geehrte Damen und Herren der {{Mandant}},")
+d.add_paragraph("unser Honorar für {{Monat}} beträgt {{Honorar}}, zahlbar bis {{Fälligkeit}}.")
+d.add_paragraph("Mit freundlichen Grüßen, {{Partner}}")
+d.save("Honorarschreiben Vorlage.docx")
+with open("Kontoauszug März 2026.csv", "w", encoding="cp1252") as f:
+    f.write("Buchungstag;Verwendungszweck;Begünstigter/Zahlungspflichtiger;Betrag;Währung\\n")
+    f.write("05.03.2026;RE-2026-0342;Müller Bürobedarf;-1.190,00;EUR\\n")
+    f.write("06.03.2026;Miete März;Kühn Immobilien GmbH;-2.500,00;EUR\\n")
+    f.write("12.03.2026;RE-2026-0350;Schmidt IT;-2.000,00;EUR\\n")
+    f.write("30.03.2026;Kontoführung;Sparkasse;-12,90;EUR\\n")
+from openpyxl import Workbook
+book = Workbook()
+sheet = book.active
+sheet.append(["Belegdatum", "Belegnr.", "Buchungstext", "Soll", "Haben"])
+sheet.append(["02.03.2026", "RE-2026-0342", "Müller Bürobedarf", None, 1190.0])
+sheet.append(["03.03.2026", "MIETE-03", "Miete März", 2500.0, None])
+sheet.append(["09.03.2026", "RE-2026-0350", "Schmidt IT", None, 2380.0])
+sheet.append(["20.03.2026", "RE-2026-0361", "Telekom", None, 59.0])
+book.save("Buchungen März 2026.xlsx")
 """
 # a firm's files, among which one passage answers each question
 FIRM = {
-    "Policies/Expenses.md": "# Expenses\n\nTravel is reimbursed at 8 TL a kilometre. Meals on "
-    "client visits are reimbursed up to 750 TL a day, with a receipt.",
-    "Policies/Leave.md": "# Annual leave\n\nStaff have 20 days of paid leave a year, and 5 more "
-    "after five years. Leave is asked for two weeks ahead.",
-    "Clients/Yılmaz Tekstil.md": "# Yılmaz Tekstil\n\nContact: Ayşe Yılmaz. VAT number "
-    "8340021957. Their year ends in June; their accounts are due by 30 September.",
-    "Clients/Ege Lojistik.md": "# Ege Lojistik\n\nContact: Mehmet Demir. Payroll for 42 staff, "
-    "run on the 25th.",
+    "Policies/Expenses.md": "# Expenses\n\nTravel is reimbursed at 0.30 EUR a kilometre. Meals "
+    "on client visits are reimbursed up to 45 EUR a day, with a receipt.",
+    "Policies/Leave.md": "# Annual leave\n\nStaff have 28 days of paid leave a year, and 2 "
+    "more after five years. Leave is asked for two weeks ahead.",
+    "Mandanten/Hofmann Textil.md": "# Hofmann Textil GmbH\n\nAnsprechpartnerin: Anna Hofmann. "
+    "USt-IdNr. DE284719350. Das Geschäftsjahr endet am 30. Juni; der Jahresabschluss ist bis "
+    "zum 30. September einzureichen.",
+    "Mandanten/Weber Logistik.md": "# Weber Logistik KG\n\nAnsprechpartner: Jonas Weber. "
+    "Lohnabrechnung für 42 Mitarbeiter, jeweils zum 25.",
 }
 # invoices, a file each
 INVOICES = {
-    f"Invoices/{n}.txt": f"FATURA {n}\nTarih: {date}\nSatıcı: {seller}\nToplam: {total} TL"
+    f"Rechnungen/{n}.txt": f"RECHNUNG {n}\nDatum: {date}\nLieferant: {seller}\n"
+    f"Gesamtbetrag: {total} EUR"
     for n, date, seller, total in [
-        ("2026-031", "02.03.2026", "Akın Tekstil", "12.400,00"),
-        ("2026-032", "05.03.2026", "Bursa Kumaş", "8.150,50"),
-        ("2026-033", "09.03.2026", "Ege Lojistik", "2.300,00"),
-        ("2026-034", "14.03.2026", "Akın Tekstil", "15.020,00"),
-        ("2026-035", "21.03.2026", "Marmara Enerji", "4.870,25"),
+        ("2026-031", "02.03.2026", "Müller Bürobedarf", "1.240,00"),
+        ("2026-032", "05.03.2026", "Schmidt IT", "2.380,50"),
+        ("2026-033", "09.03.2026", "Weber Logistik", "730,00"),
+        ("2026-034", "14.03.2026", "Müller Bürobedarf", "1.502,00"),
+        ("2026-035", "21.03.2026", "Stadtwerke München", "487,25"),
     ]
 }
 
@@ -162,21 +180,24 @@ CASES = [
          "yearly totals.", [called("run"), makes(r"\.xlsx$")]),
     Case("doesn't know", "What's my sister's name?", [unsure, uncalled("search")]),
     Case("finds in files", "How much are meals on client visits reimbursed?",
-         [called("search_files"), says("750"), says(CITES)], FIRM, attach=False),
-    Case("finds in Turkish", "Yılmaz Tekstil'in hesapları ne zamana kadar teslim edilmeli?",
-         [called_any("search_files", "read"), uncalled("search"),
-          says("30 Eylül|30 September|30\\.09")],
-         FIRM, attach=False),
+         [called("search_files"), says("45"), says(CITES)], FIRM, attach=False),
+    Case("finds in German", "Bis wann muss der Jahresabschluss von Hofmann Textil eingereicht "
+         "werden?", [called_any("search_files", "read"), uncalled("search"),
+                     says("30\\.? September|30\\.09")], FIRM, attach=False),
     Case("not in files", "What is our policy on working from home?",
          [called("search_files"), absent, uncalled("search")], FIRM, attach=False),
     Case("every file", "Make a table of every invoice's date, seller and total.",
-         [called("ask_files"), makes(r"\.xlsx$"), says("15.020|15,020")], INVOICES, attach=False),
-    Case("fills a template", "Fill the fee letter template for Ege Lojistik: March, 6.000 TL, due "
-         "10 April, signed by Ayşe Kaya.", [called("fill_template"), makes(r"Ege.*\.docx$")],
+         [called("ask_files"), makes(r"\.xlsx$"), says("1.502|1,502")], INVOICES, attach=False),
+    Case("fills a template", "Fill the fee letter template for Weber Logistik: March, 1.200 EUR, "
+         "due 10 April, signed by Clara Becker.", [called("fill_template"),
+                                                  makes(r"Weber.*\.docx$")],
          setup=LEASE, attach=False),
-    Case("redlines", "Suggest changes to the lease: thirty days' notice instead of ninety, and a "
-         "deposit of one month.", [called("suggest_edits"), makes(r"\.docx$")], setup=LEASE,
-         attach=False),
+    Case("redlines", "Suggest changes to the lease: three months' notice instead of six, and a "
+         "deposit of two months' rent.", [called("suggest_edits"), makes(r"\.docx$")],
+         setup=LEASE, attach=False),
+    Case("reconciles", "Reconcile March's bank statement with the books.",
+         [called("reconcile"), makes(r"\.xlsx$"), says("380|2.380|2,380"), says("12[.,]90")],
+         setup=LEASE, attach=False),
     Case("translates", "Translate the lease into English.",
          [called("translate_document"), makes(r"\.docx$")], setup=LEASE,
          attach=False),

@@ -75,7 +75,7 @@ def read(
         listed = "\n".join(name for name in names if not name.startswith("."))
         return Result(listed or "The folder is empty.", {"file": path})
     if not file.is_file():
-        raise FileNotFoundError(f"there is no file {path}")
+        raise workspace.missing(path)
     if picture(path):  # which the agent shows the model, if it sees images
         return Result(f"The image {path}.", {"file": path, "images": [path]})
     if file.suffix.lower() in (".heic", ".heif"):
@@ -121,8 +121,16 @@ def write(workspace: Workspace, path: str, content: str) -> Result:
 def edit(workspace: Workspace, path: str, old: str, new: str) -> Result:
     file = workspace.path(path)
     if not file.is_file():
-        raise FileNotFoundError(f"there is no file {path}")
-    text = file.read_text(encoding="utf-8")
+        raise workspace.missing(path)
+    if file.suffix.lower() in documents.DOCUMENTS:
+        raise ValueError(
+            f"{path} is a document, not text, which edit cannot change: suggest_edits "
+            "suggests edits to a Word document, and run changes any with its library"
+        )
+    try:
+        text = file.read_text(encoding="utf-8")
+    except UnicodeDecodeError as e:
+        raise ValueError(f"{path} is not a file of text") from e
     if (n := text.count(old)) != 1:
         found = "is not in" if n == 0 else f"is in {n} places of"
         raise ValueError(f"the passage {found} {path}: give it as it is, enough of it to be one")

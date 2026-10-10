@@ -53,7 +53,7 @@ d.sections[0].header.paragraphs[0].text = "Ref {{REF}}"
 d.add_paragraph("Signed: {{Partner}}")
 d.save("Letter.docx")
 """)  # fmt: skip
-    values = {"client name": "Yılmaz Ltd", "Fee": "4.500 TL", "Address": "Atatürk Cd. 5\nBursa",
+    values = {"client name": "Yılmaz Ltd", "Fee": "4.500 EUR", "Address": "Lindenstraße 5\nMünchen",
               "ref": "Y-12", "IBAN": "TR00"}  # fmt: skip
     result = office.fill(Context("c", workspace=space), "Letter.docx", values, "Letter - Yılmaz")
     assert result.content == (
@@ -62,8 +62,8 @@ d.save("Letter.docx")
     assert result.info["files"] == ["Letter - Yılmaz.docx"]
     filled = runs(space, "Letter - Yılmaz.docx")
     assert filled[0] == [["Dear ", False], ["Yılmaz Ltd", True], ["", False],
-                         [", your fee is 4.500 TL a month.", False]]  # fmt: skip
-    assert ["Address: Atatürk Cd. 5\nBursa", False] in filled[2]
+                         [", your fee is 4.500 EUR a month.", False]]  # fmt: skip
+    assert ["Address: Lindenstraße 5\nMünchen", False] in filled[2]
     assert filled[3] == [["Ref Y-12", False]]
     assert filled[1] == [["Signed: {{Partner}}", False]]
     assert runs(space, "Letter.docx")[0][1] == ["{{Cli", True]  # the template as it was
@@ -149,6 +149,11 @@ d.save("Lease.docx")
     assert ["thirty days' written", True] in runs_inserted(space, "Lease - suggested.docx")
     with pytest.raises(ValueError, match="edits must be"):
         office.suggest(Context("c", workspace=space), "Lease.docx", [{"replace": "x"}], "x")
+    # an edit's parts by the names a model may give them, as "old" and "new"
+    again = [{"old": "Disputes go to", "new": "Disputes are heard by", "reason": "Clearer."}]
+    result = office.suggest(Context("c", workspace=space), "Lease.docx", again, "Lease 2")
+    assert "1 of 1 edits suggested" in result.content
+    assert versions(space, "Lease 2.docx")["comments"] == ["Clearer."]
 
 
 def runs_inserted(space: Workspace, name: str) -> list:

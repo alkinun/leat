@@ -184,7 +184,7 @@ def _named_files(space: Workspace, named: list[str] | None) -> list[str]:
         elif path.is_file():
             found.append(path.relative_to(space.root).as_posix())
         else:
-            raise FileNotFoundError(f"there is no file {name}")
+            raise space.missing(name)
     return list(dict.fromkeys(found))
 
 

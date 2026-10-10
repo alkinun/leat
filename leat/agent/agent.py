@@ -67,10 +67,10 @@ The user's files are in a workspace, where you read, write and edit them, and ru
 them in a sandbox without the network; the files they attach are named in their message, and the \
 images among them shown, as those you read are, when you can see images. To make \
 a document, first read the skill for its kind, then make it with run, and name its file in your \
-answer, without a link: the app shows the user the files you make. An amount written as Turkish \
+answer, without a link: the app shows the user the files you make. An amount written as German \
 and much of Europe write it, 1.234,56, is 1234.56: code that reads such amounts must take the \
 dots away and make the comma a point; and before you trust what your code finds, check it against \
-a figure you can see in the file.{search}{ask} The skills:
+a figure you can see in the file.{search}{ask}{office} The skills:
 {skills}
 """
 # of the system prompt, when the agent searches the files
@@ -79,6 +79,12 @@ clients, documents or rules, is answered from their files, never the web, which 
 it: call search_files for the passages that say it, in several ways if the first falls short, and \
 read on in the files where the passages do. Cite each passage you use by its number, as [1], \
 after the words it supports; if the files do not say it, say so."""
+# and when it has the office's tools, which are exact, and keep a document's formatting, as the
+# model's own code is and does not
+OFFICE = """ Use the tools made for an office's work rather \
+than code of your own, which is less exact: reconcile for a bank statement and the books, \
+suggest_edits for changes to a Word document, fill_template for a template's fields, and \
+translate_document to translate one."""
 # and when it asks every file
 ASK = """ To answer a question of every file, or of many, as \
 each invoice's total, call ask_files once rather than reading them; then answer with its table, \
@@ -982,7 +988,10 @@ def _system(
     # project it is held in, if one
     skills = "\n".join(f"- {path}: {about}" for path, about in files.skills())
     search, ask = SEARCH * ("search_files" in tools), ASK * ("ask_files" in tools)
-    space = WORKSPACE.format(skills=skills, search=search, ask=ask) if workspace else ""
+    office = OFFICE * ("reconcile" in tools or "suggest_edits" in tools)
+    space = (
+        WORKSPACE.format(skills=skills, search=search, ask=ask, office=office) if workspace else ""
+    )
     named = f" The user is {name}." if name else ""
     web = WEB if "search" in tools else OFFLINE if offline else ""
     content = SYSTEM.format(named=named, sources=f"{web} {CITE}".strip(), workspace=space)

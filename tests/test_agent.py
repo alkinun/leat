@@ -372,7 +372,7 @@ def test_projects(agent, engine, events):
     owner, ada = agent.store.add_person("Alkın"), agent.store.add_person("Ada")
     me, her = owner["id"], ada["id"]
     with agent.events.watch() as told:
-        project = agent.add_project("Yılmaz Ltd", me, "Answer in Turkish.")
+        project = agent.add_project("Yılmaz Ltd", me, "Answer in German.")
         assert {e["to"]: [p["id"] for p in e["projects"]] for e in (told.get(), told.get())} == {
             me: [project["id"]], her: []}  # fmt: skip
     assert agent.projects(her) == [] and agent.projects(me)[0]["name"] == "Yılmaz Ltd"
@@ -383,7 +383,7 @@ def test_projects(agent, engine, events):
     until(events, ended)
     system = agent.store.messages(mine)[0]["content"]
     assert system.endswith('in the project "Yılmaz Ltd". Its instructions, which hold for every '
-                           "conversation in it:\n\nAnswer in Turkish.\n\n")  # fmt: skip
+                           "conversation in it:\n\nAnswer in German.\n\n")  # fmt: skip
     assert agent.conversations(me)[0]["project"] == project["id"]
     # shared, it is everyone's to see and change, but not to unshare, nor to delete
     with pytest.raises(NotFound):
