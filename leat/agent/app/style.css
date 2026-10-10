@@ -141,7 +141,7 @@ body.project :is(#log, #greeting) {
 .page ul { margin: 0; padding: 0; list-style: none; }
 /* a space's files' earlier versions, under its files */
 .page details.history { margin-top: 16px; }
-.page details.history li button { padding: 4px 12px; border: 1px solid var(--line); border-radius: var(--round-large); }
+.page details.history li button { padding: 4px 12px; border: 1px solid var(--line); border-radius: var(--round-large); font-size: 0.8125rem; color: var(--text); }
 #workspace:empty::before { content: "Nothing yet."; color: var(--muted); }
 #listed:empty::before { content: "No projects yet: name one above."; color: var(--muted); }
 #chats:empty::before { content: "No chats yet: write below to begin one."; color: var(--muted); }
@@ -370,6 +370,7 @@ main.empty #shortcuts { display: flex; }
 .page li .use .meta { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 #flows:empty::before { content: "None yet. Save a request you sent in a chat here with Save as workflow, below it."; color: var(--muted); }
 #flows:empty { padding: calc(12px * var(--density)) 4px; }
+#flows select, #flows input { flex: none; padding: 4px 8px; border: 1px solid var(--line); border-radius: var(--round-large); background: var(--card); color: inherit; font: inherit; font-size: 0.8125rem; }
 #composer .box {
   padding: calc(8px * var(--density)); background: var(--card); border: 1px solid var(--line);
   border-radius: var(--round-large); box-shadow: var(--shadow);
@@ -429,7 +430,7 @@ main.empty #shortcuts { display: flex; }
 /* a row's buttons, as a conversation's ×, shown as it is pointed at where the device points, and
    always on a touch screen, which points at nothing */
 @media (hover: hover) {
-  :is(.conversation, .page li):not(:hover, :focus-within) button:not(.toggle, .use) { visibility: hidden; }
+  :is(.conversation, .page li):not(:hover, :focus-within) button:not(.toggle, .use, .restore) { visibility: hidden; }
 }
 /* the gate of a device not yet paired: setting the box up, or asking to join it */
 #gate { display: none; }

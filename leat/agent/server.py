@@ -266,19 +266,30 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(200, {})
 
     def do_PATCH(self) -> None:
-        # a project changed: its name, instructions, or whether it is shared
+        # a project changed: its name, instructions, or whether it is shared; or a workflow's
+        # schedule, set or cleared
         if not self._trusted(write=True):
             return self._error(403, "requests from other sites' pages are refused")
         path, agent = urllib.parse.urlsplit(self.path).path, self.server.agent
         with self._answering():
             me = self._device()
-            if not (match := _PROJECT.fullmatch(path)):
+            flow, match = _WORKFLOW.fullmatch(path), _PROJECT.fullmatch(path)
+            if not flow and not match:
                 return self._error(404, f"there is no PATCH {path}")
             if (size := self._length()) > BODY:
                 return self._error(413, f"a request may be {BODY >> 20} MB at most")
             body = json.loads(self.rfile.read(size))
             if not isinstance(body, dict):
                 raise ValueError("the body must be a JSON object")
+            if flow:
+                if (when := body.get("schedule")) is not None and not isinstance(when, str):
+                    raise ValueError("schedule must be as 'daily 08:00', or null")
+                workflow = agent.schedule_workflow(int(flow[1]), when, me["person"])
+                done = f"scheduled the workflow, {workflow['schedule']}," if when else (
+                    "stopped the schedule of the workflow")  # fmt: skip
+                agent.note(me["person"], done, workflow["project"], workflow["name"])
+                return self._json(200, workflow)
+            assert match is not None
             changes = _project(body)
             agent.change_project(match[1], me["person"], **changes)
             for key, value in changes.items():  # each change noted

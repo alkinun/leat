@@ -502,7 +502,7 @@ def test_workflows(agent):
     held = agent.add_workflow("Reconcile", "Reconcile the bank.", me, project)
     assert [w["name"] for w in agent.workflows(me)] == ["Monthly letter", "Reconcile"]
     assert held == {"id": held["id"], "name": "Reconcile", "prompt": "Reconcile the bank.",
-                    "project": project}  # fmt: skip
+                    "project": project, "schedule": None}  # fmt: skip
     with pytest.raises(NotFound):
         agent.add_workflow("Mine", "x", ada, project)
     with pytest.raises(NotFound):
@@ -514,6 +514,42 @@ def test_workflows(agent):
     assert [w["name"] for w in agent.workflows(me)] == ["Monthly letter"]
 
 
+def test_scheduled_workflow(agent, engine, events):
+    # a workflow run by itself once its schedule is due, as a conversation of the person who set
+    # it, in its project, named as it and the day; not again till its next time, nor while its
+    # last run runs, nor while the engine has no model loaded; nor once its schedule is cleared
+    me = agent.store.add_person("Alkın")["id"]
+    project = agent.add_project("Payroll", me)["id"]
+    flow = agent.add_workflow("Payslips", "Check the payslips.", me, project)
+    with pytest.raises(ValueError, match="a schedule is"):
+        agent.schedule_workflow(flow["id"], "hourly", me)
+    assert agent.schedule_workflow(flow["id"], "Daily 08:00", me)["schedule"] == "daily 08:00"
+    agent.run_due()
+    assert agent.conversations(me) == []  # counted from now: not due yet
+    agent.store.ran_workflow(flow["id"], time.time() - 2 * 86400)
+    engine.status = "unloaded"
+    agent.run_due()
+    assert agent.conversations(me) == []  # no model to run it
+    engine.status = "loaded"
+    engine.replies.put([HOLD, {"content": "All fine."}])
+    agent.run_due()
+    (run,) = agent.conversations(me)
+    assert run["project"] == project and run["title"].startswith("Payslips · ")
+    agent.store.ran_workflow(flow["id"], time.time() - 2 * 86400)
+    agent.run_due()
+    assert len(agent.conversations(me)) == 1  # its last run runs still
+    engine.released.set()
+    until(events, ended)
+    assert agent.store.messages(run["id"])[1]["content"].endswith("Check the payslips.")
+    assert agent.store.activity()[0]["action"] == "ran the workflow"
+    agent.run_due()  # due, as it was made so above, and its last run ended
+    assert len(agent.conversations(me)) == 2
+    agent.schedule_workflow(flow["id"], None, me)
+    agent.store.ran_workflow(flow["id"], 0)
+    agent.run_due()
+    assert len(agent.conversations(me)) == 2
+
+
 def test_api_workflows(server, agent):
     status, body = request(
         f"{server}/api/workflows", "POST", {"name": "Letter", "prompt": "Write."}
@@ -523,6 +559,12 @@ def test_api_workflows(server, agent):
     assert request(f"{server}/api/workflows", "POST", {"name": "x" * 81, "prompt": "y"})[0] == 400
     asked = {"name": "x", "prompt": "y", "project": "0123456789ab"}
     assert request(f"{server}/api/workflows", "POST", asked)[0] == 404
+    url = f"{server}/api/workflows/{json.loads(body)['id']}"
+    status, changed = request(url, "PATCH", {"schedule": "weekdays 08:00"})
+    assert status == 200 and json.loads(changed)["schedule"] == "weekdays 08:00"
+    assert request(url, "PATCH", {"schedule": "now"})[0] == 400
+    assert json.loads(request(url, "PATCH", {"schedule": None})[1])["schedule"] is None
+    assert request(f"{server}/api/workflows/999", "PATCH", {"schedule": None})[0] == 404
     assert request(f"{server}/api/workflows/{json.loads(body)['id']}", "DELETE")[0] == 200
     assert request(f"{server}/api/workflows/1", "DELETE")[0] == 404
     assert agent.workflows(1) == []

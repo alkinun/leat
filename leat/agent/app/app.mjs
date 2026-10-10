@@ -16,7 +16,7 @@ let viewing = null; // the project whose page is shown
 const spaces = {};
 let attached = []; // the files and folders the next message attaches: {name, uploading, files}
 const unfolded = new Set(); // the folders whose files the lists show, by space and name
-let workflows = []; // the requests saved to make again, by name: {id, name, prompt, project}
+let workflows = []; // the requests saved to make again, by name: {id, name, prompt, project, schedule}
 let me = null; // the person whose this device is: {person, name, owner, device}
 let accounts = null; // the owner's to manage: the people and their devices, and those asking
 let offline = false; // whether the box is kept from the internet, as its owner chose
@@ -664,7 +664,7 @@ function remover(what, name, project) {
 }
 
 // a space's files' earlier versions, a project's or the person's own, asked while their list is
-// open: each a row of its file, whether it was deleted or changed since, and when, restored from
+// open: each a row of its file, whether the file is deleted, and when it was kept, restored from
 // its row, which keeps the file as it is now as one more
 async function renderHistory(details, project) {
   if (!details.open) return;
@@ -680,12 +680,12 @@ async function renderHistory(details, project) {
 }
 
 function versionRow(v, project) {
-  const item = element("li"), restore = element("button", "", "Restore");
+  const item = element("li"), restore = element("button", "restore", "Restore");
   const when = new Date(v.kept * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
   restore.onclick = () => post(`/api${place(project)}/history`, { name: v.name, version: v.version })
     .catch((error) => status(error.message, true));
   item.append(element("span", "", v.name),
-    element("span", "meta", [v.deleted ? "Deleted" : "Changed", `${day(v.kept)} ${when}`, bytes(v.size)].join(" · ")), restore);
+    element("span", "meta", [v.deleted ? "Deleted" : "Earlier version", `${day(v.kept)} ${when}`, bytes(v.size)].join(" · ")), restore);
   return item;
 }
 
@@ -800,9 +800,32 @@ function renderWorkflows() {
     const item = element("li"), use = element("button", "use");
     use.append(element("span", "", w.name), element("span", "meta", w.prompt));
     use.onclick = () => compose(w.prompt);
-    item.append(use, forget(w));
+    item.append(use, ...scheduler(w), forget(w));
     return item;
   }));
+}
+
+// when a workflow runs by itself, as a chat of the person who set it: on request alone, or every
+// day, weekday, a day of the week or the month's first, at a time of the box's
+const EVERY = [["", "On request"], ["daily", "Every day"], ["weekdays", "Every weekday"],
+  ...["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    .map((day) => [`weekly ${day.slice(0, 3).toLowerCase()}`, `Every ${day}`]),
+  ["monthly 1", "On the 1st of each month"]];
+
+function scheduler(w) {
+  const every = element("select"), at = element("input");
+  const words = (w.schedule ?? "").split(" "), kind = words.slice(0, -1).join(" ");
+  const kinds = EVERY.some(([k]) => k === kind) ? EVERY : [...EVERY, [kind, kind]];
+  every.replaceChildren(...kinds.map(([value, label]) => new Option(label, value)));
+  every.value = kind;
+  Object.assign(at, { type: "time", value: w.schedule ? words.at(-1) : "08:00", hidden: !w.schedule });
+  every.title = "When it runs by itself, as a chat of yours";
+  every.onchange = at.onchange = () => {
+    at.hidden = !every.value;
+    post(`/api/workflows/${w.id}`, { schedule: every.value ? `${every.value} ${at.value || "08:00"}` : null }, "PATCH")
+      .catch((error) => status(error.message, true));
+  };
+  return [every, at];
 }
 
 // a workflow's button that deletes it, once the user says so

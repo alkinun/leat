@@ -1,6 +1,7 @@
 """The agent's work in the background: naming each conversation after its first turn, telling the
 apps when the engine comes up or goes away, as it does when the box starts, syncing projects'
-files with their folders, and forgetting the files' earlier versions once they are old."""
+files with their folders, running the workflows whose schedules are due, and forgetting the files'
+earlier versions once they are old."""
 
 import threading
 import traceback
@@ -52,6 +53,7 @@ class Background:
                     threading.Thread(target=self.agent.sync_due, daemon=True).start()
                 self.agent.models_changed()
                 self.agent.forget()
+                self.agent.run_due()
                 for id in self.agent.store.unnamed():
                     if not self.agent.running(id):
                         _attempt(name, self.agent, id)

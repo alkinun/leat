@@ -17,7 +17,8 @@ held in it. It is a person's own, or shared with everyone on the box; a conversa
 its person's alone, and seen only while they see the project.
 
 A workflow is a request saved to make again, by its name: a project's, seen by those who see the
-project, or a person's own.
+project, or a person's own. One may run by itself on a schedule, as leat.agent.schedule says, as
+the person who set it, counted from when it was set or last ran.
 
 The settings are the box's, each a value of JSON by its key, as whether it is kept from the
 internet.
@@ -262,6 +263,13 @@ _MIGRATIONS = [
       '"name": "search",', '"name": "search_web",'), '"name": "search"}', '"name": "search_web"}')
     WHERE json_extract(message, '$.role') IN ('assistant', 'tool');
     """,
+    # a workflow's schedule, if it runs by itself, the time it counts from, and who set it, whose
+    # its runs are
+    """
+    ALTER TABLE workflows ADD COLUMN schedule TEXT;
+    ALTER TABLE workflows ADD COLUMN since REAL;
+    ALTER TABLE workflows ADD COLUMN by INTEGER REFERENCES people (id) ON DELETE SET NULL;
+    """,
 ]
 KEPT = 365 * 86400  # seconds the activity is kept
 # a conversation's columns as the apps list it
@@ -437,6 +445,23 @@ class Store:
 
     def delete_workflow(self, id: int) -> None:
         self._query("DELETE FROM workflows WHERE id = ?", id)
+
+    def schedule_workflow(self, id: int, schedule: str | None, by: int | None) -> None:
+        """Has a workflow run by itself on a schedule, as a person, counted from now; or not, of
+        None."""
+        self._query(
+            "UPDATE workflows SET schedule = ?, since = ?, by = ? WHERE id = ?",
+            schedule, time.time() if schedule else None, by if schedule else None, id,
+        )  # fmt: skip
+
+    def ran_workflow(self, id: int, at: float) -> None:
+        """Counts a workflow's schedule from a time it ran."""
+        self._query("UPDATE workflows SET since = ? WHERE id = ?", at, id)
+
+    def scheduled(self) -> list[dict[str, Any]]:
+        """The workflows that run by themselves."""
+        rows = self._query("SELECT * FROM workflows WHERE schedule IS NOT NULL")
+        return [dict(row) for row in rows]
 
     def use(self, since: float) -> list[dict[str, Any]]:
         """Each person's use since a time: the conversations they began, and the messages they

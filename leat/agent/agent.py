@@ -29,7 +29,7 @@ from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
-from leat.agent import context
+from leat.agent import context, schedule
 from leat.agent.background import Background
 from leat.agent.client import Client, Completion, EngineError, merge, whole
 from leat.agent.index import Index
@@ -144,6 +144,7 @@ class Agent:
         self._lock = threading.Lock()
         self._syncing = threading.Lock()  # held while a project's files are synced
         self._forgotten = 0.0  # when the files' oldest earlier versions were last forgotten
+        self._runs: dict[int, str] = {}  # each scheduled workflow's last run, by its id
         self.settle()
 
     def start(self) -> None:
@@ -303,6 +304,45 @@ class Agent:
             workflow = self.store.add_workflow(name, prompt, person, project)
             self._publish_workflows()
         return _workflow(workflow)
+
+    def schedule_workflow(
+        self, id: int, when: str | None, person: int | None = None
+    ) -> dict[str, Any]:
+        """Has a workflow a person sees run by itself on a schedule, as leat.agent.schedule writes
+        one, as that person, counted from now; or not, of None. Raises NotFound if they see no
+        workflow of that id, and ValueError if the schedule is not one."""
+        kept = schedule.normal(when) if when else None
+        with self._lock:
+            if not any(w["id"] == id for w in self.store.workflows(person)):
+                raise NotFound(f"there is no workflow {id}")
+            self.store.schedule_workflow(id, kept, person)
+            self._publish_workflows()
+        return _workflow(self.store.workflow(id) or {})
+
+    def run_due(self) -> None:
+        """Starts each workflow whose schedule is due, as a conversation of the person who set it,
+        in its project, named as the workflow and the day: once the engine has a model loaded,
+        and its last run ended. One the person may no longer run, as of a project they no longer
+        see, waits for its next time."""
+        now = time.time()
+        due = [w for w in self.store.scheduled() if w["by"] is not None
+               and schedule.due(w["schedule"], w["since"], now)]  # fmt: skip
+        try:
+            if not due or not self.loaded():
+                return
+        except EngineError:
+            return
+        for w in due:
+            if (last := self._runs.get(w["id"])) and self.running(last):
+                continue
+            self.store.ran_workflow(w["id"], now)
+            try:
+                id = self.send(None, w["prompt"], person=w["by"], project=w["project"])
+            except (NotFound, Busy):
+                continue
+            self._runs[w["id"]] = id
+            self.rename(id, f"{w['name']} · {datetime.date.today().isoformat()}")
+            self.note(w["by"], "ran the workflow", w["project"], w["name"], leat=True)
 
     def delete_workflow(self, id: int, person: int | None = None) -> None:
         """Deletes a workflow a person sees. Raises NotFound if they see none of that id."""
@@ -1029,7 +1069,7 @@ def _sees(project: dict[str, Any] | None, person: int | None) -> bool:
 
 def _workflow(w: dict[str, Any]) -> dict[str, Any]:
     # a workflow as the apps show it
-    return {k: w[k] for k in ("id", "name", "prompt", "project")}
+    return {k: w.get(k) for k in ("id", "name", "prompt", "project", "schedule")}
 
 
 def _project(p: dict[str, Any]) -> dict[str, Any]:
