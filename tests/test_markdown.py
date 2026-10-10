@@ -69,20 +69,9 @@ CASES = [
     ("|a|\n|-|", [["table", ["thead", ["tr", ["th", "a"]]]]]),
     ("| a | b |\n|---|", [["p", "| a | b |\n|---|"]]),
     ("| a | b |", [["p", "| a | b |"]]),
-    # math, a lone $ before a non-space and after one, and before no digit
-    ("Euler: $e^{i\\pi} + 1 = 0$.", [["p", "Euler: ", ["math", "e^{i\\pi} + 1 = 0"], "."]]),
-    ("\\(a_1\\) and $$b$$", [["p", ["math", "a_1"], " and ", ["math", {"display": "block"}, "b"]]]),
-    ("$5 to $10, or US$5, then x$", [["p", "$5 to $10, or US$5, then x$"]]),
-    ("$ x $ $x$5 \\$x$", [["p", "$ x $ $x$5 $x$"]]),
-    ("$a\\$b$", [["p", ["math", "a\\$b"]]]),
-    ("*a $b_1*c$ d* [$]$](https://x.io)",
-     [["p", ["em", "a ", ["math", "b_1*c"], " d"], " ",
-       ["a", {"href": "https://x.io"}, ["math", "]"]]]]),
-    ("text\n$$\n\\int_0^1 x\\,dx\n$$\nafter",
-     [["p", "text"], ["math", {"display": "block"}, "\\int_0^1 x\\,dx"], ["p", "after"]]),
-    ("\\[ a^2 \\] and $$b$$ c", [["math", {"display": "block"}, "a^2"],
-                               ["p", "and ", ["math", {"display": "block"}, "b"], " c"]]),
-    ("$$\\frac{a}{", [["math", {"display": "block"}, "\\frac{a}{"]]),
+    # dollars and TeX are text, as amounts are written
+    ("Euler: $e^{i\\pi}$, $5 to $10, or US$5", [["p", "Euler: $e^{i\\pi}$, $5 to $10, or US$5"]]),
+    ("\\$x$ and $$b$$", [["p", "$x$ and $$b$$"]]),
     ("`$x$`", [["p", ["code", "$x$"]]]),
     # code blocks, unclosed while streaming, their info string a language
     ("```\nx = 1\n\ny = 2\n```", [["pre", ["code", "x = 1\n\ny = 2"]]]),

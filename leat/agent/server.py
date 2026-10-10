@@ -44,17 +44,12 @@ _FILES = (
     "app.mjs",
     "markdown.mjs",
     "logo.svg",
-    "vendor/temml/temml.mjs",
-    "vendor/temml/Temml-Latin-Modern.css",
-    "vendor/temml/Temml.woff2",
-    "vendor/temml/latinmodernmath.woff2",
 )
 _PAGES = ("/", "/projects", "/files", "/settings", "/activity")
 _TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
     ".mjs": "text/javascript; charset=utf-8",
-    ".woff2": "font/woff2",
     ".svg": "image/svg+xml",
 }
 _KEEP_ALIVE = 15  # seconds between comments on a quiet event stream, which find its client gone
