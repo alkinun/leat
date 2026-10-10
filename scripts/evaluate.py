@@ -150,7 +150,7 @@ def _run(case: Case, args: argparse.Namespace) -> Outcome:
         index = Index(Path(data) / "index.db", workspace)
         tools = [
             *web.tools(args.search, engine), *files.tools(index), *ask.tools(engine, index),
-            *office.tools(),
+            *office.tools(engine),
         ]  # fmt: skip
         agent = Agent(Store(Path(data) / "leat.db"), engine, tools, workspace, index)
         space = agent.space()  # no one's own, as the conversation is

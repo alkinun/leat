@@ -1026,6 +1026,7 @@ const DID = {
   ask_files: ["read the files", (n) => `read the files ${n} times`],
   fill_template: ["filled a template", (n) => `filled ${n} templates`],
   suggest_edits: ["suggested edits", (n) => `suggested edits ${n} times`],
+  translate_document: ["translated a document", (n) => `translated ${n} documents`],
   search: ["searched the web", (n) => `searched the web ${n} times`],
   search_files: ["searched the files", (n) => `searched the files ${n} times`],
   fetch: ["read a page", (n) => `read ${n} pages`],
@@ -1151,6 +1152,8 @@ const LINES = {
   write: (a) => [`Writing ${a.path}…`, `Wrote ${a.path}`, `Couldn't write ${a.path}`],
   fill_template: (a, i) => [`Filling ${a.path}…`, `Filled ${a.path} as ${i.files?.[0] ?? a.name}`,
     `Couldn't fill ${a.path}`],
+  translate_document: (a, i) => [i.total > 1 ? `Translating ${a.path} into ${a.language}, ${i.done ?? 0} of ${i.total} parts…`
+    : `Translating ${a.path} into ${a.language}…`, `Translated ${a.path} into ${a.language}`, `Couldn't translate ${a.path}`],
   suggest_edits: (a, i) => [`Suggesting edits to ${a.path}…`,
     `Suggested ${i.suggested ?? 0} ${i.suggested === 1 ? "edit" : "edits"} to ${a.path}`, `Couldn't suggest edits to ${a.path}`],
   edit: (a) => [`Editing ${a.path}…`, `Edited ${a.path}`, `Couldn't edit ${a.path}`],
@@ -1186,7 +1189,7 @@ function what(m) {
     return [link(url, title || url), ...asked];
   }
   if (m.name === "write" || m.name === "edit") return [fileLink(args.path)];
-  if (m.name === "suggest_edits") return [cards(m.info?.files ?? [])]; // the document made
+  if (["suggest_edits", "translate_document"].includes(m.name)) return [cards(m.info?.files ?? [])]; // the document made
   if (m.name === "fill_template") { // the document made, and the fields it left as they were
     const left = m.info?.missing?.length ? [element("p", "meta", `Without values: ${m.info.missing.join(", ")}`)] : [];
     return [cards(m.info?.files ?? []), ...left];
@@ -1373,6 +1376,7 @@ const ICONS = {
   write: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
   fill_template: '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M8 13h8M8 17h5"/>',
   suggest_edits: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
+  translate_document: '<path d="m5 8 6 6M4 14l6-6 2-3M2 5h12M7 2h1M22 22l-5-10-5 10M14 18h6"/>',
   edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
   run: '<path d="m4 17 6-6-6-6"/><path d="M12 19h8"/>',
   folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',

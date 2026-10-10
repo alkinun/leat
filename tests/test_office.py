@@ -165,3 +165,66 @@ for ins in d.element.iter(qn("w:ins")):
 print(json.dumps(found))
 """)  # fmt: skip
     return json.loads(ran.content.splitlines()[0])
+
+
+def test_translate(space, engine, monkeypatch):
+    # each paragraph translated in its place, its style and its first character's formatting
+    # kept, in batches; a batch the model answers with too few, asked one by one; one it fails,
+    # left as it was and said to be; how far it is told as each batch ends
+    from leat.agent.client import Client
+
+    monkeypatch.setattr(office, "READERS", 1)
+    monkeypatch.setattr(office, "BATCH", 40)
+    make(space, """
+d = Document()
+d.add_heading("Kira Sözleşmesi", level=1)
+p = d.add_paragraph()
+p.add_run("Kira").bold = True
+p.add_run(" aylık 40.000 TL.")
+d.add_paragraph("")
+d.add_table(rows=1, cols=1).rows[0].cells[0].text = "Depozito iki aylık kiradır."
+d.save("Kira.docx")
+""")  # fmt: skip
+    engine.replies.put([{"content": '["Lease Agreement"]'}])  # too few: asked one by one
+    engine.replies.put([{"content": '["Lease Agreement"]'}])
+    engine.replies.put([{"content": '["Rent is 40,000 TL a month."]'}])
+    engine.replies.put([{"content": "Sorry, I cannot."}])  # the table's, failed
+    told: list[dict] = []
+    context = Context("c", workspace=space, progress=told.append)
+    result = office.translate(
+        Client(engine.url), context, "Kira.docx", "English", "Lease (English)"
+    )
+    assert result.content == ("Made Lease (English).docx, Kira.docx in English, 3 paragraphs "
+                              "translated. 1 could not be, as the model failed, and are as they "
+                              "were.")  # fmt: skip
+    assert told == [{"done": 0, "total": 2}, {"done": 1, "total": 2}, {"done": 2, "total": 2}]
+    asked = [json.loads(r["messages"][1]["content"]) for r in engine.requests]
+    assert asked == [["Kira Sözleşmesi", "Kira aylık 40.000 TL."], ["Kira Sözleşmesi"],
+                     ["Kira aylık 40.000 TL."], ["Depozito iki aylık kiradır."]]  # fmt: skip
+    assert "into English" in engine.requests[0]["messages"][0]["content"]
+    ran = files.run(space, """
+import json
+from docx import Document
+d = Document("Lease (English).docx")
+print(json.dumps([[p.style.name, [[r.text, bool(r.bold)] for r in p.runs]] for p in d.paragraphs]))
+print(json.dumps(d.tables[0].rows[0].cells[0].text))
+""")  # fmt: skip
+    body, cell = (json.loads(line) for line in ran.content.splitlines()[:2])
+    assert body[0] == ["Heading 1", [["Lease Agreement", False]]]
+    assert body[1] == ["Normal", [["Rent is 40,000 TL a month.", True], ["", False]]]
+    assert cell == "Depozito iki aylık kiradır."  # the batch it failed, as it was
+
+
+def test_translate_stopped(space, engine):
+    # a translation stopped saves nothing
+    import threading
+
+    from leat.agent.client import Client
+
+    make(space, 'd = Document()\nd.add_paragraph("Merhaba")\nd.save("a.docx")')
+    stopped = threading.Event()
+    stopped.set()
+    context = Context("c", workspace=space, stopped=stopped)
+    result = office.translate(Client(engine.url), context, "a.docx", "English", "b")
+    assert result.content.startswith("Stopped before the whole document was translated")
+    assert [f["name"] for f in space.files()] == ["a.docx"]

@@ -187,7 +187,7 @@ def _agent(args: argparse.Namespace) -> None:
     index = Index(args.data / "index.db", workspace, Transcriber(engine))
     tools = [
         *web.tools(args.search, engine), *files.tools(index), *ask.tools(engine, index),
-        *office.tools(),
+        *office.tools(engine),
     ]  # fmt: skip
     agent = Agent(Store(args.data / "leat.db"), engine, tools, workspace, index)
     agent.start()
