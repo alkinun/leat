@@ -219,7 +219,7 @@ CASES = [
          [called("ask_files"), makes(r"\.xlsx$"), says("1.502|1,502")], INVOICES, attach=False),
     Case("totals", "How much do the invoices come to in all?", [says("6.339,75|6,339.75")],
          INVOICES, attach=False),  # five, which the model may read itself
-    Case("totals of many", "What do this month's invoices come to in all?",
+    Case("totals of many", "What do the invoices in the Invoices folder come to in all?",
          [called("ask_files"), says(TOTAL)], MONTH, attach=False),
     Case("fills a template", "Fill the fee letter template for Weber Logistik: March, 1.200 EUR, "
          "due 10 April, signed by Clara Becker.", [called("fill_template"),
