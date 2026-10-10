@@ -192,6 +192,7 @@ def main() -> None:
                          "README says")  # fmt: skip
     font = _font()
     args.data.mkdir(parents=True, exist_ok=True)
+    (args.data / "sandbox").symlink_to(args.sandbox.resolve())  # leat agent's, of --data
     workspace = Workspace(args.data / "workspace", args.sandbox)
     agent = Agent(Store(args.data / "leat.db"), Client("http://127.0.0.1:9"), [], workspace)
     books = agent.add_project(CLIENT, None, BOOKS, shared=True)["id"]

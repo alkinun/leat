@@ -188,7 +188,7 @@ def _positive(text: str) -> int:
 
 def _agent(args: argparse.Namespace) -> None:
     args.data.mkdir(parents=True, exist_ok=True)
-    environment = args.data / "sandbox"
+    environment = (args.data / "sandbox").resolve()  # a link to one elsewhere, as the demo's
     workspace = Workspace(args.data / "workspace", environment if environment.exists() else None)
     engine = Client(args.engine, os.environ.get("LEAT_ENGINE_KEY"))
     index = Index(args.data / "index.db", workspace, Transcriber(engine), Embedder(engine))
