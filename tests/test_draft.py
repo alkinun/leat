@@ -71,11 +71,14 @@ def test_mtp_after_a_kept_state(tiny):
 
 @pytest.mark.usefixtures("reference_ops")
 @pytest.mark.parametrize("arch", ARCHS)
-@pytest.mark.parametrize("sampling", [GREEDY, Sampling(temperature=0.9, top_k=50)])
+@pytest.mark.parametrize("sampling", [
+    GREEDY, Sampling(temperature=0.9, top_k=50), Sampling(temperature=0.9, presence_penalty=1.5),
+], ids=["greedy", "sampled", "penalized"])  # fmt: skip
 @pytest.mark.parametrize("guessed", ["none", "all", "some"])
 def test_speculative_generates_as_plain(tiny, tiny_assistant, arch, sampling, guessed):
-    # whatever the drafter guesses, the tokens are those plain decoding generates; a drafter that
-    # guesses them all has each step keep all its drafts
+    # whatever the drafter guesses, the tokens are those plain decoding generates, of a
+    # presence_penalty too, which each draft's own tokens before it change; a drafter that guesses
+    # them all has each step keep all its drafts
     path, draft = models(tiny, tiny_assistant, arch)
     plain = list(Engine(path, max_context=CONTEXT).generate(PROMPT, 20, sampling, seed=3))
     engine = Engine(path, max_context=CONTEXT, draft=draft)
@@ -138,11 +141,11 @@ def several(
 @pytest.mark.parametrize("guessed", ["none", "some"])
 def test_speculative_several(tiny, tiny_assistant, arch, guessed):
     # sequences decoding at once speculate together, each generating the tokens it would alone,
-    # also in steps that prefill another: 2 drafting 3 tokens each, 3 drafting 1, and more than
-    # the drafter takes, 3, in plain steps
+    # of its own presence_penalty's tokens, also in steps that prefill another: 2 drafting 3
+    # tokens each, 3 drafting 1, and more than the drafter takes, 3, in plain steps
     path, draft = models(tiny, tiny_assistant, arch)
     prompts = [PROMPT, PROMPT[::-1], PROMPT[3:], PROMPT[5:] + PROMPT[:2]]
-    sampling = Sampling(temperature=0.9, top_k=50)
+    sampling = Sampling(temperature=0.9, top_k=50, presence_penalty=1.5)
     alone = Engine(path, max_context=CONTEXT)
     plain = [list(alone.generate(p, 20, sampling, seed=i)) for i, p in enumerate(prompts)]
     engine = Engine(path, max_context=CONTEXT, slots=len(prompts), draft=draft)
