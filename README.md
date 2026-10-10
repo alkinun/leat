@@ -53,6 +53,13 @@ DEV=NV uv run leat serve Qwen_Qwen3.6-35B-A3B-Q4_K_M.gguf --max-context 16384
 uv run leat agent
 ```
 
+To try it as an office would, `scripts/demo.py` makes a demo in a state of its own: a small firm of accountants and solicitors, in Manchester, or with `--language de` in Munich. Its client's project holds the month's invoices, two of them scanned, a bank statement and the books of the month, which differ where a reconciliation should find them out, a lease and a fee letter's template; its employment case holds a contract with clauses the employee's lawyer would change. Each has workflows of what the office asks of it.
+
+```bash
+uv run python scripts/demo.py ~/leat-demo
+uv run leat agent --data ~/leat-demo
+```
+
 `leat bench` measures speed, of random prompts as llama-bench does or with `--chat` of replies to chat prompts, which a drafter guesses as it would in use, and `leat perplexity` measures quality, either on a text file or against logits saved by llama.cpp's `llama-perplexity --kl-divergence-base`. [scripts/validate.py](scripts/validate.py) checks a machine end to end in one command: the GPU tests, speed against llama.cpp on the same files, speculative decoding, and the server, into a Markdown report. [scripts/demo.py](scripts/demo.py) makes a demo for a small German law and tax office, a state of its own to serve with `leat agent --data`: a client's books, its month's invoices, two scanned, a Sparkasse's statement and a ledger, which differ where a reconciliation should find them out, a lease and a fee letter's template; and an employment case, its contract, with clauses an employee's lawyer would change; each with workflows of what the office asks. [scripts/evaluate.py](scripts/evaluate.py) measures the agent against leat serve, on what people ask of it: whether it calls the tools it should, and says and makes what it should, each case several times.
 
 ## Supported

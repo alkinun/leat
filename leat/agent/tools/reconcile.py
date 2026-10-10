@@ -38,12 +38,14 @@ _NUMBER = re.compile(r"\b(?=[\w/-]*\d)[A-Z]{1,6}[-/]?\d[\w/-]*\d\b|\b\d{2,}[-/]\
 
 @dataclass
 class Line:
-    """A line of a table: its row, its date, its amount, as it is written, and what it says."""
+    """A line of a table: its row, its date, its amount, less if paid out, what it says, and its
+    date as the table writes it."""
 
     row: int
     date: datetime.date | None
     amount: float
     said: str
+    day: str = ""
 
     def numbers(self) -> set[str]:
         return {n.upper() for n in _NUMBER.findall(self.said.upper())}
@@ -75,21 +77,21 @@ def tools() -> list[Tool]:
 
 def reconcile(context: Context, bank: str, books: str, name: str | None = None) -> Result:
     space = context.space()
-    paid, entered = lines(sheets.read(space, bank)), lines(sheets.read(space, books))
+    paid, entered = lines(sheets.read(space, bank), bank=True), lines(sheets.read(space, books))
     matched, differ, unpaid = match(paid, entered)
     banked = {id(b) for b, _ in matched + differ}
     unentered = [b for b in paid if id(b) not in banked]
     n, m = context.cite(f"file:{bank}", bank), context.cite(f"file:{books}", books)
     parts = [
         ("Amounts differ", ["Date", "Bank", "Books", "Difference", "Bank says", "Books say"],
-         [[_day(b.date), b.amount, e.amount, round(abs(b.amount) - abs(e.amount), 2), b.said,
+         [[b.day, b.amount, e.amount, round(abs(b.amount) - abs(e.amount), 2), b.said,
            e.said] for b, e in differ]),
         ("In the bank alone", ["Date", "Amount", "Bank says"],
-         [[_day(b.date), b.amount, b.said] for b in unentered]),
+         [[b.day, b.amount, b.said] for b in unentered]),
         ("In the books alone", ["Date", "Amount", "Books say"],
-         [[_day(e.date), e.amount, e.said] for e in unpaid]),
+         [[e.day, e.amount, e.said] for e in unpaid]),
         ("Matched", ["Bank date", "Books date", "Amount", "Bank says", "Books say"],
-         [[_day(b.date), _day(e.date), b.amount, b.said, e.said] for b, e in matched]),
+         [[b.day, e.day, b.amount, b.said, e.said] for b, e in matched]),
     ]  # fmt: skip
     said = [f"Of the bank's {len(paid)} lines [{n}] and the books' {len(entered)} [{m}]: "
             f"{len(matched)} matched, {len(differ)} matched but in their amount, {len(unentered)} "
@@ -112,16 +114,19 @@ def reconcile(context: Context, bank: str, books: str, name: str | None = None) 
     return Result("\n".join(said), info | ({"files": [saved]} if saved else {}))
 
 
-def lines(rows: list[list[Any]]) -> list[Line]:
+def lines(rows: list[list[Any]], bank: bool = False) -> list[Line]:
     """A table's lines, of its rows after its heading, by the roles its columns have: those
-    without a date or an amount left out, as a total's or a balance's carried."""
+    without a date or an amount left out, as a total's or a balance's carried. Of a debit and a
+    credit, a `bank`'s debit is paid out, as its statement says, and the books' paid in, as their
+    bank account's is."""
     if not rows:
         return []
     heading, body = [_fold(str(h or "")) for h in rows[0]], rows[1:]
     roles = _roles(heading, body)
     found = []
     for i, row in enumerate(body, 2):
-        date = _date(_cell(row, roles, "date"))
+        written = str(_cell(row, roles, "date") or "").strip()
+        date = _date(written)
         if "amount" in roles:
             amount = _amount(_cell(row, roles, "amount"))
         else:
@@ -130,10 +135,12 @@ def lines(rows: list[list[Any]]) -> list[Line]:
                 _amount(_cell(row, roles, "credit")),
             )
             amount = (debit or 0.0) - (credit or 0.0) if debit or credit else None
+            amount = -amount if bank and amount else amount
         if date is None or not amount:
             continue
         said = " · ".join(str(row[c]) for c in roles.get("texts", []) if c < len(row) and row[c])
-        found.append(Line(i, date, amount, said))
+        day = written[:10] if re.match(r"\d{4}-\d\d-\d\dT", written) else written  # a workbook's
+        found.append(Line(i, date, amount, said, day))
     return found
 
 
@@ -168,7 +175,8 @@ def _cell(row: list[Any], roles: dict[str, Any], role: str) -> Any:
 
 def _roles(heading: list[str], body: list[list[Any]]) -> dict[str, Any]:
     # each role's column, by its heading's words, or a date's and an amount's by what the column
-    # holds; and "texts", the columns of what a line says, which hold neither dates nor amounts
+    # holds; and "texts", the columns of what a line says, which hold neither dates nor amounts,
+    # nor the same in every line, as an account's number or a currency
     roles: dict[str, Any] = {}
     for role, words in _ROLES.items():
         free = (c for c, h in enumerate(heading) if h.startswith(words) and c not in roles.values())
@@ -180,8 +188,14 @@ def _roles(heading: list[str], body: list[list[Any]]) -> dict[str, Any]:
         roles["amount"] = _most(body, lambda v: _amount(v) is not None, set(roles.values()))
     taken = set(roles.values())
     roles["texts"] = [c for c in range(len(heading)) if c not in taken
-                      and _most(body, _text, set(), c) > len(body) // 2]  # fmt: skip
+                      and _most(body, _text, set(), c) > len(body) // 2
+                      and _varies(body, c)]  # fmt: skip
     return roles
+
+
+def _varies(body: list[list[Any]], column: int) -> bool:
+    # whether a column's cells differ, of a table of a few lines at least
+    return len(body) < 3 or len({str(row[column]) for row in body if column < len(row)}) > 1
 
 
 def _text(value: Any) -> bool:
@@ -238,10 +252,6 @@ def _same(b: Line, e: Line) -> bool:
 
 def _apart(b: Line, e: Line) -> int:
     return abs((b.date - e.date).days) if b.date and e.date else DAYS + 1
-
-
-def _day(date: datetime.date | None) -> str:
-    return f"{date:%d.%m.%Y}" if date else ""
 
 
 def _fold(text: str) -> str:

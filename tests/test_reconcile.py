@@ -39,6 +39,21 @@ def test_columns():
         (2, march[0], -1190.0), (3, march[1], 2500.0)]  # fmt: skip
     assert found[0].said == "RE-2026-0342 · Müller Bürobedarf" and found[0].numbers() == {
         "RE-2026-0342"}  # fmt: skip
+    # a British bank's export: its debit paid out, its dates as it writes them, found by what the
+    # column holds, and its sort code, the same in every line, not said
+    bank = lines([["Transaction Date", "Transaction Type", "Sort Code", "Transaction Description",
+                   "Debit Amount", "Credit Amount", "Balance"],
+                  ["06/03/2026", "FPO", "30-94-57", "NORTHERN OFFICE SU INV-2026-0342", "1200.00",
+                   "", "118800.00"],
+                  ["16/03/2026", "BGC", "30-94-57", "HARROGATE INTERIOR H-2041", "", "18600.00",
+                   "137400.00"],
+                  ["31/03/2026", "FEE", "30-94-57", "ACCOUNT FEE MARCH", "12.50", "", "137387.50"]],
+                 bank=True)  # fmt: skip
+    assert [(line.day, line.amount, line.said) for line in bank] == [
+        ("06/03/2026", -1200.0, "FPO · NORTHERN OFFICE SU INV-2026-0342"),
+        ("16/03/2026", 18600.0, "BGC · HARROGATE INTERIOR H-2041"),
+        ("31/03/2026", -12.5, "FEE · ACCOUNT FEE MARCH"),
+    ]
 
 
 def test_match():
@@ -98,8 +113,8 @@ book.save("Buchungen.xlsx")
     assert result.content.startswith(
         "Of the bank's 3 lines [1] and the books' 3 [2]: 2 matched, 0 matched but in their "
         "amount, 1 in the bank alone, and 1 in the books alone.")  # fmt: skip
-    assert "| 30.03.2026 | -12.90 | DE89370400440532013000 · Kontoführung · Sparkasse · EUR |" in (
-        result.content)  # fmt: skip
+    # its date as the bank writes it, and what it says without what every line says alike
+    assert "| 30.03.2026 | -12.90 | Kontoführung · Sparkasse |" in result.content
     assert result.info["files"] == ["Abstimmung März.xlsx"]
     read = files.read(space, "Abstimmung März.xlsx").content
     assert [line for line in read.splitlines() if line.startswith("## ")] == [
