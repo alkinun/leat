@@ -1362,6 +1362,7 @@ function what(m) {
     return [cards(m.info?.files ?? []), ...left];
   }
   if (m.info?.images) return [cards(m.info.images)]; // an image read, which the model saw
+  if (m.name === "compare_documents") return [element("p", "changes", m.content)]; // each, whole
   if (m.name === "run") {
     const code = element("div");
     markdown(code, `\`\`\`python\n${args?.code ?? ""}\n\`\`\``);

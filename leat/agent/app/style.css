@@ -247,6 +247,7 @@ details summary { cursor: pointer; color: var(--muted); font-size: 0.875rem; }
 /* a tool's work: a line, which opens on what it found */
 .message.tool { margin-bottom: 6px; color: var(--muted); font-size: 0.875rem; white-space: normal; }
 .tool summary { display: flex; align-items: center; gap: 8px; list-style: none; }
+.tool p.changes { white-space: pre-wrap; }
 .tool summary::-webkit-details-marker { display: none; }
 .tool summary svg { width: 15px; height: 15px; flex: none; }
 .tool summary span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
