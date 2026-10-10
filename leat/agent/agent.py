@@ -183,9 +183,9 @@ class Agent:
         """Starts a turn of a person's message, in a new conversation without an id, held in
         `project` if one; returns the conversation's id. The model reasons at `effort`, one of
         leat.chat's EFFORTS, which leat serve gives as near as the model can, or else at the
-        model's own default; and reads of the files `attached`, in the workspace. Raises NotFound
-        if there is no such conversation or project of the person's, or file, Busy if a turn runs
-        in the conversation."""
+        model's own default; and reads of the files and folders `attached`, in its space. Raises
+        NotFound if there is no such conversation or project of the person's, or file, Busy if a
+        turn runs in the conversation."""
         info: dict[str, Any] = {"at": time.time()} | ({"effort": effort} if effort else {})
         message = {"role": "user", "content": content, "info": info}
         with self._lock:
@@ -196,7 +196,7 @@ class Agent:
                     raise Busy("a reply is already running")
             if attached:
                 space = self._space(project, person) if self.workspace else None
-                if space is None or not all(space.path(name).is_file() for name in attached):
+                if space is None or not all(space.path(name).exists() for name in attached):
                     raise NotFound(f"the workspace has not all of {', '.join(attached)}")
                 info["files"] = attached
             if id is None:

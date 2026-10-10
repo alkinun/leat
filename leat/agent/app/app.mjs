@@ -14,7 +14,8 @@ let viewing = null; // the project whose page is shown
 // the files of each space, the latest changed first, by its project's id, "" for the person's own:
 // {name, size, modified}
 const spaces = {};
-let attached = []; // the files the next message attaches: {name, uploading}
+let attached = []; // the files and folders the next message attaches: {name, uploading, files}
+const unfolded = new Set(); // the folders whose files the lists show, by space and name
 let me = null; // the person whose this device is: {person, name, owner, device}
 let accounts = null; // the owner's to manage: the people and their devices, and those asking
 // the conversations whose turns ended while another was shown, as this device saw them
@@ -39,8 +40,10 @@ $("held").onclick = () => turnTo("projects");
 $("filed").onclick = () => turnTo("files");
 $("set").onclick = () => turnTo("settings");
 $("attach").onclick = () => pick(attach);
-$("upload").onclick = () => pick((file) => upload(file, null));
-$("adding").onclick = () => pick((file) => upload(file, viewing));
+$("upload").onclick = () => pick((items) => uploads(items, null));
+$("uploadFolder").onclick = () => pick((items) => uploads(items, null), true);
+$("adding").onclick = () => pick((items) => uploads(items, viewing));
+$("addingFolder").onclick = () => pick((items) => uploads(items, viewing), true);
 $("create").onsubmit = create;
 $("back").onclick = (event) => {
   event.preventDefault();
@@ -73,15 +76,15 @@ $("input").onpaste = (event) => { // images pasted, as a screenshot, attached to
   const pasted = [...event.clipboardData.files]; // but text pasted with a picture of it, as Office's
   if (!pasted.length || event.clipboardData.getData("text/plain")) return;
   event.preventDefault();
-  pasted.forEach(attach);
+  attach(pasted.map((file) => ({ file, path: file.name })));
 };
 window.ondragover = (event) => event.preventDefault();
-window.ondrop = (event) => { // files dropped, attached to the next message, or on their page uploaded
-  event.preventDefault();
-  const dropped = [...event.dataTransfer.files];
-  if (paged("files")) dropped.forEach((file) => upload(file, null));
-  else if (paged("project")) dropped.forEach((file) => upload(file, viewing));
-  else dropped.forEach(attach);
+window.ondrop = async (event) => { // files and folders dropped, attached to the next message, or on
+  event.preventDefault(); // a page of files uploaded there
+  const items = await dropped(event.dataTransfer);
+  if (paged("files")) uploads(items, null);
+  else if (paged("project")) uploads(items, viewing);
+  else attach(items);
 };
 $("effort").onchange = () => { // kept for the model, on this device
   localStorage.setItem(`leat.effort.${ready()}`, $("effort").value);
@@ -531,19 +534,59 @@ function renderFiles() {
   if (shown?.messages) follow(() => views.forEach((view) => view.update()));
 }
 
-// a space's files, a project's or the person's own, each a row that opens it and deletes it
+// a space's files, a project's or the person's own: each folder at its top a row that opens on its
+// files, then each file a row that opens it; each deleted from its row
 function listFiles(project) {
-  return filesOf(project).map((f) => {
-    const item = element("li"), remover = element("button", "", "×");
-    remover.title = "Delete";
-    remover.onclick = () => confirm(`Delete “${f.name}”? It cannot be undone.`)
-      && del(`/api${place(project)}/files/${encodeURIComponent(f.name)}`);
-    const about = element("span", "meta", [STATES[f.state], bytes(f.size), day(f.modified)].filter(Boolean).join(" · "));
-    about.title = f.error ?? (f.state === "scanned" ? "Its scanned pages are read once a model that sees images is loaded" : "");
-    about.classList.toggle("failed", f.state === "failed");
-    item.append(fileLink(f.name, project), about, remover);
-    return item;
-  });
+  const folders = new Map(), loose = [];
+  for (const f of filesOf(project)) {
+    const top = f.name.split("/")[0];
+    if (f.name.includes("/")) folders.set(top, [...(folders.get(top) ?? []), f]);
+    else loose.push(f);
+  }
+  const sorted = [...folders].sort(([a], [b]) => a.localeCompare(b));
+  return [...sorted.map(([name, files]) => folderRow(name, files, project)), ...loose.map((f) => fileRow(f, project))];
+}
+
+// a file's row, by its name in its folder if it is shown in one
+function fileRow(f, project, label = f.name) {
+  const item = element("li"), link = fileLink(f.name, project);
+  link.textContent = label;
+  const about = element("span", "meta", [STATES[f.state], bytes(f.size), day(f.modified)].filter(Boolean).join(" · "));
+  about.title = f.error ?? (f.state === "scanned" ? "Its scanned pages are read once a model that sees images is loaded" : "");
+  about.classList.toggle("failed", f.state === "failed");
+  item.append(link, about, remover(`“${f.name}”`, f.name, project));
+  return item;
+}
+
+// a folder's row, which opens on its files, saying how many and how big, and whether some are
+// being read or cannot be
+function folderRow(name, files, project) {
+  const key = `${project ?? ""}:${name}`, open = unfolded.has(key);
+  const item = element("li", open ? "folder open" : "folder"), toggle = element("button", "toggle");
+  toggle.append(icon("folder"), element("span", "", name));
+  toggle.onclick = () => {
+    if (!unfolded.delete(key)) unfolded.add(key);
+    renderFiles();
+  };
+  const reading = files.filter((f) => f.state === "reading").length;
+  const failed = files.filter((f) => f.state === "failed").length;
+  const size = files.reduce((sum, f) => sum + f.size, 0);
+  const about = element("span", "meta", [reading && `Reading ${reading}…`, failed && `${failed} couldn't be read`,
+    `${files.length} ${files.length === 1 ? "file" : "files"}`, bytes(size)].filter(Boolean).join(" · "));
+  about.classList.toggle("failed", failed > 0 && !reading);
+  const inside = element("ul");
+  if (open) inside.append(...files.map((f) => fileRow(f, project, f.name.slice(name.length + 1))));
+  item.append(toggle, about, remover(`the folder “${name}”, with its ${files.length} ${files.length === 1 ? "file" : "files"}`, name, project), inside);
+  return item;
+}
+
+// a row's button that deletes a file or a folder, once the user says so
+function remover(what, name, project) {
+  const button = element("button", "", "×");
+  button.title = "Delete";
+  button.onclick = () => confirm(`Delete ${what}? It cannot be undone.`)
+    && del(`/api${place(project)}/files/${encodeURIComponent(name)}`);
+  return button;
 }
 
 // what a file's state in the index says, while it is not read: being read, or not readable
@@ -609,20 +652,37 @@ function renderProject() {
   }));
 }
 
-// asks the user for files, and hands them to `take`, each
-function pick(take) {
+// asks the user for files, or a `folder`, and hands them to `take`: {file, path}, each by its path
+// in the folder chosen, as "Invoices/March/1.pdf"
+function pick(take, folder = false) {
   const picker = element("input");
-  Object.assign(picker, { type: "file", multiple: true });
-  picker.onchange = () => [...picker.files].forEach(take);
+  Object.assign(picker, { type: "file", multiple: true, webkitdirectory: folder });
+  picker.onchange = () => take([...picker.files].map((file) => ({ file, path: file.webkitRelativePath || file.name })));
   picker.click();
 }
 
-// uploads a file to a project's files, or the person's own; returns the name it got there, or null
-// if it did not
-async function upload(file, project) {
+// the files dropped, those of the folders dropped too, each by its path in its folder
+async function dropped(transfer) {
+  const entries = [...transfer.items].map((item) => item.webkitGetAsEntry?.()).filter(Boolean);
+  if (!entries.length) return [...transfer.files].map((file) => ({ file, path: file.name }));
+  const found = [];
+  const walk = async (entry) => {
+    if (entry.isFile) return found.push({ file: await new Promise((done, failed) => entry.file(done, failed)), path: entry.fullPath.slice(1) });
+    const reader = entry.createReader();
+    for (let batch; (batch = await new Promise((done, failed) => reader.readEntries(done, failed))).length;) {
+      for (const inner of batch) await walk(inner);
+    }
+  };
+  for (const entry of entries) await walk(entry);
+  return found;
+}
+
+// uploads a file to a project's files, or the person's own, in the folders of its path, a zip
+// unpacked into a folder of its name; returns the name it got there, or null if it did not
+async function upload({ file, path }, project) {
   try {
-    const path = `/api${place(project)}/files/${encodeURIComponent(file.name)}`;
-    const response = await fetch(path, { method: "PUT", body: file });
+    const unpack = /\.zip$/i.test(path) ? "?unpack" : "";
+    const response = await fetch(`/api${place(project)}/files/${encodeURIComponent(path)}${unpack}`, { method: "PUT", body: file });
     if (!response.ok) throw new Error((await response.json()).error.message);
     return (await response.json()).name;
   } catch (error) {
@@ -631,20 +691,67 @@ async function upload(file, project) {
   }
 }
 
-// attaches a file to the next message, once it is uploaded
-async function attach(file) {
-  const chip = { name: file.name, uploading: true };
-  attached.push(chip);
-  renderAttached();
-  chip.name = await upload(file, here());
-  chip.uploading = false;
-  attached = attached.filter((a) => a.name);
-  renderAttached();
+// uploads files, UPLOADS at once, saying how many are done of many; returns the names they got
+const UPLOADS = 4;
+async function uploads(items, project) {
+  const names = [], waiting = fresh(items, project);
+  let done = 0;
+  const say = () => items.length > 1 && status(done < items.length ? `Uploading ${done} of ${items.length} files…` : "");
+  say();
+  await Promise.all(Array.from({ length: Math.min(UPLOADS, items.length) }, async () => {
+    for (let item; (item = waiting.shift());) {
+      const name = await upload(item, project);
+      if (name) names.push(name);
+      done++;
+      if ($("status").className !== "error") say();
+    }
+  }));
+  return names;
+}
+
+// files to upload, each folder at their top named anew, "Invoices (2)", if the space has one of its
+// name, so that a folder uploaded again is a folder of its own
+function fresh(items, project) {
+  const taken = new Set(filesOf(project).map((f) => f.name.split("/")[0])), named = new Map();
+  return items.map(({ file, path }) => {
+    if (!path.includes("/")) return { file, path };
+    const [top, ...rest] = path.split("/");
+    if (!named.has(top)) {
+      let n = 1, name = top;
+      while (taken.has(name)) name = `${top} (${++n})`;
+      named.set(top, name);
+    }
+    return { file, path: [named.get(top), ...rest].join("/") };
+  });
+}
+
+// attaches files and folders to the next message, once they are uploaded: a folder, or a zip
+// unpacked into one, as a chip of its own
+async function attach(items) {
+  const groups = new Map(); // by the folder at the top of each's path, or by its own name
+  for (const item of items) {
+    const top = item.path.includes("/") ? `${item.path.split("/")[0]}/` : item.path;
+    groups.set(top, [...(groups.get(top) ?? []), item]);
+  }
+  await Promise.all([...groups].map(async ([name, group]) => {
+    const chip = { name, uploading: true, files: group.length };
+    attached.push(chip);
+    renderAttached();
+    const names = await uploads(group, here());
+    const folder = name.endsWith("/") || /\.zip$/i.test(name);
+    chip.name = !names.length ? null : folder ? `${names[0].split("/")[0]}/` : names[0];
+    chip.uploading = false;
+    attached = attached.filter((a) => a.name);
+    renderAttached();
+  }));
 }
 
 function renderAttached() {
   $("attached").replaceChildren(...attached.map((a) => {
-    const chip = element("span", "chip", a.uploading ? `${a.name}…` : a.name);
+    const folder = a.name.endsWith("/");
+    const named = folder ? `${a.name.slice(0, -1)}${a.files > 1 ? ` · ${a.files} files` : ""}` : a.name;
+    const chip = element("span", "chip", a.uploading ? `${named}…` : named);
+    if (folder) chip.prepend(icon("folder"));
     if (!a.uploading && PICTURE.test(a.name)) chip.prepend(picture(a.name));
     const remover = element("button", "", "×");
     remover.title = "Remove";
@@ -989,8 +1096,13 @@ function made(m) {
   return names;
 }
 
-// a file's card, which opens or downloads it: an image's, the image
+// a file's card, which opens or downloads it: an image's, the image; a folder's, its name
 function card(name) {
+  if (name.endsWith("/")) {
+    const folder = element("span", "card", name.slice(0, -1));
+    folder.prepend(icon("folder"));
+    return folder;
+  }
   const a = fileLink(name);
   if (PICTURE.test(name)) {
     a.className = "picture";
@@ -1140,6 +1252,7 @@ const ICONS = {
   write: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
   edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
   run: '<path d="m4 17 6-6-6-6"/><path d="M12 19h8"/>',
+  folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
   tool: '<circle cx="12" cy="12" r="3"/>',
 };
 function icon(name) {

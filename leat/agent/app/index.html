@@ -63,8 +63,8 @@
   </section>
   <section id="files" class="page">
     <h1>Files</h1>
-    <p>Your own files, which Leat reads and makes, and only you see. Attach them to a message, or drop them here. A project's files are on its page.</p>
-    <form><button type="button" id="upload">Upload files</button></form>
+    <p>Your own files, which Leat reads and makes, and only you see. Attach them to a message, or drop files and folders here; a zip is unpacked into a folder. A project's files are on its page.</p>
+    <form><button type="button" id="upload">Upload files</button><button type="button" id="uploadFolder" class="quiet">Upload a folder</button></form>
     <ul id="workspace"></ul>
   </section>
   <section id="projects" class="page">
@@ -84,7 +84,7 @@
     <div id="sharing" class="choice"></div>
     <h2>Chats</h2>
     <ul id="chats"></ul>
-    <h2>Files <button id="adding" type="button">Upload</button></h2>
+    <h2>Files <span><button id="adding" type="button">Upload files</button><button id="addingFolder" type="button">Upload a folder</button></span></h2>
     <ul id="kept"></ul>
     <h2>Instructions</h2>
     <textarea id="instructions" rows="4" placeholder="What Leat should know and do in this project: who the client is, what to watch for, how to write."></textarea>

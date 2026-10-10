@@ -124,6 +124,18 @@ body:is(.files, .settings, .projects) :is(#log, #composer, #greeting), body.proj
 .page form button {
   padding: 10px 20px; border-radius: var(--round-large); background: var(--accent); color: var(--on-accent);
 }
+.page form button.quiet { border: 1px solid var(--line); background: var(--card); color: var(--text); }
+.page form button.quiet:hover { background: var(--bubble); }
+/* a folder of files, a row that opens on them */
+.page li.folder { flex-wrap: wrap; }
+.page li.folder .toggle {
+  display: flex; align-items: center; gap: 8px; padding: 0; font-size: 1rem; color: var(--text); text-align: left;
+}
+.page li.folder .toggle svg { width: 16px; height: 16px; flex: none; color: var(--muted); }
+.page li.folder > ul { flex-basis: 100%; margin-left: 24px; }
+.page li.folder > ul:empty { display: none; }
+.page li.folder > ul li:last-child { border-bottom: none; }
+.page li.folder.open { padding-bottom: 0; }
 .page ul { margin: 0; padding: 0; list-style: none; }
 #workspace:empty::before { content: "Nothing yet."; color: var(--muted); }
 #listed:empty::before { content: "No projects yet: name one above."; color: var(--muted); }
@@ -161,6 +173,7 @@ body:is(.files, .settings, .projects) :is(#log, #composer, #greeting), body.proj
 .page #title:focus { box-shadow: 0 1px 0 var(--line); }
 .page h2:has(button) { display: flex; justify-content: space-between; align-items: center; }
 .page h2 button { padding: 2px 8px; border-radius: var(--round); color: var(--muted); font-size: 0.8125rem; }
+.page h2 span { display: flex; gap: 2px; }
 .page h2 button:hover { background: var(--bubble); color: var(--text); }
 #instructions {
   display: block; width: 100%; margin-top: 8px; padding: 10px 14px; resize: vertical;
@@ -318,6 +331,11 @@ pre code { padding: 0; background: none; }
   border-radius: var(--round-large); background: var(--bubble); font-size: 0.8125rem;
 }
 .chip button { padding: 0 6px; color: var(--muted); }
+.chip > svg { width: 14px; height: 14px; margin-right: 6px; color: var(--muted); }
+.message span.card {
+  display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; font-size: 0.875rem;
+  border: 1px solid var(--line); border-radius: var(--round); background: var(--card);
+}
 .chip img {
   width: 22px; height: 22px; margin: 0 6px 0 -8px; object-fit: cover; border-radius: var(--round);
 }
@@ -358,7 +376,7 @@ pre code { padding: 0; background: none; }
 /* a row's buttons, as a conversation's ×, shown as it is pointed at where the device points, and
    always on a touch screen, which points at nothing */
 @media (hover: hover) {
-  :is(.conversation, .page li):not(:hover, :focus-within) button { visibility: hidden; }
+  :is(.conversation, .page li):not(:hover, :focus-within) button:not(.toggle) { visibility: hidden; }
 }
 /* the gate of a device not yet paired: setting the box up, or asking to join it */
 #gate { display: none; }

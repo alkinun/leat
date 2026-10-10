@@ -30,7 +30,8 @@ MEMBERS = 5000  # files a zip unpacked may hold at most
 # unpacks the zip at sys.argv[1] into the folder sys.argv[2], refusing one of more than
 # sys.argv[3] bytes or sys.argv[4] files; its names of folders kept but for any that would lead
 # out, and taken as UTF-8 where a zip says not, as many do of them; macOS's leavings and hidden
-# files left out. It prints how many files it unpacked
+# files left out, and a folder that holds all the rest, as a folder compressed has, left out too.
+# It prints how many files it unpacked
 _UNPACK = """
 import shutil, sys, zipfile
 from pathlib import Path
@@ -40,7 +41,7 @@ with zipfile.ZipFile(sys.argv[1]) as z:
         sys.exit(f"it holds {len(members)} files, more than {sys.argv[4]}")
     if sum(m.file_size for m in members) > int(sys.argv[3]):
         sys.exit(f"it holds more than {int(sys.argv[3]) >> 20} MB")
-    n = 0
+    named = []
     for m in members:
         name = m.filename
         if not m.flag_bits & 0x800:
@@ -49,14 +50,16 @@ with zipfile.ZipFile(sys.argv[1]) as z:
             except UnicodeError:
                 pass
         parts = [p for p in name.replace("\\\\", "/").split("/") if p not in ("", ".", "..")]
-        if not parts or parts[0] == "__MACOSX" or any(p.startswith(".") for p in parts):
-            continue
+        if parts and parts[0] != "__MACOSX" and not any(p.startswith(".") for p in parts):
+            named.append((m, parts))
+    if len({parts[0] for _, parts in named}) == 1 and all(len(parts) > 1 for _, parts in named):
+        named = [(m, parts[1:]) for m, parts in named]
+    for m, parts in named:
         target = Path(sys.argv[2], *parts)
         target.parent.mkdir(parents=True, exist_ok=True)
         with z.open(m) as source, open(target, "wb") as out:
             shutil.copyfileobj(source, out)
-        n += 1
-print(n)
+print(len(named))
 """
 # the sandbox's view of the box: the system, read-only, and fonts' settings, for charts
 _SYSTEM = [

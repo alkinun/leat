@@ -77,7 +77,8 @@ def tools(reader: Client, index: Index | None = None) -> list[Tool]:
             },
             "files": {
                 "type": "array", "items": {"type": "string"},
-                "description": "the files to ask, by their paths; without them, every file",
+                "description": "the files to ask, by their paths, a folder's every file by "
+                "its; without them, every file",
             },
             "name": {"type": "string", "description": "the spreadsheet's name, as 'Invoices.xlsx'"},
         },
@@ -103,14 +104,11 @@ def ask(
 ) -> Result:  # fmt: skip
     space = context.space()
     keys = [" ".join(c.split()) for c in columns or [] if c.strip()] or ["Answer"]
-    names = files or sorted(f["name"] for f in space.files() if _askable(space, f["name"]))
+    names = _named_files(space, files)
     if not names:
         return Result("There are no files to ask.", {"question": question, "total": 0})
     if len(names) > FILES:
         raise ValueError(f"a call asks {FILES} files at most, not {len(names)}: name fewer")
-    for named in names:
-        if not space.path(named).is_file():
-            raise FileNotFoundError(f"there is no file {named}")
 
     def read(named: str) -> dict[str, str] | None:  # a file's answers, none once stopped
         if context.stopped.is_set():
@@ -186,6 +184,25 @@ def _image(space: Workspace, name: str, text: str) -> list[dict[str, Any]]:
     kind = mimetypes.guess_type(name)[0] or "image/png"
     url = f"data:{kind};base64,{base64.b64encode(space.path(name).read_bytes()).decode()}"
     return [{"type": "image_url", "image_url": {"url": url}}, {"type": "text", "text": text}]
+
+
+def _named_files(space: Workspace, named: list[str] | None) -> list[str]:
+    # the files a call names, each of its folders' as their names' order has them, or without
+    # any named every file of the space's to ask. Raises FileNotFoundError for one that is not
+    every = [f["name"] for f in space.files() if _askable(space, f["name"])]
+    if not named:
+        return sorted(every)
+    found: list[str] = []
+    for name in named:
+        path = space.path(name)
+        if path.is_dir():
+            folder = path.relative_to(space.root).as_posix() + "/"
+            found += sorted(f for f in every if f.startswith(folder) or folder == "./")
+        elif path.is_file():
+            found.append(path.relative_to(space.root).as_posix())
+        else:
+            raise FileNotFoundError(f"there is no file {name}")
+    return list(dict.fromkeys(found))
 
 
 def _askable(space: Workspace, name: str) -> bool:

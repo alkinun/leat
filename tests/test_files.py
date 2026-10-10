@@ -407,6 +407,14 @@ def test_unpack(workspace, monkeypatch):
     with pytest.raises(ValueError, match="it holds 2 files, more than 1"):
         workspace.unpack("many.zip")
     assert (workspace.root / "many.zip").exists() and not (workspace.root / "many").exists()
+    # a folder compressed, the folder that holds all the rest left out
+    monkeypatch.setattr(workspace_module, "MEMBERS", 10)
+    with zipfile.ZipFile(workspace.root / "Contracts.zip", "w") as z:
+        z.writestr("Contracts/A.txt", "a")
+        z.writestr("Contracts/2025/B.txt", "b")
+    assert workspace.unpack("Contracts.zip") == ("Contracts", 2)
+    assert sorted(f["name"] for f in workspace.files() if f["name"].startswith("Contracts/")) == [
+        "Contracts/2025/B.txt", "Contracts/A.txt"]  # fmt: skip
 
 
 @sandboxed

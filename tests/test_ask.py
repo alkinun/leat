@@ -176,3 +176,13 @@ def test_image(engine, space):
     image, text = engine.requests[0]["messages"][1]["content"]
     assert image["image_url"]["url"].startswith("data:image/png;base64,")
     assert text["text"] == "The question: Totals?\n\nThe file, receipt.png, is this image."
+
+
+def test_folders(engine, space):
+    # a folder named asks each of its files, as their names' order has them
+    for name in ("March/2.txt", "March/1.txt", "April/3.txt"):
+        files.write(space, name, name)
+    for _ in range(2):
+        engine.replies.put(answers({"Answer": "x"})[0])
+    result = ask.ask(Client(engine.url), None, context(space), "?", files=["March"])
+    assert [r["file"] for r in result.info["results"]] == ["March/1.txt", "March/2.txt"]
