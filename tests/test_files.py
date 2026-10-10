@@ -414,6 +414,10 @@ def test_history(workspace, monkeypatch):
     workspace.restore("notes.txt", earlier[-1]["version"])
     assert (workspace.root / "notes.txt").read_text() == "one"
     assert len(workspace.versions()) == 3  # "three" kept as it was restored over
+    (workspace.root / ".saved.md").write_text("a page read")  # hidden: deleted, not kept
+    workspace.delete(".saved.md")
+    assert not (workspace.root / ".saved.md").exists()
+    assert {v["name"] for v in workspace.versions()} == {"notes.txt"}
     files.write(workspace, "old/a.txt", "a")
     (workspace.root / "old" / ".hidden").write_text("h")
     workspace.delete("old")

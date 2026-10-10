@@ -254,6 +254,7 @@ class Workspace:
             shutil.rmtree(path)  # and what was not kept, hidden files and folders left empty
         elif path.is_file():
             self.keep(name, move=True)
+            path.unlink(missing_ok=True)  # one not kept, as a hidden one
         else:
             raise self.missing(name)
 
