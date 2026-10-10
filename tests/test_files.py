@@ -173,6 +173,16 @@ wb = openpyxl.Workbook(); wb.active.append(["Rent", 900, "=B1*12"]); wb.save("bu
 """,
     )
     assert files.read(workspace, "plan.docx").content == "# Plan\n\nBuy milk.\n\n"
+    # a Word document's header and footer, as its letterhead, around its body
+    files.run(workspace, """
+import docx
+d = docx.Document()
+d.sections[0].header.paragraphs[0].text = "Becker & Partner"
+d.sections[0].footer.paragraphs[0].text = "80802 München"
+d.save("Briefkopf.docx")
+""")  # fmt: skip
+    letterhead = "Header: Becker & Partner\n\nFooter: 80802 München\n\n"
+    assert files.read(workspace, "Briefkopf.docx").content == letterhead
     assert files.read(workspace, "budget.xlsx").content == (
         "## Sheet\n\n\n| Rent | 900 | =B1*12 |\n| --- | --- | --- |\n\n")  # fmt: skip
     # a long one, in parts, whole

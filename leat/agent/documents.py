@@ -47,6 +47,23 @@ elif kind == "docx":
     from docx.table import Table
     from docx.text.paragraph import Paragraph
     document = Document(path)
+
+    def margins(kind):
+        # the text of the document's headers or footers, each once, as a letterhead's
+        said = []
+        for section in document.sections:
+            for part in (getattr(section, f"first_page_{kind}"), getattr(section, kind),
+                         getattr(section, f"even_page_{kind}")):
+                if part.is_linked_to_previous:
+                    continue
+                cells = [c.text for t in part.tables for row in t.rows for c in row.cells]
+                text = " ".join(" ".join(p.text for p in part.paragraphs).split() + cells)
+                if text.strip() and text not in said:
+                    said.append(text)
+        return said
+
+    for text in margins("header"):
+        print(f"Header: {text}\\n")
     for block in document.element.body.iterchildren():
         if block.tag.endswith("}tbl"):
             table([[cell.text for cell in row.cells] for row in Table(block, document).rows])
@@ -65,6 +82,8 @@ elif kind == "docx":
                 print(f"- {text}")
             else:
                 print(f"{text}\\n")
+    for text in margins("footer"):
+        print(f"Footer: {text}\\n")
 elif kind == "xlsx":  # each cell's value, or its formula if no program has computed it yet
     from openpyxl import load_workbook
     values, formulas = (load_workbook(path, read_only=True, data_only=d) for d in (True, False))

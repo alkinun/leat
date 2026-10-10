@@ -42,7 +42,7 @@ from leat.agent.embeddings import Embedder, similarity
 from leat.agent.ocr import Transcriber
 from leat.agent.workspace import Workspace
 
-VERSION = 4  # of the index's tables: one of another is made anew
+VERSION = 5  # of the index's tables, and of the text it keeps: one of another is made anew
 PASSAGE = 1200  # characters of a passage at most
 FOUND = 8  # passages a search finds at most
 EACH = 3  # of one file at most
