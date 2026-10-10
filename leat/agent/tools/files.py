@@ -1,92 +1,25 @@
-"""The workspace's files, as tools: reading them, writing and editing them, and running Python among
-them in the sandbox. read reads the skills too, the guides to making documents, at skills/."""
+"""The workspace's files, as tools: reading them, searching them, writing and editing them, and
+running Python among them in the sandbox. read reads the skills too, the guides to making
+documents, at skills/. With an index, a file's text is read as the index keeps it, and the files
+are searched there, each passage found numbered, across the conversation, for the model to cite."""
 
 from pathlib import Path
 from typing import Any
 
+from leat.agent import documents
 from leat.agent.context import picture
-from leat.agent.tools import Result, Tool, strings
+from leat.agent.index import Index
+from leat.agent.tools import Context, Result, Tool, strings
 from leat.agent.workspace import Workspace
 
 READ = 12000  # characters of a file read at once
 SKILLS = Path(__file__).parent.parent / "skills"
 LIBRARIES = "python-docx, openpyxl, python-pptx, fpdf2, pypdf, matplotlib, pandas"
-# the kinds of file read by parsing them, in the sandbox, and those that cannot be read as text
-DOCUMENTS = (".pdf", ".docx", ".xlsx", ".pptx")
-# reads the document at sys.argv[1] as markdown, which keeps its headings, lists and tables, as
-# markitdown reads one, in the sandbox, with its libraries
-_EXTRACT = """
-import sys
-path = sys.argv[1]
-kind = path.rsplit(".", 1)[-1].lower()
-
-def table(rows):
-    rows = [["" if cell is None else " ".join(str(cell).split()) for cell in row] for row in rows]
-    rows = [row for row in rows if any(row)]
-    if not rows:
-        return
-    width = max(len(row) for row in rows)
-    print()
-    for i, row in enumerate(rows):
-        print("| " + " | ".join(row + [""] * (width - len(row))) + " |")
-        if i == 0:
-            print("|" + " --- |" * width)
-    print()
-
-if kind == "pdf":
-    from pypdf import PdfReader
-    for i, page in enumerate(PdfReader(path).pages, 1):
-        print(f"## Page {i}\\n\\n{page.extract_text() or ''}\\n")
-elif kind == "docx":
-    from docx import Document
-    from docx.table import Table
-    from docx.text.paragraph import Paragraph
-    document = Document(path)
-    for block in document.element.body.iterchildren():
-        if block.tag.endswith("}tbl"):
-            table([[cell.text for cell in row.cells] for row in Table(block, document).rows])
-        elif block.tag.endswith("}p"):
-            paragraph = Paragraph(block, document)
-            style, text = paragraph.style.name if paragraph.style else "", paragraph.text
-            if not text.strip():
-                continue
-            if style == "Title":
-                print(f"# {text}\\n")
-            elif style.startswith("Heading") and style[-1:].isdigit():
-                print("#" * (int(style[-1]) + 1) + f" {text}\\n")
-            elif style.startswith("List Number"):
-                print(f"1. {text}")
-            elif style.startswith("List"):
-                print(f"- {text}")
-            else:
-                print(f"{text}\\n")
-elif kind == "xlsx":  # each cell's value, or its formula if no program has computed it yet
-    from openpyxl import load_workbook
-    values, formulas = (load_workbook(path, read_only=True, data_only=d) for d in (True, False))
-    for sheet, written in zip(values, formulas):
-        print(f"## {sheet.title}\\n")
-        table([[raw[i] if value is None else value for i, value in enumerate(row)]
-               for row, raw in zip(sheet.iter_rows(values_only=True),
-                                   written.iter_rows(values_only=True))])
-elif kind == "pptx":
-    from pptx import Presentation
-    for i, slide in enumerate(Presentation(path).slides, 1):
-        title = slide.shapes.title.text if slide.shapes.title is not None else ""
-        print(f"## Slide {i}: {title}\\n" if title else f"## Slide {i}\\n")
-        for shape in slide.shapes:
-            if shape == slide.shapes.title:
-                continue
-            if shape.has_table:
-                table([[cell.text for cell in row.cells] for row in shape.table.rows])
-            elif shape.has_text_frame and shape.text_frame.text.strip():
-                print(shape.text_frame.text + "\\n")
-        if slide.has_notes_slide and slide.notes_slide.notes_text_frame.text.strip():
-            print(f"Notes: {slide.notes_slide.notes_text_frame.text}\\n")
-"""
 
 
-def tools() -> list[Tool]:
-    """read, write, edit and run, each in its call's conversation's workspace."""
+def tools(index: Index | None = None) -> list[Tool]:
+    """read, write, edit and run, each in its call's conversation's workspace, and with an index
+    search_files, of the index's passages."""
     start = {"type": "integer", "description": "the character to read from, in a long file"}
     path = {"type": "string", "description": "the file's path in the workspace, as 'notes.txt'"}
     reading = {"type": "object", "properties": {"path": path, "start": start}, "required": ["path"]}
@@ -96,7 +29,7 @@ def tools() -> list[Tool]:
             "Read a file in the workspace as text, a PDF or a Word, Excel or PowerPoint file too, "
             "or list a folder's files, '.' the workspace's",
             reading,
-            lambda context, path, start=0: read(context.space(), path, start),
+            lambda context, path, start=0: read(context.space(), path, start, index),
         ),
         Tool(
             "write",
@@ -121,11 +54,20 @@ def tools() -> list[Tool]:
             strings(code=f"Python 3; its libraries are {LIBRARIES}"),
             lambda context, code: run(context.space(), code),
         ),
-    ]
+    ] + ([Tool(
+        "search_files",
+        "Search the text of the workspace's files, documents too, for the passages that say "
+        "something: the likeliest few, each numbered, with its file and where in it",
+        strings(query="what to find, in the words a passage would use"),
+        lambda context, query: search(index, context, query),
+    )] if index is not None else [])  # fmt: skip
 
 
-def read(workspace: Workspace, path: str, start: int | str = 0) -> Result:
-    file = _skill(path) if path.startswith("skills/") else workspace.path(path)
+def read(
+    workspace: Workspace, path: str, start: int | str = 0, index: Index | None = None
+) -> Result:
+    skill = path.startswith("skills/")
+    file = _skill(path) if skill else workspace.path(path)
     start = max(0, int(start))
     if file.is_dir():
         names = sorted(f"{p.name}/" if p.is_dir() else p.name for p in file.iterdir())
@@ -133,27 +75,33 @@ def read(workspace: Workspace, path: str, start: int | str = 0) -> Result:
         return Result(listed or "The folder is empty.", {"file": path})
     if not file.is_file():
         raise FileNotFoundError(f"there is no file {path}")
-    suffix = file.suffix.lower()
     if picture(path):  # which the agent shows the model, if it sees images
         return Result(f"The image {path}.", {"file": path, "images": [path]})
-    if suffix in (".heic", ".heif"):
+    if file.suffix.lower() in (".heic", ".heif"):
         raise ValueError(f"{path} is an image of a kind you cannot see: convert it to a PNG")
-    if suffix in DOCUMENTS:
-        name = f"/workspace/{file.relative_to(workspace.root).as_posix()}"
-        ran = workspace.run(_EXTRACT, name, kept=None)  # read on in parts, below
-        if ran.status != 0:
-            why = (ran.output.strip().splitlines() or ["it stopped"])[-1]
-            raise ValueError(f"{path} could not be read: {why}")
-        text = ran.output
-    else:
-        data = file.read_bytes()
-        if b"\0" in data[:8192]:
-            raise ValueError(f"{path} is not a file of text")
-        text = data.decode("utf-8", "replace")
+    if skill:
+        text = file.read_text(encoding="utf-8")
+    else:  # read on in parts, below
+        text = index.text(workspace, path) if index else documents.text(workspace, path)
     part = text[start : start + READ]
     if (end := start + len(part)) < len(text):
         part += f"\n\n(characters {start} to {end} of {len(text)}; read on from start={end})"
     return Result(part or "The file is empty.", {"file": path})
+
+
+def search(index: Index, context: Context, query: str) -> Result:
+    # the passages of the conversation's files likeliest to say what the query asks, each
+    # numbered as a source, by its file and place: "file:<name>#<place>"
+    results, said = [], []
+    for found in index.search(context.space(), query):
+        name, place = found["name"], found["place"]
+        where = f"{name}, {place}" if place else name
+        url = f"file:{name}#{place}" if place else f"file:{name}"
+        n = context.cite(url, where)
+        results.append({"n": n, "url": url, "title": where, "file": name, "place": place})
+        said.append(f"[{n}] {where} (read on from start={found['start']})\n{found['text']}")
+    content = "\n\n".join(said) or "No passage of the files says that."
+    return Result(content, {"query": query, "results": results})
 
 
 def write(workspace: Workspace, path: str, content: str) -> Result:

@@ -28,6 +28,7 @@ from typing import Any
 from leat.agent import context
 from leat.agent.background import Background
 from leat.agent.client import Client, Completion, EngineError, whole
+from leat.agent.index import Index
 from leat.agent.store import Store
 from leat.agent.tools import Context, Result, Tool, arguments, files, numbered
 from leat.agent.workspace import Workspace
@@ -51,9 +52,13 @@ The user's files are in a workspace, where you read, write and edit them, and ru
 them in a sandbox without the network; the files they attach are named in their message, and the \
 images among them shown, as those you read are, when you can see images. To make \
 a document, first read the skill for its kind, then make it with run, and name its file in your \
-answer, without a link: the app shows the user the files you make. The skills:
+answer, without a link: the app shows the user the files you make.{search} The skills:
 {skills}
 """
+# of the system prompt, when the agent searches the files
+SEARCH = """ To answer from the files, call search_files \
+for the passages that say it, in several ways if the first falls short, and read on in the files \
+where the passages do; cite them by their numbers, as you cite pages."""
 # of the system prompt, of a conversation in a project
 PROJECT = """
 This conversation is in the project "{name}".{instructions}
@@ -108,7 +113,8 @@ class Events:
 
 class Agent:
     """The conversations in `store`, the turns run by the model `engine` serves, which calls
-    `tools`; and the files, in `workspace`, if any: each project's, and each person's own.
+    `tools`; and the files, in `workspace`, if any: each project's, and each person's own, read
+    and kept by `index`, if one, as they change.
 
     Each conversation is a person's of the box's, `person` by its id, and an event that tells of
     one is to that person's apps alone: "to" says whose. Before the box
@@ -116,9 +122,12 @@ class Agent:
 
     def __init__(
         self, store: Store, engine: Client, tools: list[Tool] | None = None,
-        workspace: Workspace | None = None,
+        workspace: Workspace | None = None, index: Index | None = None,
     ):  # fmt: skip
         self.store, self.engine, self.workspace, self.events = store, engine, workspace, Events()
+        self.index = index
+        if index is not None:  # each file's state, told as it is read
+            index.changed = self._indexed
         self.tools = {tool.name: tool for tool in tools or []}
         self._files: dict[str, list[dict[str, Any]]] = {}  # each space's, as the apps were told
         self._models: Event | None = None  # the engine's models, as the apps were last told
@@ -132,6 +141,8 @@ class Agent:
         when the engine comes up or goes away, as background.Background does."""
         self.background = Background(self)
         self.background.start()
+        if self.index is not None:
+            self.index.start()
 
     def running(self, id: str) -> bool:
         """Whether a turn runs in a conversation."""
@@ -185,7 +196,8 @@ class Agent:
                 info["files"] = attached
             if id is None:
                 who = (self.store.person(person) or {}) if person else {}
-                system = _system(self.workspace is not None, who.get("name"), held)
+                search = "search_files" in self.tools
+                system = _system(self.workspace is not None, who.get("name"), held, search)
                 title = _title(content)
                 id = self.store.create(title, [system, message], person, project)["id"]
                 start = 1
@@ -260,6 +272,8 @@ class Agent:
             if self.workspace is not None:
                 self._space(id, person).remove()
                 self._files.pop(_folder(id, person), None)
+                if self.index is not None:
+                    self.index.forget(_folder(id, person))
             for c in held:
                 self.events.publish({"type": "deleted", "id": c["id"], "to": c["person"]})
             self._publish_projects()
@@ -281,15 +295,24 @@ class Agent:
 
     def files_changed(self, project: str | None = None, person: int | None = None) -> None:
         """Tells the apps of a space's files, a project's or a person's own, if they changed
-        since they were last told."""
+        since they were last told, and has the index read them as they now are."""
         with self._lock:
             if self.workspace is not None:
                 self._publish_files(project, person, changed=True)
+        if self.index is not None:
+            self.index.refresh(_folder(project, person))
 
     def files_event(self, project: str | None = None, person: int | None = None) -> Event:
         """A space's files, a project's or a person's own, as an event."""
-        files = self._space(project, person).files() if self.workspace else []
+        files = self._listing(project, person) if self.workspace else []
         return {"type": "files", "project": project, "files": files}
+
+    def clear(self, person: int) -> None:
+        """Deletes a person's own files, as their removal does."""
+        if self.workspace is not None:
+            self._space(None, person).remove()
+            if self.index is not None:
+                self.index.forget(_folder(None, person))
 
     def settle(self) -> None:
         """Moves the files that are no one's into the owner's space, once the box has one: those
@@ -365,11 +388,29 @@ class Agent:
         assert self.workspace is not None
         return self.workspace.space(_folder(project, person))
 
+    def _listing(self, project: str | None, person: int | None) -> list[dict[str, Any]]:
+        # a space's files, each with its state in the index if it is not read: "reading", or
+        # "failed", with why
+        files = self._space(project, person).files()
+        if self.index is None:
+            return files
+        states = self.index.states(_folder(project, person))
+        return [f | states.get(f["name"], {}) for f in files]
+
+    def _indexed(self, folder: str) -> None:
+        # tells the apps of a space's files, whose states changed as the index read them
+        kind, id = folder.split("/", 1)
+        with self._lock:
+            if kind == "projects" and self.store.project(id) is not None:
+                self._publish_files(id, None, changed=True)
+            elif kind == "people":
+                self._publish_files(None, int(id) or None, changed=True)
+
     def _publish_files(
         self, project: str | None, person: int | None, changed: bool = False
     ) -> None:
         # a space's files, to the apps of those who see it, if they `changed` since they were told
-        files, folder = self._space(project, person).files(), _folder(project, person)
+        files, folder = self._listing(project, person), _folder(project, person)
         if changed and self._files.get(folder) == files:
             return
         self._files[folder] = files
@@ -768,12 +809,14 @@ class _Stopped(Exception):
 
 
 def _system(
-    workspace: bool, name: str | None = None, project: dict[str, Any] | None = None
-) -> dict[str, Any]:
+    workspace: bool, name: str | None = None, project: dict[str, Any] | None = None,
+    search: bool = False,
+) -> dict[str, Any]:  # fmt: skip
     # the system prompt of a conversation begun now with the user, of a `name` if the box has
-    # people, the workspace's tools if `workspace`, and the project it is held in, if one
+    # people, the workspace's tools if `workspace`, search_files's if `search`, and the project
+    # it is held in, if one
     skills = "\n".join(f"- {path}: {about}" for path, about in files.skills())
-    space = WORKSPACE.format(skills=skills) if workspace else ""
+    space = WORKSPACE.format(skills=skills, search=SEARCH if search else "") if workspace else ""
     named = f" The user is {name}." if name else ""
     content = SYSTEM.format(named=named, workspace=space)
     if project is not None:

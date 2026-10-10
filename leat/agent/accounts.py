@@ -136,8 +136,7 @@ class Accounts:
             if project["person"] == id and not project["shared"]:
                 self.agent.delete_project(project["id"], id)
         self.store.remove_person(id)
-        if self.agent.workspace is not None:  # and their own files
-            self.agent.space(None, id).remove()
+        self.agent.clear(id)  # and their own files
         self.agent.projects_changed()  # those they shared, now the owner's
         self._publish()
 

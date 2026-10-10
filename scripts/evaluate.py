@@ -27,6 +27,7 @@ sys.path.insert(0, str(ROOT))
 
 from leat.agent.agent import Agent  # noqa: E402
 from leat.agent.client import Client  # noqa: E402
+from leat.agent.index import Index  # noqa: E402
 from leat.agent.store import Store  # noqa: E402
 from leat.agent.tools import files, web  # noqa: E402
 from leat.agent.workspace import Workspace  # noqa: E402
@@ -146,11 +147,13 @@ def _run(case: Case, args: argparse.Namespace) -> Outcome:
         environment = args.sandbox if args.sandbox.exists() else None
         workspace = Workspace(Path(data) / "workspace", environment)
         engine = Client(args.engine, os.environ.get("LEAT_ENGINE_KEY"))
-        tools = [*web.tools(args.search, engine), *files.tools()]
-        agent = Agent(Store(Path(data) / "leat.db"), engine, tools, workspace)
+        index = Index(Path(data) / "index.db", workspace)
+        tools = [*web.tools(args.search, engine), *files.tools(index)]
+        agent = Agent(Store(Path(data) / "leat.db"), engine, tools, workspace, index)
         space = agent.space()  # no one's own, as the conversation is
         for name, text in case.files.items():
             space.path(name).write_text(text)
+        index.update("people/0")  # read before the model searches them
         start = time.monotonic()
         messages = _wait(agent, agent.send(None, case.message, args.effort, list(case.files)))
         seconds = time.monotonic() - start

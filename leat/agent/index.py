@@ -1,0 +1,261 @@
+"""The index: what each space's files say, read once and kept, to read again at once and to search.
+
+A space's files are read in the background as they come and change: each one's text, as
+leat.agent.documents reads it, kept until the file changes, as its size and the time it changed
+tell; and its passages, each some lines of one of its places, which SQLite's FTS5 finds by the
+words they share with a query, the likeliest first. The index is a copy of what the files say,
+kept beside the agent's state, and one of another version is made anew from them.
+
+A query's words find those written as they are and those that begin as they do, as Turkish's
+suffixes and English's endings change a word: one of more than STEM letters finds the words that
+begin with its first letters but its last three, STEM at least, so that "sözleşmesi" finds
+"sözleşmenin", and "termination" "terminate". Dotted and dotless i are one letter, and a letter
+and its accented forms are one.
+"""
+
+import queue
+import re
+import sqlite3
+import threading
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+from leat.agent import documents
+from leat.agent.workspace import Workspace
+
+VERSION = 1  # of the index's tables: one of another is made anew
+PASSAGE = 1200  # characters of a passage at most
+FOUND = 8  # passages a search finds at most
+EACH = 3  # of one file at most
+STEM = 5  # letters of a word's beginning that a query's word finds at least
+_TABLES = """
+CREATE TABLE documents (
+  folder TEXT NOT NULL,
+  name TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  modified REAL NOT NULL,
+  text TEXT,
+  error TEXT,
+  PRIMARY KEY (folder, name)
+);
+CREATE VIRTUAL TABLE passages USING fts5 (
+  words, text UNINDEXED, folder UNINDEXED, name UNINDEXED, place UNINDEXED, start UNINDEXED,
+  tokenize = 'unicode61 remove_diacritics 2'
+);
+"""
+
+
+class Index:
+    """The index at `path` of the spaces of `workspace`, each by its folder there, as
+    "projects/<id>". `changed` is called with a space's folder once its files' states change, as
+    one begins to be read and once it is, on the index's thread."""
+
+    def __init__(self, path: Path | str, workspace: Workspace):
+        self.workspace = workspace
+        self.changed: Callable[[str], None] = lambda folder: None
+        self._db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
+        self._db.execute("PRAGMA journal_mode = WAL")
+        if self._db.execute("PRAGMA user_version").fetchone()[0] != VERSION:
+            for table in ("documents", "passages"):
+                self._db.execute(f"DROP TABLE IF EXISTS {table}")
+            self._db.executescript(_TABLES)
+            self._db.execute(f"PRAGMA user_version = {VERSION}")
+        self._lock = threading.Lock()
+        self._waiting: queue.SimpleQueue[str] = queue.SimpleQueue()
+        self._reading: dict[str, set[str]] = {}  # each space's files still to read, by folder
+
+    def start(self) -> None:
+        """Reads every space's new and changed files, then each space's as it is refreshed, on a
+        thread of its own."""
+        for kind in ("people", "projects"):
+            for folder in sorted((self.workspace.root / kind).glob("*")):
+                self.refresh(f"{kind}/{folder.name}")
+        threading.Thread(target=self._work, name="index", daemon=True).start()
+
+    def refresh(self, folder: str) -> None:
+        """Has a space's files read again, those new or changed since, and those gone forgotten."""
+        self._waiting.put(folder)
+
+    def text(self, space: Workspace, name: str) -> str:
+        """A file's text, as kept if the file is as it was, or else read and kept. Raises
+        FileNotFoundError if there is no such file, ValueError if it cannot be read as text."""
+        file = space.path(name)
+        name, folder = file.relative_to(space.root).as_posix(), self._folder(space)
+        stat = file.stat()
+        with self._lock:
+            row = self._db.execute(
+                "SELECT text FROM documents WHERE folder = ? AND name = ? AND size = ?"
+                " AND modified = ? AND text IS NOT NULL",
+                (folder, name, stat.st_size, stat.st_mtime),
+            ).fetchone()  # fmt: skip
+        if row is not None:
+            return row[0]
+        text = documents.text(space, name)
+        self._keep(folder, name, stat.st_size, stat.st_mtime, text)
+        return text
+
+    def search(self, space: Workspace, query: str, n: int = FOUND) -> list[dict[str, Any]]:
+        """The passages of a space's files likeliest to say what a query asks, n at most, EACH of
+        a file: each's file, place, its start in the file's text, and its text."""
+        if not (match := _match(query)):
+            return []
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT name, place, start, text FROM passages WHERE passages MATCH ?"
+                " AND folder = ? ORDER BY rank LIMIT ?", (match, self._folder(space), n * EACH),
+            ).fetchall()  # fmt: skip
+        found: list[dict[str, Any]] = []
+        for name, place, start, text in rows:
+            if sum(f["name"] == name for f in found) < EACH and len(found) < n:
+                found.append({"name": name, "place": place, "start": start, "text": text})
+        return found
+
+    def states(self, folder: str) -> dict[str, dict[str, str]]:
+        """The states of a space's files that are not read, by their names: "reading", or
+        "failed", with why."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT name, error FROM documents WHERE folder = ? AND error IS NOT NULL",
+                (folder,),
+            ).fetchall()
+            reading = set(self._reading.get(folder, ()))
+        states = {name: {"state": "failed", "error": error} for name, error in rows}
+        return states | {name: {"state": "reading"} for name in reading}
+
+    def forget(self, folder: str) -> None:
+        """Forgets a space's files, as a project deleted takes them."""
+        with self._lock, self._db:
+            self._db.execute("BEGIN")
+            for table in ("documents", "passages"):
+                self._db.execute(f"DELETE FROM {table} WHERE folder = ?", (folder,))
+
+    def _work(self) -> None:
+        while True:
+            folder = self._waiting.get()
+            try:
+                self.update(folder)
+            except Exception as e:  # a bug's, which must not stop the reading of the others
+                print(f"leat agent: the index failed to read {folder}: {e!r}", flush=True)
+
+    def update(self, folder: str) -> None:
+        """Reads a space's files that are new or changed, now, forgetting those gone, each told of
+        as it begins to be read and once it is."""
+        if not (self.workspace.root / folder).is_dir():
+            return self.forget(folder)
+        space = self.workspace.space(folder)
+        on_disk = {f["name"]: f for f in space.files()}
+        with self._lock:
+            sql = "SELECT name, size, modified FROM documents WHERE folder = ?"
+            known = {
+                name: (size, modified) for name, size, modified in self._db.execute(sql, (folder,))
+            }
+        gone = [name for name in known if name not in on_disk]
+        stale = [
+            name for name, f in on_disk.items()
+            if known.get(name) != (f["size"], f["modified"]) and _readable(space, name)
+        ]  # fmt: skip
+        with self._lock, self._db:
+            self._db.execute("BEGIN")
+            for name in gone:
+                for table in ("documents", "passages"):
+                    sql = f"DELETE FROM {table} WHERE folder = ? AND name = ?"
+                    self._db.execute(sql, (folder, name))
+            self._reading[folder] = set(stale)
+        if gone or stale:
+            self.changed(folder)
+        for name in stale:
+            try:
+                self.text(space, name)
+            except FileNotFoundError:  # gone meanwhile
+                pass
+            except (ValueError, RuntimeError) as e:  # as the sandbox not being there
+                f = on_disk[name]
+                self._keep(folder, name, f["size"], f["modified"], None, str(e))
+            with self._lock:
+                self._reading[folder].discard(name)
+            self.changed(folder)
+
+    def _keep(
+        self, folder: str, name: str, size: int, modified: float, text: str | None,
+        error: str | None = None,
+    ) -> None:  # fmt: skip
+        # keeps a file's text and its passages, or why it could not be read
+        found = passages(name, text) if text is not None else []
+        with self._lock, self._db:
+            self._db.execute("BEGIN")
+            sql = "DELETE FROM passages WHERE folder = ? AND name = ?"
+            self._db.execute(sql, (folder, name))
+            self._db.execute(
+                "INSERT OR REPLACE INTO documents VALUES (?, ?, ?, ?, ?, ?)",
+                (folder, name, size, modified, text, error),
+            )
+            self._db.executemany(
+                "INSERT INTO passages VALUES (?, ?, ?, ?, ?, ?)",
+                [(fold(said), said, folder, name, place, start) for start, place, said in found],
+            )
+
+    def _folder(self, space: Workspace) -> str:
+        return space.root.relative_to(self.workspace.root).as_posix()
+
+
+def passages(name: str, text: str) -> list[tuple[int, str, str]]:
+    """A file's text in passages, each some of its lines, PASSAGE characters at most, a line
+    longer cut between words, within one of its places: each's start in the text, its place, as
+    "page 3", or "" before any, and its text."""
+    marks = [(0, ""), *documents.places(name, text)]
+    found = []
+    for (start, place), (end, _) in zip(marks, [*marks[1:], (len(text), "")], strict=True):
+        first = last = None  # the passage's span, as its lines are added
+        for line in _lines(text, start, end):
+            if first is not None and line[1] - first > PASSAGE:
+                found.append((first, place, text[first:last]))
+                first = None
+            first, last = line[0] if first is None else first, line[1]
+        if first is not None:
+            found.append((first, place, text[first:last]))
+    return found
+
+
+def fold(text: str) -> str:
+    """Text as the index matches it: in lowercase, with dotted and dotless i one letter, as
+    Turkish's İ and ı, and English's I and i, are."""
+    return text.lower().replace("ı", "i").replace("̇", "")
+
+
+def _lines(text: str, start: int, end: int) -> list[tuple[int, int]]:
+    # the spans of the lines of text[start:end] that say something, each PASSAGE characters at
+    # most, a line longer cut between its words
+    spans = []
+    for line in re.finditer(r"[^\n]*\S[^\n]*", text[start:end]):
+        at, stop = start + line.start(), start + line.end()
+        while stop - at > PASSAGE:
+            cut = text.rfind(" ", at + 1, at + PASSAGE)
+            cut = cut if cut > at else at + PASSAGE
+            spans.append((at, cut))
+            at = cut + 1 if text[cut] == " " else cut
+        spans.append((at, stop))
+    return spans
+
+
+def _match(query: str) -> str:
+    # an FTS5 query of a search's words: any of them, as written or begun, but for those of a
+    # letter alone
+    terms = []
+    for word in dict.fromkeys(re.findall(r"\w+", fold(query))):
+        if len(word) > STEM:
+            terms.append(f'"{word[: max(STEM, len(word) - 3)]}"*')
+        elif len(word) > 3:
+            terms.append(f'"{word}"*')
+        elif len(word) > 1:
+            terms.append(f'"{word}"')
+    return " OR ".join(terms)
+
+
+def _readable(space: Workspace, name: str) -> bool:
+    # whether a file has text to read: a document, or text, not an image
+    try:
+        with space.path(name).open("rb") as f:
+            return documents.readable(name, f.read(documents.SNIFF))
+    except OSError:
+        return False

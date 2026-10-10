@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 from leat.agent.agent import Agent
 from leat.agent.client import Client
+from leat.agent.index import Index
 from leat.agent.server import Server as AgentServer
 from leat.agent.store import Store
 from leat.agent.tools import files, web
@@ -52,7 +53,8 @@ def main(argv: list[str] | None = None) -> None:
     agent.add_argument(
         "--data", type=Path, default=_data(),
         help="where its state is kept: its conversations, the user's files in "
-        "workspace/, and in sandbox/ the environment of libraries the sandbox offers",
+        "workspace/, what they say in index.db, and in sandbox/ the environment of libraries "
+        "the sandbox offers",
     )  # fmt: skip
 
     run = commands.add_parser("run", help="chat with a model in the terminal")
@@ -181,8 +183,9 @@ def _agent(args: argparse.Namespace) -> None:
     environment = args.data / "sandbox"
     workspace = Workspace(args.data / "workspace", environment if environment.exists() else None)
     engine = Client(args.engine, os.environ.get("LEAT_ENGINE_KEY"))
-    tools = [*web.tools(args.search, engine), *files.tools()]
-    agent = Agent(Store(args.data / "leat.db"), engine, tools, workspace)
+    index = Index(args.data / "index.db", workspace)
+    tools = [*web.tools(args.search, engine), *files.tools(index)]
+    agent = Agent(Store(args.data / "leat.db"), engine, tools, workspace, index)
     agent.start()
     with AgentServer(agent, args.host, args.port) as server:
         print(f"leat agent at {_url(args.host, server.server_port)}, its models of {args.engine}. "
