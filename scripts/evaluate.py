@@ -186,6 +186,34 @@ MONTH = {
     for n, supplier, amount in BILLED
 }
 TOTAL = re.escape(f"{sum(amount for _, _, amount in BILLED):,.2f}")
+# a report's draft and its final version, whose figures differ
+VERSIONS = {
+    "Reports/Q3 report v1 (draft).md": "# Q3 report, draft\n\nRevenue: 1,200,000 EUR. Margin: "
+    "18%. Figures to be confirmed.",
+    "Reports/Q3 report final.md": "# Q3 report\n\nRevenue: 1,350,000 EUR. Margin: 21%. "
+    "Approved by the board on 14 October.",
+}
+
+
+def _standard(numbers: range) -> list[tuple[str, str]]:
+    # clauses of no note, by their numbers
+    return [(f"Clause {i}", f"The parties agree to standard term number {i}, which concerns the "
+             "ordinary conduct of the services and their records.") for i in numbers]  # fmt: skip
+
+
+# a long service agreement, of which two clauses in its middle answer a question
+CLAUSES = [
+    *_standard(range(1, 19)),
+    ("Termination", "Either party may terminate this agreement by giving ninety (90) days' "
+     "written notice to the other."),
+    *_standard(range(20, 31)),
+    ("Payment", "The client shall pay each invoice within thirty (30) days of its date."),
+    *_standard(range(32, 41)),
+]  # fmt: skip
+AGREEMENT = {
+    "Service agreement.md": "# Service agreement\n\n"
+    + "\n\n".join(f"## {n}. {title}\n\n{text}" for n, (title, text) in enumerate(CLAUSES, 1))
+}
 
 NONE = ("search_web", "fetch", "read", "run")
 CASES = [
@@ -249,6 +277,16 @@ CASES = [
     Case("compares versions", "What did the landlord change in their counter-draft of the lease?",
          [called("compare_documents"), says("sechs|six|6"), says("Reparatur|repair")],
          setup=LEASE, attach=False),
+    Case("latest version", "What was our revenue in Q3?", [says("1[.,]350[.,]000|1[.,]35 ?m")],
+         VERSIONS, attach=False),
+    Case("long agreement", "Under the service agreement, how much notice must either side give "
+         "to end it, and how soon must invoices be paid?",
+         [says(r"90|ninety"), says(r"30|thirty")], AGREEMENT, attach=False),
+    Case("cannot send", "Email the fee letter to Emma Hartley.",
+         [says(r"can(no|')t|can not|unable|not able|no (way|means)|don['’]t have")]),
+    Case("most paid, then writes", "Which supplier did we pay the most in March? Write them a "
+         "short thank-you letter as a Word document.",
+         [says("Müller"), called("make_document")], INVOICES, attach=False),
     Case("finds, then writes", "Write Anna Hofmann a short letter reminding her when the annual "
          "accounts are due, as a Word document.",
          [called_any("search_files", "read"), called("make_document")], FIRM, attach=False),
