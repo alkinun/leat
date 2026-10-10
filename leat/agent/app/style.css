@@ -446,6 +446,11 @@ body.gated #gate { display: grid; flex: 1; place-items: center; min-height: 100v
   padding: 4px 12px; border-radius: var(--round); background: var(--accent); color: var(--on-accent);
   font-size: 0.875rem;
 }
+/* the box as its owner looks after it */
+#overview[hidden] { display: none; }
+#room { margin: 4px 0 4px; font-size: 0.875rem; }
+#room.meta { color: var(--muted); }
+#room.warning { color: var(--error); }
 /* the backups, the owner's to set up */
 #backups[hidden], #internet[hidden] { display: none; }
 :is(#backups, #internet) .about { margin: 4px 0 12px; color: var(--muted); font-size: 0.875rem; }

@@ -105,11 +105,33 @@ def test_due(agent, tmp_path, monkeypatch):
     assert backups.due(now.replace(hour=4) + datetime.timedelta(days=1))
 
 
+def test_overview(agent, tmp_path, engine):
+    # the room the files take and that left on their disk, and each person's use this month,
+    # counted
+    from tests.test_agent import REPLY, ended, until
+
+    agent.engine = Client(engine.url)
+    files.write(agent.space(), "a.txt", "12345")
+    owner, ada = agent.store.add_person("Alkın")["id"], agent.store.add_person("Ada")["id"]
+    engine.replies.put(REPLY)
+    engine.replies.put(REPLY)
+    with agent.events.watch() as events:
+        id = agent.send(None, "Hi", person=ada)
+        until(events, ended)
+        agent.send(id, "Again", person=ada)
+        until(events, ended)
+    seen = agent.overview()
+    assert seen["files"] == 5 and 0 < seen["disk"]["free"] <= seen["disk"]["total"]
+    assert seen["people"] == [{"id": owner, "name": "Alkın", "chats": 0, "messages": 0},
+                              {"id": ada, "name": "Ada", "chats": 1, "messages": 2}]  # fmt: skip
+
+
 def test_api(agent, tmp_path):
     # the owner's alone: the folder chosen, and a backup made now; told as it goes
     folder = tmp_path / "usb"
     folder.mkdir()
     with serving(agent) as url:
+        assert request(f"{url}/api/overview")[0] == 200
         assert request(f"{url}/api/backups/now", "POST", {})[0] == 400  # no folder yet
         assert request(f"{url}/api/backups", "POST", {"folder": 1})[0] == 400
         assert request(f"{url}/api/backups", "POST", {"folder": str(folder)})[0] == 200

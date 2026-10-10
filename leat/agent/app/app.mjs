@@ -468,6 +468,7 @@ function turnTo(name, push = true) {
   shown = viewing = null;
   heading = TITLES[name];
   render();
+  if (name === "settings") renderOverview();
 }
 
 // shows a project's page: its chats, files and instructions, and the composer, which begins a chat
@@ -633,6 +634,28 @@ function renderBackups() {
   now.disabled = !folder || running;
   now.onclick = () => post("/api/backups/now", {}).catch((e) => status(e.message, true));
   $("backed").replaceChildren(line, now);
+}
+
+// the box as its owner looks after it, asked as Settings opens: the room its files take and that
+// left on their disk, a warning if little is, and each person's use this month, counted
+async function renderOverview() {
+  $("overview").hidden = !me?.owner;
+  if (!me?.owner) return;
+  try {
+    const response = await fetch("/api/overview");
+    if (!response.ok) throw new Error((await response.json()).error.message);
+    const { files, disk, people } = await response.json();
+    const low = disk && disk.free < disk.total / 10;
+    $("room").textContent = `Files take ${bytes(files)}` + (disk ? `; ${bytes(disk.free)} of ${bytes(disk.total)} is free on this computer's disk${low ? ": it is nearly full" : ""}.` : ".");
+    $("room").className = low ? "warning" : "meta";
+    $("use").replaceChildren(...people.map((p) => {
+      const item = element("li");
+      item.append(element("span", "", p.name), element("span", "meta", `${p.chats} ${p.chats === 1 ? "chat" : "chats"}, ${p.messages} ${p.messages === 1 ? "message" : "messages"} this month`));
+      return item;
+    }));
+  } catch (error) {
+    status(error.message, true);
+  }
 }
 
 // whether Leat may reach the internet, the owner's to choose, and what each choice means
@@ -1281,7 +1304,10 @@ function fileLink(name, project = here()) {
 
 // a size in bytes, as people read it
 function bytes(n) {
-  return n < 1000 ? `${n} B` : n < 1e6 ? `${Math.round(n / 1e3)} KB` : `${(n / 1e6).toFixed(1)} MB`;
+  if (n < 1000) return `${n} B`;
+  if (n < 1e6) return `${Math.round(n / 1e3)} KB`;
+  const [size, unit] = n < 1e9 ? [n / 1e6, "MB"] : n < 1e12 ? [n / 1e9, "GB"] : [n / 1e12, "TB"];
+  return `${size.toFixed(1)} ${unit}`;
 }
 
 // the sources the conversation's tools numbered, by their numbers

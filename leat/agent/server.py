@@ -123,6 +123,9 @@ class _Handler(BaseHTTPRequestHandler):
                 )
             elif path == "/api/events":
                 self._events(me)
+            elif path == "/api/overview":  # the box, as its owner looks after it
+                _owner(me)
+                self._json(200, agent.overview())
             elif not path.startswith("/api/") and (match := _FILE.fullmatch(path)):
                 space = agent.space(match[1], me["person"])
                 self._download(space, urllib.parse.unquote(match[2]))

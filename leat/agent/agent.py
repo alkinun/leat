@@ -16,6 +16,7 @@ and watches the events after misses nothing, and an event it gets twice changes 
 import base64
 import contextlib
 import copy
+import datetime
 import functools
 import json
 import mimetypes
@@ -317,6 +318,19 @@ class Agent:
                 raise NotFound(f"there is no workflow {id}")
             self.store.delete_workflow(id)
             self._publish_workflows()
+
+    def overview(self) -> dict[str, Any]:
+        """The box as its owner looks after it: the room its files take and the room left on
+        their disk, and each person's use this month, counted, not read."""
+        month = datetime.date.today().replace(day=1)
+        since = datetime.datetime.combine(month, datetime.time()).timestamp()
+        size, disk = 0, None
+        if self.workspace is not None:
+            size = sum(p.stat().st_size for p in self.workspace.root.rglob("*")
+                       if p.is_file() and not p.is_symlink())  # fmt: skip
+            disk = shutil.disk_usage(self.workspace.root)
+        room = {"total": disk.total, "free": disk.free} if disk else None
+        return {"files": size, "disk": room, "people": self.store.use(since)}
 
     def offline(self) -> bool:
         """Whether the agent is kept from the internet, as the owner chose."""

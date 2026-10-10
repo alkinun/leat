@@ -400,6 +400,18 @@ class Store:
     def delete_workflow(self, id: int) -> None:
         self._query("DELETE FROM workflows WHERE id = ?", id)
 
+    def use(self, since: float) -> list[dict[str, Any]]:
+        """Each person's use since a time: the conversations they began, and the messages they
+        sent, counted alone, not read; the owner first."""
+        sql = """
+          SELECT p.id, p.name,
+            (SELECT count(*) FROM conversations c WHERE c.person = p.id AND c.created >= ?1) chats,
+            (SELECT count(*) FROM messages m JOIN conversations c ON c.id = m.conversation
+             WHERE c.person = p.id AND m.message ->> '$.role' = 'user'
+             AND m.message ->> '$.info.at' >= ?1) messages
+          FROM people p ORDER BY p.id"""
+        return [dict(row) for row in self._query(sql, since)]
+
     def setting(self, key: str) -> Any:
         """A setting's value, or None if it has none."""
         rows = self._query("SELECT value FROM settings WHERE key = ?", key)
