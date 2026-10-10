@@ -365,3 +365,66 @@ def test_sandbox_sees_its_space(agent):
     files.write(agent.space(project), "theirs.txt", "theirs")
     ran = files.run(agent.space(project), "import os; print(sorted(os.listdir('.')))")
     assert ran.content.startswith("['theirs.txt']")
+
+
+def test_folders(workspace):
+    # an upload's folders kept, but for any that would lead out or are hidden, its name free in
+    # the last; a folder deleted with its files
+    assert workspace.free("Invoices/March/1.pdf", folders=True) == "Invoices/March/1.pdf"
+    assert workspace.free("../.git/./a/1.pdf", folders=True) == "git/a/1.pdf"
+    assert not (workspace.root / "Invoices").exists()  # named, not made
+    files.write(workspace, "Invoices/March/1.pdf", "x")
+    assert workspace.free("Invoices/March/1.pdf", folders=True) == "Invoices/March/1 (2).pdf"
+    assert workspace.free("Invoices/March/1.pdf") == "1.pdf"
+    workspace.delete("Invoices")
+    assert workspace.files() == []
+    with pytest.raises(FileNotFoundError):
+        workspace.delete(".")
+
+
+@sandboxed
+def test_unpack(workspace, monkeypatch):
+    # a zip unpacked into a folder of its name, its own folders kept, macOS's leavings, hidden
+    # files and any name that would lead out left out; one too big, or broken, kept, and why said
+    import zipfile
+
+    with zipfile.ZipFile(workspace.root / "March.zip", "w") as z:
+        z.writestr("Invoices/1.txt", "one")
+        z.writestr("Fatura ğüş.txt", "two")
+        z.writestr("__MACOSX/._1.txt", "junk")
+        z.writestr("../../escape.txt", "out")
+        z.writestr("Invoices/.DS_Store", "junk")
+    assert workspace.unpack("March.zip") == ("March", 3)
+    assert sorted(f["name"] for f in workspace.files()) == [
+        "March/Fatura ğüş.txt", "March/Invoices/1.txt", "March/escape.txt"]  # fmt: skip
+    (workspace.root / "broken.zip").write_bytes(b"not a zip")
+    with pytest.raises(ValueError, match="broken.zip could not be unpacked"):
+        workspace.unpack("broken.zip")
+    monkeypatch.setattr(workspace_module, "MEMBERS", 1)
+    with zipfile.ZipFile(workspace.root / "many.zip", "w") as z:
+        z.writestr("a.txt", "a")
+        z.writestr("b.txt", "b")
+    with pytest.raises(ValueError, match="it holds 2 files, more than 1"):
+        workspace.unpack("many.zip")
+    assert (workspace.root / "many.zip").exists() and not (workspace.root / "many").exists()
+
+
+@sandboxed
+def test_api_folders(server, agent):
+    # files uploaded in their folders, a zip unpacked if asked, a folder deleted
+    import io
+    import zipfile
+
+    status, _, body = call(f"{server}/api/files/Invoices%2FMarch%2F1.txt", "PUT", b"one")
+    assert status == 200 and json.loads(body) == {"name": "Invoices/March/1.txt"}
+    packed = io.BytesIO()
+    with zipfile.ZipFile(packed, "w") as z:
+        z.writestr("2.txt", "two")
+    status, _, body = call(f"{server}/api/files/April.zip?unpack", "PUT", packed.getvalue())
+    assert status == 200 and json.loads(body) == {"name": "April", "files": 1}
+    names = sorted(f["name"] for f in agent.space(None, 1).files())
+    assert names == ["April/2.txt", "Invoices/March/1.txt"]
+    assert call(f"{server}/api/files/Invoices", "DELETE")[0] == 200
+    assert [f["name"] for f in agent.space(None, 1).files()] == ["April/2.txt"]
+    status, _, body = call(f"{server}/api/files/bad.zip?unpack", "PUT", b"not a zip")
+    assert status == 400 and b"could not be unpacked" in body

@@ -227,8 +227,9 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(200, {})
 
     def do_PUT(self) -> None:
-        # a file uploaded to a person's own files, or a project's, by a name of its own: its answer
-        # says the one it got
+        # a file uploaded to a person's own files, or a project's, by a name of its own, in the
+        # folders its path names, a zip unpacked into one of its name if ?unpack: its answer says
+        # the name it got, and of a zip how many files it held
         if not self._trusted(write=True):
             return self._error(403, "requests from other sites' pages are refused")
         path, agent = urllib.parse.urlsplit(self.path).path, self.server.agent
@@ -239,9 +240,18 @@ class _Handler(BaseHTTPRequestHandler):
             space = agent.space(match[1], person)
             if (size := self._length()) > UPLOAD:
                 return self._error(413, f"a file may be {UPLOAD >> 20} MB at most")
-            name = space.free(urllib.parse.unquote(match[2]))
+            name = space.free(urllib.parse.unquote(match[2]), folders=True)
+            space.path(name).parent.mkdir(parents=True, exist_ok=True)
             space.path(name).write_bytes(self.rfile.read(size))
-            agent.files_changed(match[1], person)
+            unpacked = None
+            try:  # a zip unpacked into a folder of its name, if asked
+                query = urllib.parse.urlsplit(self.path).query
+                if "unpack" in urllib.parse.parse_qs(query, keep_blank_values=True):
+                    unpacked = space.unpack(name)
+            finally:
+                agent.files_changed(match[1], person)
+            if unpacked is not None:
+                return self._json(200, {"name": unpacked[0], "files": unpacked[1]})
             self._json(200, {"name": name})
 
     @contextlib.contextmanager

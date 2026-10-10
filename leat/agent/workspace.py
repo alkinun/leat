@@ -25,6 +25,39 @@ MEMORY = 4 << 30  # bytes of memory a run may take
 OUTPUT = 20000  # bytes of a run's output kept, its start and its end
 LONGEST = 50_000_000  # bytes of a document's text kept, which is read whole
 NAME = 255  # bytes of a file's name at most, as Linux's file systems take
+UNPACKED = 1 << 30  # bytes a zip unpacked may hold at most
+MEMBERS = 5000  # files a zip unpacked may hold at most
+# unpacks the zip at sys.argv[1] into the folder sys.argv[2], refusing one of more than
+# sys.argv[3] bytes or sys.argv[4] files; its names of folders kept but for any that would lead
+# out, and taken as UTF-8 where a zip says not, as many do of them; macOS's leavings and hidden
+# files left out. It prints how many files it unpacked
+_UNPACK = """
+import shutil, sys, zipfile
+from pathlib import Path
+with zipfile.ZipFile(sys.argv[1]) as z:
+    members = [m for m in z.infolist() if not m.is_dir()]
+    if len(members) > int(sys.argv[4]):
+        sys.exit(f"it holds {len(members)} files, more than {sys.argv[4]}")
+    if sum(m.file_size for m in members) > int(sys.argv[3]):
+        sys.exit(f"it holds more than {int(sys.argv[3]) >> 20} MB")
+    n = 0
+    for m in members:
+        name = m.filename
+        if not m.flag_bits & 0x800:
+            try:
+                name = name.encode("cp437").decode("utf-8")
+            except UnicodeError:
+                pass
+        parts = [p for p in name.replace("\\\\", "/").split("/") if p not in ("", ".", "..")]
+        if not parts or parts[0] == "__MACOSX" or any(p.startswith(".") for p in parts):
+            continue
+        target = Path(sys.argv[2], *parts)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with z.open(m) as source, open(target, "wb") as out:
+            shutil.copyfileobj(source, out)
+        n += 1
+print(n)
+"""
 # the sandbox's view of the box: the system, read-only, and fonts' settings, for charts
 _SYSTEM = [
     "--ro-bind", "/usr", "/usr", "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64",
@@ -86,27 +119,52 @@ class Workspace:
             found.append({"name": name, "size": stat.st_size, "modified": stat.st_mtime})
         return sorted(found, key=lambda f: f["modified"], reverse=True)
 
-    def free(self, name: str) -> str:
+    def free(self, name: str, folders: bool = False) -> str:
         """A name for a new file at the workspace's top, as `name` but for what makes it a path,
-        numbered as "notes (2).txt" if a file has it."""
-        base = Path(name.replace("\\", "/").split("/")[-1].lstrip(". ")).name or "file"
+        numbered as "notes (2).txt" if a file has it; or with `folders` in the folders `name`
+        gives, but for any that would lead out of the workspace or are hidden, free in the
+        last."""
+        parts = name.replace("\\", "/").split("/")
+        within = [_short(p.lstrip(". ")) for p in parts[:-1] if p.lstrip(". ")] if folders else []
+        base = Path(parts[-1].lstrip(". ")).name or "file"
         stem, suffix = Path(base).stem, Path(base).suffix
         if len(base.encode()) > NAME - 8:  # its start and its kind, as long as a name may be with
             # room for a number, " (2)"
             suffix = suffix if len(suffix.encode()) < 16 else ""
-            stem = stem.encode()[: NAME - 8 - len(suffix.encode())].decode(errors="ignore")
+            stem = _short(stem, NAME - 8 - len(suffix.encode()))
             base = stem + suffix
         n, candidate = 1, base
-        while (self.root / candidate).exists():
+        while self.root.joinpath(*within, candidate).exists():
             n += 1
             candidate = f"{stem} ({n}){suffix}"
-        return candidate
+        return "/".join([*within, candidate])
 
     def delete(self, name: str) -> None:
+        """Deletes a file, or a folder with every file in it. Raises FileNotFoundError if there is
+        none."""
         path = self.path(name)
-        if not path.is_file():
+        if path.is_dir() and path != self.root:
+            shutil.rmtree(path)
+        elif path.is_file():
+            path.unlink()
+        else:
             raise FileNotFoundError(f"there is no file {name}")
-        path.unlink()
+
+    def unpack(self, name: str) -> tuple[str, int]:
+        """Unpacks a zip into a folder of its name, free at its place, in the sandbox, and deletes
+        it; returns the folder's name and how many files it holds. Raises ValueError if it cannot
+        be unpacked, or holds more than UNPACKED bytes or MEMBERS files, the zip kept."""
+        file = self.path(name)
+        stem = file.relative_to(self.root).as_posix().removesuffix(file.suffix)
+        folder = self.free(stem, folders=True)
+        inside = f"/workspace/{file.relative_to(self.root).as_posix()}"
+        ran = self.run(_UNPACK, inside, f"/workspace/{folder}", str(UNPACKED), str(MEMBERS))
+        if ran.status != 0:
+            shutil.rmtree(self.path(folder), ignore_errors=True)
+            why = (ran.output.strip().splitlines() or ["it stopped"])[-1]
+            raise ValueError(f"{file.name} could not be unpacked: {why}")
+        file.unlink()
+        return folder, int(ran.output.strip().splitlines()[-1])
 
     def run(
         self, code: str, *args: str, timeout: float = TIMEOUT, kept: int | None = OUTPUT
@@ -143,6 +201,11 @@ class Workspace:
             status = process.wait()
             timer.cancel()
         return Ran(None if stopped.is_set() else status, output)
+
+
+def _short(name: str, n: int = NAME) -> str:
+    # a name cut to n bytes at most, between its characters
+    return name.encode()[:n].decode(errors="ignore")
 
 
 def _kept(stream: IO[bytes], n: int | None) -> str:
