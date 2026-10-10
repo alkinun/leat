@@ -423,8 +423,11 @@ def _docx(space: Workspace, path: str) -> str:
 
 
 def _named(name: str) -> str:
-    # a name of a Word document, as given or with its kind added
-    return name if PurePosixPath(name).suffix.lower() == ".docx" else f"{name}.docx"
+    # a name of a Word document, as given, its kind added, or in place of another document's
+    path = PurePosixPath(name)
+    if path.suffix.lower() in (".pdf", ".doc", ".odt", ".rtf", ".txt"):
+        return str(path.with_suffix(".docx"))
+    return name if path.suffix.lower() == ".docx" else f"{name}.docx"
 
 
 def _run(space: Workspace, script: str, given: Any, *names: str) -> Any:

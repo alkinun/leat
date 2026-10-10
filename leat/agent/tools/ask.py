@@ -157,11 +157,14 @@ def _answer(
             content = _image(space, name, f"{asked}, is this image.")
         else:
             text = index.text(space, name) if index else documents.text(space, name)
+            if not documents.said(text):  # as a scanned PDF's, while no model reads images
+                return _row(keys, "(It holds no text: a scan, which only a model that sees images "
+                            "reads)")  # fmt: skip
             if len(text) > READ:
                 text = _excerpt(index, space, name, text, f"{question} {' '.join(keys)}")
             content = f"{asked}:\n\n{text}"
     except (OSError, ValueError, RuntimeError) as e:
-        return {k: f"(It could not be read: {e})" if i == 0 else "" for i, k in enumerate(keys)}
+        return _row(keys, f"(It could not be read: {e})")
     system = {
         "role": "system",
         "content": READING.format(keys=json.dumps(keys, ensure_ascii=False)),
@@ -175,8 +178,13 @@ def _answer(
     try:
         said = reader.reply(body, person)["content"].strip()
     except EngineError as e:
-        return {k: f"(It could not be asked: {e})" if i == 0 else "" for i, k in enumerate(keys)}
+        return _row(keys, f"(It could not be asked: {e})")
     return _parsed(said, keys)
+
+
+def _row(keys: list[str], why: str) -> dict[str, str]:
+    # a row of a file that could not be asked, why in its first column
+    return {k: why if i == 0 else "" for i, k in enumerate(keys)}
 
 
 def _image(space: Workspace, name: str, text: str) -> list[dict[str, Any]]:

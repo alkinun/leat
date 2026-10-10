@@ -186,3 +186,13 @@ def test_folders(engine, space):
         engine.replies.put(answers({"Answer": "x"})[0])
     result = ask.ask(Client(engine.url), None, context(space), "?", files=["March"])
     assert [r["file"] for r in result.info["results"]] == ["March/1.txt", "March/2.txt"]
+
+
+def test_scan(engine, space):
+    # a file of no text but its pages' headings, as a scanned PDF's while no model sees images,
+    # said to be a scan, not asked
+    files.write(space, "scan.md", "## Page 1\n\n\n")
+    result = ask.ask(Client(engine.url), None, context(space), "Totals?", ["Total"])
+    said = "| scan.md [1] | (It holds no text: a scan, which only a model that sees images reads) |"
+    assert said in result.content
+    assert engine.requests == []

@@ -67,7 +67,10 @@ The user's files are in a workspace, where you read, write and edit them, and ru
 them in a sandbox without the network; the files they attach are named in their message, and the \
 images among them shown, as those you read are, when you can see images. To make \
 a document, first read the skill for its kind, then make it with run, and name its file in your \
-answer, without a link: the app shows the user the files you make.{search}{ask} The skills:
+answer, without a link: the app shows the user the files you make. An amount written as Turkish \
+and much of Europe write it, 1.234,56, is 1234.56: code that reads such amounts must take the \
+dots away and make the comma a point; and before you trust what your code finds, check it against \
+a figure you can see in the file.{search}{ask} The skills:
 {skills}
 """
 # of the system prompt, when the agent searches the files

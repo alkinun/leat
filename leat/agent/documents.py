@@ -129,6 +129,11 @@ def text(workspace: Workspace, name: str) -> str:
     return data.decode("utf-8", "replace")
 
 
+def said(text: str) -> bool:
+    """Whether a file's text says anything but its places' headings, as a scanned PDF's does not."""
+    return any(line.strip() and not line.startswith("## ") for line in text.splitlines())
+
+
 def readable(workspace: Workspace, name: str) -> bool:
     """Whether a file has text to read: a document, or text, not an image, by its name and its
     first bytes."""

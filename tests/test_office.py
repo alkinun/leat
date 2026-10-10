@@ -228,3 +228,10 @@ def test_translate_stopped(space, engine):
     result = office.translate(Client(engine.url), context, "a.docx", "English", "b")
     assert result.content.startswith("Stopped before the whole document was translated")
     assert [f["name"] for f in space.files()] == ["a.docx"]
+
+
+def test_named():
+    # a Word document's name, its kind added, or in place of another document's
+    assert office._named("Letter") == "Letter.docx" and office._named("a.DOCX") == "a.DOCX"
+    assert office._named("Letter - March.pdf") == "Letter - March.docx"
+    assert office._named("Notes v1.2") == "Notes v1.2.docx"
