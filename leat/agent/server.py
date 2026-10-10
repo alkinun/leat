@@ -7,8 +7,8 @@ from the app's own page, or from no browser, not from another site's page.
 
 Every request but for the app's own files, the box's setup and a device's request to join comes
 from a device paired to one of the box's people, by the secret its cookie holds. A person sees and
-changes their own conversations, and the files, everyone's; the owner alone the box's people and
-devices, and the engine's model.
+changes their own conversations, their own projects and those shared, and the files, everyone's;
+the owner alone the box's people and devices, and the engine's model.
 """
 
 import contextlib
@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from leat.agent.accounts import Accounts
-from leat.agent.agent import Agent, Busy, NotFound
+from leat.agent.agent import Agent, Busy, NotFound, Refused
 from leat.agent.client import EngineError
 from leat.chat import EFFORTS
 
@@ -56,15 +56,18 @@ _TYPES = {
 _KEEP_ALIVE = 15  # seconds between comments on a quiet event stream, which find its client gone
 UPLOAD = 100 << 20  # bytes of a file uploaded at most
 BODY = 10 << 20  # bytes of a request's JSON at most, which may come before its device is known
+PROJECT_NAME = 80  # characters of a project's name at most
+INSTRUCTIONS = 20000  # characters of a project's instructions at most
 COOKIE = "leat"  # the cookie of a device's secret
 _YEARS = 10 * 365 * 86400  # seconds a device keeps its cookie: till it is unpaired
 # the types of the workspace's files a browser shows in the page; it downloads the others, as a page
 # the model wrote might act as the app's own
 _SHOWN = {"image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf", "text/plain"}
-# /api/conversations/<id>, and what to do there; a request to join's and
+# /api/conversations/<id>, and what to do there; a project's; a request to join's and
 # what to do with it, a device's and a person's; a file's name, of
 # /files/<name> to download it and of /api/files/<name> to upload or delete it
 _CONVERSATION = re.compile(r"/api/conversations/([0-9a-f]{12})(/messages|/stop)?")
+_PROJECT = re.compile(r"/api/projects/([0-9a-f]{12})")
 _REQUEST = re.compile(r"/api/pairings/([0-9a-f]{16})(/allow)?")
 _DEVICE = re.compile(r"/api/devices/([0-9]+)")
 _PERSON = re.compile(r"/api/people/([0-9]+)")
@@ -145,8 +148,15 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._json(200, accounts.ask(_text(body, "name"), _device(self.headers)))
             me = self._device()
             person, match = me["person"], _CONVERSATION.fullmatch(path)
-            if path == "/api/conversations":
-                self._json(200, {"id": agent.send(None, *_message(body), person=person)})
+            if path == "/api/conversations":  # in a project, if the body names one
+                project = body.get("project")
+                if project is not None and not isinstance(project, str):
+                    raise ValueError("project must be the id of a project")
+                id = agent.send(None, *_message(body), person=person, project=project)
+                self._json(200, {"id": id})
+            elif path == "/api/projects":
+                fields = _project(body, new=True)
+                self._json(200, agent.add_project(fields.pop("name"), person, **fields))
             elif match and match[2] == "/messages":
                 self._json(200, {"id": agent.send(match[1], *_message(body), person=person)})
             elif match and match[2] == "/stop":
@@ -176,6 +186,8 @@ class _Handler(BaseHTTPRequestHandler):
             person = me["person"]
             if (match := _CONVERSATION.fullmatch(path)) and not match[2]:
                 agent.delete(match[1], person)
+            elif match := _PROJECT.fullmatch(path):
+                agent.delete_project(match[1], person)
             elif path.startswith("/api/files/") and agent.workspace is not None:
                 agent.workspace.delete(urllib.parse.unquote(path.removeprefix("/api/files/")))
                 agent.files_changed()
@@ -191,6 +203,23 @@ class _Handler(BaseHTTPRequestHandler):
                 accounts.remove(int(match[1]))
             else:
                 return self._error(404, f"there is no DELETE {path}")
+            self._json(200, {})
+
+    def do_PATCH(self) -> None:
+        # a project changed: its name, instructions, or whether it is shared
+        if not self._trusted(write=True):
+            return self._error(403, "requests from other sites' pages are refused")
+        path, agent = urllib.parse.urlsplit(self.path).path, self.server.agent
+        with self._answering():
+            me = self._device()
+            if not (match := _PROJECT.fullmatch(path)):
+                return self._error(404, f"there is no PATCH {path}")
+            if (size := self._length()) > BODY:
+                return self._error(413, f"a request may be {BODY >> 20} MB at most")
+            body = json.loads(self.rfile.read(size))
+            if not isinstance(body, dict):
+                raise ValueError("the body must be a JSON object")
+            agent.change_project(match[1], me["person"], **_project(body))
             self._json(200, {})
 
     def do_PUT(self) -> None:
@@ -218,6 +247,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._error(401, "this device has not joined this Leat: ask to join")
         except _Refused:
             self._error(403, "only this Leat's owner may do that")
+        except Refused as e:
+            self._error(403, str(e))
         except (ValueError, RecursionError) as e:  # JSON nested too deep to parse, too
             self._error(400, str(e))
         except (NotFound, LookupError, FileNotFoundError) as e:
@@ -287,6 +318,7 @@ class _Handler(BaseHTTPRequestHandler):
         agent, person = self.server.agent, me["person"]
         with agent.events.watch() as events, contextlib.suppress(OSError):
             self._event({"type": "conversations", "conversations": agent.conversations(person)})
+            self._event({"type": "projects", "projects": agent.projects(person)})
             self._event(agent.files_event())
             if me["owner"]:
                 self._event(self.server.accounts.state())
@@ -392,6 +424,24 @@ def _text(body: dict[str, Any], key: str) -> str:
     if not isinstance(text := body.get(key), str) or not text.strip():
         raise ValueError(f"{key} must be some text")
     return text
+
+
+def _project(body: dict[str, Any], new: bool = False) -> dict[str, Any]:
+    # a project's fields a body gives, its name, instructions and whether it is shared; a `new`
+    # one's name must be given. Raises ValueError for one that is not as it must be
+    fields: dict[str, Any] = {k: body[k] for k in ("name", "instructions", "shared") if k in body}
+    if new or "name" in fields:
+        name = _text(body, "name").strip()
+        if len(name) > PROJECT_NAME:
+            raise ValueError(f"a project's name is {PROJECT_NAME} characters at most")
+        fields["name"] = name
+    if not isinstance(fields.get("instructions", ""), str):
+        raise ValueError("instructions must be text")
+    if len(fields.get("instructions", "")) > INSTRUCTIONS:
+        raise ValueError(f"a project's instructions are {INSTRUCTIONS} characters at most")
+    if not isinstance(fields.get("shared", False), bool):
+        raise ValueError("shared must be true or false")
+    return fields
 
 
 def _message(body: dict[str, Any]) -> tuple[str, str | None, list[str]]:

@@ -131,7 +131,11 @@ class Accounts:
             raise ValueError("the owner cannot be removed")
         for c in self.store.conversations(id):
             self.agent.delete(c["id"], id)
+        for project in self.store.projects(id):  # their own, with others' conversations in them
+            if project["person"] == id and not project["shared"]:
+                self.agent.delete_project(project["id"], id)
         self.store.remove_person(id)
+        self.agent.projects_changed()  # those they shared, now the owner's
         self._publish()
 
     def state(self) -> dict[str, Any]:

@@ -18,7 +18,7 @@ from unittest.mock import ANY
 import pytest
 
 from leat.agent import background, context
-from leat.agent.agent import LAST, Agent, Busy, NotFound
+from leat.agent.agent import LAST, Agent, Busy, NotFound, Refused
 from leat.agent.client import Client, EngineError
 from leat.agent.context import message as _api
 from leat.agent.server import BODY, Server
@@ -157,7 +157,7 @@ def test_turn(agent, engine, events):
     id = agent.send(None, "Hi\nand more")
     seen = until(events, ended)
     assert [e["type"] for e in seen[:3]] == ["conversation", "message", "message"]
-    summary = {"id": id, "title": "Hi", "updated": 0, "running": True}
+    summary = {"id": id, "title": "Hi", "updated": 0, "project": None, "running": True}
     assert seen[0]["conversation"] | {"updated": 0} == summary
     user = {"role": "user", "content": "Hi\nand more",
             "info": {"at": pytest.approx(time.time(), abs=5)}}  # fmt: skip
@@ -366,6 +366,84 @@ def test_people(agent, engine, events):
             agent.stop(mine, other)
 
 
+def test_projects(agent, engine, events):
+    # a project is its person's own until shared; a conversation in it is still its person's, seen
+    # while they see the project, and its system prompt gives the project's name and instructions
+    owner, ada = agent.store.add_person("Alkın"), agent.store.add_person("Ada")
+    me, her = owner["id"], ada["id"]
+    with agent.events.watch() as told:
+        project = agent.add_project("Yılmaz Ltd", me, "Answer in Turkish.")
+        assert {e["to"]: [p["id"] for p in e["projects"]] for e in (told.get(), told.get())} == {
+            me: [project["id"]], her: []}  # fmt: skip
+    assert agent.projects(her) == [] and agent.projects(me)[0]["name"] == "Yılmaz Ltd"
+    with pytest.raises(NotFound):
+        agent.send(None, "Hi", person=her, project=project["id"])
+    engine.replies.put(REPLY)
+    mine = agent.send(None, "Hi", person=me, project=project["id"])
+    until(events, ended)
+    system = agent.store.messages(mine)[0]["content"]
+    assert system.endswith('in the project "Yılmaz Ltd". Its instructions, which hold for every '
+                           "conversation in it:\n\nAnswer in Turkish.\n\n")  # fmt: skip
+    assert agent.conversations(me)[0]["project"] == project["id"]
+    # shared, it is everyone's to see and change, but not to unshare, nor to delete
+    with pytest.raises(NotFound):
+        agent.change_project(project["id"], her, name="Mine")
+    agent.change_project(project["id"], me, shared=True)
+    engine.replies.put(REPLY)
+    hers = agent.send(None, "Hello", person=her, project=project["id"])
+    until(events, ended)
+    agent.change_project(project["id"], her, instructions="Be brief.")
+    assert agent.projects(me)[0]["instructions"] == "Be brief."
+    with pytest.raises(Refused):
+        agent.change_project(project["id"], her, shared=False)
+    with pytest.raises(Refused):
+        agent.delete_project(project["id"], her)
+    # unshared, her conversation in it is hers still, but unseen till it is shared again
+    agent.change_project(project["id"], me, shared=False)
+    assert agent.conversations(her) == [] and agent.conversation(hers, her) is None
+    with pytest.raises(NotFound):
+        agent.send(hers, "Still there?", person=her)
+    agent.change_project(project["id"], me, shared=True)
+    assert [c["id"] for c in agent.conversations(her)] == [hers]
+    # deleted by the owner, with every conversation in it, whoever's
+    agent.delete_project(project["id"], me)
+    assert agent.projects(me) == [] and agent.conversations(me) == agent.conversations(her) == []
+
+
+def test_projects_of_one_removed(server, agent):
+    # a person removed takes their own projects with them; those they shared become the owner's
+    ada = agent.store.add_person("Ada")["id"]
+    own, shared = agent.add_project("Own", ada), agent.add_project("Shared", ada, shared=True)
+    agent.store.create("Hi", [], 1, shared["id"])
+    assert request(f"{server}/api/people/{ada}", "DELETE")[0] == 200
+    assert agent.store.project(own["id"]) is None
+    assert agent.store.project(shared["id"])["person"] == 1
+    assert len(agent.conversations(1)) == 1
+
+
+def test_api_projects(server, engine, agent, events):
+    status, body = request(f"{server}/api/projects", "POST", {"name": " Payroll "})
+    project = json.loads(body)
+    assert status == 200 and project["name"] == "Payroll" and project["shared"] is False
+    url = f"{server}/api/projects/{project['id']}"
+    assert request(url, "PATCH", {"instructions": "Be brief.", "shared": True})[0] == 200
+    assert agent.projects(1)[0] | {"updated": 0} == project | {
+        "instructions": "Be brief.", "shared": True, "updated": 0}  # fmt: skip
+    for wrong in ({"name": ""}, {"name": "x" * 81}, {"shared": "yes"}, {"instructions": 1}):
+        assert request(url, "PATCH", wrong)[0] == 400
+    assert request(f"{server}/api/projects", "POST", {})[0] == 400
+    assert request(f"{server}/api/projects/0123456789ab", "PATCH", {"name": "x"})[0] == 404
+    engine.replies.put(REPLY)
+    asked = {"content": "Hi", "project": project["id"]}
+    _, body = request(f"{server}/api/conversations", "POST", asked)
+    until(events, ended)
+    assert agent.conversation(json.loads(body)["id"], 1)["project"] == project["id"]
+    asked["project"] = "0123456789ab"
+    assert request(f"{server}/api/conversations", "POST", asked)[0] == 404
+    assert request(url, "DELETE")[0] == 200 and agent.conversations(1) == []
+    assert request(url, "DELETE")[0] == 404
+
+
 def test_person_to_the_engine(agent, engine, events):
     # each request of a person's conversation names them to the engine, which keeps the prefixes
     # it caches of their prompts to theirs: their turns', and the naming of their conversations;
@@ -477,9 +555,9 @@ def test_migration(tmp_path):
     # of the household's features gone, nothing is left
     tables = {name for (name,) in store._db.execute("SELECT name FROM sqlite_schema")}
     assert {t for t in tables if not t.startswith("sqlite_")} == {
-        "conversations", "messages", "people", "devices"}  # fmt: skip
+        "conversations", "messages", "people", "devices", "projects"}  # fmt: skip
     columns = [row[1] for row in store._db.execute("PRAGMA table_info(conversations)")]
-    assert columns == ["id", "title", "created", "updated", "context", "named", "person"]
+    assert columns == ["id", "title", "created", "updated", "context", "named", "person", "project"]
     # and a conversation deleted takes its messages with it, as the state's references hold
     store.delete("0123456789ab")
     assert store._db.execute("SELECT count(*) FROM messages").fetchone() == (0,)
@@ -936,6 +1014,7 @@ def test_events(server, agent, engine):
         return json.loads(line[6:])
 
     assert event() == {"type": "conversations", "conversations": []}
+    assert event() == {"type": "projects", "projects": []}
     assert event() == {"type": "files", "files": []}
     assert event()["type"] == "accounts"  # the owner's
     assert event()["type"] == "models"

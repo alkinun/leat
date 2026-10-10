@@ -11,6 +11,10 @@ to the model's.
 The accounts are the box's people, the first its owner, and the devices paired to each, known by the
 hash of a secret each holds. A conversation is a person's. Before the box has its first person,
 every conversation is no one's, and becomes the owner's.
+
+A project is a client's or a matter's: its files, instructions for the model, and the conversations
+held in it. It is a person's own, or shared with everyone on the box; a conversation in it is still
+its person's alone, and seen only while they see the project.
 """
 
 import json
@@ -192,9 +196,24 @@ _MIGRATIONS = [
     DROP TABLE settings;
     ALTER TABLE people DROP COLUMN child;
     """,
+    # the projects, each a person's own or shared, and the project a conversation is held in
+    """
+    CREATE TABLE projects (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      instructions TEXT NOT NULL DEFAULT '',
+      person INTEGER REFERENCES people (id),
+      shared INTEGER NOT NULL DEFAULT 0,
+      created REAL NOT NULL,
+      updated REAL NOT NULL
+    );
+    ALTER TABLE conversations ADD COLUMN project TEXT REFERENCES projects (id);
+    """,
 ]
 # a conversation's columns as the apps list it
-_SUMMARY = "id, title, created, updated, person"
+_SUMMARY = "id, title, created, updated, person, project"
+# the projects a person sees: their own, and those shared
+_SEEN = "(shared OR person IS ?)"
 
 
 class Store:
@@ -218,27 +237,38 @@ class Store:
         self._db.execute("PRAGMA foreign_keys = ON")
 
     def conversations(self, person: int | None = None) -> list[dict[str, Any]]:
-        """A person's conversations, without their messages, the latest updated first."""
-        sql = f"SELECT {_SUMMARY} FROM conversations WHERE person IS ? ORDER BY updated DESC"
-        return [dict(row) for row in self._query(sql, person)]
+        """A person's conversations, without their messages, the latest updated first: those of
+        no project, and of the projects they see."""
+        sql = (
+            f"SELECT {_SUMMARY} FROM conversations WHERE person IS ? AND (project IS NULL OR"
+            f" project IN (SELECT id FROM projects WHERE {_SEEN})) ORDER BY updated DESC"
+        )
+        return [dict(row) for row in self._query(sql, person, person)]
+
+    def conversations_in(self, project: str) -> list[dict[str, Any]]:
+        """The conversations held in a project, whoever's."""
+        sql = f"SELECT {_SUMMARY} FROM conversations WHERE project = ?"
+        return [dict(row) for row in self._query(sql, project)]
 
     def conversation(self, id: str) -> dict[str, Any] | None:
         rows = self._query(f"SELECT {_SUMMARY} FROM conversations WHERE id = ?", id)
         return dict(rows[0]) if rows else None
 
     def create(
-        self, title: str, messages: list[dict[str, Any]], person: int | None = None
-    ) -> dict[str, Any]:
-        """A new conversation of a person's, of these messages."""
+        self, title: str, messages: list[dict[str, Any]], person: int | None = None,
+        project: str | None = None,
+    ) -> dict[str, Any]:  # fmt: skip
+        """A new conversation of a person's, of these messages, in a project if one."""
         id, now = uuid.uuid4().hex[:12], time.time()
         with self._lock, self._db:
             self._db.execute("BEGIN")
             self._db.execute(
-                "INSERT INTO conversations (id, title, created, updated, person)"
-                " VALUES (?, ?, ?, ?, ?)", (id, title, now, now, person),
+                "INSERT INTO conversations (id, title, created, updated, person, project)"
+                " VALUES (?, ?, ?, ?, ?, ?)", (id, title, now, now, person, project),
             )  # fmt: skip
             self._insert(id, 0, messages)
-        return {"id": id, "title": title, "created": now, "updated": now, "person": person}
+        return {"id": id, "title": title, "created": now, "updated": now, "person": person,
+                "project": project}  # fmt: skip
 
     def context(self, id: str) -> dict[str, Any]:
         rows = self._query("SELECT context FROM conversations WHERE id = ?", id)
@@ -288,6 +318,42 @@ class Store:
             sql = "UPDATE conversations SET title = ?, named = 1 WHERE id = ?"
             self._db.execute(sql, (title, id))
 
+    def projects(self, person: int | None = None) -> list[dict[str, Any]]:
+        """The projects a person sees, the latest updated first."""
+        sql = f"SELECT * FROM projects WHERE {_SEEN} ORDER BY updated DESC"
+        return [dict(row) for row in self._query(sql, person)]
+
+    def project(self, id: str) -> dict[str, Any] | None:
+        rows = self._query("SELECT * FROM projects WHERE id = ?", id)
+        return dict(rows[0]) if rows else None
+
+    def add_project(
+        self, name: str, person: int | None = None, instructions: str = "", shared: bool = False
+    ) -> dict[str, Any]:
+        """A new project of a person's."""
+        rows = self._query(
+            "INSERT INTO projects (id, name, instructions, person, shared, created, updated)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *",
+            uuid.uuid4().hex[:12], name, instructions, person, int(shared), now := time.time(), now,
+        )  # fmt: skip
+        return dict(rows[0])
+
+    def change_project(self, id: str, **changes: Any) -> dict[str, Any] | None:
+        """Changes a project's name, instructions or whether it is shared, as `changes` give them;
+        returns it as it now is, or None if there is none."""
+        assert set(changes) <= {"name", "instructions", "shared"}
+        sets = "".join(f"{key} = ?, " for key in changes)
+        sql = f"UPDATE projects SET {sets}updated = ? WHERE id = ? RETURNING *"
+        rows = self._query(sql, *changes.values(), time.time(), id)
+        return dict(rows[0]) if rows else None
+
+    def delete_project(self, id: str) -> None:
+        """Deletes a project, with every conversation in it, whoever's."""
+        with self._lock, self._db:
+            self._db.execute("BEGIN")
+            self._db.execute("DELETE FROM conversations WHERE project = ?", (id,))
+            self._db.execute("DELETE FROM projects WHERE id = ?", (id,))
+
     def people(self) -> list[dict[str, Any]]:
         """The box's people, the owner first."""
         return [dict(row) for row in self._query("SELECT * FROM people ORDER BY id")]
@@ -297,8 +363,8 @@ class Store:
         return dict(rows[0]) if rows else None
 
     def add_person(self, name: str) -> dict[str, Any]:
-        """A new person of the box's; the first its owner, whose every conversation that was
-        no one's becomes."""
+        """A new person of the box's; the first its owner, whose every conversation and project
+        that was no one's becomes."""
         with self._lock, self._db:
             self._db.execute("BEGIN")
             first = self._db.execute("SELECT count(*) FROM people").fetchone()[0] == 0
@@ -308,15 +374,22 @@ class Store:
             )  # fmt: skip
             assert person is not None
             if first:
-                sql = "UPDATE conversations SET person = ? WHERE person IS NULL"
-                self._db.execute(sql, (person["id"],))
+                for table in ("conversations", "projects"):
+                    sql = f"UPDATE {table} SET person = ? WHERE person IS NULL"
+                    self._db.execute(sql, (person["id"],))
         return person
 
     def remove_person(self, id: int) -> None:
-        """Removes a person who is not the owner, and all that is theirs: their conversations and
-        devices."""
+        """Removes a person who is not the owner, and all that is theirs: their conversations,
+        devices and own projects, with the conversations in those. The projects they shared
+        become the owner's."""
         with self._lock, self._db:
             self._db.execute("BEGIN")
+            own = "SELECT id FROM projects WHERE person = ? AND NOT shared"
+            self._db.execute(f"DELETE FROM conversations WHERE project IN ({own})", (id,))
+            self._db.execute("DELETE FROM projects WHERE person = ? AND NOT shared", (id,))
+            owner = "SELECT id FROM people WHERE owner"
+            self._db.execute(f"UPDATE projects SET person = ({owner}) WHERE person = ?", (id,))
             for table in ("conversations", "devices"):
                 self._db.execute(f"DELETE FROM {table} WHERE person = ?", (id,))
             self._db.execute("DELETE FROM people WHERE id = ? AND NOT owner", (id,))

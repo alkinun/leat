@@ -1,6 +1,9 @@
 """The agent: conversations, the turns that run in them, and the events that tell every app watching
 what changed.
 
+A conversation may be held in a project, whose name and instructions its system prompt gives the
+model.
+
 A turn is a job of its own, on a thread of the box: the user's message, then the model's replies,
 streamed into the conversation, each after the tools the last one called, until one calls none. The
 app that sent the message watches it as any other does, and closing it stops nothing. A turn that
@@ -50,6 +53,11 @@ a document, first read the skill for its kind, then make it with run, and name i
 answer, without a link: the app shows the user the files you make. The skills:
 {skills}
 """
+# of the system prompt, of a conversation in a project
+PROJECT = """
+This conversation is in the project "{name}".{instructions}
+"""
+INSTRUCTIONS = " Its instructions, which hold for every conversation in it:\n\n{text}\n"
 TITLE = 60  # characters of a conversation's title at most: its first message's start
 ROUNDS = 25  # replies a turn takes at most; the last answers, told so, and may call no tools
 LAST = "(You have made all the tool calls this message allows: answer now, from what you found.)"
@@ -61,7 +69,11 @@ Event = dict[str, Any]
 
 
 class NotFound(Exception):
-    """There is no such conversation."""
+    """There is no such conversation, or project, of the person's."""
+
+
+class Refused(Exception):
+    """The person may not do that: delete a project of another's, as only the box's owner may."""
 
 
 class Busy(Exception):
@@ -138,7 +150,7 @@ class Agent:
     def conversation(self, id: str, person: int | None = None) -> dict[str, Any] | None:
         """A person's conversation and its messages, with the one a turn is writing."""
         with self._lock:
-            if (c := self.store.conversation(id)) is None or c["person"] != person:
+            if (c := self._seen(id, person)) is None:
                 return None
             messages = self.store.messages(id)
             if turn := self._turns.get(id):
@@ -148,13 +160,14 @@ class Agent:
 
     def send(
         self, id: str | None, content: str, effort: str | None = None,
-        attached: list[str] | None = None, person: int | None = None,
+        attached: list[str] | None = None, person: int | None = None, project: str | None = None,
     ) -> str:  # fmt: skip
-        """Starts a turn of a person's message, in a new conversation without an id; returns the
-        conversation's id. The model reasons at `effort`, one of leat.chat's EFFORTS, which leat
-        serve gives as near as the model can, or else at the model's own default; and reads of the
-        files `attached`, in the workspace. Raises NotFound if there is no such conversation of the
-        person's, or file, Busy if a turn runs in the conversation."""
+        """Starts a turn of a person's message, in a new conversation without an id, held in
+        `project` if one; returns the conversation's id. The model reasons at `effort`, one of
+        leat.chat's EFFORTS, which leat serve gives as near as the model can, or else at the
+        model's own default; and reads of the files `attached`, in the workspace. Raises NotFound
+        if there is no such conversation or project of the person's, or file, Busy if a turn runs
+        in the conversation."""
         info: dict[str, Any] = {"at": time.time()} | ({"effort": effort} if effort else {})
         if attached:
             space = self.workspace
@@ -165,10 +178,11 @@ class Agent:
         with self._lock:
             if id is None:
                 who = (self.store.person(person) or {}) if person else {}
-                name = who.get("name")
-                system = _system(self.workspace is not None, name)
+                held = self._project(project, person) if project else None
+                system = _system(self.workspace is not None, who.get("name"), held)
                 title = _title(content)
-                id, start = self.store.create(title, [system, message], person)["id"], 1
+                id = self.store.create(title, [system, message], person, project)["id"]
+                start = 1
             else:
                 self._own(id, person)
                 if id in self._turns:
@@ -198,6 +212,54 @@ class Agent:
                 turn.stop()
             self.store.delete(id)
             self.events.publish({"type": "deleted", "id": id, "to": person})
+
+    def projects(self, person: int | None = None) -> list[dict[str, Any]]:
+        """The projects a person sees, the latest updated first."""
+        return [_project(p) for p in self.store.projects(person)]
+
+    def add_project(
+        self, name: str, person: int | None = None, instructions: str = "", shared: bool = False
+    ) -> dict[str, Any]:
+        """A new project of a person's, which the apps of those who see it are told of."""
+        with self._lock:
+            project = self.store.add_project(name, person, instructions, shared)
+            self._publish_projects()
+        return _project(project)
+
+    def change_project(self, id: str, person: int | None = None, **changes: Any) -> None:
+        """Changes a project a person sees: its name, instructions, or whether it is shared, which
+        its own person alone may change, as a project shared is seen by everyone. Raises
+        NotFound if they see no such project, Refused if it is shared and not theirs."""
+        with self._lock:
+            project = self._project(id, person)
+            if "shared" in changes and project["person"] != person:
+                raise Refused("only whoever made a project may change whom it is shared with")
+            self.store.change_project(id, **changes)
+            self._publish_projects()
+            if "shared" in changes:  # the conversations in it, seen or no longer
+                self._publish_conversations()
+
+    def delete_project(self, id: str, person: int | None = None) -> None:
+        """Deletes a project a person sees, with every conversation in it, whoever's, stopping
+        their turns: its own person's to do, or the box's owner's. Raises NotFound if they see no
+        such project, Refused if it is not theirs to delete."""
+        with self._lock:
+            project, who = self._project(id, person), self.store.person(person or 0) or {}
+            if project["person"] != person and not who.get("owner"):
+                raise Refused("only whoever made a project, or this Leat's owner, may delete it")
+            held = self.store.conversations_in(id)
+            for c in held:
+                if (turn := self._turns.pop(c["id"], None)) is not None:
+                    turn.stop()
+            self.store.delete_project(id)
+            for c in held:
+                self.events.publish({"type": "deleted", "id": c["id"], "to": c["person"]})
+            self._publish_projects()
+
+    def projects_changed(self) -> None:
+        """Tells each person's apps of the projects they see, as they changed."""
+        with self._lock:
+            self._publish_projects()
 
     def files_changed(self) -> None:
         """Tells the apps of the workspace's files, if they changed since they were last told."""
@@ -243,13 +305,44 @@ class Agent:
 
     def _own(self, id: str, person: int | None) -> dict[str, Any]:
         # a person's conversation, or NotFound if it is not one
-        if (c := self.store.conversation(id)) is None or c["person"] != person:
+        if (c := self._seen(id, person)) is None:
             raise NotFound(f"there is no conversation {id}")
         return c
 
+    def _seen(self, id: str, person: int | None) -> dict[str, Any] | None:
+        # a person's conversation, in no project or one they see; or None
+        if (c := self.store.conversation(id)) is None or c["person"] != person:
+            return None
+        if c["project"] is not None and not _sees(self.store.project(c["project"]), person):
+            return None
+        return c
+
+    def _project(self, id: str, person: int | None) -> dict[str, Any]:
+        # a project the person sees, or NotFound if they see none of that id
+        if not _sees(project := self.store.project(id), person):
+            raise NotFound(f"there is no project {id}")
+        assert project is not None
+        return project
+
     def _summary(self, c: dict[str, Any]) -> dict[str, Any]:
-        running, keys = c["id"] in self._turns, ("id", "title", "updated")
+        running, keys = c["id"] in self._turns, ("id", "title", "updated", "project")
         return {k: c[k] for k in keys} | {"running": running}
+
+    def _everyone(self) -> list[int | None]:
+        # the box's people, by their ids; before it has any, no one's, None
+        return [p["id"] for p in self.store.people()] or [None]
+
+    def _publish_projects(self) -> None:
+        # each person's projects, to their apps alone, as a project shared or no longer is seen
+        # by others or no longer
+        for person in self._everyone():
+            event = {"type": "projects", "projects": self.projects(person), "to": person}
+            self.events.publish(event)
+
+    def _publish_conversations(self) -> None:
+        for person in self._everyone():
+            listed = [self._summary(c) for c in self.store.conversations(person)]
+            self.events.publish({"type": "conversations", "conversations": listed, "to": person})
 
     def _publish_summary(self, id: str) -> None:
         if (c := self.store.conversation(id)) is not None:
@@ -607,14 +700,31 @@ class _Stopped(Exception):
     """The turn was stopped while the model answered other than in its reply."""
 
 
-def _system(workspace: bool, name: str | None = None) -> dict[str, Any]:
+def _system(
+    workspace: bool, name: str | None = None, project: dict[str, Any] | None = None
+) -> dict[str, Any]:
     # the system prompt of a conversation begun now with the user, of a `name` if the box has
-    # people, and the workspace's tools if `workspace`
+    # people, the workspace's tools if `workspace`, and the project it is held in, if one
     skills = "\n".join(f"- {path}: {about}" for path, about in files.skills())
     space = WORKSPACE.format(skills=skills) if workspace else ""
     named = f" The user is {name}." if name else ""
     content = SYSTEM.format(named=named, workspace=space)
+    if project is not None:
+        text = project["instructions"].strip()
+        instructions = INSTRUCTIONS.format(text=text) if text else ""
+        content += PROJECT.format(name=project["name"], instructions=instructions)
     return {"role": "system", "content": content}
+
+
+def _sees(project: dict[str, Any] | None, person: int | None) -> bool:
+    # whether a person sees a project: their own, or one shared
+    return project is not None and (bool(project["shared"]) or project["person"] == person)
+
+
+def _project(p: dict[str, Any]) -> dict[str, Any]:
+    # a project as the apps show it
+    keys = ("id", "name", "instructions", "person", "updated")
+    return {k: p[k] for k in keys} | {"shared": bool(p["shared"])}
 
 
 def _title(content: str) -> str:
