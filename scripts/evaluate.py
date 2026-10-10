@@ -32,6 +32,7 @@ from leat.agent.agent import Agent  # noqa: E402
 from leat.agent.client import Client  # noqa: E402
 from leat.agent.embeddings import Embedder  # noqa: E402
 from leat.agent.index import Index  # noqa: E402
+from leat.agent.ocr import Transcriber  # noqa: E402
 from leat.agent.store import Store  # noqa: E402
 from leat.agent.tools import every  # noqa: E402
 from leat.agent.workspace import Workspace  # noqa: E402
@@ -186,6 +187,19 @@ MONTH = {
     for n, supplier, amount in BILLED
 }
 TOTAL = re.escape(f"{sum(amount for _, _, amount in BILLED):,.2f}")
+# a scanned invoice, an image of its text alone, made in the sandbox
+SCAN = """
+from pathlib import Path
+from PIL import Image, ImageDraw
+lines = ["INVOICE 7731", "Date: 12/03/2026", "From: Pennine Weaving Co Ltd",
+         "Net amount: 427.00 GBP", "VAT at 20%: 85.40 GBP", "Total due: 512.40 GBP"]
+image = Image.new("RGB", (900, 420), "white")
+draw = ImageDraw.Draw(image)
+for i, line in enumerate(lines):
+    draw.text((60, 50 + 55 * i), line, fill="black", font_size=34)
+Path("Scans").mkdir()
+image.save("Scans/7731.png")
+"""
 # a report's draft and its final version, whose figures differ
 VERSIONS = {
     "Reports/Q3 report v1 (draft).md": "# Q3 report, draft\n\nRevenue: 1,200,000 EUR. Margin: "
@@ -282,6 +296,8 @@ CASES = [
     Case("long agreement", "Under the service agreement, how much notice must either side give "
          "to end it, and how soon must invoices be paid?",
          [says(r"90|ninety"), says(r"30|thirty")], AGREEMENT, attach=False),
+    Case("reads a scan", "How much is due on the scanned invoice from Pennine Weaving?",
+         [says(r"512[.,]40")], setup=SCAN, attach=False),
     Case("cannot send", "Email the fee letter to Emma Hartley.",
          [says(r"can(no|')t|can not|unable|not able|no (way|means)|don['’]t have")]),
     Case("most paid, then writes", "Which supplier did we pay the most in March? Write them a "
@@ -344,7 +360,7 @@ def _run(case: Case, args: argparse.Namespace) -> Outcome:
         environment = args.sandbox if args.sandbox.exists() else None
         workspace = Workspace(Path(data) / "workspace", environment)
         engine = Client(args.engine, os.environ.get("LEAT_ENGINE_KEY"), args.context)
-        index = Index(Path(data) / "index.db", workspace, embedder=Embedder(engine))
+        index = Index(Path(data) / "index.db", workspace, Transcriber(engine), Embedder(engine))
         tools = every(args.search, engine, index)
         agent = Agent(Store(Path(data) / "leat.db"), engine, tools, workspace, index)
         space = agent.space()  # no one's own, as the conversation is
