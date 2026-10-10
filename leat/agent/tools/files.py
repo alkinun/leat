@@ -13,6 +13,7 @@ from leat.agent.tools import Context, Result, Tool, strings
 from leat.agent.workspace import Workspace
 
 READ = 12000  # characters of a file read at once
+LISTED = 20  # files a search that finds nothing names, the first by name
 SKILLS = Path(__file__).parent.parent / "skills"
 LIBRARIES = "python-docx, openpyxl, python-pptx, fpdf2, pypdf, matplotlib, pandas"
 
@@ -100,8 +101,12 @@ def search(index: Index, context: Context, query: str) -> Result:
         n = context.cite(url, where)
         results.append({"n": n, "url": url, "title": where, "file": name, "place": place})
         said.append(f"[{n}] {where} (read on from start={found['start']})\n{found['text']}")
-    if not said:
-        return Result("No passage of the files says that.", {"query": query, "results": []})
+    if not said:  # and the files there are, to read, as one in another language than the query
+        names = sorted(f["name"] for f in context.space().files())
+        listed = "\n".join(f"- {name}" for name in names[:LISTED])
+        more = f"\n(and {len(names) - LISTED} more)" if len(names) > LISTED else ""
+        there = f" The files:\n{listed}{more}" if names else " There are no files."
+        return Result(f"No passage of the files says that.{there}", {"query": query, "results": []})
     content = "\n\n".join(said) + "\n\n(Cite each passage you use by its number, as [1].)"
     return Result(content, {"query": query, "results": results})
 

@@ -139,7 +139,8 @@ def test_search_files(workspace, index):
                                        "place": "Rent"}]  # fmt: skip
     assert files.search(index, context, "deposit").content.startswith("[2] lease.md, Deposit")
     assert files.search(index, context, "rent").info["results"][0]["n"] == 1
-    assert files.search(index, context, "nothing").content == "No passage of the files says that."
+    assert files.search(index, context, "nothing").content == (
+        "No passage of the files says that. The files:\n- lease.md")  # fmt: skip
     # and read reads the text the index keeps
     assert files.read(space, "lease.md", index=index).content.startswith("# Rent")
 
