@@ -3,6 +3,7 @@ running Python among them in the sandbox. read reads the skills too, the guides 
 documents, at skills/. With an index, a file's text is read as the index keeps it, and the files
 are searched there, each passage found numbered, across the conversation, for the model to cite."""
 
+import datetime
 from pathlib import Path
 from typing import Any
 
@@ -45,7 +46,7 @@ def tools(index: Index | None = None) -> list[Tool]:
     reading_tool = Tool(
         "read",
         "Read a file in the workspace as text, PDF, Word, Excel and PowerPoint files too, or list "
-        "a folder's files, '.' for the whole workspace",
+        "a folder's files, with their sizes and when each changed, '.' for the whole workspace",
         reading,
         lambda context, path, start=0: read(context.space(), path, start, index),
     )
@@ -93,9 +94,9 @@ def read(
     skill = path.startswith("skills/")
     file = _skill(path) if skill else workspace.path(path)
     start = max(0, int(start))
-    if file.is_dir():
-        names = sorted(f"{p.name}/" if p.is_dir() else p.name for p in file.iterdir())
-        listed = "\n".join(name for name in names if not name.startswith("."))
+    if file.is_dir():  # each file with its size and when it changed, as a version's tell
+        shown = sorted(p for p in file.iterdir() if not p.name.startswith("."))
+        listed = "\n".join(f"{p.name}/" if p.is_dir() else _listed(p) for p in shown)
         return Result(listed or "The folder is empty.", {"file": path})
     if not file.is_file():
         raise workspace.missing(path)
@@ -193,6 +194,18 @@ def _skill(path: str) -> Path:
     if not file.is_relative_to(SKILLS.resolve()):
         raise ValueError(f"{path} is outside the skills")
     return file
+
+
+def _listed(file: Path) -> str:
+    # a file as a folder's listing says it: its name, size and the day it changed
+    stat = file.stat()
+    size = float(stat.st_size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1000 or unit == "GB":
+            break
+        size /= 1000
+    day = datetime.date.fromtimestamp(stat.st_mtime)
+    return f"{file.name} ({size:.0f} {unit}, changed {day})"
 
 
 def _name(workspace: Workspace, file: Path) -> str:

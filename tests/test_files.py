@@ -1,6 +1,7 @@
 """The workspace, its tools and the sandbox. The sandbox's tests need bubblewrap, and those of the
 documents it reads LEAT_SANDBOX, an environment made of leat/agent/sandbox.txt."""
 
+import datetime
 import json
 import os
 import shutil
@@ -94,7 +95,8 @@ def test_read_write_edit(workspace):
     files.write(workspace, "notes/plan.md", "# Plan\n\nBuy bread.\n")
     assert files.read(workspace, "notes/plan.md").content == "# Plan\n\nBuy bread.\n"
     assert files.read(workspace, ".").content == "notes/"
-    assert files.read(workspace, "notes").content == "plan.md"
+    today = datetime.date.today()
+    assert files.read(workspace, "notes").content == f"plan.md (19 B, changed {today})"
     result = files.edit(workspace, "notes/plan.md", "bread", "milk")
     assert result.info == {"files": ["notes/plan.md"]}
     assert (workspace.root / "notes" / "plan.md").read_text() == "# Plan\n\nBuy milk.\n"
