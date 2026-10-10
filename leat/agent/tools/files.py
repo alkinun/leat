@@ -132,7 +132,26 @@ def search(index: Index, context: Context, query: str) -> Result:
         there = f" The files:\n{listed}{more}" if names else " There are no files."
         return Result(f"No passage of the files says that.{there}", {"query": query, "results": []})
     content = "\n\n".join(said) + "\n\n(Cite each passage you use by its number, as [1].)"
+    if unseen := _unseen(context.space(), {r["file"] for r in results}):
+        content += f"\n\n{unseen}"
     return Result(content, {"query": query, "results": results})
+
+
+def _unseen(workspace: Workspace, found: set[str]) -> str:
+    # what a search's passages leave out of the folders they are of: how many files each holds of
+    # which they are not, as a search finds some passages of many files and a model takes them
+    # for all, the way to every one's answer said
+    folders = sorted({name.rpartition("/")[0] for name in found})
+    held = [f["name"] for f in workspace.files()]
+    said = []
+    for folder in folders:
+        inside = [n for n in held if n.rpartition("/")[0] == folder]
+        if len(inside) > (seen := sum(n.rpartition("/")[0] == folder for n in found)):
+            where = f"{folder}/" if folder else "The workspace's top"
+            said.append(f"{where} holds {len(inside)} files, of which these passages are of {seen}")
+    if not said:
+        return ""
+    return f"({'; '.join(said)}: for a question of every one, call ask_files.)"
 
 
 def write(workspace: Workspace, path: str, content: str) -> Result:

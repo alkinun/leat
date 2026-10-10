@@ -168,6 +168,14 @@ def test_search_files(workspace, index):
         "No passage of the files says that. The files:\n- lease.md")  # fmt: skip
     # and read reads the text the index keeps
     assert files.read(space, "lease.md", index=index).content.startswith("# Rent")
+    # passages of some of a folder's files, the others said to be there, as a model would take
+    # those found for all
+    for n, total in (("1", "900,00 EUR"), ("2", "1.240,00 EUR"), ("3", "Wasser")):
+        files.write(space, f"Rechnungen/{n}.txt", f"Rechnung {n}: {total}")
+    index.update("people/1")
+    found = files.search(index, context, "EUR").content
+    assert found.endswith("(Rechnungen/ holds 3 files, of which these passages are of 2: for a "
+                          "question of every one, call ask_files.)")  # fmt: skip
 
 
 @needs_sandbox
