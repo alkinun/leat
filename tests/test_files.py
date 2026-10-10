@@ -436,3 +436,44 @@ def test_api_folders(server, agent):
     assert [f["name"] for f in agent.space(None, 1).files()] == ["April/2.txt"]
     status, _, body = call(f"{server}/api/files/bad.zip?unpack", "PUT", b"not a zip")
     assert status == 400 and b"could not be unpacked" in body
+
+
+def test_activity(server, agent, engine, tmp_path):
+    # what people do, and what Leat does for them, noted as it is done, never what was asked;
+    # the owner's alone to see, the latest first, in pages
+    from tests.test_agent import request
+
+    agent.engine = Client(engine.url)
+    agent.tools = {t.name: t for t in files.tools()}
+    _, body = request(f"{server}/api/projects", "POST", {"name": "Yılmaz Ltd"})
+    project = json.loads(body)["id"]
+    call(f"{server}/api/projects/{project}/files/Lease.txt", "PUT", b"Rent: 900.")
+    engine.replies.put([{"tool_calls": [calling("read", {"path": "Lease.txt"})]}])
+    engine.replies.put([{"content": "Rent is 900."}])
+    with agent.events.watch() as events:
+        request(f"{server}/api/conversations", "POST", {"content": "Secret question about rent?",
+                                                        "project": project})  # fmt: skip
+        until(events, ended)
+    request(f"{server}/api/projects/{project}", "PATCH", {"shared": True})
+    request(f"{server}/api/offline", "POST", {"offline": True})
+    status, body = request(f"{server}/api/activity")
+    seen = [(a["person"], a["leat"], a["action"], a["place"], a["detail"])
+            for a in json.loads(body)["activity"]]  # fmt: skip
+    assert status == 200 and seen == [
+        ("Alkın", 0, "turned the internet off", None, None),
+        ("Alkın", 0, "shared the project", "Yılmaz Ltd", None),
+        ("Alkın", 1, "read", "Yılmaz Ltd", "Lease.txt"),
+        ("Alkın", 0, "began a chat", "Yılmaz Ltd", None),
+        ("Alkın", 0, "uploaded", "Yılmaz Ltd", "Lease.txt"),
+        ("Alkın", 0, "made the project", "Yılmaz Ltd", None),
+        ("Alkın", 0, "set Leat up", None, None),
+    ]  # fmt: skip
+    assert "Secret" not in body.decode() and "rent" not in body.decode().lower()
+    newest = json.loads(body)["activity"][0]["id"]
+    _, older = request(f"{server}/api/activity?before={newest}")
+    assert json.loads(older)["activity"][0]["action"] == "shared the project"
+    assert request(f"{server}/api/activity?before=x")[0] == 400
+    request(f"{server}/api/projects/{project}", "DELETE")
+    _, body = request(f"{server}/api/activity")
+    assert json.loads(body)["activity"][0]["action"] == "deleted the project"
+    assert json.loads(body)["activity"][0]["place"] == "Yılmaz Ltd"

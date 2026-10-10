@@ -24,6 +24,7 @@ import queue
 import shutil
 import threading
 import time
+import urllib.parse
 from collections.abc import Collection, Iterable, Iterator
 from typing import Any
 
@@ -331,6 +332,15 @@ class Agent:
             disk = shutil.disk_usage(self.workspace.root)
         room = {"total": disk.total, "free": disk.free} if disk else None
         return {"files": size, "disk": room, "people": self.store.use(since)}
+
+    def note(
+        self, person: int | None, action: str, project: str | None = None,
+        detail: str | None = None, leat: bool = False,
+    ) -> None:  # fmt: skip
+        """Notes something done by a person, or by Leat for one, in a project, if any, by its id,
+        and of what, as store.note keeps it."""
+        held = self.store.project(project) if project else None
+        self.store.note(person, action, held["name"] if held else None, detail, leat)
 
     def offline(self) -> bool:
         """Whether the agent is kept from the internet, as the owner chose."""
@@ -812,6 +822,8 @@ class _Turn:
                 self.id, self._cite, self.person, self.workspace, progress, self.stopped
             )
             result = tool.run(context, **called)
+            for action, detail in _did(message["name"], called, result.info):
+                a.note(self.person, action, self.project, detail, leat=True)
         except Exception as e:  # for the model, which may try again
             result = Result(f"error: {e}", {"error": str(e)})
         with a._lock:
@@ -919,6 +931,27 @@ def _system(
         instructions = INSTRUCTIONS.format(text=text) if text else ""
         content += PROJECT.format(name=project["name"], instructions=instructions)
     return {"role": "system", "content": content}
+
+
+def _did(
+    name: str, arguments: dict[str, Any], info: dict[str, Any]
+) -> list[tuple[str, str | None]]:
+    # what a tool's call did with the files and the web, as the activity notes it: the files it
+    # read, of whatever kind, and those it made; what it searched for is not noted, nor read
+    did: list[tuple[str, str | None]] = []
+    if name == "read" and info.get("file") and not str(info["file"]).startswith("skills/"):
+        did.append(("read", info["file"]))
+    elif name in ("fill_template", "suggest_edits", "translate_document"):
+        did.append(("read", arguments.get("path")))
+    elif name == "ask_files" and info.get("total"):
+        did.append(("read", f"{info['done']} files"))
+    elif name == "search_files":
+        did.append(("searched the files", None))
+    elif name == "search":
+        did.append(("searched the web", None))
+    elif name == "fetch" and info.get("url"):
+        did.append(("read a page of", urllib.parse.urlsplit(info["url"]).hostname))
+    return did + [("made", made) for made in info.get("files", [])]
 
 
 def _folder(project: str | None, person: int | None) -> str:

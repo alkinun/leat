@@ -20,6 +20,10 @@ A workflow is a request saved to make again, by its name: a project's, seen by t
 project, or a person's own.
 
 The settings are the box's, each a value of JSON by its key, as where it backs up to.
+
+The activity is what was done on the box, by whom, and where, as its owner looks back on it: a
+chat begun, a file uploaded or read for one, a project shared; never what anyone asked, nor what
+was answered. It is kept a year.
 """
 
 import json
@@ -229,7 +233,22 @@ _MIGRATIONS = [
     """
     CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     """,
+    # what was done on the box: when, by whom, or by Leat for whom, what, in which project by its
+    # name, and of what
+    """
+    CREATE TABLE activity (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      at REAL NOT NULL,
+      person INTEGER,
+      leat INTEGER NOT NULL DEFAULT 0,
+      action TEXT NOT NULL,
+      place TEXT,
+      detail TEXT
+    );
+    CREATE INDEX activity_at ON activity (at);
+    """,
 ]
+KEPT = 365 * 86400  # seconds the activity is kept
 # a conversation's columns as the apps list it
 _SUMMARY = "id, title, created, updated, person, project"
 # the projects a person sees: their own, and those shared
@@ -411,6 +430,29 @@ class Store:
              AND m.message ->> '$.info.at' >= ?1) messages
           FROM people p ORDER BY p.id"""
         return [dict(row) for row in self._query(sql, since)]
+
+    def note(
+        self, person: int | None, action: str, place: str | None = None,
+        detail: str | None = None, leat: bool = False,
+    ) -> None:  # fmt: skip
+        """Notes something done, by a person, or by Leat for one, or of none, in a project, by its
+        name, if in one, and of what; forgetting what was done a year ago."""
+        with self._lock, self._db:
+            self._db.execute("BEGIN")
+            now, sql = time.time(), "INSERT INTO activity VALUES (NULL, ?, ?, ?, ?, ?, ?)"
+            self._db.execute(sql, (now, person, int(leat), action, place, detail))
+            self._db.execute("DELETE FROM activity WHERE at < ?", (now - KEPT,))
+
+    def activity(self, before: int | None = None, n: int = 100) -> list[dict[str, Any]]:
+        """What was done, the latest first, n at most, before the one of the id `before`: each with
+        the name of whoever did it, if they are still the box's."""
+        sql = (
+            "SELECT a.id, a.at, a.leat, a.action, a.place, a.detail, p.name AS person"
+            " FROM activity a"
+            " LEFT JOIN people p ON p.id = a.person WHERE ?1 IS NULL OR a.id < ?1"
+            " ORDER BY a.id DESC LIMIT ?2"
+        )
+        return [dict(row) for row in self._query(sql, before, n)]
 
     def setting(self, key: str) -> Any:
         """A setting's value, or None if it has none."""

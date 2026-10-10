@@ -9,6 +9,9 @@ Every request but for the app's own files, the box's setup and a device's reques
 from a device paired to one of the box's people, by the secret its cookie holds. A person sees and
 changes their own conversations and files, and their own projects and those shared, with their
 files; the owner alone the box's people and devices, and the engine's model.
+
+What people do is noted here, as each request asks it, for the owner to look back on: who did what,
+where, and of what, never what anyone asked; what Leat does for them, the agent notes.
 """
 
 import contextlib
@@ -47,7 +50,7 @@ _FILES = (
     "vendor/temml/Temml.woff2",
     "vendor/temml/latinmodernmath.woff2",
 )
-_PAGES = ("/", "/projects", "/files", "/settings")
+_PAGES = ("/", "/projects", "/files", "/settings", "/activity")
 _TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
@@ -126,6 +129,13 @@ class _Handler(BaseHTTPRequestHandler):
             elif path == "/api/overview":  # the box, as its owner looks after it
                 _owner(me)
                 self._json(200, agent.overview())
+            elif path == "/api/activity":  # what was done, the latest first, before ?before
+                _owner(me)
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                before = query.get("before", [""])[0]
+                if before and not before.isdigit():
+                    raise ValueError("before must be the id of a thing done")
+                self._json(200, {"activity": agent.store.activity(int(before) if before else None)})
             elif not path.startswith("/api/") and (match := _FILE.fullmatch(path)):
                 space = agent.space(match[1], me["person"])
                 self._download(space, urllib.parse.unquote(match[2]))
@@ -152,6 +162,7 @@ class _Handler(BaseHTTPRequestHandler):
                 raise ValueError("the body must be a JSON object")
             if path == "/api/setup":  # the box's first person, its owner
                 secret = accounts.setup(_text(body, "name"), _device(self.headers))
+                agent.note(agent.store.people()[0]["id"], "set Leat up")
                 return self._json(200, {}, secret)
             if path == "/api/pairings":  # a device's request to join
                 return self._json(200, accounts.ask(_text(body, "name"), _device(self.headers)))
@@ -159,12 +170,17 @@ class _Handler(BaseHTTPRequestHandler):
             person, match = me["person"], _CONVERSATION.fullmatch(path)
             if path == "/api/conversations":  # in a project, if the body names one
                 id = agent.send(None, *_message(body), person=person, project=_held(body))
+                agent.note(person, "began a chat", _held(body))
                 self._json(200, {"id": id})
             elif path == "/api/projects":
                 fields = _project(body, new=True)
-                self._json(200, agent.add_project(fields.pop("name"), person, **fields))
+                project = agent.add_project(fields.pop("name"), person, **fields)
+                agent.note(person, "made the project", project["id"])
+                self._json(200, project)
             elif path == "/api/workflows":  # a project's, if the body names one
-                self._json(200, agent.add_workflow(*_workflow(body), person, _held(body)))
+                workflow = agent.add_workflow(*_workflow(body), person, _held(body))
+                agent.note(person, "saved the workflow", workflow["project"], workflow["name"])
+                self._json(200, workflow)
             elif match and match[2] == "/messages":
                 self._json(200, {"id": agent.send(match[1], *_message(body), person=person)})
             elif match and match[2] == "/stop":
@@ -176,22 +192,28 @@ class _Handler(BaseHTTPRequestHandler):
                 if to is not None and (not isinstance(to, int) or isinstance(to, bool)):
                     raise ValueError("person must be the id of one of this Leat's people")
                 name = body.get("name") if isinstance(body.get("name"), str) else None
-                self._json(200, accounts.allow(match[1], to, name))
+                allowed = accounts.allow(match[1], to, name)
+                agent.note(person, "let in", detail=f"{allowed['name']}'s {allowed['device']}")
+                self._json(200, allowed)
             elif path == "/api/models/load":
                 _owner(me)
-                agent.load(_text(body, "model"))
+                agent.load(model := _text(body, "model"))
+                agent.note(person, "loaded the model", detail=model)
                 self._json(200, {})
             elif path == "/api/offline":  # the agent kept from the internet, or let reach it
                 _owner(me)
                 if not isinstance(offline := body.get("offline"), bool):
                     raise ValueError("offline must be true or false")
                 agent.set_offline(offline)
+                agent.note(person, f"turned the internet {'off' if offline else 'on'}")
                 self._json(200, {})
             elif path == "/api/backups":  # the folder backed up to, or none
                 _owner(me)
                 if (folder := body.get("folder")) is not None and not isinstance(folder, str):
                     raise ValueError("folder must be a folder's path, or null")
-                agent.backups.choose((folder or "").strip() or None)
+                agent.backups.choose(folder := (folder or "").strip() or None)
+                agent.note(person, "chose to back up to" if folder else "stopped backing up",
+                           detail=folder)  # fmt: skip
                 self._json(200, {})
             elif path == "/api/backups/now":
                 _owner(me)
@@ -209,26 +231,39 @@ class _Handler(BaseHTTPRequestHandler):
         accounts = self.server.accounts
         with self._answering():
             me = self._device()
-            person = me["person"]
+            person, store = me["person"], agent.store
             if (match := _CONVERSATION.fullmatch(path)) and not match[2]:
+                held = (store.conversation(match[1]) or {}).get("project")
                 agent.delete(match[1], person)
+                agent.note(person, "deleted a chat", held)
             elif match := _PROJECT.fullmatch(path):
+                held = (store.project(match[1]) or {}).get("name")
                 agent.delete_project(match[1], person)
+                store.note(person, "deleted the project", held)
             elif match := _WORKFLOW.fullmatch(path):
+                workflow = store.workflow(int(match[1])) or {}
                 agent.delete_workflow(int(match[1]), person)
+                agent.note(
+                    person, "deleted the workflow", workflow.get("project"), workflow.get("name")
+                )
             elif path.startswith("/api/") and (match := _FILE.fullmatch(path)):
-                agent.space(match[1], person).delete(urllib.parse.unquote(match[2]))
+                agent.space(match[1], person).delete(name := urllib.parse.unquote(match[2]))
                 agent.files_changed(match[1], person)
+                agent.note(person, "deleted", match[1], name)
             elif match := _DEVICE.fullmatch(path):  # the owner's, or a device unpairing itself
                 if int(match[1]) != me["id"]:
                     _owner(me)
+                device = next((d for d in store.devices() if d["id"] == int(match[1])), {})
                 accounts.unpair(int(match[1]))
+                agent.note(person, "unpaired", detail=device.get("name"))
             elif (match := _REQUEST.fullmatch(path)) and not match[2]:
                 _owner(me)
                 accounts.refuse(match[1])
             elif match := _PERSON.fullmatch(path):
                 _owner(me)
+                removed = (store.person(int(match[1])) or {}).get("name")
                 accounts.remove(int(match[1]))
+                agent.note(person, "removed", detail=removed)
             else:
                 return self._error(404, f"there is no DELETE {path}")
             self._json(200, {})
@@ -247,7 +282,15 @@ class _Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(size))
             if not isinstance(body, dict):
                 raise ValueError("the body must be a JSON object")
-            agent.change_project(match[1], me["person"], **_project(body))
+            changes = _project(body)
+            agent.change_project(match[1], me["person"], **changes)
+            for key, value in changes.items():  # each change noted
+                said = {
+                    "name": "renamed the project",
+                    "instructions": "changed the instructions of",
+                    "shared": "shared the project" if value else "stopped sharing the project",
+                }
+                agent.note(me["person"], said[key], match[1])  # fmt: skip
             self._json(200, {})
 
     def do_PUT(self) -> None:
@@ -275,7 +318,9 @@ class _Handler(BaseHTTPRequestHandler):
             finally:
                 agent.files_changed(match[1], person)
             if unpacked is not None:
+                agent.note(person, "uploaded", match[1], f"{unpacked[0]}, {unpacked[1]} files")
                 return self._json(200, {"name": unpacked[0], "files": unpacked[1]})
+            agent.note(person, "uploaded", match[1], name)
             self._json(200, {"name": name})
 
     @contextlib.contextmanager

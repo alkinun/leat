@@ -627,9 +627,12 @@ def test_migration(tmp_path):
     assert [m["content"] for m in store.messages("0123456789ab")] == ["tulips", "Tulips?"]
     assert Store(tmp_path / "leat.db").conversations()[0]["id"] == "0123456789ab"
     # of the household's features gone, nothing is left
-    tables = {name for (name,) in store._db.execute("SELECT name FROM sqlite_schema")}
+    tables = {
+        name for (name,) in store._db.execute("SELECT name FROM sqlite_schema WHERE type = 'table'")
+    }
     assert {t for t in tables if not t.startswith("sqlite_")} == {
         "conversations", "messages", "people", "devices", "projects", "workflows", "settings",
+        "activity",
     }  # fmt: skip
     columns = [row[1] for row in store._db.execute("PRAGMA table_info(conversations)")]
     assert columns == ["id", "title", "created", "updated", "context", "named", "person", "project"]

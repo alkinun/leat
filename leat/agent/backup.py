@@ -89,8 +89,10 @@ class Backups:
             except OSError as e:
                 self.store.set_setting("backup.error", _said(e, folder))
                 self.store.set_setting("backup.failed", time.time())
+                self.store.note(None, "failed to back up", detail=_said(e, folder), leat=True)
             else:
                 self.store.set_setting("backup.last", made)
+                self.store.note(None, "backed up to", detail=str(folder), leat=True)
                 for key in ("backup.error", "backup.failed"):
                     self.store.set_setting(key, None)
         finally:

@@ -98,7 +98,8 @@ class Accounts:
 
     def allow(self, id: str, person: int | None = None, name: str | None = None) -> dict:
         """Lets a request's device in, as one of the box's people, or as a new one of a name,
-        theirs by default. Raises LookupError if there is no such request or person."""
+        theirs by default; returns the person, and the device, as it calls itself. Raises
+        LookupError if there is no such request or person."""
         with self._lock:
             self._expire()
             if (request := self._requests.get(id)) is None or request.secret is not None:
@@ -109,7 +110,7 @@ class Accounts:
                 raise LookupError(f"there is no person {person}")
             request.secret = self._pair(person, request.device)
         self._publish()
-        return self.store.person(person) or {}
+        return (self.store.person(person) or {}) | {"device": request.device}
 
     def refuse(self, id: str) -> None:
         """Turns down a request to join."""
