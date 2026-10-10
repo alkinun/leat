@@ -19,6 +19,7 @@ const unfolded = new Set(); // the folders whose files the lists show, by space 
 let workflows = []; // the requests saved to make again, by name: {id, name, prompt, project}
 let me = null; // the person whose this device is: {person, name, owner, device}
 let accounts = null; // the owner's to manage: the people and their devices, and those asking
+let backups = null; // the owner's: the folder backed up to, and how the last backup went
 // the conversations whose turns ended while another was shown, as this device saw them
 const unread = new Set(JSON.parse(localStorage.getItem("leat.unread") ?? "[]"));
 let models = [], loading = null, unreachable = null; // the engine's, a model it loads, or why not
@@ -46,6 +47,15 @@ $("uploadFolder").onclick = () => pick((items) => uploads(items, null), true);
 $("adding").onclick = () => pick((items) => uploads(items, viewing));
 $("addingFolder").onclick = () => pick((items) => uploads(items, viewing), true);
 $("create").onsubmit = create;
+$("backing").onsubmit = async (event) => { // the folder backed up to, or none if it is cleared
+  event.preventDefault();
+  try {
+    await post("/api/backups", { folder: $("folder").value.trim() || null });
+    $("folder").blur();
+  } catch (error) {
+    status(error.message, true);
+  }
+};
 $("back").onclick = (event) => {
   event.preventDefault();
   turnTo("projects");
@@ -260,6 +270,10 @@ function handle(event) {
     case "accounts":
       accounts = event;
       renderAccounts();
+      return;
+    case "backups":
+      backups = event;
+      renderBackups();
       return;
     case "loading":
       loading = event.model;
@@ -596,6 +610,30 @@ function remover(what, name, project) {
 
 // what a file's state in the index says, while it is not read: being read, or not readable
 const STATES = { reading: "Reading…", failed: "Couldn't read", scanned: "Scanned" };
+
+// the backups, the owner's to set up: the folder, as last saved unless it is being changed, and how
+// the last backup went, or why it failed, with a button that backs up now
+function renderBackups() {
+  $("backups").hidden = !me?.owner || !backups;
+  if (!backups) return;
+  if (document.activeElement !== $("folder")) $("folder").value = backups.folder ?? "";
+  const { folder, last, error, kept, running } = backups;
+  const said = running ? "Backing up…"
+    : error ? `Couldn't back up: ${error}`
+    : !folder ? "Not set up: no backups are made."
+    : last ? `Last backed up ${when(last.at)} · ${last.files} ${last.files === 1 ? "file" : "files"}, ${bytes(last.bytes)} · ${kept} kept`
+    : "No backup yet: the first is made tonight.";
+  const line = element("p", error || !folder ? "warning" : "meta", said);
+  const now = element("button", "", "Back up now");
+  now.disabled = !folder || running;
+  now.onclick = () => post("/api/backups/now", {}).catch((e) => status(e.message, true));
+  $("backed").replaceChildren(line, now);
+}
+
+// a time, in seconds, as a day and its hour
+function when(seconds) {
+  return new Date(seconds * 1000).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+}
 
 // the files of a project's space, or of the person's own
 function filesOf(project) {
