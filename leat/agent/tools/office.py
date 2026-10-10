@@ -349,8 +349,9 @@ print("{}")
 # the system prompt's rules of the office's tools, which lay out a document and keep one's
 # formatting, as the model's own code does not
 MAKE = (
-    "To make a letter, memo or report, call make_document with its text in markdown, and the "
-    "user's letterhead, a Word template, if they have one."
+    "To make a letter, memo or report, call make_document with its text in markdown, as it should "
+    "read, without the sources' numbers of your answers, and the user's letterhead, a Word "
+    "template, if they have one."
 )
 FILL = "To fill a Word template's fields, call fill_template, which keeps its formatting."
 COMPARE = (
