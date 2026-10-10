@@ -244,6 +244,11 @@ div.math { margin: 12px 0; overflow-x: auto; overflow-y: hidden; }
 .work > .message {
   margin: 0 0 0 5px; padding: 0 0 8px 16px; border-left: 2px solid var(--line);
 }
+/* how far a long call is, below its turn's work, while it runs */
+.meter { margin: -8px 0 24px; color: var(--muted); font-size: 0.8125rem; }
+.meter .track { height: 3px; overflow: hidden; border-radius: 2px; background: var(--line); }
+.meter .track span { display: block; height: 100%; background: var(--accent); transition: width 0.3s; }
+.meter p { margin: 8px 0 0; }
 /* files: those a message attached, and those its answer made */
 .cards { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; white-space: normal; }
 .cards:empty { display: none; }
@@ -275,6 +280,7 @@ sup.cite { margin: 0 1px; color: var(--muted); font-size: 0.6875rem; line-height
   background: var(--side); color: var(--muted); font-size: 0.75rem; text-decoration: none;
 }
 .message a.source:hover { color: var(--text); }
+.sources .more { padding: 1px 4px; color: var(--muted); font-size: 0.75rem; }
 .note { margin-top: 8px; color: var(--muted); font-size: 0.75rem; }
 .note:empty { display: none; }
 pre, code { font: 0.875rem/1.5 var(--font-mono); background: var(--side); }

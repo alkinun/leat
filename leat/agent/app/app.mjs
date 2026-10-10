@@ -23,6 +23,7 @@ let models = [], loading = null, unreachable = null; // the engine's, a model it
 let lost = false; // the events' connection, until it is back
 let mode = localStorage.getItem("leat.mode") ?? "system"; // light, dark, or as the system is
 let views = []; // the shown messages' elements, by their indexes
+let heading = "leat"; // the shown page's title, as the window's says it
 const opened = new Map(); // whether each fold is open, as the user left it: work, calls, reasoning
 // the pages beside the conversations, each a section of its own name, and their titles; a
 // project's page, "project", has its name
@@ -438,8 +439,8 @@ function turnTo(name, push = true) {
   document.body.classList.remove("menu", ...PAGES);
   document.body.classList.add(name);
   shown = viewing = null;
+  heading = TITLES[name];
   render();
-  document.title = TITLES[name];
 }
 
 // shows a project's page: its chats, files and instructions, and the composer, which begins a chat
@@ -584,7 +585,7 @@ function renderProjects() {
 function renderProject() {
   const p = project(viewing);
   if (!p) return;
-  document.title = p.name;
+  heading = p.name;
   if (document.activeElement !== $("title")) $("title").value = p.name;
   if (document.activeElement !== $("instructions")) $("instructions").value = p.instructions;
   const mine = p.person === me?.person;
@@ -771,8 +772,25 @@ function fill(turn, [start, ...rest]) {
   turn.classList.toggle("summarized", [start, ...rest].includes(shown.summarized));
   turn.replaceChildren(view(start));
   if (work.length) turn.append(fold(start, work, !answered));
+  const long = shown.running && !answered && longCall(work);
+  if (long) turn.append(meter(long));
   if (answered) turn.append(view(rest.at(-1)));
   return turn;
+}
+
+// the call of a turn's work that runs long, telling how far it is, while it runs; none if none
+function longCall(indexes) {
+  const m = shown.messages[indexes.at(-1)];
+  return m?.role === "tool" && !m.content && m.info?.total > 1 ? m : null;
+}
+
+// how far a long call is, below its turn's work: a bar, and that the box works on without the page
+function meter(m) {
+  const box = element("div", "meter"), track = element("div", "track"), done = element("span");
+  done.style.width = `${(100 * (m.info.done ?? 0)) / m.info.total}%`;
+  track.append(done);
+  box.append(track, element("p", "", "Leat keeps working if you leave or close this page, and marks the chat when it's done."));
+  return box;
 }
 
 // a turn's work, its steps and calls, folded into a line: what it does as it runs, then what it did
@@ -788,6 +806,7 @@ function fold(start, indexes, unanswered) {
 
 // what each tool's calls did, in a few words: one call, and n
 const DID = {
+  ask_files: ["read the files", (n) => `read the files ${n} times`],
   search: ["searched the web", (n) => `searched the web ${n} times`],
   search_files: ["searched the files", (n) => `searched the files ${n} times`],
   fetch: ["read a page", (n) => `read ${n} pages`],
@@ -816,7 +835,9 @@ function controls() {
   input.style.height = `${input.scrollHeight}px`;
   input.style.overflowY = input.scrollHeight > 240 ? "auto" : "hidden"; // its max-height
   const page = PAGES.some(paged);
-  if (!page) document.title = shown?.title || "leat";
+  // the page's title, after how many chats' work ended unseen, as a tab shows it
+  const named = page ? heading : shown?.title || "leat";
+  document.title = unread.size ? `(${unread.size}) ${named}` : named;
   $("main").classList.toggle("empty", !shown && !page);
   const held = project(here());
   input.placeholder = viewing && held ? `Start a chat in ${held.name}` : "Message";
@@ -860,7 +881,7 @@ function message(m, index) {
     else markdown(text, m.content ?? "");
     item.querySelectorAll(":not(.code) > pre").forEach(codeBar); // the blocks new since
     cite(item);
-    if (answer) pages.replaceChildren(...sources(m).map(source));
+    if (answer) pages.replaceChildren(...chips(sources(m)));
     const names = m.role === "user" ? (m.info?.files ?? []) : answer ? made(m) : [];
     cards.replaceChildren(...names.map(card));
     if (m.role !== "user") note.textContent = answer ? describe(m.info ?? {}) : "";
@@ -898,6 +919,9 @@ function work(m, index) {
 // each tool's call in a line, of its arguments and info: what it is doing, what it did, and that
 // it failed
 const LINES = {
+  ask_files: (a, i) => [i.total ? `Reading ${i.done ?? 0} of ${i.total} files…` : "Reading the files…",
+    i.done < i.total ? `Read ${i.done} of ${i.total} files` : `Read ${i.total === 1 ? "1 file" : `${i.total ?? 0} files`}`,
+    "Couldn't read the files"],
   search: (a) => [`Searching for “${a.query}”…`, `Searched for “${a.query}”`,
     `Couldn't search for “${a.query}”`],
   search_files: (a) => [`Searching the files for “${a.query}”…`, `Searched the files for “${a.query}”`,
@@ -925,6 +949,11 @@ function what(m) {
   if (error || !m.content) return [element("p", "", error ?? "")];
   if (m.name === "search" && results?.length) {
     return [cited(listed(results.map((r) => link(r.url, r.title)), true), results)];
+  }
+  if (m.name === "ask_files") { // what it asked of each file, and the spreadsheet of the answers
+    const asked = element("p", "", `Asked of each file: ${args?.question ?? ""}`);
+    const columns = m.info?.columns?.length > 1 ? [element("p", "meta", `Columns: ${m.info.columns.join(", ")}`)] : [];
+    return [asked, ...columns, cards(m.info?.files ?? [])];
   }
   if (m.name === "search_files" && results?.length) {
     return [cited(listed(results.map((r) => sourceLink(r, r.title))), results)];
@@ -1041,6 +1070,13 @@ function sources(m) {
   return pages;
 }
 
+// a reply's sources as chips, the first CHIPS of many, then how many more
+const CHIPS = 8;
+function chips(all) {
+  const more = all.length > CHIPS + 1 ? [element("span", "more", `and ${all.length - CHIPS} more`)] : [];
+  return [...all.slice(0, more.length ? CHIPS : all.length).map(source), ...more];
+}
+
 function source(s) {
   const named = s.file ? s.title : host(s.url);
   const a = sourceLink(s, s.n ? `${s.n} · ${named}` : named);
@@ -1096,6 +1132,7 @@ function host(url) {
 
 // the icon of a tool's line
 const ICONS = {
+  ask_files: '<path d="M3 5h18M3 12h18M3 19h18M9 5v14"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
   search_files: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
   fetch: '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/>',
