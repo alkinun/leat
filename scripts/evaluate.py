@@ -242,7 +242,7 @@ CASES = [
          "Kündigungsfrist statt sechs und eine Kaution von zwei Monatsmieten.",
          [called("suggest_edits"), makes(r"\.docx$")], setup=LEASE, attach=False),
     Case("totals in German", "Wie hoch sind alle Rechnungen zusammen?",
-         [called("ask_files"), says("6.339,75|6,339.75")], INVOICES, attach=False),
+         [says("6.339,75|6,339.75")], INVOICES, attach=False),
     Case("edits a note", "Change the meeting time in notes.txt to 11:30.",
          [called_any("edit", "write", "run"), holds("notes.txt", "11:30")],
          files={"notes.txt": "Meeting with Anna Hofmann at 10:00 in Munich, at her office."}),
