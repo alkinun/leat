@@ -5,9 +5,15 @@
 import { markdown } from "/markdown.mjs";
 
 const $ = (id) => document.getElementById(id);
-let conversations = []; // the latest updated first: {id, title, updated, running}
+let conversations = []; // the latest updated first: {id, title, updated, project, running}
 let shown = null; // the conversation shown, with its messages; null for a new one
-let files = []; // the workspace's, the latest changed first: {name, size, modified}
+// the projects this person sees, the latest updated first, once told: {id, name, instructions,
+// person, shared, updated}
+let projects = null;
+let viewing = null; // the project whose page is shown
+// the files of each space, the latest changed first, by its project's id, "" for the person's own:
+// {name, size, modified}
+const spaces = {};
 let attached = []; // the files the next message attaches: {name, uploading}
 let me = null; // the person whose this device is: {person, name, owner, device}
 let accounts = null; // the owner's to manage: the people and their devices, and those asking
@@ -18,19 +24,50 @@ let lost = false; // the events' connection, until it is back
 let mode = localStorage.getItem("leat.mode") ?? "system"; // light, dark, or as the system is
 let views = []; // the shown messages' elements, by their indexes
 const opened = new Map(); // whether each fold is open, as the user left it: work, calls, reasoning
-// the pages beside the conversations, each a section of its own name, and their titles
-const PAGES = ["files", "settings"];
-const TITLES = { files: "Files", settings: "Settings" };
+// the pages beside the conversations, each a section of its own name, and their titles; a
+// project's page, "project", has its name
+const PAGES = ["projects", "project", "files", "settings"];
+const TITLES = { projects: "Projects", files: "Files", settings: "Settings" };
 
 $("new").onclick = () => {
   open(null);
   $("input").focus();
 };
 $("menu").onclick = () => document.body.classList.toggle("menu");
+$("held").onclick = () => turnTo("projects");
 $("filed").onclick = () => turnTo("files");
 $("set").onclick = () => turnTo("settings");
 $("attach").onclick = () => pick(attach);
-$("upload").onclick = () => pick(upload);
+$("upload").onclick = () => pick((file) => upload(file, null));
+$("adding").onclick = () => pick((file) => upload(file, viewing));
+$("create").onsubmit = create;
+$("back").onclick = (event) => {
+  event.preventDefault();
+  turnTo("projects");
+};
+$("crumb").onclick = (event) => {
+  event.preventDefault();
+  showProject(shown.project);
+};
+$("title").onkeydown = (event) => event.key === "Enter" && $("title").blur();
+$("title").onchange = () => { // renamed, unless to nothing
+  const name = $("title").value.trim();
+  if (name) change(viewing, { name });
+  else renderProject();
+};
+let saving = null; // the instructions' save, a moment after the user stops typing
+$("instructions").oninput = () => {
+  clearTimeout(saving);
+  const id = viewing, instructions = $("instructions").value;
+  saving = setTimeout(async () => {
+    if (await change(id, { instructions })) $("saved").textContent = "Saved. They hold for chats begun from now on.";
+  }, 600);
+};
+$("discard").onclick = async () => {
+  const p = project(viewing);
+  if (!confirm(`Delete “${p.name}”, with its files and every chat in it? It cannot be undone.`)) return;
+  if (await del(`/api/projects/${p.id}`)) turnTo("projects");
+};
 $("input").onpaste = (event) => { // images pasted, as a screenshot, attached to the next message
   const pasted = [...event.clipboardData.files]; // but text pasted with a picture of it, as Office's
   if (!pasted.length || event.clipboardData.getData("text/plain")) return;
@@ -41,7 +78,8 @@ window.ondragover = (event) => event.preventDefault();
 window.ondrop = (event) => { // files dropped, attached to the next message, or on their page uploaded
   event.preventDefault();
   const dropped = [...event.dataTransfer.files];
-  if (document.body.classList.contains("files")) dropped.forEach(upload);
+  if (paged("files")) dropped.forEach((file) => upload(file, null));
+  else if (paged("project")) dropped.forEach((file) => upload(file, viewing));
   else dropped.forEach(attach);
 };
 $("effort").onchange = () => { // kept for the model, on this device
@@ -145,10 +183,12 @@ function renderModes() {
   }));
 }
 
-// shows what the address names: a page, as the files', a conversation, or a new one
+// shows what the address names: a page, as the files', a project's, a conversation, or a new one
 function route() {
   const name = location.pathname.slice(1);
-  if (PAGES.includes(name)) turnTo(name, false);
+  const held = location.pathname.match(/^\/projects\/([0-9a-f]{12})$/)?.[1];
+  if (held) showProject(held, false);
+  else if (PAGES.includes(name) && name !== "project") turnTo(name, false);
   else open(addressed(), false);
 }
 
@@ -195,9 +235,18 @@ function handle(event) {
         if (!$("input").value) $("input").value = event.content;
       }
       break;
+    case "projects":
+      projects = event.projects;
+      if (viewing && !project(viewing)) { // gone, or no longer shared
+        history.replaceState(null, "", "/projects");
+        turnTo("projects", false);
+      }
+      renderProjects();
+      break;
     case "files":
-      files = event.files;
+      spaces[event.project ?? ""] = event.files;
       renderFiles();
+      renderProjects(); // as they count them
       return;
     case "accounts":
       accounts = event;
@@ -268,6 +317,7 @@ async function open(id, push = true) {
   if (push) history.pushState(null, "", id ? `/c/${id}` : "/");
   markRead(id);
   document.body.classList.remove("menu", ...PAGES);
+  viewing = null;
   const running = conversations.find((c) => c.id === id)?.running ?? false;
   // until it comes; then shown, unless another was opened since, or this one again
   const pending = id ? { id, title: "", messages: null, running, later: [] } : null;
@@ -299,13 +349,14 @@ async function send() {
   controls();
   try {
     const path = shown ? `/api/conversations/${shown.id}/messages` : "/api/conversations";
-    const sent = attached, from = shown?.id;
+    const sent = attached, from = location.pathname;
     const files = sent.map((a) => a.name);
     const effort = chosen(models.find((m) => m.id === ready())) ?? undefined; // none, if it has none
-    const { id } = await (await post(path, { content, effort, files })).json();
+    const project = shown ? undefined : (viewing ?? undefined); // a new one's, begun on its page
+    const { id } = await (await post(path, { content, effort, files, project })).json();
     attached = attached.filter((a) => !sent.includes(a)); // not those added meanwhile
     renderAttached();
-    if (shown?.id === from && from !== id) open(id); // unless another was opened meanwhile
+    if (location.pathname === from && shown?.id !== id) open(id); // unless another was opened meanwhile
   } catch (error) {
     if (!$("input").value) $("input").value = content;
     status(error.message, true);
@@ -349,10 +400,36 @@ async function load(model) {
   }
 }
 
-async function post(path, body) {
-  const response = await fetch(path, { method: "POST", body: JSON.stringify(body) });
+async function post(path, body, method = "POST") {
+  const response = await fetch(path, { method, body: JSON.stringify(body) });
   if (!response.ok) throw new Error((await response.json()).error.message);
   return response;
+}
+
+// makes a project of the name the user gave, and shows its page
+async function create(event) {
+  event.preventDefault();
+  const name = $("naming").value.trim();
+  if (!name) return;
+  try {
+    const made = await (await post("/api/projects", { name })).json();
+    $("naming").value = "";
+    projects = [made, ...(projects ?? []).filter((p) => p.id !== made.id)]; // before its event
+    showProject(made.id);
+  } catch (error) {
+    status(error.message, true);
+  }
+}
+
+// changes a project's name, instructions or sharing; whether it did, saying why not if not
+async function change(id, fields) {
+  try {
+    await post(`/api/projects/${id}`, fields, "PATCH");
+    return true;
+  } catch (error) {
+    status(error.message, true);
+    return false;
+  }
 }
 
 // shows a page, in place of the conversation
@@ -360,9 +437,32 @@ function turnTo(name, push = true) {
   if (push) history.pushState(null, "", `/${name}`);
   document.body.classList.remove("menu", ...PAGES);
   document.body.classList.add(name);
-  shown = null;
+  shown = viewing = null;
   render();
   document.title = TITLES[name];
+}
+
+// shows a project's page: its chats, files and instructions, and the composer, which begins a chat
+// in it
+function showProject(id, push = true) {
+  if (push) history.pushState(null, "", `/projects/${id}`);
+  document.body.classList.remove("menu", ...PAGES);
+  document.body.classList.add("project");
+  if (viewing !== id) $("saved").textContent = "They hold for chats begun from now on.";
+  shown = null;
+  viewing = id;
+  render();
+  $("input").focus();
+}
+
+// a project this person sees, by its id
+function project(id) {
+  return projects?.find((p) => p.id === id);
+}
+
+// whether a page is shown
+function paged(name) {
+  return document.body.classList.contains(name);
 }
 
 // a time, in seconds, as a day people read
@@ -424,15 +524,82 @@ function renderAccounts() {
 }
 
 function renderFiles() {
-  $("workspace").replaceChildren(...files.map((f) => {
-    const item = element("li"), remover = element("button", "", "×");
-    remover.title = "Delete";
-    remover.onclick = () => del(`/api/files/${encodeURIComponent(f.name)}`);
-    item.append(fileLink(f.name), element("span", "meta", `${bytes(f.size)} · ${day(f.modified)}`), remover);
-    return item;
-  }));
+  $("workspace").replaceChildren(...listFiles(null));
+  $("kept").replaceChildren(...(viewing ? listFiles(viewing) : []));
   // the cards of the files its answers made, where the user reads
   if (shown?.messages) follow(() => views.forEach((view) => view.update()));
+}
+
+// a space's files, a project's or the person's own, each a row that opens it and deletes it
+function listFiles(project) {
+  return filesOf(project).map((f) => {
+    const item = element("li"), remover = element("button", "", "×");
+    remover.title = "Delete";
+    remover.onclick = () => confirm(`Delete “${f.name}”? It cannot be undone.`)
+      && del(`/api${place(project)}/files/${encodeURIComponent(f.name)}`);
+    item.append(fileLink(f.name, project), element("span", "meta", `${bytes(f.size)} · ${day(f.modified)}`), remover);
+    return item;
+  });
+}
+
+// the files of a project's space, or of the person's own
+function filesOf(project) {
+  return spaces[project ?? ""] ?? [];
+}
+
+// where a space's files are, of a project's or the person's own: their addresses' start
+function place(project) {
+  return project ? `/projects/${project}` : "";
+}
+
+// the space the user works in: the shown conversation's, or the project's whose page is shown
+function here() {
+  return shown ? (shown.project ?? null) : viewing;
+}
+
+// the projects, as their page lists them
+function renderProjects() {
+  $("listed").replaceChildren(...(projects ?? []).map((p) => {
+    const item = element("li"), a = element("a", "", p.name);
+    a.href = `/projects/${p.id}`;
+    a.onclick = (event) => {
+      event.preventDefault();
+      showProject(p.id);
+    };
+    const n = filesOf(p.id).length;
+    const about = [p.shared ? "Shared" : "Only you", `${n} ${n === 1 ? "file" : "files"}`, day(p.updated)];
+    item.append(a, element("span", "meta", about.join(" · ")));
+    return item;
+  }));
+  renderProject();
+}
+
+// the shown project's page: its name, whom it is shared with, its chats, files and instructions
+function renderProject() {
+  const p = project(viewing);
+  if (!p) return;
+  document.title = p.name;
+  if (document.activeElement !== $("title")) $("title").value = p.name;
+  if (document.activeElement !== $("instructions")) $("instructions").value = p.instructions;
+  const mine = p.person === me?.person;
+  $("sharing").replaceChildren(...[[false, "Only me"], [true, "Everyone"]].map(([shared, said]) => {
+    const button = element("button", shared === p.shared ? "on" : "", said);
+    button.disabled = !mine;
+    button.title = mine ? "" : "Only whoever made the project can change whom it is shared with";
+    button.onclick = () => shared !== p.shared && change(p.id, { shared });
+    return button;
+  }));
+  $("discard").hidden = !mine && !me?.owner;
+  $("chats").replaceChildren(...conversations.filter((c) => c.project === p.id).map((c) => {
+    const item = element("li"), a = element("a", "", c.title);
+    a.href = `/c/${c.id}`;
+    a.onclick = (event) => {
+      event.preventDefault();
+      open(c.id);
+    };
+    item.append(a, element("span", "meta", day(c.updated)));
+    return item;
+  }));
 }
 
 // asks the user for files, and hands them to `take`, each
@@ -443,10 +610,11 @@ function pick(take) {
   picker.click();
 }
 
-// uploads a file to the workspace; returns the name it got there, or null if it did not
-async function upload(file) {
+// uploads a file to a project's files, or the person's own; returns the name it got there, or null
+// if it did not
+async function upload(file, project) {
   try {
-    const path = `/api/files/${encodeURIComponent(file.name)}`;
+    const path = `/api${place(project)}/files/${encodeURIComponent(file.name)}`;
     const response = await fetch(path, { method: "PUT", body: file });
     if (!response.ok) throw new Error((await response.json()).error.message);
     return (await response.json()).name;
@@ -461,7 +629,7 @@ async function attach(file) {
   const chip = { name: file.name, uploading: true };
   attached.push(chip);
   renderAttached();
-  chip.name = await upload(file);
+  chip.name = await upload(file, here());
   chip.uploading = false;
   attached = attached.filter((a) => a.name);
   renderAttached();
@@ -496,10 +664,12 @@ function ready() {
 function render() {
   renderList();
   renderLog();
+  renderFiles();
   controls();
 }
 
 function renderList() {
+  renderProject(); // its chats
   $("conversations").replaceChildren(...conversations.map((c) => {
     const item = element("div", "conversation");
     item.classList.toggle("shown", c.id === shown?.id);
@@ -638,9 +808,14 @@ function controls() {
   input.style.height = "auto";
   input.style.height = `${input.scrollHeight}px`;
   input.style.overflowY = input.scrollHeight > 240 ? "auto" : "hidden"; // its max-height
-  const paged = PAGES.some((name) => document.body.classList.contains(name));
-  if (!paged) document.title = shown?.title || "leat";
-  $("main").classList.toggle("empty", !shown && !paged);
+  const page = PAGES.some(paged);
+  if (!page) document.title = shown?.title || "leat";
+  $("main").classList.toggle("empty", !shown && !page);
+  const held = project(here());
+  input.placeholder = viewing && held ? `Start a chat in ${held.name}` : "Message";
+  $("crumb").hidden = !shown || !held; // the project the conversation is in
+  $("crumb").lastElementChild.textContent = held?.name ?? "";
+  $("crumb").href = held ? `/projects/${held.id}` : "";
   $("greeting").textContent = unreachable ? "The engine is not reachable"
     : loading ? "Loading…" : !model ? "Choose a model" : "How can I help?";
   $("send").classList.toggle("stop", running);
@@ -764,7 +939,7 @@ function named(path = "") {
 
 // the files a reply's turn made or changed, that are still there
 function made(m) {
-  const messages = shown?.messages ?? [], names = [];
+  const messages = shown?.messages ?? [], names = [], files = filesOf(here());
   for (let i = messages.indexOf(m) - 1; i >= 0 && messages[i].role !== "user"; i--) {
     for (const name of messages[i].info?.files ?? []) {
       if (!names.includes(name) && files.some((f) => f.name === name)) names.unshift(name);
@@ -796,15 +971,16 @@ function cards(names) {
 // the files a page shows as images, by their names
 const PICTURE = /\.(png|jpe?g|gif|webp)$/i;
 
-function picture(name) {
+// an image of a space's: a project's, or the person's own, the space worked in by default
+function picture(name, project = here()) {
   const img = element("img");
-  Object.assign(img, { src: `/files/${encodeURIComponent(name)}`, alt: name, loading: "lazy" });
+  Object.assign(img, { src: `${place(project)}/files/${encodeURIComponent(name)}`, alt: name, loading: "lazy" });
   return img;
 }
 
-function fileLink(name) {
+function fileLink(name, project = here()) {
   const a = element("a", "", name);
-  Object.assign(a, { href: `/files/${encodeURIComponent(name)}`, target: "_blank" });
+  Object.assign(a, { href: `${place(project)}/files/${encodeURIComponent(name)}`, target: "_blank" });
   return a;
 }
 

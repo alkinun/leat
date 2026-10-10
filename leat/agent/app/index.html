@@ -28,6 +28,9 @@
   <button id="new">
     <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>New chat
   </button>
+  <button id="held" class="place">
+    <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/></svg>Projects
+  </button>
   <div id="conversations"></div>
   <button id="filed" class="place">
     <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>Files
@@ -45,6 +48,9 @@
     </button>
     <select id="model"></select>
     <span id="status"></span>
+    <a id="crumb" title="The project this chat is in" hidden>
+      <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/></svg><span></span>
+    </a>
   </header>
   <h1 id="greeting"></h1>
   <div id="log"></div>
@@ -57,9 +63,33 @@
   </section>
   <section id="files" class="page">
     <h1>Files</h1>
-    <p>Your files, which Leat reads and makes. Attach them to a message, or drop them here.</p>
+    <p>Your own files, which Leat reads and makes, and only you see. Attach them to a message, or drop them here. A project's files are on its page.</p>
     <form><button type="button" id="upload">Upload files</button></form>
     <ul id="workspace"></ul>
+  </section>
+  <section id="projects" class="page">
+    <h1>Projects</h1>
+    <p>A project keeps a client's or a matter's files, instructions and chats together. Its chats read its files and follow its instructions.</p>
+    <form id="create">
+      <input id="naming" placeholder="A new project's name" maxlength="80" autocomplete="off">
+      <button>Create</button>
+    </form>
+    <ul id="listed"></ul>
+  </section>
+  <section id="project" class="page">
+    <a id="back" href="/projects">
+      <svg viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg>Projects
+    </a>
+    <input id="title" maxlength="80" autocomplete="off" aria-label="The project's name">
+    <div id="sharing" class="choice"></div>
+    <h2>Chats</h2>
+    <ul id="chats"></ul>
+    <h2>Files <button id="adding" type="button">Upload</button></h2>
+    <ul id="kept"></ul>
+    <h2>Instructions</h2>
+    <textarea id="instructions" rows="4" placeholder="What Leat should know and do in this project: who the client is, what to watch for, how to write."></textarea>
+    <p id="saved" class="meta">They hold for chats begun from now on.</p>
+    <button id="discard" type="button">Delete project</button>
   </section>
   <div id="composer">
     <div class="box">
