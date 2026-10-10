@@ -26,6 +26,7 @@ import threading
 import time
 import urllib.parse
 from collections.abc import Collection, Iterable, Iterator
+from pathlib import Path
 from typing import Any
 
 from leat.agent import context
@@ -34,6 +35,7 @@ from leat.agent.backup import Backups
 from leat.agent.client import Client, Completion, EngineError, whole
 from leat.agent.index import Index
 from leat.agent.store import Store
+from leat.agent.sync import SYNC, mirror
 from leat.agent.tools import Context, Result, Tool, arguments, files, numbered
 from leat.agent.workspace import Workspace
 
@@ -153,6 +155,7 @@ class Agent:
         self.background: Background | None = None  # once started
         self._turns: dict[str, _Turn] = {}  # the running ones, by their conversation's id
         self._lock = threading.Lock()
+        self._syncing = threading.Lock()  # held while a project's files are synced
         self.backups = Backups(self)
         self.settle()
 
@@ -363,6 +366,58 @@ class Agent:
         agent is kept from it."""
         offline = self.offline()
         return {n: t for n, t in self.tools.items() if not (offline and n in WEB_TOOLS)}
+
+    def sync(self, id: str, source: str | None, person: int | None = None) -> None:
+        """Syncs a project's files with a folder of the box's from now on, in a folder of its name,
+        the first time at once; or of None with none, its copy kept. Raises NotFound if the
+        person sees no such project, ValueError of a folder not named by its whole path, or not
+        there."""
+        if source is not None:
+            path = Path(source)
+            if not path.is_absolute():
+                raise ValueError("the folder must be named by its whole path, as /mnt/office")
+            if not path.name or path.name.startswith("."):  # as "/", whose copy would be the
+                # project's whole files
+                raise ValueError("choose a folder of a name, not a whole disk")
+            if not path.is_dir():
+                raise ValueError(f"{source} is not a folder on this computer")
+        with self._lock:
+            self._project(id, person)
+            self.store.change_project(id, source=source, synced=None, unsynced=None)
+            self._publish_projects()
+        if source is not None:
+            threading.Thread(target=self.synced, args=(id,), daemon=True).start()
+
+    def syncs_due(self) -> list[str]:
+        """The projects whose files are due to be synced: not since SYNC seconds ago."""
+        due = time.time() - SYNC
+        return [p["id"] for p in self.store.synced_projects() if (p["synced"] or 0) < due]
+
+    def sync_due(self) -> None:
+        """Syncs each project's files that are due to be, in turn, unless a sync runs."""
+        if not self._syncing.locked():
+            for id in self.syncs_due():
+                self.synced(id)
+
+    def synced(self, id: str) -> None:
+        """Syncs a project's files with its folder now, one project at a time, telling the apps
+        how it went, and noting what changed."""
+        with self._syncing:
+            if (project := self.store.project(id)) is None or not project["source"]:
+                return
+            source = Path(project["source"])
+            space = self._space(id, None)
+            try:
+                copied, deleted = mirror(source, space.path(source.name))
+            except (OSError, ValueError) as e:
+                self.store.change_project(id, synced=time.time(), unsynced=str(e))
+            else:
+                self.store.change_project(id, synced=time.time(), unsynced=None)
+                if copied or deleted:
+                    did = f"{copied} copied, {deleted} deleted, from {source}"
+                    self.note(None, "synced the files", id, did, leat=True)
+                    self.files_changed(id)
+        self.projects_changed()
 
     def projects_changed(self) -> None:
         """Tells each person's apps of the projects they see, as they changed."""
@@ -972,8 +1027,9 @@ def _workflow(w: dict[str, Any]) -> dict[str, Any]:
 
 
 def _project(p: dict[str, Any]) -> dict[str, Any]:
-    # a project as the apps show it
-    keys = ("id", "name", "instructions", "person", "updated")
+    # a project as the apps show it: the folder its files are synced with too, if any, when they
+    # last were, and why not, if not
+    keys = ("id", "name", "instructions", "person", "updated", "source", "synced", "unsynced")
     return {k: p[k] for k in keys} | {"shared": bool(p["shared"])}
 
 

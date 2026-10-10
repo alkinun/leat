@@ -75,6 +75,7 @@ _SHOWN = {"image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf
 _CONVERSATION = re.compile(r"/api/conversations/([0-9a-f]{12})(/messages|/stop)?")
 _PROJECT = re.compile(r"/api/projects/([0-9a-f]{12})")
 _WORKFLOW = re.compile(r"/api/workflows/([0-9]+)")
+_SYNC = re.compile(r"/api/projects/([0-9a-f]{12})/sync")
 _PROJECT_PAGE = re.compile(r"/projects/[0-9a-f]{12}")
 _REQUEST = re.compile(r"/api/pairings/([0-9a-f]{16})(/allow)?")
 _DEVICE = re.compile(r"/api/devices/([0-9]+)")
@@ -177,6 +178,14 @@ class _Handler(BaseHTTPRequestHandler):
                 project = agent.add_project(fields.pop("name"), person, **fields)
                 agent.note(person, "made the project", project["id"])
                 self._json(200, project)
+            elif synced := _SYNC.fullmatch(path):  # a project's files synced with a folder, or not
+                _owner(me)
+                if (source := body.get("source")) is not None and not isinstance(source, str):
+                    raise ValueError("source must be a folder's path, or null")
+                agent.sync(synced[1], source := (source or "").strip() or None, person)
+                agent.note(person, "chose to sync the files with" if source else "stopped syncing",
+                           synced[1], source)  # fmt: skip
+                self._json(200, {})
             elif path == "/api/workflows":  # a project's, if the body names one
                 workflow = agent.add_workflow(*_workflow(body), person, _held(body))
                 agent.note(person, "saved the workflow", workflow["project"], workflow["name"])

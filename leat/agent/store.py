@@ -247,6 +247,13 @@ _MIGRATIONS = [
     );
     CREATE INDEX activity_at ON activity (at);
     """,
+    # the folder of the box's a project's files are synced with, if one, as a network drive's,
+    # when they last were, and why they were not, if they were not
+    """
+    ALTER TABLE projects ADD COLUMN source TEXT;
+    ALTER TABLE projects ADD COLUMN synced REAL;
+    ALTER TABLE projects ADD COLUMN unsynced TEXT;
+    """,
 ]
 KEPT = 365 * 86400  # seconds the activity is kept
 # a conversation's columns as the apps list it
@@ -362,6 +369,10 @@ class Store:
         sql = f"SELECT * FROM projects WHERE {_SEEN} ORDER BY updated DESC"
         return [dict(row) for row in self._query(sql, person)]
 
+    def synced_projects(self) -> list[dict[str, Any]]:
+        """The projects whose files are synced with a folder, whoever's."""
+        return [dict(row) for row in self._query("SELECT * FROM projects WHERE source IS NOT NULL")]
+
     def project(self, id: str) -> dict[str, Any] | None:
         rows = self._query("SELECT * FROM projects WHERE id = ?", id)
         return dict(rows[0]) if rows else None
@@ -380,7 +391,7 @@ class Store:
     def change_project(self, id: str, **changes: Any) -> dict[str, Any] | None:
         """Changes a project's name, instructions or whether it is shared, as `changes` give them;
         returns it as it now is, or None if there is none."""
-        assert set(changes) <= {"name", "instructions", "shared"}
+        assert set(changes) <= {"name", "instructions", "shared", "source", "synced", "unsynced"}
         sets = "".join(f"{key} = ?, " for key in changes)
         sql = f"UPDATE projects SET {sets}updated = ? WHERE id = ? RETURNING *"
         rows = self._query(sql, *changes.values(), time.time(), id)
