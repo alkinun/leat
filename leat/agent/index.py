@@ -41,7 +41,6 @@ from leat.agent.workspace import Workspace
 
 VERSION = 4  # of the index's tables: one of another is made anew
 PASSAGE = 1200  # characters of a passage at most
-LIBRARY = "library"  # the space of the laws leat.agent.library keeps
 FOUND = 8  # passages a search finds at most
 EACH = 3  # of one file at most
 STEM = 5  # letters of a word's beginning that a query's word finds at least
@@ -130,7 +129,6 @@ class Index:
         for kind in ("people", "projects"):
             for folder in sorted((self.workspace.root / kind).glob("*")):
                 self.refresh(f"{kind}/{folder.name}")
-        self.refresh(LIBRARY)
 
     def refresh(self, folder: str) -> None:
         """Has a space's files read again, those new or changed since, and those gone forgotten."""

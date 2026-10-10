@@ -20,7 +20,6 @@ let workflows = []; // the requests saved to make again, by name: {id, name, pro
 let me = null; // the person whose this device is: {person, name, owner, device}
 let accounts = null; // the owner's to manage: the people and their devices, and those asking
 let backups = null; // the owner's: the folder backed up to, and how the last backup went
-let laws = null; // the owner's: the laws kept, those being added, and why the last could not be
 let offline = false; // whether the box is kept from the internet, as its owner chose
 // the conversations whose turns ended while another was shown, as this device saw them
 const unread = new Set(JSON.parse(localStorage.getItem("leat.unread") ?? "[]"));
@@ -54,17 +53,6 @@ $("backing").onsubmit = async (event) => { // the folder backed up to, or none i
   try {
     await post("/api/backups", { folder: $("folder").value.trim() || null });
     $("folder").blur();
-  } catch (error) {
-    status(error.message, true);
-  }
-};
-$("lawing").onsubmit = async (event) => { // a law added, by its abbreviation
-  event.preventDefault();
-  const law = $("law").value.trim();
-  if (!law) return;
-  try {
-    await post("/api/library", { law });
-    $("law").value = "";
   } catch (error) {
     status(error.message, true);
   }
@@ -295,14 +283,9 @@ function handle(event) {
       backups = event;
       renderBackups();
       return;
-    case "library":
-      laws = event;
-      renderLaws();
-      return;
     case "settings":
       offline = event.offline;
       renderInternet();
-      renderLaws();
       return;
     case "loading":
       loading = event.model;
@@ -710,31 +693,6 @@ function renderBackups() {
   now.disabled = !folder || running;
   now.onclick = () => post("/api/backups/now", {}).catch((e) => status(e.message, true));
   $("backed").replaceChildren(line, now);
-}
-
-// the laws kept, the owner's to add while Leat may reach the internet, and to remove; those being
-// added, and why the last could not be
-function renderLaws() {
-  $("laws").hidden = !me?.owner || !laws;
-  if (!laws) return;
-  $("offeredLaws").replaceChildren(...laws.offered.map((a) => new Option(a)));
-  $("law").disabled = $("lawing").querySelector("button").disabled = offline;
-  $("statutes").replaceChildren(...laws.laws.map((law) => {
-    const item = element("li"), about = element("div"), remover = element("button", "", "×");
-    about.append(element("span", "", `${law.abbreviation} · ${law.title}`),
-      element("span", "meta", `${law.norms.toLocaleString()} paragraphs · fetched ${day(Date.parse(law.fetched) / 1000)}`));
-    remover.title = "Remove";
-    remover.onclick = () => confirm(`Remove the ${law.abbreviation}? Leat can no longer cite it.`)
-      && del(`/api/library/${encodeURIComponent(law.abbreviation)}`);
-    item.append(about, remover);
-    return item;
-  }));
-  const said = laws.adding.length ? `Adding ${laws.adding.join(", ")}…`
-    : laws.error ? laws.error
-    : offline ? "Leat is kept from the internet: turn it on to add laws."
-    : !laws.laws.length ? "No laws yet: Leat answers questions of law from what it knows, and may be wrong." : "";
-  $("lawed").textContent = said;
-  $("lawed").className = laws.error && !laws.adding.length ? "warning" : "meta";
 }
 
 // the box as its owner looks after it, asked as Settings opens: the room its files take and that
@@ -1216,7 +1174,6 @@ const DID = {
   translate_document: ["translated a document", (n) => `translated ${n} documents`],
   search: ["searched the web", (n) => `searched the web ${n} times`],
   search_files: ["searched the files", (n) => `searched the files ${n} times`],
-  search_law: ["looked up the law", (n) => `looked up the law ${n} times`],
   fetch: ["read a page", (n) => `read ${n} pages`],
   read: ["read a file", (n) => `read ${n} files`],
   run: ["ran code", (n) => `ran code ${n} times`],
@@ -1334,8 +1291,6 @@ const LINES = {
     `Couldn't search for “${a.query}”`],
   search_files: (a) => [`Searching the files for “${a.query}”…`, `Searched the files for “${a.query}”`,
     `Couldn't search the files for “${a.query}”`],
-  search_law: (a) => [`Looking up the law on “${a.query}”…`, `Looked up the law on “${a.query}”`,
-    `Couldn't look up the law on “${a.query}”`],
   fetch: (a, i) => [`Reading ${host(a.url)}…`, `Read ${i.title || host(i.url ?? a.url)}`,
     `Couldn't read ${host(a.url)}`],
   read: (a) => [`Reading ${named(a.path)}…`, `Read ${named(a.path)}`, `Couldn't read ${named(a.path)}`],
@@ -1375,7 +1330,7 @@ function what(m) {
     const columns = m.info?.columns?.length > 1 ? [element("p", "meta", `Columns: ${m.info.columns.join(", ")}`)] : [];
     return [asked, ...columns, cards(m.info?.files ?? [])];
   }
-  if (["search_files", "search_law"].includes(m.name) && results?.length) {
+  if (m.name === "search_files" && results?.length) {
     return [cited(listed(results.map((r) => sourceLink(r, r.title))), results)];
   }
   if (m.name === "fetch") { // and the question it was read for, if one
@@ -1511,7 +1466,7 @@ function chips(all) {
 }
 
 function source(s) {
-  const named = s.file ? s.title : s.law ? s.title.split(":")[0] : host(s.url);
+  const named = s.file ? s.title : host(s.url);
   const a = sourceLink(s, s.n ? `${s.n} · ${named}` : named);
   a.className = "source";
   a.title = s.title || s.url;
@@ -1568,7 +1523,6 @@ const ICONS = {
   ask_files: '<path d="M3 5h18M3 12h18M3 19h18M9 5v14"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
   search_files: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
-  search_law: '<path d="M12 3v18M7 21h10M5 7h14M5 7l-3 7a3 3 0 0 0 6 0zM19 7l-3 7a3 3 0 0 0 6 0z"/>',
   fetch: '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/>',
   read: '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/>',
   write: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',

@@ -18,7 +18,6 @@ import statistics
 import sys
 import tempfile
 import time
-import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,11 +25,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from leat.agent import library  # noqa: E402
 from leat.agent.agent import Agent  # noqa: E402
 from leat.agent.client import Client  # noqa: E402
 from leat.agent.embeddings import Embedder  # noqa: E402
-from leat.agent.index import LIBRARY, Index  # noqa: E402
+from leat.agent.index import Index  # noqa: E402
 from leat.agent.store import Store  # noqa: E402
 from leat.agent.tools import ask, files, office, reconcile, web  # noqa: E402
 from leat.agent.workspace import Workspace  # noqa: E402
@@ -102,7 +100,6 @@ class Case:
     files: dict[str, str] = field(default_factory=dict)  # the workspace's, by name
     attach: bool = True  # whether the message attaches them, or the model must find them
     setup: str = ""  # Python run in the sandbox, in the workspace, that makes more of its files
-    laws: bool = False  # whether the library keeps the Bundesurlaubsgesetz, as tests' fixture
 
 
 # a lease and a fee letter's template, as Word documents, made in the sandbox, in German; and a
@@ -204,9 +201,6 @@ CASES = [
     Case("translates", "Translate the lease into English.",
          [called("translate_document"), makes(r"\.docx$")], setup=LEASE,
          attach=False),
-    Case("cites the law", "Wie viele Urlaubstage stehen einem Arbeitnehmer gesetzlich mindestens "
-         "zu?", [called("search_law"), says("24"), says(r"§ ?3"), says(CITES), uncalled("search")],
-         laws=True),
 ]  # fmt: skip
 
 
@@ -256,12 +250,9 @@ def _run(case: Case, args: argparse.Namespace) -> Outcome:
         index = Index(Path(data) / "index.db", workspace, embedder=Embedder(engine))
         tools = [
             *web.tools(args.search, engine), *files.tools(index), *ask.tools(engine, index),
-            *office.tools(engine), *reconcile.tools(), *library.tools(index),
+            *office.tools(engine), *reconcile.tools(),
         ]  # fmt: skip
         agent = Agent(Store(Path(data) / "leat.db"), engine, tools, workspace, index)
-        if case.laws:
-            _law(workspace)
-            index.update(LIBRARY)
         space = agent.space()  # no one's own, as the conversation is
         for name, text in case.files.items():
             space.path(name).parent.mkdir(parents=True, exist_ok=True)
@@ -282,17 +273,6 @@ def _run(case: Case, args: argparse.Namespace) -> Outcome:
         held, read = sum(i["cached"] or 0 for i in infos), sum(i["read"] for i in infos)
         share = held / (held + read) if held + read else 0.0
         return Outcome(tools_called, answer or "", names, seconds, share)
-
-
-def _law(workspace: Workspace) -> None:
-    # the library, keeping the Bundesurlaubsgesetz's start, as tests' fixture has it
-    from tests.test_library import BURLG
-
-    space = workspace.space(LIBRARY)
-    with zipfile.ZipFile(space.path(".burlg.zip"), "w") as z:
-        z.writestr("burlg.xml", BURLG)
-    library.keep(space, ".burlg.zip", "burlg")
-    space.path(".burlg.zip").unlink()
 
 
 def _wait(agent: Agent, id: str) -> list[dict]:

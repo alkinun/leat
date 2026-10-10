@@ -1097,7 +1097,6 @@ def test_events(server, agent, engine):
     assert event() == {"type": "files", "project": None, "files": []}
     assert event()["type"] == "accounts"  # the owner's
     assert event()["type"] == "backups"
-    assert event()["type"] == "library"
     assert event()["type"] == "models"
     assert event() == {"type": "settings", "offline": False}
     engine.replies.put(REPLY)
