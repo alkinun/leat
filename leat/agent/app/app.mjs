@@ -16,6 +16,7 @@ let viewing = null; // the project whose page is shown
 const spaces = {};
 let attached = []; // the files and folders the next message attaches: {name, uploading, files}
 const unfolded = new Set(); // the folders whose files the lists show, by space and name
+let workflows = []; // the requests saved to make again, by name: {id, name, prompt, project}
 let me = null; // the person whose this device is: {person, name, owner, device}
 let accounts = null; // the owner's to manage: the people and their devices, and those asking
 // the conversations whose turns ended while another was shown, as this device saw them
@@ -247,6 +248,10 @@ function handle(event) {
       }
       renderProjects();
       break;
+    case "workflows":
+      workflows = event.workflows;
+      renderWorkflows();
+      return;
     case "files":
       spaces[event.project ?? ""] = event.files;
       renderFiles();
@@ -607,6 +612,71 @@ function here() {
   return shown ? (shown.project ?? null) : viewing;
 }
 
+// the workflows: the person's own, as chips below the composer of a new chat, and the shown
+// project's, as its page lists them; each puts its request in the composer, to send as it is or
+// change first
+function renderWorkflows() {
+  $("shortcuts").replaceChildren(...workflows.filter((w) => !w.project).map((w) => {
+    const chip = element("span", "chip"), use = element("button", "use", w.name);
+    use.title = w.prompt;
+    use.onclick = () => compose(w.prompt);
+    chip.append(use, forget(w));
+    return chip;
+  }));
+  $("flows").replaceChildren(...workflows.filter((w) => w.project && w.project === viewing).map((w) => {
+    const item = element("li"), use = element("button", "use");
+    use.append(element("span", "", w.name), element("span", "meta", w.prompt));
+    use.onclick = () => compose(w.prompt);
+    item.append(use, forget(w));
+    return item;
+  }));
+}
+
+// a workflow's button that deletes it, once the user says so
+function forget(w) {
+  const button = element("button", "", "×");
+  button.title = "Delete";
+  button.onclick = () => confirm(`Delete the workflow “${w.name}”?`) && del(`/api/workflows/${w.id}`);
+  return button;
+}
+
+// puts a request in the composer, to send or change
+function compose(text) {
+  const input = $("input");
+  input.value = text;
+  controls();
+  input.focus();
+  input.setSelectionRange(text.length, text.length);
+}
+
+// below a message the user sent, an action that saves it as a workflow, of a name they give it
+// there: the project's, if the chat is in one, or their own
+function saver(m) {
+  const box = element("div", "actions"), save = element("button", "", "Save as workflow");
+  save.onclick = () => {
+    const form = element("form"), name = element("input"), ok = element("button", "", "Save");
+    const cancel = element("button", "", "Cancel");
+    Object.assign(name, { value: m.content.split(/\s+/).slice(0, 6).join(" "), maxLength: 80, placeholder: "The workflow's name" });
+    cancel.type = "button";
+    cancel.onclick = () => box.replaceChildren(save);
+    form.onsubmit = async (event) => {
+      event.preventDefault();
+      if (!name.value.trim()) return;
+      try {
+        await post("/api/workflows", { name: name.value.trim(), prompt: m.content, project: shown?.project ?? undefined });
+        box.replaceChildren(element("span", "done", shown?.project ? "Saved to this project's workflows" : "Saved to your workflows, below a new chat"));
+      } catch (error) {
+        status(error.message, true);
+      }
+    };
+    form.append(name, ok, cancel);
+    box.replaceChildren(form);
+    name.select();
+  };
+  box.append(save);
+  return box;
+}
+
 // the projects, as their page lists them
 function renderProjects() {
   $("listed").replaceChildren(...(projects ?? []).map((p) => {
@@ -779,6 +849,7 @@ function render() {
   renderList();
   renderLog();
   renderFiles();
+  renderWorkflows();
   controls();
 }
 
@@ -878,6 +949,7 @@ function fill(turn, [start, ...rest]) {
   turn.start = start;
   turn.classList.toggle("summarized", [start, ...rest].includes(shown.summarized));
   turn.replaceChildren(view(start));
+  if (shown.messages[start].role === "user") turn.append(saver(shown.messages[start]));
   if (work.length) turn.append(fold(start, work, !answered));
   const long = shown.running && !answered && longCall(work);
   if (long) turn.append(meter(long));

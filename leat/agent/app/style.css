@@ -317,6 +317,44 @@ pre code { padding: 0; background: none; }
 .bar button:hover { background: var(--bubble); color: var(--text); }
 
 #composer { padding-bottom: calc(20px * var(--density)); }
+/* the person's workflows, below the composer of a new chat, each putting its request in it */
+#shortcuts { display: none; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 16px; }
+main.empty #shortcuts { display: flex; }
+#shortcuts .chip { position: relative; padding: 0; background: none; border: 1px solid var(--line); }
+#shortcuts .chip:hover { background: var(--bubble); }
+#shortcuts .use { padding: 6px 14px; font-size: 0.875rem; }
+/* its delete, a badge on its corner */
+#shortcuts .chip > button:not(.use) {
+  position: absolute; top: -7px; right: -7px; display: grid; place-items: center; width: 18px; height: 18px;
+  padding: 0; border: 1px solid var(--line); border-radius: 50%; background: var(--card); font-size: 0.75rem; line-height: 1;
+}
+@media (hover: hover) {
+  #shortcuts .chip:not(:hover, :focus-within) > button:not(.use) { display: none; }
+}
+/* below a message the user sent, an action that saves it as a workflow */
+.actions {
+  display: flex; justify-content: flex-end; margin: calc(-22px * var(--density)) 0 calc(16px * var(--density));
+  color: var(--muted); font-size: 0.8125rem;
+}
+.actions > button, .actions form button { padding: 2px 8px; border-radius: var(--round); color: var(--muted); }
+.actions > button:hover, .actions form button:hover { background: var(--bubble); color: var(--text); }
+.actions form { display: flex; gap: 4px; align-items: center; }
+.actions input {
+  width: 220px; padding: 3px 10px; border: 1px solid var(--line); border-radius: var(--round);
+  background: var(--card); font: inherit; color: var(--text); outline: none;
+}
+.actions .done { padding: 2px 8px; }
+@media (hover: hover) {
+  .turn:not(:hover, :focus-within) > .actions > button { visibility: hidden; }
+}
+/* a project's workflows, each putting its request in the composer */
+.page li .use {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; padding: 0;
+  color: var(--text); font-size: 1rem; text-align: left;
+}
+.page li .use .meta { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+#flows:empty::before { content: "None yet. Save a request you sent in a chat here with Save as workflow, below it."; color: var(--muted); }
+#flows:empty { padding: calc(12px * var(--density)) 4px; }
 #composer .box {
   padding: calc(8px * var(--density)); background: var(--card); border: 1px solid var(--line);
   border-radius: var(--round-large); box-shadow: var(--shadow);
@@ -376,7 +414,7 @@ pre code { padding: 0; background: none; }
 /* a row's buttons, as a conversation's ×, shown as it is pointed at where the device points, and
    always on a touch screen, which points at nothing */
 @media (hover: hover) {
-  :is(.conversation, .page li):not(:hover, :focus-within) button:not(.toggle) { visibility: hidden; }
+  :is(.conversation, .page li):not(:hover, :focus-within) button:not(.toggle, .use) { visibility: hidden; }
 }
 /* the gate of a device not yet paired: setting the box up, or asking to join it */
 #gate { display: none; }
