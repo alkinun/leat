@@ -40,7 +40,9 @@ def sample(
     tensors so one compiled graph serves every value. A row's draw depends only on its logits,
     its options, its seed and its `position`, the sampled token's position, one per row or one for
     all: a seeded generation repeats however much of its prompt was cached, whatever the other
-    rows.
+    rows, where its logits do. On the kernels they may not, in their last bits: those of a chunk
+    of several tokens round otherwise than those of a few, so that a prompt run whole and one
+    partly cached can tip a near tie apart, at its first token too.
     """
     temperature, top_k, top_p, min_p, presence = (options[:, i : i + 1] for i in range(5))
     if seen is not None:
