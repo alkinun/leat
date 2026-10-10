@@ -889,3 +889,29 @@ def test_cut_off_call():
     reply = Reply(content="Here it is.\n<tool_call>\n<function=weather>\n<parameter=city>\nPar")
     assert _calls(reply, [WEATHER], "length") == ("Here it is.", [])
     assert _calls(reply, [WEATHER], "stop")[0] == reply.content
+
+
+@pytest.mark.usefixtures("reference_ops")
+def test_embeddings(tiny_model, tiny):
+    # an embedding model beside the model: each text's embedding, as OpenAI's API gives them, of
+    # its tokens and the end-of-text token its tokenizer adds; texts refused that are none
+    embedder, _ = tiny("qwen3")
+    with serving(tiny_model[0], max_context=CONTEXT, embed=embedder) as server:
+        client = connect(server)
+        said = client.embeddings.create(model="any", input=["the rent", "a deposit"])
+        engine = Engine(embedder, max_context=CONTEXT, prefill_chunk=8)
+        tokens = engine.tokenizer.encode("the rent")
+        if GGUF.open(embedder).metadata.get("tokenizer.ggml.add_eos_token"):
+            tokens.append(engine.tokenizer.eos_id)
+        assert [d.index for d in said.data] == [0, 1] and said.model == embedder.stem
+        assert said.data[0].embedding == pytest.approx(engine.embed(tokens), abs=1e-5)
+        assert sum(x * x for x in said.data[1].embedding) == pytest.approx(1, abs=1e-4)
+        assert said.usage.prompt_tokens == len(tokens) + len(engine.tokenizer.encode("a deposit"))
+        for wrong in ([], [""], [1], "x" * 0):
+            with pytest.raises(openai.BadRequestError):
+                client.embeddings.create(model="any", input=wrong)
+    with (
+        serving(tiny_model[0], max_context=CONTEXT) as server,
+        pytest.raises(openai.NotFoundError, match="--embed"),
+    ):
+        connect(server).embeddings.create(model="any", input="x")

@@ -115,6 +115,10 @@ class Engine:
     context. A slot's rings hold only the last positions its runs wrote, as many as their size: it
     shares a prefix of its tokens only where they still hold the window before the prefix's end,
     as llama.cpp's.
+
+    An embedding model, as Qwen3-Embedding, embeds a prompt rather than generating: embed() runs
+    it in the first slot, chunk by chunk, and gives the normed hidden state of its last token, of
+    unit length, as such a model pools its tokens.
     """
 
     def __init__(
@@ -182,6 +186,7 @@ class Engine:
         # padding row would read experts of its own
         self._live = UOp.variable("live", 1, most) if self.config.experts else None
         self._chunk, self._few_chunk = graph(self._step), graph(self._step)
+        self._embedding, self._few_embedding = graph(self._embedded), graph(self._embedded)
         self._decode = {n: graph(functools.partial(self._step, decode=True)) for n in self._batches}
         self._copy = graph(self._copy_slot)
         if self.drafter is not None:
@@ -352,6 +357,30 @@ class Engine:
                 for _ in self.generate(image.tokens, 1, ignore_eog=True, images=[image]):
                     pass
         self.reset()
+
+    def embed(self, prompt: list[int]) -> list[float]:
+        """A prompt's embedding: the normed hidden state of its last token, of unit length, as an
+        embedding model that pools its last token gives it. Runs alone, as generate() does, in
+        the first slot, whose cached tokens it takes, chunk by chunk."""
+        if self.active:
+            raise RuntimeError("another generation is unfinished: exhaust or close it first")
+        if not 0 < len(prompt) < self.max_context:
+            raise ValueError(
+                f"prompt must have 1 to {self.max_context - 1} tokens, got {len(prompt)}"
+            )
+        self._cached[0], self._owners[0] = [], "\0embedding"  # shared with no prompt after
+        vector = None
+        for pos in range(0, len(prompt), self.prefill_chunk):
+            chunk = prompt[pos : pos + self.prefill_chunk]
+            few = len(chunk) <= FEW_TOKENS
+            graph, length = (
+                (self._few_embedding, self._few) if few else (self._embedding, self._len)
+            )
+            tokens = _ids(chunk, int(length.vmax)).shrink(((0, 1), (0, length.bind(len(chunk)))))
+            vector = graph(tokens, self._slot_vars[0].bind(0), self._pos_vars[0].bind(pos))
+            self._wrote(0, pos + len(chunk))
+        assert vector is not None
+        return cast(list[float], vector[0].tolist())
 
     def image(self, data: bytes) -> Image:
         """An image of its file's bytes, for a prompt: its tokens show it there, and start()
@@ -685,6 +714,11 @@ class Engine:
         logits = self.model.logits(hidden).reshape(len(pairs), -1)
         positions = Tensor.stack(*(Tensor(start + 1) for _, start in pairs))
         return sample(logits, options, seed, positions, seen).realize()
+
+    def _embedded(self, tokens: Tensor, slot: UOp, start: UOp) -> Tensor:
+        # runs a chunk of a prompt to embed: its last token's normed hidden state, of unit length
+        hidden = self.model.run(tokens, [Span(slot, start, tokens.shape[1])])[:, -1, :]
+        return (hidden / (hidden * hidden).sum(axis=-1, keepdim=True).sqrt()).realize()
 
     def _followed(self, tokens: Tensor, hidden: Tensor, spans: list[Span]) -> Tensor:
         # hidden (1, T, dim), the target's of a run of the spans' tokens; with a drafter, which

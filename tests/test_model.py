@@ -17,6 +17,7 @@ from tests.helpers import (
     P3_MSCALE,
     P3_ORIGINAL,
     P3_ROTATED,
+    D,
     random_blocks,
     reference_logits,
 )
@@ -237,6 +238,23 @@ def test_prefill_graphs(tiny_model):
     calls = engine._chunk.cnt, engine._few_chunk.cnt
     assert list(engine.generate(longer, 4)) == generated(path, longer, 4)
     assert (engine._chunk.cnt, engine._few_chunk.cnt) == (calls[0], calls[1] + 1)
+
+
+@pytest.mark.usefixtures("reference_ops")
+def test_embed(tiny):
+    # an embedding: the normed hidden state of the prompt's last token, of unit length, as the
+    # reference's is, through chunks of either graph; the slot it ran in shares no prefix after
+    path, weights = tiny("qwen3")
+    engine = Engine(path, max_context=CONTEXT, prefill_chunk=FEW_TOKENS + 4)
+    prompt = PROMPT * 3  # chunks of FEW_TOKENS + 4 and 36 - FEW_TOKENS - 4
+    hidden = reference_logits(weights | {"output.weight": np.eye(D)}, prompt, "qwen3")[-1]
+    got = np.array(engine.embed(prompt))
+    np.testing.assert_allclose(got, hidden / np.linalg.norm(hidden), rtol=2e-3, atol=2e-3)
+    assert engine._embedding.captured is not None and engine._few_embedding.captured is not None
+    assert engine.cached_prefix(prompt) == 0
+    assert list(engine.generate(prompt, 3)) == generated(path, prompt, 3)
+    with pytest.raises(ValueError, match="prompt must have"):
+        engine.embed([])
 
 
 def generated(path, prompt: list[int], n: int, sampling=GREEDY, seed=None) -> list[int]:

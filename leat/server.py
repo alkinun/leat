@@ -1,9 +1,11 @@
-"""OpenAI-compatible HTTP server: chat completions, whole or streamed, the model list, loading a
-model, and the metrics of what it did, in Prometheus's format.
+"""OpenAI-compatible HTTP server: chat completions, whole or streamed, embeddings, the model list,
+loading a model, and the metrics of what it did, in Prometheus's format.
 
 Handler threads parse requests, render prompts and write responses. One worker thread owns the
-engine: it runs completions together, one per slot, a token of each per batched step, and loads a
+engines: it runs completions together, one per slot, a token of each per batched step, and loads a
 model once the completions before have finished; the rest wait their turn in the order they arrive.
+With an embedding model beside the model, as Qwen3-Embedding, it embeds texts too, one between
+steps, so that a long list of them never holds the completions up.
 
 Given keys, every request must hold one, as OpenAI's clients send it, `Authorization: Bearer KEY`,
 or as Anthropic's do, `x-api-key: KEY`; each key's requests, tokens and time are counted apart,
@@ -44,6 +46,7 @@ from leat.chat import (
 )
 from leat.defaults import Overrides, recommended
 from leat.engine import Engine, Sequence
+from leat.gguf import GGUF
 from leat.keys import Keys
 from leat.sampler import Sampling
 from leat.tokenizer import Tokenizer
@@ -51,6 +54,8 @@ from leat.vision import Image, beside
 
 # seconds between a handler's checks that its client is still there, while it waits for text
 _HANG_UP_CHECK = 0.25
+EMBED_CONTEXT = 2048  # tokens of a text the embedding model reads at most, its start
+_EMBED_TEXTS = 256  # texts a request embeds at most
 
 
 def _integer(v: Any) -> bool:
@@ -130,6 +135,15 @@ class _Load:
 
 
 @dataclass
+class _Embedding:
+    # texts to embed, as their tokens: the worker answers their embeddings, in turn, or the
+    # exception it raised
+    texts: list[list[int]]
+    done: list[list[float]] = field(default_factory=list)
+    out: queue.SimpleQueue[list[list[float]] | Exception] = field(default_factory=queue.SimpleQueue)
+
+
+@dataclass
 class _Completion:
     """A chat completion: what the worker generates, and what the handler answers with."""
 
@@ -183,14 +197,19 @@ class Server(ThreadingHTTPServer):
 
     One model is loaded at a time, none until load(), as Engine(path, **options); it answers every
     request, whatever model it names. A model's id is its file name without .gguf. Unless the
-    options name a vision encoder, a model takes the projector beside it, if any, of its name.
+    options name a vision encoder, a model takes the projector beside it, if any, of its name. An
+    embedding model, `embed`, if given, loads at start beside it, and stays, and answers every
+    request for embeddings.
     """
 
     def __init__(
         self, models: Iterable[str | Path], host: str = "127.0.0.1", port: int = 8080,
-        keys: Keys | None = None, sampling: Overrides | None = None, **options: Any,
+        keys: Keys | None = None, sampling: Overrides | None = None,
+        embed: str | Path | None = None, **options: Any,
     ):  # fmt: skip
         self.models = {Path(path).stem: Path(path) for path in models}
+        self.embed = Path(embed) if embed is not None else None
+        self.embedder: Engine | None = None  # once the worker has loaded it
         self.options, self.created, self.keys = options, int(time.time()), keys
         self.overrides = sampling  # an operator's sampling, of each model's, if given
         self.metrics = _Metrics()
@@ -202,7 +221,9 @@ class Server(ThreadingHTTPServer):
         self.ready.set()
         self._loads = 0  # loads asked for, not yet done
         self._loads_lock = threading.Lock()
-        self.requests: queue.SimpleQueue[_Completion | _Load | None] = queue.SimpleQueue()
+        self.requests: queue.SimpleQueue[_Completion | _Load | _Embedding | None] = (
+            queue.SimpleQueue()
+        )
         super().__init__((host, port), _Handler)
         threading.Thread(target=self._work, name="leat engine", daemon=True).start()
 
@@ -230,26 +251,52 @@ class Server(ThreadingHTTPServer):
             super().handle_error(request, client_address)
 
     def _work(self) -> None:
-        # starts waiting requests in turn, then steps every running completion; waits for a
-        # request only when none is running or waiting, and stops after the requests that came
-        # before shutdown
+        # loads the embedding model, if any; then starts waiting requests in turn, embeds a text
+        # of the first embedding asked, and steps every running completion; waits for a request
+        # only when none is running or waiting, and stops after the requests that came before
+        # shutdown
+        if self.embed is not None:
+            try:
+                self.embedder = _embedder(self.embed)
+            except Exception as e:  # the models served still, without embeddings
+                print(f"{self.embed.name} failed to load, so nothing is embedded: {e!r}",
+                      file=sys.stderr, flush=True)  # fmt: skip
+                self.embed = None
         waiting: collections.deque[_Completion | _Load] = collections.deque()
+        embedding: collections.deque[_Embedding] = collections.deque()
         running: dict[Sequence, _Writer] = {}
         stopping = False
-        while not stopping or waiting or running:
+        while not stopping or waiting or running or embedding:
             try:
-                for request in self._arrivals(wait=not (waiting or running)):
+                for request in self._arrivals(wait=not (waiting or running or embedding)):
                     if request is None:
                         stopping = True
+                    elif isinstance(request, _Embedding):
+                        embedding.append(request)
                     else:
                         waiting.append(request)
                 while waiting and self._start(waiting[0], running):
                     waiting.popleft()
+                if embedding:
+                    self._embed(embedding)
                 if running:
                     self._step(running)
             except Exception as e:  # a bug's, for every client, rather than a worker gone
                 self._fail(e, waiting, running)
             self.busy, self.queued = len(running), sum(isinstance(r, _Completion) for r in waiting)
+
+    def _embed(self, embedding: collections.deque[_Embedding]) -> None:
+        # embeds the next text of the first embedding asked, answering it once all are
+        e = embedding[0]
+        try:
+            assert self.embedder is not None  # a handler asks for none without it
+            e.done.append(self.embedder.embed(e.texts[len(e.done)]))
+        except Exception as error:  # for the client; the server carries on
+            embedding.popleft()
+            return e.out.put(error)
+        if len(e.done) == len(e.texts):
+            embedding.popleft()
+            e.out.put(e.done)
 
     def _fail(
         self, error: Exception, waiting: collections.deque[_Completion | _Load],
@@ -379,7 +426,7 @@ class Server(ThreadingHTTPServer):
         engine.warm_up()
         return engine, chat
 
-    def _arrivals(self, wait: bool) -> Iterator[_Completion | _Load | None]:
+    def _arrivals(self, wait: bool) -> Iterator[_Completion | _Load | _Embedding | None]:
         # the requests queued so far, after waiting for one if `wait`
         with contextlib.suppress(queue.Empty):
             yield self.requests.get(block=wait)
@@ -513,7 +560,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         self.path = urllib.parse.urlsplit(self.path).path
-        routes = {"/v1/chat/completions": self._complete, "/v1/models/load": self._load}
+        routes = {"/v1/chat/completions": self._complete, "/v1/models/load": self._load,
+                  "/v1/embeddings": self._embeddings}  # fmt: skip
         with self._counted(self.path in routes):
             if (route := routes.get(self.path)) is None:
                 return self._error(404, f"there is no POST {self.path}")
@@ -601,6 +649,30 @@ class _Handler(BaseHTTPRequestHandler):
         except RuntimeError as e:
             return self._error(500, str(e))
         self._json(200, self._model(name))
+
+    def _embeddings(self, body: Any) -> None:
+        # each text's embedding, as OpenAI's API gives them, of the texts' starts, as many tokens
+        # as the embedding model reads
+        server = self.server
+        if server.embed is None:
+            return self._error(404, "this server embeds nothing: start it with --embed MODEL")
+        given = body.get("input") if isinstance(body, dict) else None
+        texts = [given] if isinstance(given, str) else given
+        if not (isinstance(texts, list) and 0 < len(texts) <= _EMBED_TEXTS
+                and all(isinstance(t, str) and t for t in texts)):  # fmt: skip
+            return self._error(400, f"input must be some text, or a list of 1 to {_EMBED_TEXTS}")
+        while server.embedder is None and server.embed is not None:  # loading, at start
+            time.sleep(_HANG_UP_CHECK)
+        if (engine := server.embedder) is None:
+            return self._error(404, "this server's embedding model failed to load")
+        tokens = [_embedded(engine, text) for text in texts]
+        server.requests.put(asked := _Embedding(tokens))
+        if isinstance(said := asked.out.get(), Exception):
+            return self._error(500, f"embedding failed: {said!r}")
+        data = [{"object": "embedding", "index": i, "embedding": v} for i, v in enumerate(said)]
+        used = sum(map(len, tokens))
+        self._json(200, {"object": "list", "data": data, "model": server.embed.stem,
+                         "usage": {"prompt_tokens": used, "total_tokens": used}})  # fmt: skip
 
     def _complete(self, body: Any) -> None:
         self.server.ready.wait()  # for the model loading, if one is, whose template renders it
@@ -739,6 +811,25 @@ class _Handler(BaseHTTPRequestHandler):
         code = "invalid_api_key" if status == 401 else None
         error = {"message": message, "type": kind, "param": None, "code": code}
         self._json(status, {"error": error}, headers)
+
+
+def _embedded(engine: Engine, text: str) -> list[int]:
+    # a text's tokens, as the embedding model reads it: its start, and its end-of-text token if the
+    # model's tokenizer adds one, as Qwen3-Embedding's does, whose state it pools
+    eos, adds = engine.tokenizer.eos_id, engine.gguf.metadata.get("tokenizer.ggml.add_eos_token")
+    end = [eos] if eos is not None and adds else []
+    return engine.tokenizer.encode(text)[: engine.max_context - 1 - len(end)] + end
+
+
+def _embedder(path: Path) -> Engine:
+    # an embedding model's engine, of EMBED_CONTEXT or its own context if less, its graphs
+    # compiled, for a text of a few tokens and for more
+    metadata = GGUF.open(path).metadata
+    trained = metadata.get(f"{metadata['general.architecture']}.context_length", EMBED_CONTEXT)
+    engine = Engine(path, max_context=min(EMBED_CONTEXT, trained), prefill_chunk=512)
+    engine.embed([0])
+    engine.embed([0] * 32)
+    return engine
 
 
 def _completion(body: Any, server: Server) -> _Completion:
