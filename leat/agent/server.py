@@ -80,6 +80,7 @@ _PROJECT_PAGE = re.compile(r"/projects/[0-9a-f]{12}")
 _REQUEST = re.compile(r"/api/pairings/([0-9a-f]{16})(/allow)?")
 _DEVICE = re.compile(r"/api/devices/([0-9]+)")
 _PERSON = re.compile(r"/api/people/([0-9]+)")
+_LAW = re.compile(r"/api/library/([^/]+)")  # a law the library keeps, by its abbreviation
 _FILE = re.compile(r"/(?:api/)?(?:projects/([0-9a-f]{12})/)?files/(.+)")
 
 
@@ -222,6 +223,10 @@ class _Handler(BaseHTTPRequestHandler):
                 agent.note(person, "chose to back up to" if folder else "stopped backing up",
                            detail=folder)  # fmt: skip
                 self._json(200, {})
+            elif path == "/api/library":  # a law added, by its abbreviation
+                _owner(me)
+                agent.library.add(_text(body, "law"), person)
+                self._json(200, {})
             elif path == "/api/backups/now":
                 _owner(me)
                 if not agent.backups.state()["folder"]:
@@ -266,6 +271,9 @@ class _Handler(BaseHTTPRequestHandler):
             elif (match := _REQUEST.fullmatch(path)) and not match[2]:
                 _owner(me)
                 accounts.refuse(match[1])
+            elif match := _LAW.fullmatch(path):
+                _owner(me)
+                agent.library.remove(urllib.parse.unquote(match[1]), person)
             elif match := _PERSON.fullmatch(path):
                 _owner(me)
                 removed = (store.person(int(match[1])) or {}).get("name")
@@ -417,6 +425,7 @@ class _Handler(BaseHTTPRequestHandler):
             if me["owner"]:
                 self._event(self.server.accounts.state())
                 self._event(agent.backups.state())
+                self._event(agent.library.state())
             self._event(agent.models_event())
             self._event(agent.settings_event())
             checked = time.monotonic()

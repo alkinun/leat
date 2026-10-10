@@ -34,6 +34,7 @@ from leat.agent.background import Background
 from leat.agent.backup import Backups
 from leat.agent.client import Client, Completion, EngineError, whole
 from leat.agent.index import Index
+from leat.agent.library import Library
 from leat.agent.store import Store
 from leat.agent.sync import SYNC, mirror
 from leat.agent.tools import Context, Result, Tool, arguments, files, numbered
@@ -58,6 +59,11 @@ with a report: what you found, in sections, and what stays unsure."""
 OFFLINE = """\
 This Leat is kept from the internet: answer from what you know and the user's files, and say so \
 when a question needs what you cannot reach, as today's news."""
+# of the system prompt, when the agent searches the law the box keeps
+LAW = """A question of German law is answered from the law's own text: call search_law for the \
+paragraphs that say it, and cite each you use by its number, as [1]. Name only paragraphs you \
+have read so, never one from memory; if the laws kept here do not say it, say so, and that a \
+lawyer should check it."""
 CITE = """Cite what you use by the numbers the tools give their sources, as [1] or [2][3], after \
 the words they support."""
 WEB_TOOLS = ("search", "fetch")  # the tools that reach the internet, which offline takes away
@@ -166,7 +172,7 @@ class Agent:
         self._turns: dict[str, _Turn] = {}  # the running ones, by their conversation's id
         self._lock = threading.Lock()
         self._syncing = threading.Lock()  # held while a project's files are synced
-        self.backups = Backups(self)
+        self.backups, self.library = Backups(self), Library(self)
         self.settle()
 
     def start(self) -> None:
@@ -556,8 +562,9 @@ class Agent:
         return [f | states.get(f["name"], {}) for f in files]
 
     def _indexed(self, folder: str) -> None:
-        # tells the apps of a space's files, whose states changed as the index read them
-        kind, id = folder.split("/", 1)
+        # tells the apps of a space's files, whose states changed as the index read them; the
+        # library's, which no app lists, not
+        kind, _, id = folder.partition("/")
         with self._lock:
             if kind == "projects" and self.store.project(id) is not None:
                 self._publish_files(id, None, changed=True)
@@ -990,8 +997,8 @@ def _system(
 ) -> dict[str, Any]:  # fmt: skip
     # the system prompt of a conversation begun now with the user, of a `name` if the box has
     # people, the workspace's tools if `workspace`, and of those named in `tools` search's,
-    # search_files's and ask_files's, that the internet is out of reach if `offline`, and the
-    # project it is held in, if one
+    # search_files's, ask_files's and search_law's, that the internet is out of reach if `offline`,
+    # and the project it is held in, if one
     skills = "\n".join(f"- {path}: {about}" for path, about in files.skills())
     search, ask = SEARCH * ("search_files" in tools), ASK * ("ask_files" in tools)
     office = OFFICE * ("reconcile" in tools or "suggest_edits" in tools)
@@ -1000,7 +1007,8 @@ def _system(
     )
     named = f" The user is {name}." if name else ""
     web = WEB if "search" in tools else OFFLINE if offline else ""
-    content = SYSTEM.format(named=named, sources=f"{web} {CITE}".strip(), workspace=space)
+    sources = " ".join(filter(None, [web, LAW * ("search_law" in tools), CITE]))
+    content = SYSTEM.format(named=named, sources=sources, workspace=space)
     if project is not None:
         text = project["instructions"].strip()
         instructions = INSTRUCTIONS.format(text=text) if text else ""
@@ -1022,6 +1030,8 @@ def _did(
         did.append(("read", f"{info['done']} files"))
     elif name == "search_files":
         did.append(("searched the files", None))
+    elif name == "search_law":
+        did.append(("looked up the law", None))
     elif name == "search":
         did.append(("searched the web", None))
     elif name == "fetch" and info.get("url"):

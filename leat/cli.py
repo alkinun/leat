@@ -16,6 +16,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from leat.agent import library
 from leat.agent.agent import Agent
 from leat.agent.client import Client
 from leat.agent.embeddings import Embedder
@@ -193,7 +194,7 @@ def _agent(args: argparse.Namespace) -> None:
     index = Index(args.data / "index.db", workspace, Transcriber(engine), Embedder(engine))
     tools = [
         *web.tools(args.search, engine), *files.tools(index), *ask.tools(engine, index),
-        *office.tools(engine), *reconcile.tools(),
+        *office.tools(engine), *reconcile.tools(), *library.tools(index),
     ]  # fmt: skip
     agent = Agent(Store(args.data / "leat.db"), engine, tools, workspace, index)
     agent.start()
