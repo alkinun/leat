@@ -482,6 +482,42 @@ def test_api_workflows(server, agent):
     assert agent.workflows(1) == []
 
 
+def test_offline(engine, tmp_path):
+    # kept from the internet, the model is offered no tool that reaches it, and told so; let
+    # reach it again, it is offered them, and told how to use them
+    from leat.agent.agent import OFFLINE, WEB
+
+    def tool(name: str) -> Tool:
+        return Tool(name, name, strings(text="x"), echo)
+
+    agent = Agent(Store(tmp_path / "leat.db"), Client(engine.url),
+                  [tool("search"), tool("fetch"), tool("echo")])  # fmt: skip
+    with agent.events.watch() as told:
+        agent.set_offline(True)
+        assert told.get() == {"type": "settings", "offline": True}
+    engine.replies.put(REPLY)
+    with agent.events.watch() as events:
+        id = agent.send(None, "What's new?")
+        until(events, ended)
+    assert OFFLINE in agent.store.messages(id)[0]["content"]
+    assert WEB not in agent.store.messages(id)[0]["content"]
+    assert [t["function"]["name"] for t in engine.requests[-1]["tools"]] == ["echo"]
+    agent.set_offline(False)
+    assert agent.store.setting("offline") is None and list(agent.offered()) == [
+        "search", "fetch", "echo"]  # fmt: skip
+    engine.replies.put(REPLY)
+    with agent.events.watch() as events:
+        id = agent.send(None, "What's new?")
+        until(events, ended)
+    assert WEB in agent.store.messages(id)[0]["content"]
+
+
+def test_api_offline(server, agent):
+    assert request(f"{server}/api/offline", "POST", {"offline": "yes"})[0] == 400
+    assert request(f"{server}/api/offline", "POST", {"offline": True})[0] == 200
+    assert agent.offline()
+
+
 def test_person_to_the_engine(agent, engine, events):
     # each request of a person's conversation names them to the engine, which keeps the prefixes
     # it caches of their prompts to theirs: their turns', and the naming of their conversations;
@@ -666,11 +702,11 @@ def test_summary_in_place(agent, engine, events):
     # when the prompt and the summary fit the context; its tools declared, that it extends the last
     engine.context = 4400
     engine.replies.put([{"content": "Noted."}])
-    id = agent.send(None, "a" * 3600)
+    id = agent.send(None, "a" * 3850)
     until(events, ended)
     engine.replies.put([{"content": "Goal: the user writes long."}])  # the summary
     engine.replies.put([{"content": "Noted again."}])
-    agent.send(id, "b" * 3600)
+    agent.send(id, "b" * 3850)
     until(events, ended)
     first, summarizing, reply = engine.requests
     asked = summarizing["messages"]
@@ -1059,6 +1095,7 @@ def test_events(server, agent, engine):
     assert event()["type"] == "accounts"  # the owner's
     assert event()["type"] == "backups"
     assert event()["type"] == "models"
+    assert event() == {"type": "settings", "offline": False}
     engine.replies.put(REPLY)
     id = agent.send(None, "Hi", person=1)
     assert event()["conversation"]["id"] == id

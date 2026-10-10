@@ -447,8 +447,8 @@ body.gated #gate { display: grid; flex: 1; place-items: center; min-height: 100v
   font-size: 0.875rem;
 }
 /* the backups, the owner's to set up */
-#backups[hidden] { display: none; }
-#backups .about { margin: 4px 0 12px; color: var(--muted); font-size: 0.875rem; }
+#backups[hidden], #internet[hidden] { display: none; }
+:is(#backups, #internet) .about { margin: 4px 0 12px; color: var(--muted); font-size: 0.875rem; }
 #backed { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 #backed p { margin: 0; font-size: 0.875rem; }
 #backed .meta { color: var(--muted); }

@@ -20,6 +20,7 @@ let workflows = []; // the requests saved to make again, by name: {id, name, pro
 let me = null; // the person whose this device is: {person, name, owner, device}
 let accounts = null; // the owner's to manage: the people and their devices, and those asking
 let backups = null; // the owner's: the folder backed up to, and how the last backup went
+let offline = false; // whether the box is kept from the internet, as its owner chose
 // the conversations whose turns ended while another was shown, as this device saw them
 const unread = new Set(JSON.parse(localStorage.getItem("leat.unread") ?? "[]"));
 let models = [], loading = null, unreachable = null; // the engine's, a model it loads, or why not
@@ -274,6 +275,10 @@ function handle(event) {
     case "backups":
       backups = event;
       renderBackups();
+      return;
+    case "settings":
+      offline = event.offline;
+      renderInternet();
       return;
     case "loading":
       loading = event.model;
@@ -628,6 +633,19 @@ function renderBackups() {
   now.disabled = !folder || running;
   now.onclick = () => post("/api/backups/now", {}).catch((e) => status(e.message, true));
   $("backed").replaceChildren(line, now);
+}
+
+// whether Leat may reach the internet, the owner's to choose, and what each choice means
+function renderInternet() {
+  $("internet").hidden = !me?.owner;
+  $("reach").replaceChildren(...[[false, "On"], [true, "Off"]].map(([off, said]) => {
+    const button = element("button", off === offline ? "on" : "", said);
+    button.onclick = () => off !== offline && post("/api/offline", { offline: off }).catch((e) => status(e.message, true));
+    return button;
+  }));
+  $("reached").textContent = offline
+    ? "Leat answers from what it knows and your files alone: nothing it does reaches the internet."
+    : "Leat may search the web and read pages to answer. What it searches for leaves the office; your files never do.";
 }
 
 // a time, in seconds, as a day and its hour

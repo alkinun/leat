@@ -178,6 +178,12 @@ class _Handler(BaseHTTPRequestHandler):
                 _owner(me)
                 agent.load(_text(body, "model"))
                 self._json(200, {})
+            elif path == "/api/offline":  # the agent kept from the internet, or let reach it
+                _owner(me)
+                if not isinstance(offline := body.get("offline"), bool):
+                    raise ValueError("offline must be true or false")
+                agent.set_offline(offline)
+                self._json(200, {})
             elif path == "/api/backups":  # the folder backed up to, or none
                 _owner(me)
                 if (folder := body.get("folder")) is not None and not isinstance(folder, str):
@@ -357,6 +363,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self._event(self.server.accounts.state())
                 self._event(agent.backups.state())
             self._event(agent.models_event())
+            self._event(agent.settings_event())
             checked = time.monotonic()
             while True:
                 try:

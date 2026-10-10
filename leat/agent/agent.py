@@ -41,13 +41,22 @@ You are Leat, an assistant that runs on a computer of the user's own, which keep
 and the files they share private.{named} Each of the user's messages begins with the date and time \
 they sent it.
 
+{sources}
+{workspace}"""
+# of the system prompt, when the agent searches the web
+WEB = """\
 When a question needs facts you may not know, or that may have changed since you learned them, \
 call search, then fetch the few pages most likely to answer, three or so, at once, each with the \
 question you want it to answer, more only if they fall short. When the user asks you to research \
 something, search it in several ways and read the pages that matter, ten or so, before you answer \
-with a report: what you found, in sections, and what stays unsure. Cite what you use by the \
-numbers the tools give their sources, as [1] or [2][3], after the words they support.
-{workspace}"""
+with a report: what you found, in sections, and what stays unsure."""
+# and when it is kept from the internet
+OFFLINE = """\
+This Leat is kept from the internet: answer from what you know and the user's files, and say so \
+when a question needs what you cannot reach, as today's news."""
+CITE = """Cite what you use by the numbers the tools give their sources, as [1] or [2][3], after \
+the words they support."""
+WEB_TOOLS = ("search", "fetch")  # the tools that reach the internet, which offline takes away
 # of the system prompt, when the agent has a workspace
 WORKSPACE = """
 The user's files are in a workspace, where you read, write and edit them, and run Python among \
@@ -203,7 +212,8 @@ class Agent:
                 info["files"] = attached
             if id is None:
                 who = (self.store.person(person) or {}) if person else {}
-                system = _system(self.workspace is not None, who.get("name"), held, self.tools)
+                system = _system(self.workspace is not None, who.get("name"), held,
+                                 self.offered(), self.offline())  # fmt: skip
                 title = _title(content)
                 id = self.store.create(title, [system, message], person, project)["id"]
                 start = 1
@@ -307,6 +317,26 @@ class Agent:
                 raise NotFound(f"there is no workflow {id}")
             self.store.delete_workflow(id)
             self._publish_workflows()
+
+    def offline(self) -> bool:
+        """Whether the agent is kept from the internet, as the owner chose."""
+        return bool(self.store.setting("offline"))
+
+    def set_offline(self, offline: bool) -> None:
+        """Keeps the agent from the internet, or lets it reach it, from each turn begun now on,
+        telling every app."""
+        self.store.set_setting("offline", offline or None)
+        self.events.publish(self.settings_event())
+
+    def settings_event(self) -> Event:
+        """The box's settings that every app shows: whether it is kept from the internet."""
+        return {"type": "settings", "offline": self.offline()}
+
+    def offered(self) -> dict[str, Tool]:
+        """The tools the model is offered: all, but for those that reach the internet while the
+        agent is kept from it."""
+        offline = self.offline()
+        return {n: t for n, t in self.tools.items() if not (offline and n in WEB_TOOLS)}
 
     def projects_changed(self) -> None:
         """Tells each person's apps of the projects they see, as they changed."""
@@ -510,7 +540,7 @@ class _Turn:
         # the files its tools work among: its project's, or its person's own
         self.workspace = agent._space(project, person) if agent.workspace else None
         self.content, self.effort = content, effort  # asked of the model, or its default if None
-        self.tools = agent.tools  # the tools the model calls
+        self.tools = agent.offered()  # the tools the model calls
         self.state = agent.store.context(id)  # the prompt's, as it was, to take the turn back to
         self.kept = start + 1  # the conversation's messages kept
         self.live: list[dict[str, Any]] = []  # those after, to keep: a reply, or its calls running
@@ -858,16 +888,18 @@ class _Stopped(Exception):
 
 def _system(
     workspace: bool, name: str | None = None, project: dict[str, Any] | None = None,
-    tools: Collection[str] = (),
+    tools: Collection[str] = (), offline: bool = False,
 ) -> dict[str, Any]:  # fmt: skip
     # the system prompt of a conversation begun now with the user, of a `name` if the box has
-    # people, the workspace's tools if `workspace`, and of those named in `tools` search_files's
-    # and ask_files's, and the project it is held in, if one
+    # people, the workspace's tools if `workspace`, and of those named in `tools` search's,
+    # search_files's and ask_files's, that the internet is out of reach if `offline`, and the
+    # project it is held in, if one
     skills = "\n".join(f"- {path}: {about}" for path, about in files.skills())
     search, ask = SEARCH * ("search_files" in tools), ASK * ("ask_files" in tools)
     space = WORKSPACE.format(skills=skills, search=search, ask=ask) if workspace else ""
     named = f" The user is {name}." if name else ""
-    content = SYSTEM.format(named=named, workspace=space)
+    web = WEB if "search" in tools else OFFLINE if offline else ""
+    content = SYSTEM.format(named=named, sources=f"{web} {CITE}".strip(), workspace=space)
     if project is not None:
         text = project["instructions"].strip()
         instructions = INSTRUCTIONS.format(text=text) if text else ""
