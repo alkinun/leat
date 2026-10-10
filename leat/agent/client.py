@@ -10,7 +10,12 @@ from typing import Any
 
 
 class EngineError(Exception):
-    """The engine refused a request, failed it, or could not be reached."""
+    """The engine refused a request, failed it, or could not be reached: `status` is the HTTP
+    status it answered with, if it answered."""
+
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 class Completion:
@@ -72,6 +77,12 @@ class Client:
         """Loads a model in place of the loaded one; returns once it is ready."""
         self._json("POST", "/v1/models/load", {"model": model})
 
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        """Each text's embedding, by the embedding model the engine has beside its model. Raises
+        EngineError, of status 404 if it has none."""
+        data = self._json("POST", "/v1/embeddings", {"input": texts}).get("data", [])
+        return [d["embedding"] for d in sorted(data, key=lambda d: d["index"])]
+
     def complete(self, body: dict[str, Any], person: int | None = None) -> Completion:
         """A chat completion of `body`, streamed, for a person of the box's, by their id, if it is
         one's: the engine keeps the prefixes it caches of a person's prompts to theirs alone, so
@@ -121,7 +132,7 @@ class Client:
             message = f"the engine answered HTTP {response.status}"
         finally:
             _close(sock, response)
-        raise EngineError(message)
+        raise EngineError(message, response.status)
 
 
 def whole(completion: Completion) -> dict[str, Any]:

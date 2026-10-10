@@ -14,8 +14,15 @@ and its accented forms are one.
 
 With a transcriber, an image's text is read too, and a PDF's scanned pages', by the model that sees
 images; while none does, a PDF's scans are left unread, and read once one does, at rescan().
+
+With an embedder, each passage is embedded too, after its file is read, and a search finds them by
+what they mean as well as by their words: the passages likeliest by each, those by meaning MEANT
+similar at least and NEAR the most similar, ranked as their reciprocal ranks add up, as reciprocal
+rank fusion ranks them, so that a question finds a passage in other words or another language, and
+an invoice's number still finds its own.
 """
 
+import collections
 import mimetypes
 import queue
 import re
@@ -28,14 +35,34 @@ from typing import Any
 from leat.agent import documents
 from leat.agent.client import EngineError
 from leat.agent.context import picture
+from leat.agent.embeddings import Embedder, similarity
 from leat.agent.ocr import Transcriber
 from leat.agent.workspace import Workspace
 
-VERSION = 2  # of the index's tables: one of another is made anew
+VERSION = 3  # of the index's tables: one of another is made anew
 PASSAGE = 1200  # characters of a passage at most
 FOUND = 8  # passages a search finds at most
 EACH = 3  # of one file at most
 STEM = 5  # letters of a word's beginning that a query's word finds at least
+# the words of every sentence, English's and Turkish's, as fold() has them, which a search leaves
+# out
+_COMMON = """
+a an the is are was were be been am of to in on at for and or but with by from as it its this that
+these those what which who whom how why when where much many do does did can could should would
+will shall may might must about into than then there their they them your you my me i we our us he
+she his her has have had not no if so any all some
+ve veya ile bu şu o bir için de da mi mu mü ne nasil kaç ki gibi daha en çok ama fakat ya hangi
+neden niye nerede kim olan olarak var yok her kadar
+"""
+COMMON = frozenset(_COMMON.split())
+CANDIDATES = 50  # passages found by their words, and by what they mean, before they are ranked
+# the similarity, a cosine, of a passage found by what it means, at least, and below the most
+# similar's at most: Qwen3-Embedding 0.6B's cosines of a firm's files and questions of them were
+# 0.46 to 0.60 of the files that answered and 0.36 to 0.56 of those that did not, but within 0.05
+# of the first only of those that came close to answering
+MEANT, NEAR = 0.45, 0.05
+FUSION = 60  # of reciprocal rank fusion: a rank's score is 1 / (FUSION + its rank)
+EMBEDDED = 32  # passages embedded at once
 _TABLES = """
 CREATE TABLE documents (
   folder TEXT NOT NULL,
@@ -51,24 +78,32 @@ CREATE VIRTUAL TABLE passages USING fts5 (
   words, text UNINDEXED, folder UNINDEXED, name UNINDEXED, place UNINDEXED, start UNINDEXED,
   tokenize = 'unicode61 remove_diacritics 2'
 );
+CREATE TABLE vectors (passage INTEGER PRIMARY KEY, folder TEXT NOT NULL, vector BLOB NOT NULL);
+CREATE INDEX vectors_folder ON vectors (folder);
 """
+# deletes the vectors of a file's passages, of its folder and name, before they are deleted
+_UNEMBED = (
+    "DELETE FROM vectors WHERE passage IN (SELECT rowid FROM passages WHERE folder = ?1"
+    " AND name = ?2)"
+)
 
 
 class Index:
     """The index at `path` of the spaces of `workspace`, each by its folder there, as
-    "projects/<id>", whose images and scans `transcriber`, if any, reads. `changed` is called with
-    a space's folder once its files' states change, as one begins to be read and once it is, on
-    the index's thread."""
+    "projects/<id>", whose images and scans `transcriber`, if any, reads, and whose passages
+    `embedder`, if any, embeds. `changed` is called with a space's folder once its files' states
+    change, as one begins to be read and once it is, on the index's thread."""
 
     def __init__(
-        self, path: Path | str, workspace: Workspace, transcriber: Transcriber | None = None
-    ):
-        self.workspace, self.transcriber = workspace, transcriber
+        self, path: Path | str, workspace: Workspace, transcriber: Transcriber | None = None,
+        embedder: Embedder | None = None,
+    ):  # fmt: skip
+        self.workspace, self.transcriber, self.embedder = workspace, transcriber, embedder
         self.changed: Callable[[str], None] = lambda folder: None
         self._db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self._db.execute("PRAGMA journal_mode = WAL")
         if self._db.execute("PRAGMA user_version").fetchone()[0] != VERSION:
-            for table in ("documents", "passages"):
+            for table in ("documents", "passages", "vectors"):
                 self._db.execute(f"DROP TABLE IF EXISTS {table}")
             self._db.executescript(_TABLES)
             self._db.execute(f"PRAGMA user_version = {VERSION}")
@@ -85,8 +120,9 @@ class Index:
     def rescan(self) -> None:
         """Has every space's files read again that are new or changed, or were left unread as no
         model saw images, as one may now."""
-        if self.transcriber is not None:
-            self.transcriber.recheck()
+        for checked in (self.transcriber, self.embedder):
+            if checked is not None:
+                checked.recheck()
         for kind in ("people", "projects"):
             for folder in sorted((self.workspace.root / kind).glob("*")):
                 self.refresh(f"{kind}/{folder.name}")
@@ -117,21 +153,50 @@ class Index:
         self, space: Workspace, query: str, n: int = FOUND, file: str | None = None
     ) -> list[dict[str, Any]]:
         """The passages of a space's files, or of one `file`, likeliest to say what a query asks,
-        n at most, EACH of a file of all: each's file, place, its start in the file's text, and
-        its text."""
-        if not (match := _match(query)):
-            return []
+        by their words and, with an embedder, by what they mean, n at most, EACH of a file of all:
+        each's file, place, its start in the file's text, and its text."""
+        folder, scores = self._folder(space), collections.defaultdict[int, float](float)
+        for ranked in (self._worded(folder, query, file), self._meant(folder, query, file)):
+            for rank, passage in enumerate(ranked):
+                scores[passage] += 1 / (FUSION + rank + 1)
+        best = sorted(scores, key=scores.__getitem__, reverse=True)
         with self._lock:
-            rows = self._db.execute(
-                "SELECT name, place, start, text FROM passages WHERE passages MATCH ?1"
-                " AND folder = ?2 AND (?3 IS NULL OR name = ?3) ORDER BY rank LIMIT ?4",
-                (match, self._folder(space), file, n * EACH),
-            ).fetchall()  # fmt: skip
+            rows = {row[0]: row[1:] for row in self._db.execute(
+                f"SELECT rowid, name, place, start, text FROM passages WHERE rowid IN"
+                f" ({', '.join('?' * len(best))})", best)}  # fmt: skip
         found: list[dict[str, Any]] = []
-        for name, place, start, text in rows:
+        for name, place, start, text in (rows[passage] for passage in best if passage in rows):
             if (file or sum(f["name"] == name for f in found) < EACH) and len(found) < n:
                 found.append({"name": name, "place": place, "start": start, "text": text})
         return found
+
+    def _worded(self, folder: str, query: str, file: str | None) -> list[int]:
+        # the passages that share the query's words, the likeliest first, by their rows
+        if not (match := _match(query)):
+            return []
+        with self._lock:
+            return [row for (row,) in self._db.execute(
+                "SELECT rowid FROM passages WHERE passages MATCH ?1 AND folder = ?2"
+                " AND (?3 IS NULL OR name = ?3) ORDER BY rank LIMIT ?4",
+                (match, folder, file, CANDIDATES))]  # fmt: skip
+
+    def _meant(self, folder: str, query: str, file: str | None) -> list[int]:
+        # the passages that mean what the query asks, MEANT similar at least, the likeliest
+        # first, by their rows; none without an embedder, or while it fails
+        if self.embedder is None or not self.embedder.available():
+            return []
+        try:
+            asked = self.embedder.question(query)
+        except EngineError:
+            return []
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT v.passage, v.vector FROM vectors v JOIN passages p ON p.rowid = v.passage"
+                " WHERE v.folder = ?1 AND (?2 IS NULL OR p.name = ?2)", (folder, file),
+            ).fetchall()  # fmt: skip
+        scored = sorted(((similarity(asked, vector), row) for row, vector in rows), reverse=True)
+        least = max(MEANT, scored[0][0] - NEAR) if scored else MEANT
+        return [row for score, row in scored[:CANDIDATES] if score >= least]
 
     def states(self, folder: str) -> dict[str, dict[str, str]]:
         """The states of a space's files that are not wholly read, by their names: "reading";
@@ -151,7 +216,7 @@ class Index:
         """Forgets a space's files, as a project deleted takes them."""
         with self._lock, self._db:
             self._db.execute("BEGIN")
-            for table in ("documents", "passages"):
+            for table in ("documents", "passages", "vectors"):
                 self._db.execute(f"DELETE FROM {table} WHERE folder = ?", (folder,))
 
     def _work(self) -> None:
@@ -183,6 +248,7 @@ class Index:
         with self._lock, self._db:
             self._db.execute("BEGIN")
             for name in gone:
+                self._db.execute(_UNEMBED, (folder, name))
                 for table in ("documents", "passages"):
                     sql = f"DELETE FROM {table} WHERE folder = ? AND name = ?"
                     self._db.execute(sql, (folder, name))
@@ -202,6 +268,33 @@ class Index:
             with self._lock:
                 self._reading[folder].discard(name)
             self.changed(folder)
+        self._embed(folder)
+
+    def _embed(self, folder: str) -> None:
+        # embeds a space's passages not yet embedded, EMBEDDED at a time, with the embedder if it
+        # embeds: those it fails to, at the next update
+        if self.embedder is None or not self.embedder.available():
+            return
+        while True:
+            with self._lock:
+                rows = self._db.execute(
+                    "SELECT p.rowid, p.text FROM passages p LEFT JOIN vectors v ON"
+                    " v.passage = p.rowid WHERE p.folder = ? AND v.passage IS NULL LIMIT ?",
+                    (folder, EMBEDDED),
+                ).fetchall()  # fmt: skip
+            if not rows:
+                return
+            try:
+                vectors = self.embedder.passages([text for _, text in rows])
+            except EngineError:
+                return
+            with self._lock, self._db:  # those of passages still there, as a file may change
+                self._db.execute("BEGIN")
+                self._db.executemany(
+                    "INSERT OR REPLACE INTO vectors SELECT ?1, ?2, ?3"
+                    " WHERE EXISTS (SELECT 1 FROM passages WHERE rowid = ?1)",
+                    [(row, folder, v) for (row, _), v in zip(rows, vectors, strict=True)],
+                )
 
     def _read(self, space: Workspace, name: str) -> tuple[str, int]:
         # a file's text, an image's as the transcriber reads it, and a PDF's scanned pages' too;
@@ -237,6 +330,7 @@ class Index:
         found = passages(name, text) if text is not None else []
         with self._lock, self._db:
             self._db.execute("BEGIN")
+            self._db.execute(_UNEMBED, (folder, name))
             sql = "DELETE FROM passages WHERE folder = ? AND name = ?"
             self._db.execute(sql, (folder, name))
             self._db.execute(
@@ -293,9 +387,12 @@ def _lines(text: str, start: int, end: int) -> list[tuple[int, int]]:
 
 def _match(query: str) -> str:
     # an FTS5 query of a search's words: any of them, as written or begun, but for those of a
-    # letter alone
+    # letter alone, and the words of every sentence, English's and Turkish's, unless it has no
+    # others
+    words = list(dict.fromkeys(re.findall(r"\w+", fold(query))))
+    words = [w for w in words if w not in COMMON] or words
     terms = []
-    for word in dict.fromkeys(re.findall(r"\w+", fold(query))):
+    for word in words:
         if len(word) > STEM:
             terms.append(f'"{word[: max(STEM, len(word) - 3)]}"*')
         elif len(word) > 3:

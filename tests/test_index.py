@@ -59,7 +59,8 @@ def test_passages():
 def test_words():
     # dotted and dotless i one letter; a word found as it is begun, a long one by its stem
     assert fold("İSTANBUL Iğdır ılık") == "istanbul iğdir ilik"
-    assert _match("Sözleşmesi feshi a ve kira") == '"sözleşm"* OR "feshi"* OR "ve" OR "kira"*'
+    assert _match("Sözleşmesi feshi a ve kira") == '"sözleşm"* OR "feshi"* OR "kira"*'
+    assert _match("What is it?") == '"what"* OR "is" OR "it"'  # all common: all kept
     assert _match("termination") == '"terminat"*' and _match("?!") == ""
 
 
@@ -265,3 +266,74 @@ def test_transcriber(engine):
     ((image, text),) = [engine.requests[0]["messages"][0]["content"]]
     assert image == {"type": "image_url", "image_url": {"url": "data:image/png;base64,cG5n"}}
     assert text == {"type": "text", "text": TRANSCRIBE}
+
+
+class Meaning:
+    """An embedder whose embeddings point along each concept a text names, in English or Turkish,
+    or, for a text that names none, along one of seven other directions, by its checksum; that may
+    fail."""
+
+    CONCEPTS = [("rent", "kira"), ("deposit", "depozito"), ("notice", "bildirim")]
+
+    def __init__(self):
+        self.embedded: list[str] = []
+        self.fails = False
+
+    def available(self) -> bool:
+        return True
+
+    def recheck(self) -> None:
+        pass
+
+    def _vector(self, text: str) -> bytes:
+        import zlib
+
+        from leat.agent.embeddings import _kept
+
+        words, other = fold(text), [0.0] * 7
+        vector = [float(any(w in words for w in c)) for c in self.CONCEPTS]
+        if not any(vector):
+            other[zlib.crc32(words.encode()) % 7] = 1.0
+        return _kept(vector + other)
+
+    def passages(self, texts: list[str]) -> list[bytes]:
+        from leat.agent.client import EngineError
+
+        if self.fails:
+            raise EngineError("down")
+        self.embedded += texts
+        return [self._vector(t) for t in texts]
+
+    def question(self, text: str) -> bytes:
+        return self._vector(text)
+
+
+def test_meaning(workspace, tmp_path, monkeypatch):
+    # a passage found by what it means, as an English question finds a Turkish lease's, beside
+    # those found by their words; none that means too little; passages embedded once, in
+    # batches, after their files are read, and again as their files change; those the embedder
+    # failed to, at the next update
+    from leat.agent import index as module
+
+    monkeypatch.setattr(module, "EMBEDDED", 2)
+    meaning = Meaning()
+    index = Index(tmp_path / "index.db", workspace, embedder=meaning)  # type: ignore[arg-type]
+    space = workspace.space("people/1")
+    files.write(space, "kira.md", "# Kira\n\nAylık kira 40.000 TL.\n\n# Depozito\n\nİki aylık.")
+    files.write(space, "notes.txt", "The deposit question came up on Monday.")
+    files.write(space, "menu.txt", "Lunch is at noon.")
+    index.update("people/1")
+    assert len(meaning.embedded) == 4  # each passage, in batches of two
+    found = [(f["name"], f["place"]) for f in index.search(space, "How much is the deposit?")]
+    assert found == [("notes.txt", ""), ("kira.md", "Depozito")]  # by words and meaning first
+    assert [f["name"] for f in index.search(space, "lunch")] == ["menu.txt"]  # by words alone
+    assert index.search(space, "What is the weather?") == []  # nothing means it
+    files.write(space, "kira.md", "# Bildirim\n\nDoksan gün önceden.")
+    meaning.fails = True
+    index.update("people/1")
+    assert index.search(space, "notice period") == []  # not yet embedded
+    meaning.fails = False
+    index.update("people/1")
+    assert [f["place"] for f in index.search(space, "notice period")] == ["Bildirim"]
+    count = index._db.execute("SELECT count(*) FROM vectors").fetchone()[0]
+    assert count == 3  # the changed file's old passages' vectors gone

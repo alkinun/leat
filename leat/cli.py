@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 from leat.agent.agent import Agent
 from leat.agent.client import Client
+from leat.agent.embeddings import Embedder
 from leat.agent.index import Index
 from leat.agent.ocr import Transcriber
 from leat.agent.server import Server as AgentServer
@@ -102,6 +103,11 @@ def main(argv: list[str] | None = None) -> None:
         "projector beside it of its name, if any",
     )  # fmt: skip
     serve.add_argument(
+        "--embed", type=Path,
+        help="an embedding model's GGUF, as Qwen3-Embedding's, loaded beside the models to answer "
+        "/v1/embeddings, as leat agent's search of the files asks",
+    )  # fmt: skip
+    serve.add_argument(
         "--keys", type=Path, nargs="?", const=_data() / "keys.json",
         help="a file of API keys, as `leat keys` makes it, one of which every request must hold; "
         f"by default {_data() / 'keys.json'}. Needed to serve beyond this machine",
@@ -184,7 +190,7 @@ def _agent(args: argparse.Namespace) -> None:
     environment = args.data / "sandbox"
     workspace = Workspace(args.data / "workspace", environment if environment.exists() else None)
     engine = Client(args.engine, os.environ.get("LEAT_ENGINE_KEY"))
-    index = Index(args.data / "index.db", workspace, Transcriber(engine))
+    index = Index(args.data / "index.db", workspace, Transcriber(engine), Embedder(engine))
     tools = [
         *web.tools(args.search, engine), *files.tools(index), *ask.tools(engine, index),
         *office.tools(engine),
@@ -321,7 +327,7 @@ def _serve(args: argparse.Namespace) -> None:
             sampling.of("")
         except (OSError, ValueError) as e:
             raise SystemExit(f"the sampling at {args.sampling} cannot be read: {e}") from e
-    with Server(models, args.host, args.port, keys, sampling, **options) as server:
+    with Server(models, args.host, args.port, keys, sampling, args.embed, **options) as server:
         # served at once, the model loading meanwhile, so that a client asking while it compiles
         # hears it is loading, its completions waiting for it, rather than no answer
         url, name = _url(args.host, server.server_port), models[0].stem

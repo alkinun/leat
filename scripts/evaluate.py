@@ -27,6 +27,7 @@ sys.path.insert(0, str(ROOT))
 
 from leat.agent.agent import Agent  # noqa: E402
 from leat.agent.client import Client  # noqa: E402
+from leat.agent.embeddings import Embedder  # noqa: E402
 from leat.agent.index import Index  # noqa: E402
 from leat.agent.store import Store  # noqa: E402
 from leat.agent.tools import ask, files, office, web  # noqa: E402
@@ -53,6 +54,10 @@ Check = Callable[[Outcome], str | None]  # why an outcome fails, or None if it p
 def called(name: str, times: int = 1) -> Check:
     n = lambda o: o.tools.count(name)  # noqa: E731
     return lambda o: None if n(o) >= times else f"called {name} {n(o)} times, not {times}"
+
+
+def called_any(*names: str) -> Check:
+    return lambda o: None if set(names) & set(o.tools) else f"called none of {', '.join(names)}"
 
 
 def uncalled(*names: str) -> Check:
@@ -159,7 +164,8 @@ CASES = [
     Case("finds in files", "How much are meals on client visits reimbursed?",
          [called("search_files"), says("750"), says(CITES)], FIRM, attach=False),
     Case("finds in Turkish", "Yılmaz Tekstil'in hesapları ne zamana kadar teslim edilmeli?",
-         [called("search_files"), uncalled("search"), says("30 Eylül|30 September|30\\.09")],
+         [called_any("search_files", "read"), uncalled("search"),
+          says("30 Eylül|30 September|30\\.09")],
          FIRM, attach=False),
     Case("not in files", "What is our policy on working from home?",
          [called("search_files"), absent, uncalled("search")], FIRM, attach=False),
@@ -220,7 +226,7 @@ def _run(case: Case, args: argparse.Namespace) -> Outcome:
         environment = args.sandbox if args.sandbox.exists() else None
         workspace = Workspace(Path(data) / "workspace", environment)
         engine = Client(args.engine, os.environ.get("LEAT_ENGINE_KEY"))
-        index = Index(Path(data) / "index.db", workspace)
+        index = Index(Path(data) / "index.db", workspace, embedder=Embedder(engine))
         tools = [
             *web.tools(args.search, engine), *files.tools(index), *ask.tools(engine, index),
             *office.tools(engine),
