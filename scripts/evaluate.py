@@ -122,8 +122,8 @@ class Case:
     setup: str = ""  # Python run in the sandbox, in the workspace, that makes more of its files
 
 
-# a lease, a fee letter's template and the office's letterhead, as Word documents, made in the
-# sandbox, in German
+# a lease, the landlord's counter-draft of it, a fee letter's template and the office's
+# letterhead, as Word documents, made in the sandbox, in German
 LEASE = """
 from docx import Document
 d = Document()
@@ -142,6 +142,10 @@ d = Document()
 d.sections[0].header.paragraphs[0].text = "Becker & Partner Steuerberatung · Leopoldstraße 12"
 d.sections[0].footer.paragraphs[0].text = "80802 München · USt-IdNr. DE123456789"
 d.save("Briefkopf.docx")
+d = Document("Mietvertrag.docx")
+d.paragraphs[3].text = "Der Mieter leistet eine Kaution in Höhe von sechs Monatsmieten."
+d.add_paragraph("Der Mieter trägt alle Reparaturen am Gebäude.")
+d.save("Mietvertrag - Gegenentwurf.docx")
 """
 # a firm's files, among which one passage answers each question
 FIRM = {
@@ -241,6 +245,9 @@ CASES = [
     Case("edits a note", "Change the meeting time in notes.txt to 11:30.",
          [called_any("edit", "write", "run"), holds("notes.txt", "11:30")],
          files={"notes.txt": "Meeting with Anna Hofmann at 10:00 in Munich, at her office."}),
+    Case("compares versions", "What did the landlord change in their counter-draft of the lease?",
+         [called("compare_documents"), says("sechs|six|6"), says("Reparatur|repair")],
+         setup=LEASE, attach=False),
     Case("finds, then writes", "Write Anna Hofmann a short letter reminding her when the annual "
          "accounts are due, as a Word document.",
          [called_any("search_files", "read"), called("make_document")], FIRM, attach=False),

@@ -288,3 +288,31 @@ d.save("Letterhead.docx")
         office.make(context, "Fees.pdf", letter, "Letterhead.docx")
     with pytest.raises(ValueError, match="no text"):
         office.make(context, "Empty", "\n\n")
+
+
+def test_compare(tmp_path):
+    # each change between two versions: a paragraph changed, its words marked among a few around
+    # them, one added and one removed; a PDF's pages' headings not changes; versions alike said so
+    space = Workspace(tmp_path / "workspace")
+    files.write(space, "lease.md", "# Lease\n\nThe deposit is six months' rent, paid before the "
+                "term begins, by transfer to the landlord's account at its bank.\n\nThe tenant may "
+                "end it on the fifth anniversary.\n\nThe tenant keeps it in good repair.\n\n"
+                "## Page 2\n\nEnglish law governs it.")  # fmt: skip
+    files.write(space, "lease - theirs.md", "# Lease\n\nThe deposit is three months' rent, paid "
+                "before the term begins, by transfer to the landlord's account at its bank.\n\n"
+                "The landlord insures the building.\n\nThe tenant may end it on the third "
+                "anniversary.\n\nEnglish law governs it.")  # fmt: skip
+    result = office.compare(Context("c", workspace=space), "lease.md", "lease - theirs.md")
+    assert result.content.split("\n") == [
+        "4 changes from lease.md to lease - theirs.md:",
+        "1. Changed: The deposit is [-six-] {+three+} months' rent, paid before the term "
+        "begins, by …",
+        "2. Added: The landlord insures the building.",
+        "3. Changed: The tenant may end it on the [-fifth-] {+third+} anniversary.",
+        "4. Removed: The tenant keeps it in good repair.",
+    ]  # fmt: skip
+    assert result.info == {"changes": 4}
+    same = office.compare(Context("c", workspace=space), "lease.md", "lease.md")
+    assert same.content == "lease.md says what lease.md does, word for word."
+    with pytest.raises(FileNotFoundError):
+        office.compare(Context("c", workspace=space), "lease.md", "nothing.md")

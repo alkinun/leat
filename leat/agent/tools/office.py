@@ -1,8 +1,13 @@
-"""Documents made and changed as an office makes and changes them, as tools: make_document makes a
-Word document or a PDF of the model's markdown, fill_template fills a template's fields, and
-suggest_edits suggests edits as tracked changes, which the user accepts or rejects in Word. Each
-works in the sandbox, with python-docx or fpdf2, so that a document made to attack its parser
-attacks nothing else; a template or a document changed is read there, and left as it was.
+"""Documents made, changed and compared as an office makes, changes and compares them, as tools:
+make_document makes a Word document or a PDF of the model's markdown, fill_template fills a
+template's fields, suggest_edits suggests edits as tracked changes, which the user accepts or
+rejects in Word, and compare_documents finds what changed between two versions of a document.
+Each works in the sandbox, with python-docx or fpdf2, so that a document made to attack its
+parser attacks nothing else; a template or a document changed is read there, and left as it was.
+
+Two versions are compared by code, as a model spots the differences of two long texts less surely:
+their paragraphs matched in order, each pair that differs its words marked [-taken out-] and
+{+put in+} among a few of the words around them, and those of one alone added or removed.
 
 A document made is the model's writing alone, as markdown: its headings, paragraphs, lists, quotes,
 code and tables, and **bold**, *italic* and `code` within them, each line of a paragraph a line,
@@ -19,10 +24,12 @@ paragraph, which it deletes and puts its replacement after, both marked as Leat'
 if it has one.
 """
 
+import difflib
 import re
 from pathlib import PurePosixPath
 from typing import Any
 
+from leat.agent import documents
 from leat.agent.tools import Context, Result, Tool
 from leat.agent.workspace import Workspace
 
@@ -346,6 +353,14 @@ MAKE = (
     "user's letterhead, a Word template, if they have one."
 )
 FILL = "To fill a Word template's fields, call fill_template, which keeps its formatting."
+COMPARE = (
+    "To see what changed between two versions of a document, as a contract the other side sent "
+    "back, call compare_documents, then explain each change and what it means for the user."
+)
+CHANGES = 60  # changes a comparison lists at most
+CHANGE = 600  # characters of a change it says at most
+AROUND = 8  # words kept around a paragraph's changes, the others between them left out
+SIMILAR = 0.4  # how alike two paragraphs are, at least, to be one changed rather than two
 SUGGEST = (
     "To change a Word document, call suggest_edits, which makes tracked changes the user accepts "
     "or rejects, keeping its formatting."
@@ -382,6 +397,22 @@ def tools() -> list[Tool]:
             },  # fmt: skip
             lambda context, name, content, template=None: make(context, name, content, template),
             (MAKE,),
+        ),
+        Tool(
+            "compare_documents",
+            "Compare two versions of a document, of any kind, as a contract and the one sent "
+            "back: returns each change, numbered, a passage changed, added or removed, its words "
+            "marked [-taken out-] and {+put in+}",
+            {
+                "type": "object",
+                "properties": {
+                    "original": {"type": "string", "description": "the earlier version's path"},
+                    "revised": {"type": "string", "description": "the later version's path"},
+                },
+                "required": ["original", "revised"],
+            },  # fmt: skip
+            lambda context, original, revised: compare(context, original, revised),
+            (COMPARE,),
         ),
         Tool(
             "fill_template",
@@ -462,6 +493,25 @@ def make(context: Context, name: str, content: str, template: str | None = None)
     space.given(_PDF if pdf else _WORD, laid, made, *([letterhead] if letterhead else []))
     styled = f", in the styles, headers and footers of {letterhead}" if letterhead else ""
     return Result(f"Made {made}{styled}.", {"files": [made]})
+
+
+def compare(context: Context, original: str, revised: str) -> Result:
+    space = context.space()
+    before, after = (_paragraphs(documents.text(space, name)) for name in (original, revised))
+    changes: list[tuple[str, str]] = []
+    matcher = difflib.SequenceMatcher(None, before, after, autojunk=False)
+    for kind, i1, i2, j1, j2 in matcher.get_opcodes():
+        if kind != "equal":
+            changes += _changes(before[i1:i2], after[j1:j2])
+    if not changes:
+        return Result(f"{revised} says what {original} does, word for word.", {"changes": 0})
+    lines = [f"{len(changes)} changes from {original} to {revised}:"]
+    for n, (how, said) in enumerate(changes[:CHANGES], 1):
+        cut = f"{said[:CHANGE]}…" if len(said) > CHANGE else said
+        lines.append(f"{n}. {how}: {cut}")
+    if len(changes) > CHANGES:
+        lines.append(f"(The first {CHANGES} of {len(changes)}.)")
+    return Result("\n".join(lines), {"changes": len(changes)})
 
 
 def fill(context: Context, path: str, values: dict[str, Any], name: str) -> Result:
@@ -674,3 +724,51 @@ def _cells(row: str) -> list[str]:
     row = row.strip().removeprefix("|")
     row = row[:-1] if row.endswith("|") and not row.endswith("\\|") else row
     return [cell.strip().replace("\\|", "|") for cell in re.split(r"(?<!\\)\|", row)]
+
+
+def _paragraphs(text: str) -> list[str]:
+    # a document's paragraphs, its text's between blank lines, each one line, but for a PDF's
+    # pages' headings, which fall where the text does, not where it changes
+    found = (" ".join(part.split()) for part in re.split(r"\n\s*\n", text))
+    return [p for p in found if p and not re.fullmatch(r"#{1,6} Page \d+", p)]
+
+
+def _changes(old: list[str], new: list[str]) -> list[tuple[str, str]]:
+    # the changes of paragraphs replaced by others: each old one matched, in order, to the most
+    # alike new one after the last matched, SIMILAR at least, as one changed, and the rest added
+    # or removed
+    changes, at = [], 0
+    for paragraph in old:
+        alike = [(difflib.SequenceMatcher(None, paragraph, b).ratio(), j)
+                 for j, b in enumerate(new[at:], at)]  # fmt: skip
+        ratio, j = max(alike, default=(0.0, -1))
+        if ratio < SIMILAR:
+            changes.append(("Removed", paragraph))
+            continue
+        changes += [("Added", b) for b in new[at:j]]
+        changes.append(("Changed", _marked(paragraph, new[j])))
+        at = j + 1
+    return changes + [("Added", b) for b in new[at:]]
+
+
+def _marked(old: str, new: str) -> str:
+    # a paragraph changed, its words taken out [-so-] and put in {+so+}, AROUND words kept on each
+    # side of a change and the others between left out
+    a, b = old.split(), new.split()
+    parts: list[str] = []
+    codes = difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes()
+    for n, (kind, i1, i2, j1, j2) in enumerate(codes):
+        if kind == "equal":
+            words = a[i1:i2]
+            first, last = n == 0, n == len(codes) - 1
+            if len(words) > 2 * AROUND or (first or last) and len(words) > AROUND:
+                head = [] if first else words[:AROUND]
+                tail = [] if last else words[-AROUND:]
+                words = [*head, "…", *tail]
+            parts += words
+        else:
+            if i2 > i1:
+                parts.append(f"[-{' '.join(a[i1:i2])}-]")
+            if j2 > j1:
+                parts.append(f"{{+{' '.join(b[j1:j2])}+}}")
+    return " ".join(parts)

@@ -1079,6 +1079,8 @@ def _did(
         did.append(("read", arguments.get("path")))
     elif name == "make_document" and arguments.get("template"):
         did.append(("read", arguments["template"]))
+    elif name == "compare_documents":
+        did += [("read", arguments.get("original")), ("read", arguments.get("revised"))]
     elif name == "ask_files" and info.get("total"):
         did.append(("read", f"{info['done']} files"))
     elif name == "search_files":
