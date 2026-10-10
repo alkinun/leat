@@ -539,7 +539,7 @@ function listFiles(project) {
     remover.onclick = () => confirm(`Delete “${f.name}”? It cannot be undone.`)
       && del(`/api${place(project)}/files/${encodeURIComponent(f.name)}`);
     const about = element("span", "meta", [STATES[f.state], bytes(f.size), day(f.modified)].filter(Boolean).join(" · "));
-    about.title = f.error ?? "";
+    about.title = f.error ?? (f.state === "scanned" ? "Its scanned pages are read once a model that sees images is loaded" : "");
     about.classList.toggle("failed", f.state === "failed");
     item.append(fileLink(f.name, project), about, remover);
     return item;
@@ -547,7 +547,7 @@ function listFiles(project) {
 }
 
 // what a file's state in the index says, while it is not read: being read, or not readable
-const STATES = { reading: "Reading…", failed: "Couldn't read" };
+const STATES = { reading: "Reading…", failed: "Couldn't read", scanned: "Scanned" };
 
 // the files of a project's space, or of the person's own
 function filesOf(project) {

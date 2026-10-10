@@ -165,3 +165,14 @@ def test_in_a_turn(engine, tmp_path):
     assert [(i.get("done"), i.get("total")) for i in shown] == [(None, None), (0, 1), (1, 1)]
     assert ASK in _system(True, tools={"ask_files"})["content"]
     assert ASK in agent.store.messages(agent.conversations()[0]["id"])[0]["content"]
+
+
+def test_image(engine, space):
+    # an image asked as the reader sees it, among the files asked by default
+    (space.root / "receipt.png").write_bytes(b"\x89PNG\x00")
+    engine.replies.put(answers({"Total": "900"})[0])
+    result = ask.ask(Client(engine.url), None, context(space), "Totals?", ["Total"])
+    assert "| receipt.png [1] | 900 |" in result.content
+    image, text = engine.requests[0]["messages"][1]["content"]
+    assert image["image_url"]["url"].startswith("data:image/png;base64,")
+    assert text["text"] == "The question: Totals?\n\nThe file, receipt.png, is this image."

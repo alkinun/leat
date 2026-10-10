@@ -365,6 +365,8 @@ class Agent:
             if always or event != self._models:
                 self._models = event
                 self.events.publish(event)
+                if self.index is not None:  # whose scans a model that sees images may now read
+                    self.index.rescan()
 
     def models_event(self) -> Event:
         """The engine's models, as an event, or why there are none."""

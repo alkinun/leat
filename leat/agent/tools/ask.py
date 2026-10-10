@@ -10,13 +10,17 @@ each ends; once the turn is stopped, it reads no more. A file longer than a read
 its start and the passages of it the index finds likeliest to answer.
 """
 
+import base64
 import concurrent.futures
 import json
+import mimetypes
 import re
 import uuid
+from typing import Any
 
 from leat.agent import documents
 from leat.agent.client import Client, EngineError
+from leat.agent.context import picture
 from leat.agent.index import Index
 from leat.agent.tools import Context, Result, Tool
 from leat.agent.workspace import Workspace
@@ -99,9 +103,7 @@ def ask(
 ) -> Result:  # fmt: skip
     space = context.space()
     keys = [" ".join(c.split()) for c in columns or [] if c.strip()] or ["Answer"]
-    names = files or sorted(
-        f["name"] for f in space.files() if documents.readable(space, f["name"])
-    )
+    names = files or sorted(f["name"] for f in space.files() if _askable(space, f["name"]))
     if not names:
         return Result("There are no files to ask.", {"question": question, "total": 0})
     if len(names) > FILES:
@@ -148,20 +150,26 @@ def _answer(
     reader: Client, index: Index | None, space: Workspace, name: str, question: str,
     keys: list[str], person: int | None,
 ) -> dict[str, str]:  # fmt: skip
-    # a file's answers, by their keys, as a reader reads it; why not, in the first, if it cannot
+    # a file's answers, by their keys, as a reader reads it, an image as it sees it; why not, in
+    # the first, if it cannot
+    asked = f"The question: {question}\n\nThe file, {name}"
+    content: str | list[dict[str, Any]]
     try:
-        text = index.text(space, name) if index else documents.text(space, name)
+        if picture(name):
+            content = _image(space, name, f"{asked}, is this image.")
+        else:
+            text = index.text(space, name) if index else documents.text(space, name)
+            if len(text) > READ:
+                text = _excerpt(index, space, name, text, f"{question} {' '.join(keys)}")
+            content = f"{asked}:\n\n{text}"
     except (OSError, ValueError, RuntimeError) as e:
         return {k: f"(It could not be read: {e})" if i == 0 else "" for i, k in enumerate(keys)}
-    if len(text) > READ:
-        text = _excerpt(index, space, name, text, f"{question} {' '.join(keys)}")
     system = {
         "role": "system",
         "content": READING.format(keys=json.dumps(keys, ensure_ascii=False)),
     }
-    user = {"role": "user", "content": f"The question: {question}\n\nThe file, {name}:\n\n{text}"}
     body = {
-        "messages": [system, user],
+        "messages": [system, {"role": "user", "content": content}],
         "max_tokens": ANSWER,
         "temperature": 0,
         "reasoning_effort": "none",
@@ -171,6 +179,18 @@ def _answer(
     except EngineError as e:
         return {k: f"(It could not be asked: {e})" if i == 0 else "" for i, k in enumerate(keys)}
     return _parsed(said, keys)
+
+
+def _image(space: Workspace, name: str, text: str) -> list[dict[str, Any]]:
+    # a message's content of an image of the space's, as a data: URL, and text after it
+    kind = mimetypes.guess_type(name)[0] or "image/png"
+    url = f"data:{kind};base64,{base64.b64encode(space.path(name).read_bytes()).decode()}"
+    return [{"type": "image_url", "image_url": {"url": url}}, {"type": "text", "text": text}]
+
+
+def _askable(space: Workspace, name: str) -> bool:
+    # whether a file is one to ask: a document, text, or an image, which a reader sees
+    return picture(name) or documents.readable(space, name)
 
 
 def _excerpt(index: Index | None, space: Workspace, name: str, text: str, query: str) -> str:

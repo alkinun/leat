@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 from leat.agent.agent import Agent
 from leat.agent.client import Client
 from leat.agent.index import Index
+from leat.agent.ocr import Transcriber
 from leat.agent.server import Server as AgentServer
 from leat.agent.store import Store
 from leat.agent.tools import ask, files, web
@@ -183,7 +184,7 @@ def _agent(args: argparse.Namespace) -> None:
     environment = args.data / "sandbox"
     workspace = Workspace(args.data / "workspace", environment if environment.exists() else None)
     engine = Client(args.engine, os.environ.get("LEAT_ENGINE_KEY"))
-    index = Index(args.data / "index.db", workspace)
+    index = Index(args.data / "index.db", workspace, Transcriber(engine))
     tools = [*web.tools(args.search, engine), *files.tools(index), *ask.tools(engine, index)]
     agent = Agent(Store(args.data / "leat.db"), engine, tools, workspace, index)
     agent.start()

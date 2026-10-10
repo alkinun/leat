@@ -11,8 +11,12 @@ suffixes and English's endings change a word: one of more than STEM letters find
 begin with its first letters but its last three, STEM at least, so that "sözleşmesi" finds
 "sözleşmenin", and "termination" "terminate". Dotted and dotless i are one letter, and a letter
 and its accented forms are one.
+
+With a transcriber, an image's text is read too, and a PDF's scanned pages', by the model that sees
+images; while none does, a PDF's scans are left unread, and read once one does, at rescan().
 """
 
+import mimetypes
 import queue
 import re
 import sqlite3
@@ -22,9 +26,12 @@ from pathlib import Path
 from typing import Any
 
 from leat.agent import documents
+from leat.agent.client import EngineError
+from leat.agent.context import picture
+from leat.agent.ocr import Transcriber
 from leat.agent.workspace import Workspace
 
-VERSION = 1  # of the index's tables: one of another is made anew
+VERSION = 2  # of the index's tables: one of another is made anew
 PASSAGE = 1200  # characters of a passage at most
 FOUND = 8  # passages a search finds at most
 EACH = 3  # of one file at most
@@ -37,6 +44,7 @@ CREATE TABLE documents (
   modified REAL NOT NULL,
   text TEXT,
   error TEXT,
+  scans INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (folder, name)
 );
 CREATE VIRTUAL TABLE passages USING fts5 (
@@ -48,11 +56,14 @@ CREATE VIRTUAL TABLE passages USING fts5 (
 
 class Index:
     """The index at `path` of the spaces of `workspace`, each by its folder there, as
-    "projects/<id>". `changed` is called with a space's folder once its files' states change, as
-    one begins to be read and once it is, on the index's thread."""
+    "projects/<id>", whose images and scans `transcriber`, if any, reads. `changed` is called with
+    a space's folder once its files' states change, as one begins to be read and once it is, on
+    the index's thread."""
 
-    def __init__(self, path: Path | str, workspace: Workspace):
-        self.workspace = workspace
+    def __init__(
+        self, path: Path | str, workspace: Workspace, transcriber: Transcriber | None = None
+    ):
+        self.workspace, self.transcriber = workspace, transcriber
         self.changed: Callable[[str], None] = lambda folder: None
         self._db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self._db.execute("PRAGMA journal_mode = WAL")
@@ -68,10 +79,17 @@ class Index:
     def start(self) -> None:
         """Reads every space's new and changed files, then each space's as it is refreshed, on a
         thread of its own."""
+        self.rescan()
+        threading.Thread(target=self._work, name="index", daemon=True).start()
+
+    def rescan(self) -> None:
+        """Has every space's files read again that are new or changed, or were left unread as no
+        model saw images, as one may now."""
+        if self.transcriber is not None:
+            self.transcriber.recheck()
         for kind in ("people", "projects"):
             for folder in sorted((self.workspace.root / kind).glob("*")):
                 self.refresh(f"{kind}/{folder.name}")
-        threading.Thread(target=self._work, name="index", daemon=True).start()
 
     def refresh(self, folder: str) -> None:
         """Has a space's files read again, those new or changed since, and those gone forgotten."""
@@ -91,8 +109,8 @@ class Index:
             ).fetchone()  # fmt: skip
         if row is not None:
             return row[0]
-        text = documents.text(space, name)
-        self._keep(folder, name, stat.st_size, stat.st_mtime, text)
+        text, scans = self._read(space, name)
+        self._keep(folder, name, stat.st_size, stat.st_mtime, text, scans=scans)
         return text
 
     def search(
@@ -116,15 +134,17 @@ class Index:
         return found
 
     def states(self, folder: str) -> dict[str, dict[str, str]]:
-        """The states of a space's files that are not read, by their names: "reading", or
-        "failed", with why."""
+        """The states of a space's files that are not wholly read, by their names: "reading";
+        "failed", with why; or "scanned", of a PDF whose scanned pages wait for a model that sees
+        images."""
         with self._lock:
             rows = self._db.execute(
-                "SELECT name, error FROM documents WHERE folder = ? AND error IS NOT NULL",
-                (folder,),
-            ).fetchall()
+                "SELECT name, error FROM documents WHERE folder = ?"
+                " AND (error IS NOT NULL OR scans > 0)", (folder,),
+            ).fetchall()  # fmt: skip
             reading = set(self._reading.get(folder, ()))
-        states = {name: {"state": "failed", "error": error} for name, error in rows}
+        states = {name: {"state": "failed", "error": error} if error else {"state": "scanned"}
+                  for name, error in rows}  # fmt: skip
         return states | {name: {"state": "reading"} for name in reading}
 
     def forget(self, folder: str) -> None:
@@ -150,14 +170,15 @@ class Index:
         space = self.workspace.space(folder)
         on_disk = {f["name"]: f for f in space.files()}
         with self._lock:
-            sql = "SELECT name, size, modified FROM documents WHERE folder = ?"
-            known = {
-                name: (size, modified) for name, size, modified in self._db.execute(sql, (folder,))
-            }
+            sql = "SELECT name, size, modified, scans FROM documents WHERE folder = ?"
+            known = {row[0]: row[1:] for row in self._db.execute(sql, (folder,))}
+        sees = self.transcriber is not None and self.transcriber.available()
         gone = [name for name in known if name not in on_disk]
         stale = [
             name for name, f in on_disk.items()
-            if known.get(name) != (f["size"], f["modified"]) and documents.readable(space, name)
+            if (known.get(name, ())[:2] != (f["size"], f["modified"])
+                or sees and known[name][2] > 0)  # its scans unread, as they can now be
+            and (documents.readable(space, name) or sees and picture(name))
         ]  # fmt: skip
         with self._lock, self._db:
             self._db.execute("BEGIN")
@@ -170,7 +191,9 @@ class Index:
             self.changed(folder)
         for name in stale:
             try:
-                self.text(space, name)
+                file = space.path(name).stat()
+                text, scans = self._read(space, name)
+                self._keep(folder, name, file.st_size, file.st_mtime, text, scans=scans)
             except FileNotFoundError:  # gone meanwhile
                 pass
             except (ValueError, RuntimeError) as e:  # as the sandbox not being there
@@ -180,19 +203,45 @@ class Index:
                 self._reading[folder].discard(name)
             self.changed(folder)
 
+    def _read(self, space: Workspace, name: str) -> tuple[str, int]:
+        # a file's text, an image's as the transcriber reads it, and a PDF's scanned pages' too;
+        # and the scans left unread, as no model sees images. Raises ValueError if it cannot be
+        # read, FileNotFoundError if it is gone
+        sees = self.transcriber is not None and self.transcriber.available()
+        if picture(name):
+            if not sees:
+                raise ValueError(f"{name} is an image, which only a model that sees images reads")
+            assert self.transcriber is not None
+            data, kind = space.path(name).read_bytes(), mimetypes.guess_type(name)[0]
+            try:
+                return self.transcriber(data, kind or "image/png"), 0
+            except EngineError as e:
+                raise ValueError(f"{name} could not be read: {e}") from e
+        text = documents.text(space, name)
+        if not (scans := documents.scans(name, text)) or not sees:
+            return text, len(scans)
+        assert self.transcriber is not None
+        try:
+            pages = documents.render(space, name, scans)
+            read = {n: self.transcriber(png, "image/png") for n, png in pages.items()}
+        except (ValueError, EngineError):  # read as it is, its scans left for later
+            return text, len(scans)
+        return documents.transcribed(text, read), 0
+
     def _keep(
         self, folder: str, name: str, size: int, modified: float, text: str | None,
-        error: str | None = None,
+        error: str | None = None, scans: int = 0,
     ) -> None:  # fmt: skip
-        # keeps a file's text and its passages, or why it could not be read
+        # keeps a file's text and its passages, and how many of its scans are unread; or why it
+        # could not be read
         found = passages(name, text) if text is not None else []
         with self._lock, self._db:
             self._db.execute("BEGIN")
             sql = "DELETE FROM passages WHERE folder = ? AND name = ?"
             self._db.execute(sql, (folder, name))
             self._db.execute(
-                "INSERT OR REPLACE INTO documents VALUES (?, ?, ?, ?, ?, ?)",
-                (folder, name, size, modified, text, error),
+                "INSERT OR REPLACE INTO documents VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (folder, name, size, modified, text, error, scans),
             )
             self._db.executemany(
                 "INSERT INTO passages VALUES (?, ?, ?, ?, ?, ?)",

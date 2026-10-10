@@ -5,9 +5,14 @@ and tables, as markitdown reads one, in the sandbox, so that a file made to atta
 attacks nothing else; a text file is read as it is. A document's text marks its places, by which a
 passage of it is cited: a PDF's pages, a presentation's slides, a workbook's sheets, and any
 other's sections, by their headings.
+
+A PDF's page that holds next to no text is a scan, which the sandbox renders as an image for a
+model that sees images to read, as leat.agent.ocr has it.
 """
 
 import re
+import shutil
+import uuid
 
 from leat.agent.workspace import Workspace
 
@@ -83,6 +88,17 @@ elif kind == "pptx":
         if slide.has_notes_slide and slide.notes_slide.notes_text_frame.text.strip():
             print(f"Notes: {slide.notes_slide.notes_text_frame.text}\\n")
 """
+# renders the pages sys.argv[3:] of the PDF at sys.argv[1] as PNGs in the folder sys.argv[2], each
+# page-<n>.png, 1600 pixels on its longer side, in the sandbox, with pypdfium2
+_RENDER = """
+import sys
+import pypdfium2
+pdf = pypdfium2.PdfDocument(sys.argv[1])
+for n in sys.argv[3:]:
+    page = pdf[int(n) - 1]
+    page.render(scale=1600 / max(page.get_size())).to_pil().save(f"{sys.argv[2]}/page-{n}.png")
+"""
+SCANNED = 20  # characters of a PDF's page, at fewest, that make it text rather than a scan
 SNIFF = 8192  # bytes of a file whose having no NUL makes it text
 # where each kind of document's text begins a place, and what the place is called
 _PLACES = {
@@ -122,6 +138,51 @@ def readable(workspace: Workspace, name: str) -> bool:
     except (OSError, ValueError):
         return False
     return name.lower().endswith(DOCUMENTS) or b"\0" not in head
+
+
+def scans(name: str, text: str) -> list[int]:
+    """The pages of a PDF's text that are scans, holding next to no text, by their numbers."""
+    if not name.lower().endswith(".pdf"):
+        return []
+    return [n for n, page in _pages(text).items() if len(page.strip()) < SCANNED]
+
+
+def render(workspace: Workspace, name: str, pages: list[int]) -> dict[int, bytes]:
+    """A PDF's pages as PNG images, by their numbers, rendered in the sandbox. Raises ValueError
+    if they cannot be."""
+    folder = f".pages-{uuid.uuid4().hex[:8]}"
+    workspace.path(folder).mkdir()
+    try:
+        inside = f"/workspace/{workspace.path(name).relative_to(workspace.root).as_posix()}"
+        ran = workspace.run(_RENDER, inside, f"/workspace/{folder}", *map(str, pages))
+        if ran.status != 0:
+            why = (ran.output.strip().splitlines() or ["it stopped"])[-1]
+            raise ValueError(f"{name}'s pages could not be rendered: {why}")
+        return {n: workspace.path(f"{folder}/page-{n}.png").read_bytes() for n in pages}
+    finally:
+        shutil.rmtree(workspace.path(folder), ignore_errors=True)
+
+
+def transcribed(text: str, pages: dict[int, str]) -> str:
+    """A PDF's text with the text of its pages given, by their numbers, in place of theirs."""
+    matches = list(_PLACES[".pdf"][0].finditer(text))
+    out, last = [], 0
+    for match, after in zip(matches, [*matches[1:], None], strict=True):
+        end = after.start() if after else len(text)
+        n = int(match[1])
+        out += [
+            text[last : match.end()],
+            f"\n\n{pages[n]}\n\n" if n in pages else text[match.end() : end],
+        ]
+        last = end
+    return "".join(out) + text[last:]
+
+
+def _pages(text: str) -> dict[int, str]:
+    # a PDF's text's pages, each's text after its heading, by their numbers
+    matches = list(_PLACES[".pdf"][0].finditer(text))
+    return {int(m[1]): text[m.end() : after.start() if after else len(text)]
+            for m, after in zip(matches, [*matches[1:], None], strict=True)}  # fmt: skip
 
 
 def places(name: str, text: str) -> list[tuple[int, str]]:

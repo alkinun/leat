@@ -175,3 +175,91 @@ def test_agent(engine, workspace, index, tmp_path):
     assert SEARCH in _system(True, tools={"search_files"})["content"]
     assert "search_files" not in _system(True)["content"]
     assert "search_files" in agent.tools
+
+
+class Seeing:
+    """A transcriber whose model sees images, or not as `sees` says, which reads every image as
+    `said`, and keeps the kinds it was given."""
+
+    def __init__(self, said: str, sees: bool = True):
+        self.said, self.sees, self.kinds = said, sees, []
+
+    def available(self) -> bool:
+        return self.sees
+
+    def recheck(self) -> None:
+        pass
+
+    def __call__(self, image: bytes, kind: str) -> str:
+        self.kinds.append(kind)
+        return self.said
+
+
+def test_scans():
+    # a PDF's pages that hold next to no text, and its text with theirs read in their place
+    text = "## Page 1\n\nThe lease runs three years.\n\n## Page 2\n\n\n\n## Page 3\n\n7\n"
+    assert documents.scans("lease.pdf", text) == [2, 3]
+    assert documents.scans("lease.txt", text) == []
+    assert documents.transcribed(text, {2: "Deposit: two months."}) == (
+        "## Page 1\n\nThe lease runs three years.\n\n## Page 2\n\nDeposit: two months.\n\n"
+        "## Page 3\n\n7\n")  # fmt: skip
+
+
+def test_images(workspace, tmp_path):
+    # an image's text, as a model that sees images reads it, kept and searched; while none does,
+    # images are not read, and are once one does
+    seeing = Seeing("FATURA\n\nToplam: 1.200 TL", sees=False)
+    index = Index(tmp_path / "index.db", workspace, seeing)  # type: ignore[arg-type]
+    space = workspace.space("people/1")
+    (space.root / "receipt.jpg").write_bytes(b"\xff\xd8\xff\x00 a photo")
+    index.update("people/1")
+    assert index.states("people/1") == {} and index.search(space, "toplam") == []
+    seeing.sees = True
+    index.update("people/1")
+    assert index.search(space, "toplam")[0]["name"] == "receipt.jpg"
+    assert seeing.kinds == ["image/jpeg"]
+
+
+@needs_sandbox
+def test_scanned_pdf(workspace, tmp_path):
+    # a scanned page rendered, and read by a model that sees images; while none does, the PDF's
+    # other pages are read, and it is said to be scanned, till one does
+    seeing = Seeing("The deposit is two months' rent.", sees=False)
+    index = Index(tmp_path / "index.db", workspace, seeing)  # type: ignore[arg-type]
+    space = workspace.space("people/1")
+    files.run(space, """
+from fpdf import FPDF
+pdf = FPDF()
+pdf.set_font("Helvetica")
+pdf.add_page()
+pdf.cell(text="The lease runs three years.")
+pdf.add_page()
+pdf.rect(20, 20, 100, 60, style="F")
+pdf.output("lease.pdf")
+""")  # fmt: skip
+    index.update("people/1")
+    assert index.states("people/1") == {"lease.pdf": {"state": "scanned"}}
+    assert index.search(space, "lease")[0]["place"] == "page 1"
+    seeing.sees = True
+    index.update("people/1")
+    assert index.states("people/1") == {} and seeing.kinds == ["image/png"]
+    assert [(f["place"], f["text"]) for f in index.search(space, "deposit")] == [
+        ("page 2", "## Page 2\n\nThe deposit is two months' rent.")]  # fmt: skip
+
+
+def test_transcriber(engine):
+    # an image asked of the engine's model, as a data: URL before the request to read it; whether
+    # the model sees images, as the engine says, asked again once rechecked
+    from leat.agent.ocr import TRANSCRIBE, Transcriber
+
+    transcriber = Transcriber(Client(engine.url))
+    assert not transcriber.available()
+    engine.vision = True
+    assert not transcriber.available()  # as it was said, CHECK seconds ago
+    transcriber.recheck()
+    assert transcriber.available()
+    engine.replies.put([{"content": " Total: 900 "}])
+    assert transcriber(b"png", "image/png") == "Total: 900"
+    ((image, text),) = [engine.requests[0]["messages"][0]["content"]]
+    assert image == {"type": "image_url", "image_url": {"url": "data:image/png;base64,cG5n"}}
+    assert text == {"type": "text", "text": TRANSCRIBE}
