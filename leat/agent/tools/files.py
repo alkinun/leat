@@ -137,6 +137,7 @@ def search(index: Index, context: Context, query: str) -> Result:
 def write(workspace: Workspace, path: str, content: str) -> Result:
     file = workspace.path(path)
     file.parent.mkdir(parents=True, exist_ok=True)
+    workspace.keep(path)  # as it was, if it was
     file.write_text(content, encoding="utf-8")
     return Result(f"Wrote {path}, {len(content)} characters.", {"files": [_name(workspace, file)]})
 
@@ -157,6 +158,7 @@ def edit(workspace: Workspace, path: str, old: str, new: str) -> Result:
     if (n := text.count(old)) != 1:
         found = "is not in" if n == 0 else f"is in {n} places of"
         raise ValueError(f"the passage {found} {path}: give it as it is, enough of it to be one")
+    workspace.keep(path)
     file.write_text(text.replace(old, new), encoding="utf-8")
     return Result(f"Edited {path}.", {"files": [_name(workspace, file)]})
 

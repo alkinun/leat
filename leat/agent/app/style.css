@@ -139,6 +139,9 @@ body.project :is(#log, #greeting) {
 .page li.folder > ul li:last-child { border-bottom: none; }
 .page li.folder.open { padding-bottom: 0; }
 .page ul { margin: 0; padding: 0; list-style: none; }
+/* a space's files' earlier versions, under its files */
+.page details.history { margin-top: 16px; }
+.page details.history li button { padding: 4px 12px; border: 1px solid var(--line); border-radius: var(--round-large); }
 #workspace:empty::before { content: "Nothing yet."; color: var(--muted); }
 #listed:empty::before { content: "No projects yet: name one above."; color: var(--muted); }
 #chats:empty::before { content: "No chats yet: write below to begin one."; color: var(--muted); }

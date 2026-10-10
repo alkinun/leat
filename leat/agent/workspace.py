@@ -10,14 +10,27 @@ cannot change, and the workspace, at /workspace; no network, no other file of th
 memory and a time it may not pass. Files of the kinds whose reading parses them, as PDFs, are read
 there too, so that a file made to attack its parser attacks the sandbox. Python runs isolated, so
 that a file of the workspace's, as docx.py, cannot take a library's place, and writes no bytecode.
+
+Nothing Leat changes is lost: a file changed or deleted, by a tool or by its user, is kept first as
+an earlier version, in the history beside the workspace, which no sandbox sees, to be restored for
+KEPT seconds, HISTORY versions of a file at most. The code a run runs sees the workspace through an
+overlay, its changes written apart, and made in the workspace once it ends, each file it changes
+or deletes kept first, so that no code the model writes changes a file unkept; where the kernel
+mounts no overlay, as one too old, the workspace is the code's to change, and runs keep nothing.
+A space's history goes with it, as a project deleted takes its files' earlier versions too.
 """
 
+import contextlib
 import difflib
+import functools
 import json
 import os
 import shutil
+import stat
 import subprocess
+import tempfile
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +43,8 @@ LONGEST = 50_000_000  # bytes of a document's text kept, which is read whole
 NAME = 255  # bytes of a file's name at most, as Linux's file systems take
 UNPACKED = 1 << 30  # bytes a zip unpacked may hold at most
 MEMBERS = 5000  # files a zip unpacked may hold at most
+HISTORY = 20  # earlier versions of a file kept at most
+KEPT = 30 * 86400  # seconds an earlier version is kept
 # unpacks the zip at sys.argv[1] into the folder sys.argv[2], refusing one of more than
 # sys.argv[3] bytes or sys.argv[4] files; its names of folders kept but for any that would lead
 # out, and taken as UTF-8 where a zip says not, as many do of them; macOS's leavings and hidden
@@ -82,21 +97,98 @@ class Ran:
 
 class Workspace:
     """The files at `root`, and Python run among them by the interpreter of `environment`, a
-    virtual environment of the libraries the sandbox offers, or the system's without one."""
+    virtual environment of the libraries the sandbox offers, or the system's without one. Their
+    earlier versions are kept at `history`, and runs write at `scratch`, each beside the root by
+    default, where its sandbox sees neither."""
 
-    def __init__(self, root: Path, environment: Path | None = None):
+    def __init__(
+        self, root: Path, environment: Path | None = None, history: Path | None = None,
+        scratch: Path | None = None,
+    ):  # fmt: skip
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.environment = environment.resolve() if environment else None
+        self.history = (history or self.root.parent / f".{self.root.name}-history").resolve()
+        self.scratch = (scratch or self.root.parent / f".{self.root.name}-runs").resolve()
 
     def space(self, name: str) -> "Workspace":
         """The workspace of a folder of this one's, as one of its own, whose code runs with the
-        same libraries: a person's files, or a project's."""
-        return Workspace(self.path(name), self.environment)
+        same libraries, and whose history is its own: a person's files, or a project's."""
+        return Workspace(self.path(name), self.environment, self.history / name, self.scratch)
 
     def remove(self) -> None:
-        """Deletes the workspace's folder, with every file in it."""
+        """Deletes the workspace's folder, with every file in it, and their earlier versions."""
         shutil.rmtree(self.root, ignore_errors=True)
+        shutil.rmtree(self.history, ignore_errors=True)
+
+    def keep(self, name: str, move: bool = False) -> None:
+        """Keeps a file as it is now as an earlier version, or each of a folder's, moved there if
+        `move`, as a file deleted is; then forgets the file's oldest past HISTORY or KEPT. Hidden
+        files are not kept, as a page saved to read on, which is no one's work."""
+        path = self.path(name)
+        if path.is_dir():
+            for inside in sorted(path.rglob("*")):
+                if inside.is_file():
+                    self.keep(inside.relative_to(self.root).as_posix(), move)
+            return
+        relative = path.relative_to(self.root).as_posix()
+        if not path.is_file() or any(part.startswith(".") for part in relative.split("/")):
+            return
+        versions = self.history / relative
+        versions.mkdir(parents=True, exist_ok=True)
+        kept = versions / str(time.time_ns())
+        if move:
+            shutil.move(path, kept)
+        else:
+            shutil.copy2(path, kept)
+        self._forget(versions)
+
+    def versions(self) -> list[dict[str, Any]]:
+        """The earlier versions of the files, the latest first: each's file's name, its version,
+        when it was kept, its size, and whether the file is deleted, as no file has its name now."""
+        found = []
+        for kept in self.history.rglob("*") if self.history.is_dir() else []:
+            if not kept.name.isdigit() or kept.is_dir():
+                continue
+            name = kept.parent.relative_to(self.history).as_posix()
+            found.append({
+                "name": name, "version": kept.name, "kept": int(kept.name) / 1e9,
+                "size": kept.lstat().st_size, "deleted": not (self.root / name).is_file(),
+            })  # fmt: skip
+        return sorted(found, key=lambda v: v["kept"], reverse=True)
+
+    def restore(self, name: str, version: str) -> None:
+        """Makes a file as an earlier version of it was, the file as it is now kept first.
+        Raises FileNotFoundError if there is no such version."""
+        relative = self.path(name).relative_to(self.root).as_posix()
+        kept = self.history / relative / version
+        if not version.isdigit() or not kept.is_file():
+            raise FileNotFoundError(f"there is no earlier version {version} of {name}")
+        path = self.root / relative
+        if path.is_dir():
+            self.delete(relative)
+        self.keep(relative)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(kept, path)
+
+    def forget(self) -> None:
+        """Forgets every earlier version kept longer than KEPT, as the box does each day."""
+        if self.history.is_dir():
+            for versions in {kept.parent for kept in self.history.rglob("*") if kept.is_file()}:
+                self._forget(versions)
+
+    def _forget(self, versions: Path) -> None:
+        # forgets a file's versions past the HISTORY latest, or kept longer than KEPT, and the
+        # folders of its name left empty
+        oldest = time.time_ns() - int(KEPT * 1e9)
+        kept = [v for v in versions.iterdir() if v.name.isdigit()]
+        kept.sort(key=lambda v: int(v.name))
+        for i, version in enumerate(kept):
+            if i < len(kept) - HISTORY or int(version.name) < oldest:
+                version.unlink(missing_ok=True)
+        while versions != self.history and versions.is_dir() and not any(versions.iterdir()):
+            versions.rmdir()
+            versions = versions.parent
 
     def path(self, name: str) -> Path:
         """The path of a file in the workspace, named relative to it. Raises ValueError for a
@@ -154,13 +246,14 @@ class Workspace:
         return "/".join([*within, candidate])
 
     def delete(self, name: str) -> None:
-        """Deletes a file, or a folder with every file in it. Raises FileNotFoundError if there is
-        none."""
+        """Deletes a file, or a folder with every file in it, each kept as an earlier version.
+        Raises FileNotFoundError if there is none."""
         path = self.path(name)
         if path.is_dir() and path != self.root:
-            shutil.rmtree(path)
+            self.keep(name, move=True)
+            shutil.rmtree(path)  # and what was not kept, hidden files and folders left empty
         elif path.is_file():
-            path.unlink()
+            self.keep(name, move=True)
         else:
             raise self.missing(name)
 
@@ -208,9 +301,19 @@ class Workspace:
         if self.environment is not None:
             python = str(self.environment / "bin" / "python")
             mounts = ["--ro-bind", str(self.environment), str(self.environment)]
+        upper = None
+        if _overlays(self.scratch):
+            self.scratch.mkdir(parents=True, exist_ok=True)
+            run = Path(tempfile.mkdtemp(prefix="run-", dir=self.scratch))
+            upper, work = run / "upper", run / "work"
+            upper.mkdir()
+            work.mkdir()
+            seen = ["--overlay-src", str(self.root), "--overlay", str(upper), str(work)]
+        else:
+            seen = ["--bind", str(self.root)]
         command = [
             "prlimit", f"--as={MEMORY}", "--",
-            "bwrap", *_SYSTEM, *mounts, "--bind", str(self.root), "/workspace",
+            "bwrap", *_SYSTEM, *mounts, *seen, "/workspace",
             "--chdir", "/workspace", "--unshare-all", "--die-with-parent", "--new-session",
             "--clearenv", "--setenv", "PATH", f"{Path(python).parent}:/usr/bin",
             "--setenv", "HOME", "/tmp", "--setenv", "MPLBACKEND", "Agg",
@@ -218,19 +321,103 @@ class Workspace:
         ]  # fmt: skip
         env, stopped = {"PATH": os.environ.get("PATH", "/usr/bin")}, threading.Event()
         out = subprocess.PIPE
-        with subprocess.Popen(command, stdout=out, stderr=subprocess.STDOUT, env=env) as process:
+        try:
+            with subprocess.Popen(
+                command, stdout=out, stderr=subprocess.STDOUT, env=env
+            ) as process:
 
-            def stop() -> None:  # out of time
-                stopped.set()
-                process.kill()
+                def stop() -> None:  # out of time
+                    stopped.set()
+                    process.kill()
 
-            timer = threading.Timer(timeout, stop)
-            timer.start()
-            assert process.stdout is not None
-            output = _kept(process.stdout, kept)
-            status = process.wait()
-            timer.cancel()
+                timer = threading.Timer(timeout, stop)
+                timer.start()
+                assert process.stdout is not None
+                output = _kept(process.stdout, kept)
+                status = process.wait()
+                timer.cancel()
+            if upper is not None:
+                self._apply(upper)
+        finally:
+            if upper is not None:
+                _clear(upper.parent)
         return Ran(None if stopped.is_set() else status, output)
+
+    def _apply(self, upper: Path) -> None:
+        # makes in the workspace the changes a run wrote in its overlay's upper folder, each file
+        # changed or deleted kept first: a file or a link written there takes the place of any
+        # of its name, a whiteout, a character device, deletes one, and an opaque folder, one
+        # deleted and made anew, replaces the folder of its name
+        for folder, folders, names in os.walk(upper):
+            at = Path(folder).relative_to(upper)
+            if at.parts and _opaque(Path(folder)):
+                self._clear(at.as_posix())
+            for name in folders:
+                target = self.root / at / name
+                if target.is_symlink() or target.is_file():
+                    self._clear((at / name).as_posix())
+                target.mkdir(parents=True, exist_ok=True)
+            for name in names:
+                source, target = Path(folder) / name, self.root / at / name
+                self._clear((at / name).as_posix())
+                if not stat.S_ISCHR(source.lstat().st_mode):  # a whiteout deletes alone
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(source, target)
+
+    def _clear(self, name: str) -> None:
+        # deletes what has a name, a link not followed, and nothing kept of it, a file or a
+        # folder kept first, so that a run's change takes its place
+        path = self.root / name
+        if path.is_symlink():
+            path.unlink()
+        elif path.exists():
+            self.delete(name)
+
+
+@functools.cache
+def _overlays(scratch: Path) -> bool:
+    # whether the sandbox mounts an overlay, its writes at `scratch`: as an unprivileged user,
+    # which needs Linux 5.11 at least, and bubblewrap 0.11
+    if shutil.which("bwrap") is None:
+        return False
+    try:
+        scratch.mkdir(parents=True, exist_ok=True)
+        probe = Path(tempfile.mkdtemp(prefix="probe-", dir=scratch))
+    except OSError:
+        return False
+    try:
+        for part in ("lower", "upper", "work"):
+            (probe / part).mkdir()
+        command = [
+            "bwrap", *_SYSTEM, "--overlay-src", str(probe / "lower"), "--overlay",
+            str(probe / "upper"), str(probe / "work"), "/workspace", "--unshare-all",
+            "--die-with-parent", "/usr/bin/true",
+        ]  # fmt: skip
+        return subprocess.run(command, capture_output=True, timeout=30).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    finally:
+        _clear(probe)
+
+
+def _opaque(folder: Path) -> bool:
+    # whether an overlay's upper folder is opaque: deleted and made anew, hiding what it held
+    for name in ("user.overlay.opaque", "trusted.overlay.opaque"):
+        try:
+            if os.getxattr(folder, name, follow_symlinks=False) == b"y":
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _clear(folder: Path) -> None:
+    # deletes a folder of a run's, its overlay's work folder too, which overlayfs leaves unreadable
+    for inside in folder.rglob("*") if folder.is_dir() else []:
+        if inside.is_dir() and not inside.is_symlink():
+            with contextlib.suppress(OSError):
+                inside.chmod(0o700)
+    shutil.rmtree(folder, ignore_errors=True)
 
 
 def _short(name: str, n: int = NAME) -> str:

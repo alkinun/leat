@@ -75,6 +75,7 @@
     <p>Your own files, which Leat reads and makes, and only you see. Attach them to a message, or drop files and folders here; a zip is unpacked into a folder. A project's files are on its page.</p>
     <form><button type="button" id="upload">Upload files</button><button type="button" id="uploadFolder" class="quiet">Upload a folder</button></form>
     <ul id="workspace"></ul>
+    <details id="workspaceHistory" class="history"><summary>Earlier versions</summary><ul></ul></details>
   </section>
   <section id="projects" class="page">
     <h1>Projects</h1>
@@ -107,6 +108,7 @@
     <h2>Files <span><button id="adding" type="button">Upload files</button><button id="addingFolder" type="button">Upload a folder</button></span></h2>
     <div id="syncing"></div>
     <ul id="kept"></ul>
+    <details id="keptHistory" class="history"><summary>Earlier versions</summary><ul></ul></details>
     <h2>Instructions</h2>
     <textarea id="instructions" rows="4" placeholder="What Leat should know and do in this project: who the client is, what to watch for, how to write."></textarea>
     <p id="saved" class="meta">They hold for chats begun from now on.</p>

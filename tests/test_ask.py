@@ -102,8 +102,11 @@ def test_gaps_and_totals(engine, space):
     files.write(space, "b.txt", "Invoice 0048: £448.00")
     files.write(space, "c.txt", "A letter")
     files.write(space, "d.pdf", "not a PDF")
-    for reply in answers({"Number": "0047", "Total": "£1,664.70"},
-                         {"Number": "0048", "Total": "£448.00"}, {"Number": "", "Total": ""}):
+    for reply in answers(
+        {"Number": "0047", "Total": "£1,664.70"},
+        {"Number": "0048", "Total": "£448.00"},
+        {"Number": "", "Total": ""},
+    ):
         engine.replies.put(reply)
     result = ask.ask(Client(engine.url), None, context(space), "Each invoice's number and total?",
                      ["Number", "Total"])  # fmt: skip
@@ -188,10 +191,13 @@ def test_saved(engine, space):
         engine.replies.put(reply)
     ask.ask(Client(engine.url), None, context(space), "Totals?", ["Total"], ["a.txt", "b.txt"],
             "Euros")  # fmt: skip
-    cells = files.run(space, """
+    cells = files.run(
+        space,
+        """
 from openpyxl import load_workbook
 print([[c.value for c in row] for row in load_workbook("Euros.xlsx").active.rows])
-""").content.splitlines()[0]
+""",
+    ).content.splitlines()[0]
     assert cells == "[['File', 'Total (€)'], ['a.txt', 1502], ['b.txt', 730], ['Total', 2232]]"
 
 

@@ -70,6 +70,8 @@ _CONVERSATION = re.compile(r"/api/conversations/([0-9a-f]{12})(/messages|/stop)?
 _PROJECT = re.compile(r"/api/projects/([0-9a-f]{12})")
 _WORKFLOW = re.compile(r"/api/workflows/([0-9]+)")
 _SYNC = re.compile(r"/api/projects/([0-9a-f]{12})/sync")
+# a project's files' earlier versions, or the person's own, to list and to restore
+_HISTORY = re.compile(r"/api/(?:projects/([0-9a-f]{12})/)?history")
 _PROJECT_PAGE = re.compile(r"/projects/[0-9a-f]{12}")
 _REQUEST = re.compile(r"/api/pairings/([0-9a-f]{16})(/allow)?")
 _DEVICE = re.compile(r"/api/devices/([0-9]+)")
@@ -134,6 +136,8 @@ class _Handler(BaseHTTPRequestHandler):
             elif not path.startswith("/api/") and (match := _FILE.fullmatch(path)):
                 space = agent.space(match[1], me["person"])
                 self._download(space, urllib.parse.unquote(match[2]))
+            elif match := _HISTORY.fullmatch(path):  # the files' earlier versions
+                self._json(200, {"versions": agent.space(match[1], me["person"]).versions()})
             elif (match := _CONVERSATION.fullmatch(path)) and not match[2]:
                 if (conversation := agent.conversation(match[1], me["person"])) is None:
                     raise NotFound(f"there is no conversation {match[1]}")
@@ -207,6 +211,12 @@ class _Handler(BaseHTTPRequestHandler):
                     raise ValueError("offline must be true or false")
                 agent.set_offline(offline)
                 agent.note(person, f"turned the internet {'off' if offline else 'on'}")
+                self._json(200, {})
+            elif match := _HISTORY.fullmatch(path):  # a file restored as it was
+                name = _text(body, "name")
+                agent.space(match[1], person).restore(name, _text(body, "version"))
+                agent.files_changed(match[1], person)
+                agent.note(person, "restored", match[1], name)
                 self._json(200, {})
             else:
                 self._error(404, f"there is no POST {path}")

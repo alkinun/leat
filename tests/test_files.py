@@ -280,6 +280,15 @@ def test_api_files(server, agent, monkeypatch):
         assert call(f"{server}{path}")[0] == 404
     assert call(f"{server}/api/files/My%20notes.txt", "DELETE")[0] == 200
     assert call(f"{server}/api/files/My%20notes.txt", "DELETE")[0] == 404
+    # the file deleted kept as an earlier version, and restored
+    versions = json.loads(call(f"{server}/api/history")[2])["versions"]
+    assert [(v["name"], v["deleted"]) for v in versions] == [("My notes.txt", True)]
+    restored = json.dumps({"name": "My notes.txt", "version": versions[0]["version"]}).encode()
+    assert call(f"{server}/api/history", "POST", restored)[0] == 200
+    assert agent.space(None, 1).path("My notes.txt").read_bytes() == b"Buy milk."
+    unknown = json.dumps({"name": "My notes.txt", "version": "1"}).encode()
+    assert call(f"{server}/api/history", "POST", unknown)[0] == 404
+    assert agent.store.activity()[0]["action"] == "restored"
     for length in ("-1", "many"):  # a length there cannot be
         bad = urllib.request.Request(f"{server}/api/files/x.txt", b"x", method="PUT")
         bad.add_unredirected_header("Content-Length", length)
@@ -359,6 +368,78 @@ def test_api_project_files(server, agent):
 
 
 @sandboxed
+def test_history(workspace, monkeypatch):
+    # a file written over, edited or deleted kept first as an earlier version, apart from the
+    # workspace; restored, the file as it was then kept too; a deleted one restored; hidden
+    # files not kept; a space's history its own, and gone with it
+    files.write(workspace, "notes.txt", "one")
+    assert workspace.versions() == []  # a new file: nothing earlier
+    files.write(workspace, "notes.txt", "two")
+    files.edit(workspace, "notes.txt", "two", "three")
+    earlier = workspace.versions()
+    assert [(v["name"], v["size"], v["deleted"]) for v in earlier] == [
+        ("notes.txt", 3, False), ("notes.txt", 3, False)]  # "two", then "one"  # fmt: skip
+    assert not workspace.history.is_relative_to(workspace.root)
+    workspace.restore("notes.txt", earlier[-1]["version"])
+    assert (workspace.root / "notes.txt").read_text() == "one"
+    assert len(workspace.versions()) == 3  # "three" kept as it was restored over
+    files.write(workspace, "old/a.txt", "a")
+    (workspace.root / "old" / ".hidden").write_text("h")
+    workspace.delete("old")
+    gone = [v for v in workspace.versions() if v["deleted"]]
+    assert [v["name"] for v in gone] == ["old/a.txt"] and not (workspace.root / "old").exists()
+    workspace.restore("old/a.txt", gone[0]["version"])
+    assert (workspace.root / "old" / "a.txt").read_text() == "a"
+    with pytest.raises(FileNotFoundError):
+        workspace.restore("notes.txt", "123")
+    with pytest.raises(ValueError):
+        workspace.restore("../x", "123")
+    # a space's, apart from the others', and removed with it
+    space = workspace.space("projects/a")
+    files.write(space, "x.txt", "1")
+    files.write(space, "x.txt", "2")
+    assert space.history == workspace.history / "projects" / "a"
+    assert [v["name"] for v in space.versions()] == ["x.txt"]
+    space.remove()
+    assert not space.history.exists() and not space.root.exists()
+    # HISTORY versions of a file at most, and none kept longer than KEPT
+    monkeypatch.setattr(workspace_module, "HISTORY", 2)
+    files.write(workspace, "notes.txt", "four")
+    assert len([v for v in workspace.versions() if v["name"] == "notes.txt"]) == 2
+    monkeypatch.setattr(workspace_module, "KEPT", 0)
+    workspace.forget()
+    assert workspace.versions() == []
+
+
+@sandboxed
+def test_run_keeps(workspace):
+    # code run changes the workspace only once it ends, through its overlay, each file it
+    # changes or deletes kept first: a file written over, one deleted, a folder deleted and made
+    # anew, a file made a folder, and a new file; the history out of its sight
+    if not workspace_module._overlays(workspace.scratch):
+        pytest.skip("the kernel mounts no overlay for an unprivileged user")
+    for name, text in (("a.txt", "a"), ("b.txt", "b"), ("d/1.txt", "1"), ("d/2.txt", "2"),
+                       ("e", "e")):  # fmt: skip
+        files.write(workspace, name, text)
+    code = """
+import os, shutil
+open("a.txt", "w").write("A")
+os.remove("b.txt")
+shutil.rmtree("d"); os.mkdir("d"); open("d/3.txt", "w").write("3")
+os.remove("e"); os.mkdir("e"); open("e/f.txt", "w").write("f")
+open("new.txt", "w").write("new")
+print(os.path.exists("/workspace/../.workspace-history"))
+"""
+    ran = files.run(workspace, code)
+    assert ran.info["status"] == 0 and ran.content.startswith("False\n")
+    names = sorted(f["name"] for f in workspace.files())
+    assert names == ["a.txt", "d/3.txt", "e/f.txt", "new.txt"]
+    assert (workspace.root / "a.txt").read_text() == "A"
+    kept = {v["name"]: v["deleted"] for v in workspace.versions()}
+    assert kept == {"a.txt": False, "b.txt": True, "d/1.txt": True, "d/2.txt": True, "e": True}
+    assert not list(workspace.scratch.iterdir())  # the run's overlay gone
+
+
 def test_sandbox_sees_its_space(agent):
     # code a conversation runs sees its space's files, and no other's
     project = agent.add_project("Payroll")["id"]

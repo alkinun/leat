@@ -72,6 +72,7 @@ PROJECT = """\
 This conversation is in the project "{name}".{instructions}"""
 INSTRUCTIONS = " Follow its instructions, which hold for every conversation in it:\n\n{text}"
 TITLE = 60  # characters of a conversation's title at most: its first message's start
+FORGET = 86400  # seconds between forgettings of the files' oldest earlier versions
 ROUNDS = 25  # replies a turn takes at most; the last answers, told so, and may call no tools
 LAST = "(You have made all the tool calls this message allows: answer now, from what you found.)"
 # times a reply of nothing, neither text nor a call, is asked again at most: a model may end its
@@ -142,6 +143,7 @@ class Agent:
         self._turns: dict[str, _Turn] = {}  # the running ones, by their conversation's id
         self._lock = threading.Lock()
         self._syncing = threading.Lock()  # held while a project's files are synced
+        self._forgotten = 0.0  # when the files' oldest earlier versions were last forgotten
         self.settle()
 
     def start(self) -> None:
@@ -331,6 +333,12 @@ class Agent:
         and of what, as store.note keeps it."""
         held = self.store.project(project) if project else None
         self.store.note(person, action, held["name"] if held else None, detail, leat)
+
+    def forget(self) -> None:
+        """Forgets the files' earlier versions kept longer than they are kept, once a day."""
+        if self.workspace is not None and time.time() - self._forgotten > FORGET:
+            self._forgotten = time.time()
+            self.workspace.forget()
 
     def offline(self) -> bool:
         """Whether the agent is kept from the internet, as the owner chose."""

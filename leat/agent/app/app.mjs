@@ -46,6 +46,8 @@ $("upload").onclick = () => pick((items) => uploads(items, null));
 $("uploadFolder").onclick = () => pick((items) => uploads(items, null), true);
 $("adding").onclick = () => pick((items) => uploads(items, viewing));
 $("addingFolder").onclick = () => pick((items) => uploads(items, viewing), true);
+$("workspaceHistory").ontoggle = () => renderHistory($("workspaceHistory"), null);
+$("keptHistory").ontoggle = () => renderHistory($("keptHistory"), viewing);
 $("create").onsubmit = create;
 $("back").onclick = (event) => {
   event.preventDefault();
@@ -600,6 +602,8 @@ function renderAccounts() {
 function renderFiles() {
   $("workspace").replaceChildren(...listFiles(null));
   $("kept").replaceChildren(...(viewing ? listFiles(viewing) : []));
+  renderHistory($("workspaceHistory"), null);
+  if (viewing) renderHistory($("keptHistory"), viewing);
   // the cards of the files its answers made, where the user reads
   if (shown?.messages) follow(() => views.forEach((view) => view.update()));
 }
@@ -654,9 +658,35 @@ function folderRow(name, files, project) {
 function remover(what, name, project) {
   const button = element("button", "", "×");
   button.title = "Delete";
-  button.onclick = () => confirm(`Delete ${what}? It cannot be undone.`)
+  button.onclick = () => confirm(`Delete ${what}? It can be restored from Earlier versions for 30 days.`)
     && del(`/api${place(project)}/files/${encodeURIComponent(name)}`);
   return button;
+}
+
+// a space's files' earlier versions, a project's or the person's own, asked while their list is
+// open: each a row of its file, whether it was deleted or changed since, and when, restored from
+// its row, which keeps the file as it is now as one more
+async function renderHistory(details, project) {
+  if (!details.open) return;
+  try {
+    const response = await fetch(`/api${place(project)}/history`);
+    if (!response.ok) throw new Error((await response.json()).error.message);
+    const { versions } = await response.json();
+    details.querySelector("ul").replaceChildren(...(versions.length ? versions.map((v) => versionRow(v, project))
+      : [element("li", "meta", "Nothing changed or deleted in the last 30 days.")]));
+  } catch (error) {
+    status(error.message, true);
+  }
+}
+
+function versionRow(v, project) {
+  const item = element("li"), restore = element("button", "", "Restore");
+  const when = new Date(v.kept * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  restore.onclick = () => post(`/api${place(project)}/history`, { name: v.name, version: v.version })
+    .catch((error) => status(error.message, true));
+  item.append(element("span", "", v.name),
+    element("span", "meta", [v.deleted ? "Deleted" : "Changed", `${day(v.kept)} ${when}`, bytes(v.size)].join(" · ")), restore);
+  return item;
 }
 
 // what a file's state in the index says, while it is not read: being read, or not readable
