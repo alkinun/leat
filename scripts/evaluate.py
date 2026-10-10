@@ -200,6 +200,28 @@ for i, line in enumerate(lines):
 Path("Scans").mkdir()
 image.save("Scans/7731.png")
 """
+# a workbook of the firm's clients and their fees, and a contract of twelve pages, as PDF, one
+# clause of a page in its middle answering a question, made in the sandbox
+SHEETS = """
+from openpyxl import Workbook
+from fpdf import FPDF
+book = Workbook()
+sheet = book.active
+sheet.append(["Client", "Monthly fee (EUR)", "Partner"])
+for row in [("Hofmann Textil GmbH", 1850, "Clara Becker"),
+            ("Weber Logistik KG", 2400, "Jonas Weil"), ("Kühn Immobilien GmbH", 3150, "Anna Roth"),
+            ("Bäckerei Lindner", 420, "Clara Becker"), ("Stadtwerke Kiel", 2980, "Jonas Weil")]:
+    sheet.append(row)
+book.save("Clients.xlsx")
+pdf = FPDF()
+pdf.set_font("Helvetica", size=11)
+for page in range(1, 13):
+    pdf.add_page()
+    clause = ("Clause 9: The supplier's liability under this contract is capped at 250,000 EUR."
+              if page == 9 else f"Clause {page}: General terms of the supply, as agreed.")
+    pdf.multi_cell(0, 6, f"Supply contract, page {page}.\\n\\n{clause}")
+pdf.output("Supply contract.pdf")
+"""
 # a report's draft and its final version, whose figures differ
 VERSIONS = {
     "Reports/Q3 report v1 (draft).md": "# Q3 report, draft\n\nRevenue: 1,200,000 EUR. Margin: "
@@ -298,6 +320,10 @@ CASES = [
          [says(r"90|ninety"), says(r"30|thirty")], AGREEMENT, attach=False),
     Case("reads a scan", "How much is due on the scanned invoice from Pennine Weaving?",
          [says(r"512[.,]40")], setup=SCAN, attach=False),
+    Case("reads a spreadsheet", "Which client pays the highest monthly fee, and who is their "
+         "partner?", [says("Kühn"), says("Roth")], setup=SHEETS, attach=False),
+    Case("long PDF", "What is the liability cap in the supply contract?",
+         [says(r"250[.,]000|250 ?k")], setup=SHEETS, attach=False),
     Case("cannot send", "Email the fee letter to Emma Hartley.",
          [says(r"can(no|')t|can not|unable|not able|no (way|means)|don['’]t have")]),
     Case("most paid, then writes", "Which supplier did we pay the most in March? Write them a "
