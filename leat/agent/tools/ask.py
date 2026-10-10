@@ -15,10 +15,9 @@ import concurrent.futures
 import json
 import mimetypes
 import re
-import uuid
 from typing import Any
 
-from leat.agent import documents
+from leat.agent import documents, sheets
 from leat.agent.client import Client, EngineError
 from leat.agent.context import picture
 from leat.agent.index import Index
@@ -37,30 +36,6 @@ READING = """\
 You read one file for Leat, an assistant, who asks the same of many files. Answer from this file \
 alone, as a JSON object of these keys: {keys}. Each value is short: what the file says, a number \
 or a date as it is written there, or "" where the file does not say. Write the JSON alone."""
-# saves the table of the JSON file at sys.argv[1], a list of rows, the first its heading, as the
-# spreadsheet sys.argv[2]: its heading bold, frozen and filtered, its columns as wide as they need
-_SAVE = """
-import json, sys
-from openpyxl import Workbook
-from openpyxl.styles import Alignment, Font
-rows = json.load(open(sys.argv[1], encoding="utf-8"))
-book = Workbook()
-sheet = book.active
-sheet.title = "Answers"
-for row in rows:
-    sheet.append(row)
-for cell in sheet[1]:
-    cell.font = Font(bold=True)
-for row in sheet.iter_rows(min_row=2):
-    for cell in row:
-        cell.alignment = Alignment(vertical="top", wrap_text=True)
-sheet.freeze_panes = "A2"
-sheet.auto_filter.ref = sheet.dimensions
-for column in sheet.columns:
-    width = max(len(str(cell.value or "")) for cell in column)
-    sheet.column_dimensions[column[0].column_letter].width = min(60, max(12, width + 2))
-book.save(sys.argv[2])
-"""
 
 
 def tools(reader: Client, index: Index | None = None) -> list[Tool]:
@@ -247,20 +222,11 @@ def _parsed(said: str, keys: list[str]) -> dict[str, str]:
 
 
 def _save(space: Workspace, table: list[list[str]], name: str) -> tuple[str | None, str]:
-    # saves a table as a spreadsheet of the space's, by a name free there, in the sandbox, which
-    # has openpyxl; returns its name, or None and why not
-    if space.environment is None:
-        return None, "the sandbox has no spreadsheet library"
-    name = space.free(name if name.lower().endswith(".xlsx") else f"{name}.xlsx")
-    rows = f".ask-{uuid.uuid4().hex[:8]}.json"
-    space.path(rows).write_text(json.dumps(table, ensure_ascii=False), encoding="utf-8")
+    # saves a table as a spreadsheet of the space's; returns its name, or None and why not
     try:
-        ran = space.run(_SAVE, f"/workspace/{rows}", f"/workspace/{name}")
-    finally:
-        space.path(rows).unlink(missing_ok=True)
-    if ran.status != 0:
-        return None, (ran.output.strip().splitlines() or ["it stopped"])[-1]
-    return name, ""
+        return sheets.write(space, [("Answers", table)], name), ""
+    except ValueError as e:
+        return None, str(e)
 
 
 def _named(question: str) -> str:

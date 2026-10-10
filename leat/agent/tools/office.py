@@ -14,7 +14,6 @@ text in the formatting of its first character; one stopped is not saved.
 
 import concurrent.futures
 import json
-import uuid
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -297,7 +296,7 @@ def fill(context: Context, path: str, values: dict[str, Any], name: str) -> Resu
     template = _docx(space, path)
     made = space.free(_named(name), folders=True)
     space.path(made).parent.mkdir(parents=True, exist_ok=True)
-    said = _run(space, _FILL, values, template, made)
+    said = space.given(_FILL, values, template, made)
     filled, missing, unused = said["filled"], said["missing"], said["unused"]
     lines = [f"Made {made}, of {template}: {len(filled)} fields filled."]
     if missing:
@@ -316,7 +315,7 @@ def suggest(context: Context, path: str, edits: list[dict[str, Any]], name: str)
         raise ValueError("edits must be a list of objects, each with the passage to find")
     made = space.free(_named(name), folders=True)
     space.path(made).parent.mkdir(parents=True, exist_ok=True)
-    found = _run(space, _SUGGEST, edits, document, made)
+    found = space.given(_SUGGEST, edits, document, made)
     done = sum(n == 1 for n in found)
     lines = [f"Made {made}, of {document}: {done} of {len(edits)} edits suggested, as tracked "
              "changes, which the user accepts or rejects in Word."]  # fmt: skip
@@ -330,7 +329,7 @@ def suggest(context: Context, path: str, edits: list[dict[str, Any]], name: str)
 def translate(reader: Client, context: Context, path: str, language: str, name: str) -> Result:
     space = context.space()
     document = _docx(space, path)
-    texts: list[str] = _run(space, _READ, None, document)
+    texts: list[str] = space.given(_READ, None, document)
     batches = _batches(texts)
     translated: list[str | None] = [None] * len(texts)
     done = 0
@@ -353,7 +352,7 @@ def translate(reader: Client, context: Context, path: str, language: str, name: 
         return Result("Stopped before the whole document was translated: nothing was saved.")
     made = space.free(_named(name), folders=True)
     space.path(made).parent.mkdir(parents=True, exist_ok=True)
-    _run(space, _WRITE, translated, document, made)
+    space.given(_WRITE, translated, document, made)
     left = sum(1 for i, text in enumerate(texts) if text.strip() and translated[i] is None)
     said = f"Made {made}, {document} in {language}, {len(texts) - left} paragraphs translated."
     if left:
@@ -428,18 +427,3 @@ def _named(name: str) -> str:
     if path.suffix.lower() in (".pdf", ".doc", ".odt", ".rtf", ".txt"):
         return str(path.with_suffix(".docx"))
     return name if path.suffix.lower() == ".docx" else f"{name}.docx"
-
-
-def _run(space: Workspace, script: str, given: Any, *names: str) -> Any:
-    # runs a script in the sandbox, of the JSON of `given`, in a hidden file of the space's, and of
-    # files of the space's; returns what it printed last, as JSON. Raises ValueError if it fails
-    inside = f".office-{uuid.uuid4().hex[:8]}.json"
-    space.path(inside).write_text(json.dumps(given, ensure_ascii=False), encoding="utf-8")
-    try:
-        ran = space.run(script, f"/workspace/{inside}", *(f"/workspace/{n}" for n in names))
-    finally:
-        space.path(inside).unlink(missing_ok=True)
-    lines = ran.output.strip().splitlines() or ["it printed nothing"]
-    if ran.status != 0:
-        raise ValueError(f"it failed: {lines[-1]}")
-    return json.loads(lines[-1])

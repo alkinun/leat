@@ -12,10 +12,12 @@ there too, so that a file made to attack its parser attacks the sandbox. Python 
 that a file of the workspace's, as docx.py, cannot take a library's place, and writes no bytecode.
 """
 
+import json
 import os
 import shutil
 import subprocess
 import threading
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
@@ -168,6 +170,22 @@ class Workspace:
             raise ValueError(f"{file.name} could not be unpacked: {why}")
         file.unlink()
         return folder, int(ran.output.strip().splitlines()[-1])
+
+    def given(self, code: str, given: Any, *names: str, timeout: float = TIMEOUT) -> Any:
+        """Runs code in the sandbox, of `given`, as JSON in a hidden file of the workspace's, its
+        path sys.argv[1], and of the files named, their paths the arguments after; returns what
+        it printed last, as JSON. Raises ValueError if it fails."""
+        inside = f".given-{uuid.uuid4().hex[:8]}.json"
+        self.path(inside).write_text(json.dumps(given, ensure_ascii=False), encoding="utf-8")
+        try:
+            paths = [f"/workspace/{self.path(n).relative_to(self.root).as_posix()}" for n in names]
+            ran = self.run(code, f"/workspace/{inside}", *paths, timeout=timeout, kept=None)
+        finally:
+            self.path(inside).unlink(missing_ok=True)
+        lines = ran.output.strip().splitlines() or ["it printed nothing"]
+        if ran.status != 0:
+            raise ValueError(f"it failed: {lines[-1]}")
+        return json.loads(lines[-1])
 
     def run(
         self, code: str, *args: str, timeout: float = TIMEOUT, kept: int | None = OUTPUT
