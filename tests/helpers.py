@@ -9,6 +9,7 @@ import numpy as np
 from gguf.quants import dequantize
 from tinygrad import Tensor, UOp, dtypes
 
+from leat.draft import mtp
 from leat.gguf import GGUF
 from leat.quant import BLOCK, GGMLType
 from leat.tokenizer import _BYTE_CHAR, CONTROL, NORMAL, USER_DEFINED, Tokenizer
@@ -1161,22 +1162,30 @@ def _write_qwen35(path: Path, arch: str) -> dict[str, np.ndarray]:
 
 def split_mtp(path: Path, folder: Path, name: str) -> tuple[Path, Path]:
     # a Qwen3.5 GGUF with its MTP layer as llama.cpp's converters write Qwen3.8's: the model's
-    # file without the layer, and mtp-*.gguf of the layer, the embeddings and the output, each of
-    # the model's metadata and general.name `name`
+    # file without the layer, of its layers alone, and mtp-*.gguf of the layer, the embeddings and
+    # the output, of the whole's metadata; each of general.name `name`
     reader = gguf.GGUFReader(path)
     arch = reader.fields["general.architecture"].contents()
-    layer = f"blk.{reader.fields[f'{arch}.block_count'].contents() - 1}."
+    blocks, nextn = f"{arch}.block_count", f"{arch}.nextn_predict_layers"
+    layers = reader.fields[blocks].contents() - 1
+    layer = f"blk.{layers}."
     files = {
         folder / f"{name}.gguf": lambda n: not n.startswith(layer),
-        folder / f"mtp-{name}.gguf": lambda n: n.startswith(layer) or not n.startswith("blk."),
+        folder / f"mtp-{name}.gguf": lambda n: n.startswith((layer, "token_embd", "output")),
     }
     for file, keep in files.items():
         w = gguf.GGUFWriter(file, arch=arch)
         w.add_name(name)
+        alone = not mtp(file)  # the model's layers, none past them
+        if alone:
+            w.add_uint32(blocks, layers)
         for field in reader.fields.values():
-            if not field.name.startswith("GGUF.") and field.name != "general.architecture":
-                sub = field.types[-1] if field.types[0] == gguf.GGUFValueType.ARRAY else None
-                w.add_key_value(field.name, field.contents(), field.types[0], sub)
+            if field.name.startswith("GGUF.") or field.name == "general.architecture":
+                continue
+            if alone and field.name in (blocks, nextn):
+                continue
+            sub = field.types[-1] if field.types[0] == gguf.GGUFValueType.ARRAY else None
+            w.add_key_value(field.name, field.contents(), field.types[0], sub)
         for t in reader.tensors:
             if keep(t.name):
                 w.add_tensor(t.name, t.data, raw_dtype=t.tensor_type)

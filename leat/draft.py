@@ -69,24 +69,33 @@ def mtp(path: Path) -> bool:
 
 def own_drafter(model: Path) -> Path | None:
     """A model's own drafter, if it has one: a Qwen3.5 model's MTP layer, in its file or else in
-    the mtp-*.gguf beside it of its general.name, the largest, most exact, of several."""
+    the mtp-*.gguf beside it of its general.name, whose layer is past the model's, the largest,
+    most exact, of several."""
     gguf = GGUF.open(model)
     m, arch = gguf.metadata, gguf.metadata["general.architecture"]
-    if arch not in QWEN35 or not m.get(f"{arch}.nextn_predict_layers"):
+    if arch not in QWEN35:
         return None
     if _mtp_layer(m, gguf.tensors):
         return model
-    name = _named(m.get("general.name", ""))
-    found = [p for p in model.parent.glob("*.gguf") if mtp(p)
-             and _named(GGUF.open(p).metadata.get("general.name", "")) == name]  # fmt: skip
+    name, layers = _named(m.get("general.name", "")), _layers(m)
+
+    def beside(path: Path) -> bool:  # an MTP file of this model's
+        o = GGUF.open(path).metadata
+        return _named(o.get("general.name", "")) == name and _layers(o) == layers
+
+    found = [p for p in model.parent.glob("*.gguf") if mtp(p) and beside(p)]
     return max(found, key=lambda p: p.stat().st_size, default=None) if name else None
+
+
+def _layers(m: dict) -> int:
+    # a Qwen3.5 GGUF's model's layers, without its MTP layer
+    arch = m["general.architecture"]
+    return m[f"{arch}.block_count"] - m.get(f"{arch}.nextn_predict_layers", 0)
 
 
 def _mtp_layer(m: dict, tensors: dict) -> bool:
     # whether a Qwen3.5 GGUF holds its MTP layer, past the model's layers
-    arch = m["general.architecture"]
-    layers = m[f"{arch}.block_count"] - m.get(f"{arch}.nextn_predict_layers", 0)
-    return f"blk.{layers}.nextn.eh_proj.weight" in tensors
+    return f"blk.{_layers(m)}.nextn.eh_proj.weight" in tensors
 
 
 def _named(name: str) -> str:
