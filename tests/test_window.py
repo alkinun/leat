@@ -7,7 +7,7 @@ import pytest
 from tinygrad import Tensor, UOp, dtypes
 
 import tests.helpers
-from leat import vision
+from leat import ops, vision
 from leat.engine import Engine
 from leat.gguf import GGUF
 from leat.model import Config, Transformer
@@ -203,10 +203,14 @@ def test_ring_image(long, tiny_mmproj, monkeypatch):
 
 @pytest.mark.gpu
 @pytest.mark.parametrize("arch", ["gemma3", "gpt-oss"])
-def test_ring_kernels(long, arch):
+def test_ring_kernels(long, arch, monkeypatch):
     # the kernels, where they take the tiny models' heads, store in and read rings as whole
     # caches: chunks of a prompt that wraps the rings, then tokens one at a time, at positions
-    # bound as the engine's graphs bind them
+    # bound as the engine's graphs bind them. Of attention alone: the tiny gpt-oss's 4 experts,
+    # too few for the experts' kernels, take the reference ops' every expert for a chunk's pairs,
+    # whose kernels took 9 minutes a chunk on tinygrad's emulated GPU, past CI's time for all
+    monkeypatch.setattr(ops, "mixture", lambda x, *args, residual=True, **kwargs: (
+        x if residual else x.zeros_like()))  # fmt: skip
     f = GGUF.open(long(arch)[0])
     config, weights = Config.from_gguf(f.metadata), f.load()
     ring, whole = Transformer(config, weights, LONG, run=CHUNK), Transformer(config, weights, LONG)
