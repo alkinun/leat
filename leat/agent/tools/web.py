@@ -58,7 +58,9 @@ TIMEOUT = 15  # seconds a request may take
 TEXTS = ("application/xhtml+xml", "application/json", "application/xml")
 # a page's charset as its <meta charset="..."> or <meta http-equiv content="...; charset=..."> says
 _CHARSET = re.compile(rb"""<meta[^>]*charset\s*=\s*["']?([\w.:-]+)""", re.IGNORECASE)
-LANGUAGE = "en"  # of the results: SearXNG's engines would answer in the box's country's otherwise
+# of the results: the query's, as SearXNG finds it, so that a question asked in German finds German
+# pages and one in English English ones, wherever the box is
+LANGUAGE = "auto"
 # elements whose text is not a page's content: code, and the menus around it
 HIDDEN = {"script", "style", "noscript", "template", "svg", "nav", "header", "footer", "aside"}
 # elements that begin and end lines of a page's text

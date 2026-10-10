@@ -102,7 +102,7 @@ def test_search(site):
     context = numbering()
     context.cite("https://two.example/", "")  # read before
     result = web.search(site, "strix halo", context)
-    assert _Site.queries[-1] == {"q": ["strix halo"], "format": ["json"], "language": ["en"]}
+    assert _Site.queries[-1] == {"q": ["strix halo"], "format": ["json"], "language": ["auto"]}
     two = "https://two.example/"
     assert result.content == f"[2] One\nhttps://one.example/\nThe first.\n\n[1] {two}\n{two}"
     assert result.info == {"query": "strix halo", "results": [
