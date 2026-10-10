@@ -475,6 +475,15 @@ print(os.path.exists("/workspace/../.workspace-history"))
     assert not list(workspace.scratch.iterdir())  # the run's overlay gone
 
 
+def test_overview(agent):
+    # the room the files take, and their earlier versions, and the disk's
+    files.write(agent.space(), "a.txt", "12345")
+    files.write(agent.space(), "a.txt", "1234567")  # its earlier version kept
+    seen = agent.overview()
+    assert (seen["files"], seen["versions"]) == (7, 5)
+    assert seen["disk"]["free"] <= seen["disk"]["total"] and seen["people"] == []
+
+
 def test_sandbox_sees_its_space(agent):
     # code a conversation runs sees its space's files, and no other's
     project = agent.add_project("Payroll")["id"]

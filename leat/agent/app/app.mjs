@@ -700,9 +700,9 @@ async function renderOverview() {
   try {
     const response = await fetch("/api/overview");
     if (!response.ok) throw new Error((await response.json()).error.message);
-    const { files, disk, people } = await response.json();
+    const { files, versions, disk, people } = await response.json();
     const low = disk && disk.free < disk.total / 10;
-    $("room").textContent = `Files take ${bytes(files)}` + (disk ? `; ${bytes(disk.free)} of ${bytes(disk.total)} is free on this computer's disk${low ? ": it is nearly full" : ""}.` : ".");
+    $("room").textContent = `Files take ${bytes(files)}` + (versions ? `, and their earlier versions ${bytes(versions)}` : "") + (disk ? `; ${bytes(disk.free)} of ${bytes(disk.total)} is free on this computer's disk${low ? ": it is nearly full" : ""}.` : ".");
     $("room").className = low ? "warning" : "meta";
     $("use").replaceChildren(...people.map((p) => {
       const item = element("li");

@@ -385,17 +385,20 @@ class Agent:
             self._publish_workflows()
 
     def overview(self) -> dict[str, Any]:
-        """The box as its owner looks after it: the room its files take and the room left on
-        their disk, and each person's use this month, counted, not read."""
+        """The box as its owner looks after it: the room its files take, and their earlier
+        versions, and the room left on their disk, and each person's use this month, counted,
+        not read."""
         month = datetime.date.today().replace(day=1)
         since = datetime.datetime.combine(month, datetime.time()).timestamp()
-        size, disk = 0, None
+        size = kept = 0
+        disk = None
         if self.workspace is not None:
-            size = sum(p.stat().st_size for p in self.workspace.root.rglob("*")
-                       if p.is_file() and not p.is_symlink())  # fmt: skip
+            size, kept = (sum(p.stat().st_size for p in folder.rglob("*")
+                              if p.is_file() and not p.is_symlink())
+                          for folder in (self.workspace.root, self.workspace.history))  # fmt: skip
             disk = shutil.disk_usage(self.workspace.root)
         room = {"total": disk.total, "free": disk.free} if disk else None
-        return {"files": size, "disk": room, "people": self.store.use(since)}
+        return {"files": size, "versions": kept, "disk": room, "people": self.store.use(since)}
 
     def note(
         self, person: int | None, action: str, project: str | None = None,
