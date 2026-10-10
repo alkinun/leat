@@ -18,6 +18,8 @@ its person's alone, and seen only while they see the project.
 
 A workflow is a request saved to make again, by its name: a project's, seen by those who see the
 project, or a person's own.
+
+The settings are the box's, each a value of JSON by its key, as where it backs up to.
 """
 
 import json
@@ -223,6 +225,10 @@ _MIGRATIONS = [
       created REAL NOT NULL
     );
     """,
+    # the box's settings, each a value of JSON by its key
+    """
+    CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    """,
 ]
 # a conversation's columns as the apps list it
 _SUMMARY = "id, title, created, updated, person, project"
@@ -393,6 +399,29 @@ class Store:
 
     def delete_workflow(self, id: int) -> None:
         self._query("DELETE FROM workflows WHERE id = ?", id)
+
+    def setting(self, key: str) -> Any:
+        """A setting's value, or None if it has none."""
+        rows = self._query("SELECT value FROM settings WHERE key = ?", key)
+        return json.loads(rows[0]["value"]) if rows else None
+
+    def set_setting(self, key: str, value: Any) -> None:
+        """Sets a setting, or of None takes it away."""
+        if value is None:
+            self._query("DELETE FROM settings WHERE key = ?", key)
+        else:
+            sql = "INSERT OR REPLACE INTO settings VALUES (?, ?)"
+            self._query(sql, key, json.dumps(value, ensure_ascii=False))
+
+    def backup(self, path: Path) -> None:
+        """Copies the state, whole, to a new file at `path`, by SQLite's backup, which writes
+        meanwhile do not tear."""
+        target = sqlite3.connect(path)
+        try:
+            with self._lock:
+                self._db.backup(target)
+        finally:
+            target.close()
 
     def people(self) -> list[dict[str, Any]]:
         """The box's people, the owner first."""

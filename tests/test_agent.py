@@ -593,7 +593,8 @@ def test_migration(tmp_path):
     # of the household's features gone, nothing is left
     tables = {name for (name,) in store._db.execute("SELECT name FROM sqlite_schema")}
     assert {t for t in tables if not t.startswith("sqlite_")} == {
-        "conversations", "messages", "people", "devices", "projects", "workflows"}  # fmt: skip
+        "conversations", "messages", "people", "devices", "projects", "workflows", "settings",
+    }  # fmt: skip
     columns = [row[1] for row in store._db.execute("PRAGMA table_info(conversations)")]
     assert columns == ["id", "title", "created", "updated", "context", "named", "person", "project"]
     # and a conversation deleted takes its messages with it, as the state's references hold
@@ -1056,6 +1057,7 @@ def test_events(server, agent, engine):
     assert event() == {"type": "workflows", "workflows": []}
     assert event() == {"type": "files", "project": None, "files": []}
     assert event()["type"] == "accounts"  # the owner's
+    assert event()["type"] == "backups"
     assert event()["type"] == "models"
     engine.replies.put(REPLY)
     id = agent.send(None, "Hi", person=1)
