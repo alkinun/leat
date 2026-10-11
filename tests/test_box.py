@@ -2,6 +2,7 @@ import base64
 import datetime
 import io
 import json
+import shutil
 import socket
 import subprocess
 import threading
@@ -221,14 +222,25 @@ def test_paint(monkeypatch):
     assert painted.size == (1280, 800)
     page, white = ImageColor.getrgb(screen.PAGE), ImageColor.getrgb(screen.CARD)
     assert painted.getpixel((0, 0)) == page
-    u, margin = 8.0, 64
-    mark = round(4.4 * u)
-    top = round(7 * u) + round(2.2 * u) - mark // 2
+    u = 8.0
+    margin, mark = round(7 * u), round(3.4 * u)
+    top = round(7 * u) + round(1.7 * u) - mark // 2
     assert painted.getpixel((margin + mark - 4, top + 4)) != page  # the mark's top right quarter
     assert painted.getpixel((1280 - margin - 150, 400)) == white  # the card, at the middle's right
     hidden = screen.paint(replace(READY, show_address=False), (1280, 800), now)
     assert hidden.getpixel((1280 - margin - 150, 400)) == page
     assert screen.paint(READY, (3840, 2160), now).size == (3840, 2160)  # any display's size
+
+
+@pytest.mark.skipif(shutil.which("qrencode") is None, reason="needs qrencode")
+def test_qr_card():
+    # the QR code on its white card, a quiet zone of 2 modules about it, its corners rounded
+    card = screen.qr_card("https://7j324w.leatbox.net", 400)
+    assert card is not None and card.width == card.height <= 400
+    page, white = ImageColor.getrgb(screen.PAGE), ImageColor.getrgb(screen.CARD)
+    k = card.width // 29  # a version 3 code, 25 modules, and 2 of quiet zone each side
+    assert card.getpixel((0, 0)) == page and card.getpixel((k, k)) == white
+    assert card.getpixel((2 * k, 2 * k)) == (0, 0, 0)  # the finder pattern's corner
 
 
 def test_logo():

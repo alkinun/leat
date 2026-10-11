@@ -146,31 +146,31 @@ def paint(state: State, size: tuple[int, int], now: datetime.datetime) -> Image.
     u = min(height / 100, width / 160)  # the screen's measure: a hundredth of its height
     image = Image.new("RGB", size, PAGE)
     pen = ImageDraw.Draw(image)
-    margin, words = round(8 * u), font(round(3.4 * u))
+    margin, words = round(7 * u), font(round(2.6 * u))
 
     # the top: Leat's mark and name, the office's, and the time
-    mark, middle = round(4.4 * u), round(7 * u) + round(2.2 * u)
+    mark, middle = round(3.4 * u), round(7 * u) + round(1.7 * u)
     image.paste(ImageColor.getrgb(TEXT), (margin, middle - mark // 2), logo(mark))
-    x = margin + mark + round(1.8 * u)
-    pen.text((x, middle), "Leat", font=font(round(3.4 * u), "SemiBold"), fill=TEXT, anchor="lm")
+    x = margin + mark + round(1.4 * u)
+    pen.text((x, middle), "Leat", font=font(round(2.6 * u), "SemiBold"), fill=TEXT, anchor="lm")
     if state.office:
-        x += round(pen.textlength("Leat", font=font(round(3.4 * u), "SemiBold")))
+        x += round(pen.textlength("Leat", font=font(round(2.6 * u), "SemiBold")))
         pen.text((x, middle), f"   {state.office}", font=words, fill=MUTED, anchor="lm")
     pen.text((width - margin, middle), now.strftime("%H:%M"), font=words, fill=MUTED, anchor="rm")
 
     # the middle: what the box says, and the address to open, with its QR code on a card
     headline, sentence, url = said(state)
-    card = qr_card(url, round(min(46 * u, width * 0.32))) if url else None
+    card = qr_card(url, round(min(40 * u, width * 0.28))) if url else None
     right = width - margin - (card.width + round(8 * u) if card else 0)
     lines: list[tuple[str, ImageFont.FreeTypeFont | ImageFont.ImageFont, str, float]] = [
-        (headline, font(round(8.5 * u), "SemiBold"), TEXT, 3.0 * u),
-        *((line, font(round(3.6 * u)), MUTED, 1.2 * u)
-          for line in _wrapped(sentence, font(round(3.6 * u)), right - margin, pen)),
+        (headline, font(round(6.4 * u), "SemiBold"), TEXT, 2.4 * u),
+        *((line, font(round(2.8 * u)), MUTED, 1.0 * u)
+          for line in _wrapped(sentence, font(round(2.8 * u)), right - margin, pen)),
     ]  # fmt: skip
     if url:
-        lines += [(url.removeprefix("https://"), font(round(4.2 * u), "Medium"), TEXT, 1.4 * u),
-                  ("or type leat.local", font(round(3.0 * u)), MUTED, 0.0)]  # fmt: skip
-        lines[-3] = (*lines[-3][:3], 5.0 * u)  # room before the address
+        lines += [(url.removeprefix("https://"), font(round(3.2 * u), "Medium"), TEXT, 1.1 * u),
+                  ("or type leat.local", font(round(2.4 * u)), MUTED, 0.0)]  # fmt: skip
+        lines[-3] = (*lines[-3][:3], 4.0 * u)  # room before the address
     tall = sum(_height(pen, f) + gap for _, f, _, gap in lines)
     y = height / 2 - tall / 2
     for line, f, colour, gap in lines:
@@ -182,10 +182,10 @@ def paint(state: State, size: tuple[int, int], now: datetime.datetime) -> Image.
     # the last line: the box's model, network, internet and room; its version, right
     below = height - round(7 * u)
     pen.line((margin, below - round(4 * u), width - margin, below - round(4 * u)), fill=LINE)
-    small, x = font(round(2.6 * u)), margin
+    small, x = font(round(2.1 * u)), margin
     for item in footer(state):
         pen.text((x, below), item, font=small, fill=MUTED, anchor="lm")
-        x += round(pen.textlength(item, font=small) + 4 * u)
+        x += round(pen.textlength(item, font=small) + 3.4 * u)
     if state.version:
         pen.text((width - margin, below), state.version, font=small, fill=MUTED, anchor="rm")
     return image
@@ -228,20 +228,23 @@ def logo(size: int) -> Image.Image:
 
 @functools.lru_cache(maxsize=4)
 def qr_card(url: str, side: int) -> Image.Image | None:
-    """A QR code of the address, its modules sharp, on a white card of about `side` pixels with a
-    quiet zone of 4 modules around it; or None without qrencode."""
+    """A QR code of the address, its modules sharp, on a white card of about `side` pixels, its
+    corners rounded, with a quiet zone of 2 modules around it: enough on a dark screen, where 4
+    looked a thick border; or None without qrencode."""
     if shutil.which("qrencode") is None:
         return None
     try:
         png = subprocess.run(["qrencode", "-t", "PNG", "-s", "1", "-m", "0", "-o", "-", url],
                              capture_output=True, timeout=5, check=True).stdout  # fmt: skip
-        code = Image.open(io.BytesIO(png)).convert("L")
+        code = Image.open(io.BytesIO(png)).convert("RGBA").convert("L")
     except (OSError, subprocess.SubprocessError):
         return None
-    n = code.width
-    k = max(1, side // (n + 8))  # each module's pixels
-    card = Image.new("RGB", ((n + 8) * k, (n + 8) * k), CARD)
-    card.paste(code.resize((n * k, n * k), Image.Resampling.NEAREST), (4 * k, 4 * k))
+    n, quiet = code.width, 2
+    k = max(1, side // (n + 2 * quiet))  # each module's pixels
+    whole = (n + 2 * quiet) * k
+    card = Image.new("RGB", (whole, whole), PAGE)
+    ImageDraw.Draw(card).rounded_rectangle((0, 0, whole - 1, whole - 1), radius=k, fill=CARD)
+    card.paste(code.resize((n * k, n * k), Image.Resampling.NEAREST), (quiet * k, quiet * k))
     return card
 
 
