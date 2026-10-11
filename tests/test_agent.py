@@ -22,7 +22,7 @@ from leat.agent import background, context
 from leat.agent.agent import LAST, Agent, Busy, NotFound, Refused
 from leat.agent.client import Client, EngineError
 from leat.agent.context import message as _api
-from leat.agent.server import BODY, Server
+from leat.agent.server import BODY, HSTS, POLICY, Server
 from leat.agent.store import Store
 from leat.agent.tools import Result, Tool, strings
 
@@ -1174,6 +1174,62 @@ def test_trust(server, engine):
     connection.putheader("Content-Length", str(BODY + 1))
     connection.endheaders()
     assert connection.getresponse().status == 413
+
+
+def test_named(agent):
+    # a box served by its name, through the HTTPS proxy in front: that name alone, and loopback,
+    # writes from https://<name>, and a cookie sent over HTTPS alone, to that name alone
+    name = "k7x2.leatbox.net"
+    with Server(agent, port=0, name="K7X2.leatbox.net") as server:
+        threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True).start()
+        port = server.server_port
+
+        def ask(method: str, path: str, body: Any = None, **headers: str):
+            connection = http.client.HTTPConnection("127.0.0.1", port)
+            data = None if body is None else json.dumps(body).encode()
+            connection.request(method, path, data, {"Host": name} | headers)
+            response = connection.getresponse()
+            response.read()
+            connection.close()
+            return response
+
+        try:
+            for host in ("leat.local", "192.168.1.20", "evil.example", f"{name}.evil.example"):
+                assert ask("GET", "/", Host=host).status == 403
+            for host in (name, f"127.0.0.1:{port}", "localhost"):
+                assert ask("GET", "/", Host=host).status == 200
+            response = ask("GET", "/")
+            assert response.headers["Strict-Transport-Security"] == HSTS
+            assert response.headers["Content-Security-Policy"] == POLICY
+            assert response.headers["Referrer-Policy"] == "no-referrer"
+            setup = {"name": "Alkın"}
+            evil = ("https://evil.example", f"https://{name}.evil.example")
+            for origin in (f"http://{name}", *evil):
+                assert ask("POST", "/api/setup", setup, Origin=origin).status == 403
+            response = ask("POST", "/api/setup", setup, Origin=f"https://{name}")
+            cookie = response.headers["Set-Cookie"]
+            assert response.status == 200 and cookie.startswith("__Host-leat=")
+            assert "; Path=/;" in cookie and "; Secure;" in cookie and "HttpOnly" in cookie
+            assert "Domain" not in cookie
+            secret = cookie.split(";")[0]
+            assert ask("GET", "/api/me", Cookie=secret).status == 200
+            assert ask("GET", "/api/me", Cookie=secret.replace("__Host-leat", "leat")).status == 401
+        finally:
+            server.shutdown()
+
+
+def test_headers(server):
+    # every page of the app's runs its own scripts, styles and images alone, in no other's frame,
+    # and tells no site it links to its address; without a name, the box is no HTTPS one
+    with urllib.request.urlopen(f"{server}/") as response:
+        assert response.headers["Content-Security-Policy"] == POLICY
+        assert response.headers["Referrer-Policy"] == "no-referrer"
+        assert response.headers["X-Content-Type-Options"] == "nosniff"
+        assert response.headers["Strict-Transport-Security"] is None
+        assert b"<script>" not in response.read()  # none within the page, which the policy runs not
+    with urllib.request.urlopen(f"{server}/mode.js") as response:
+        assert response.headers["Content-Type"] == "text/javascript; charset=utf-8"
+    assert "Secure" not in cookie() and cookie().startswith("leat=")
 
 
 def test_events(server, agent, engine):

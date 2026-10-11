@@ -10,6 +10,7 @@ import contextlib
 import ipaddress
 import json
 import os
+import re
 import threading
 import time
 from dataclasses import asdict
@@ -57,6 +58,11 @@ def main(argv: list[str] | None = None) -> None:
     )
     agent.add_argument("--host", default="127.0.0.1", help="0.0.0.0 for the local network too")
     agent.add_argument("--port", type=int, default=8000)
+    agent.add_argument(
+        "--name", type=_name,
+        help="the box's name, as k7x2.leatbox.net, which the HTTPS proxy in front of the agent "
+        "serves it at: it then answers that name alone, and this machine, as --host must be",
+    )  # fmt: skip
     agent.add_argument(
         "--data", type=Path, default=_data(),
         help="where its state is kept: its conversations, the user's files in "
@@ -206,6 +212,18 @@ def _data() -> Path:
     return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "leat"
 
 
+# a host's name: labels of letters, digits and hyphens, a dot between them
+_NAME = re.compile(r"(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))+")
+
+
+def _name(text: str) -> str:
+    # a box's name, as k7x2.leatbox.net: a name a certificate can be of, not an address
+    name = text.strip().lower().rstrip(".")
+    if not _NAME.fullmatch(name) or name.endswith(".local") or name.replace(".", "").isdigit():
+        raise argparse.ArgumentTypeError(f"must be a host's name, as k7x2.leatbox.net, not {text}")
+    return name
+
+
 def _positive(text: str) -> int:
     # an argument that counts something, of which there must be one at least
     if (n := int(text)) < 1:
@@ -214,6 +232,10 @@ def _positive(text: str) -> int:
 
 
 def _agent(args: argparse.Namespace) -> None:
+    if args.name and not _loopback(args.host):
+        raise SystemExit(f"served by its name, the agent is reached through its proxy alone: "
+                         f"--host must be this machine's, as 127.0.0.1, "
+                         f"not {args.host}")  # fmt: skip
     args.data.mkdir(parents=True, exist_ok=True)
     environment = (args.data / "sandbox").resolve()  # a link to one elsewhere, as the demo's
     workspace = Workspace(args.data / "workspace", environment if environment.exists() else None)
@@ -222,9 +244,9 @@ def _agent(args: argparse.Namespace) -> None:
     tools = every(args.search, engine, index)
     agent = Agent(Store(args.data / "leat.db"), engine, tools, workspace, index)
     agent.start()
-    with AgentServer(agent, args.host, args.port) as server:
-        print(f"leat agent at {_url(args.host, server.server_port)}, its models of {args.engine}. "
-              "Ctrl-C quits.", flush=True)  # fmt: skip
+    with AgentServer(agent, args.host, args.port, args.name) as server:
+        url = f"https://{args.name}" if args.name else _url(args.host, server.server_port)
+        print(f"leat agent at {url}, its models of {args.engine}. Ctrl-C quits.", flush=True)
         with contextlib.suppress(KeyboardInterrupt):
             server.serve_forever()
 

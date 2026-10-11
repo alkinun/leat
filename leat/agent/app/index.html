@@ -6,8 +6,8 @@
 <title>leat</title>
 <link rel="icon" href="/logo.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/style.css">
-<!-- the mode chosen on this device, so that the first paint is already in it -->
-<script>document.documentElement.dataset.mode = localStorage.getItem("leat.mode") ?? "system";</script>
+<!-- the mode chosen on this device, before the first paint, so that it is already in it -->
+<script src="/mode.js"></script>
 <script type="module" src="/app.mjs"></script>
 </head>
 <body>

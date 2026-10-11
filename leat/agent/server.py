@@ -5,6 +5,12 @@ It answers this machine and its own network alone. A request must name the box b
 a local name, which a site's page turned on the box by DNS rebinding cannot; and a write must come
 from the app's own page, or from no browser, not from another site's page.
 
+On a box, the server is reached by its name, as k7x2.leatbox.net, through the proxy in front of it
+that serves the name over HTTPS, with a certificate of its own: it then answers that name alone,
+and loopback, as the box's own screen asks; writes come from https://<name>; and a device's cookie
+is sent over HTTPS alone, to exactly that name. Every page of the app runs its own scripts, styles
+and images alone, framed by none, and a link followed tells no site the box's name.
+
 Every request but for the app's own files, the box's setup and a device's request to join comes
 from a device paired to one of the box's people, by the secret its cookie holds. A person sees and
 changes their own conversations and files, and their own projects and those shared, with their
@@ -40,6 +46,7 @@ APP = Path(__file__).parent / "app"
 # conversation's, /projects/<id> one project's, /projects, /files and /settings, are index.html
 _FILES = (
     "index.html",
+    "mode.js",
     "style.css",
     "app.mjs",
     "markdown.mjs",
@@ -50,6 +57,7 @@ _TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
     ".mjs": "text/javascript; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
     ".svg": "image/svg+xml",
 }
 _KEEP_ALIVE = 15  # seconds between comments on a quiet event stream, which find its client gone
@@ -58,6 +66,17 @@ BODY = 10 << 20  # bytes of a request's JSON at most, which may come before its 
 PROJECT_NAME = 80  # characters of a project's name at most
 INSTRUCTIONS = 20000  # characters of a project's instructions at most
 COOKIE = "leat"  # the cookie of a device's secret
+# of a box served by its name over HTTPS: a cookie browsers send over HTTPS alone, to that name
+# alone, as its prefix has them keep it
+SECURE_COOKIE = "__Host-leat"
+# the app's pages: its own scripts, styles and images alone, and in no other's frame
+POLICY = (
+    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; "
+    "connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; "
+    "frame-ancestors 'none'"
+)
+# of a box served by its name: a year in which a browser reaches it by HTTPS alone
+HSTS = "max-age=31536000"
 _YEARS = 10 * 365 * 86400  # seconds a device keeps its cookie: till it is unpaired
 # the types of the workspace's files a browser shows in the page; it downloads the others, as a page
 # the model wrote might act as the app's own
@@ -80,12 +99,17 @@ _FILE = re.compile(r"/(?:api/)?(?:projects/([0-9a-f]{12})/)?files/(.+)")
 
 
 class Server(ThreadingHTTPServer):
-    """Serves `agent` at http://host:port, until shut down, to the devices of its people."""
+    """Serves `agent` at http://host:port, until shut down, to the devices of its people; of a
+    `name`, as k7x2.leatbox.net, behind the proxy that serves it at https://name."""
 
     daemon_threads = True  # event streams end with the server
 
-    def __init__(self, agent: Agent, host: str = "127.0.0.1", port: int = 8000):
+    def __init__(
+        self, agent: Agent, host: str = "127.0.0.1", port: int = 8000, name: str | None = None
+    ):
         self.agent, self.accounts = agent, Accounts(agent)
+        self.name = name.lower() if name else None
+        self.cookie = SECURE_COOKIE if self.name else COOKIE
         super().__init__((host, port), _Handler)
 
     def handle_error(self, request: Any, client_address: Any) -> None:
@@ -356,7 +380,8 @@ class _Handler(BaseHTTPRequestHandler):
         # the paired device the request comes from, by its cookie's secret. Raises _Unpaired
         # if it comes from none.
         cookies = http.cookies.SimpleCookie(self.headers.get("Cookie", ""))
-        secret = cookies[COOKIE].value if COOKIE in cookies else None
+        name = self.server.cookie
+        secret = cookies[name].value if name in cookies else None
         if (device := self.server.accounts.device(secret)) is None:
             raise _Unpaired
         return device
@@ -397,7 +422,6 @@ class _Handler(BaseHTTPRequestHandler):
         quoted = urllib.parse.quote(file.name)
         self.send_header("Content-Disposition", f"{shown}; filename*=UTF-8''{quoted}")
         self.send_header("Content-Security-Policy", "sandbox")
-        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(data)
 
@@ -438,13 +462,27 @@ class _Handler(BaseHTTPRequestHandler):
                     self._event(event)
 
     def _trusted(self, write: bool = False) -> bool:
-        # a request that names this machine as its own network does, and a write from no browser,
-        # which sends no Origin, or from a page of this server
-        host = self.headers.get("Host", "")
-        if not _local(urllib.parse.urlsplit(f"//{host}").hostname or ""):
+        # a request that names this machine as its own network does: by the box's name, of one
+        # served by its name, which the proxy in front alone reaches, or else by an address or a
+        # local name; and by loopback always. A write comes from no browser, which sends no
+        # Origin, or from a page of this server's, https://<name> of the box's name
+        host, name = self.headers.get("Host", ""), self.server.name
+        hostname = urllib.parse.urlsplit(f"//{host}").hostname or ""
+        if not (hostname == name or _loopback(hostname) or name is None and _local(hostname)):
             return False
-        origin = self.headers.get("Origin")
-        return not write or origin is None or urllib.parse.urlsplit(origin).netloc == host
+        if not write or (origin := self.headers.get("Origin")) is None:
+            return True
+        page = urllib.parse.urlsplit(origin)
+        return page.netloc == host and (hostname != name or page.scheme == "https")
+
+    def end_headers(self) -> None:
+        # of every answer: its type as it says, not sniffed; no address of the box's told a site a
+        # link leads to; and of a box served by its name, HTTPS alone from now on
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        if self.server.name:
+            self.send_header("Strict-Transport-Security", HSTS)
+        super().end_headers()
 
     def _length(self) -> int:
         # the body's length, as its header says. Raises ValueError if it says none there can be,
@@ -469,16 +507,19 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-cache")
         if secret is not None:
-            cookie = f"{COOKIE}={secret}; Path=/; Max-Age={_YEARS}; HttpOnly; SameSite=Strict"
-            self.send_header("Set-Cookie", cookie)
+            secure = "; Secure" if self.server.name else ""
+            cookie = f"{self.server.cookie}={secret}; Path=/; Max-Age={_YEARS}; HttpOnly{secure}"
+            self.send_header("Set-Cookie", f"{cookie}; SameSite=Strict")
         self.end_headers()
         self.wfile.write(data)
 
     def _send(self, status: int, kind: str, data: bytes) -> None:
+        # a file of the app's
         self.send_response(status)
         self.send_header("Content-Type", kind)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-cache")
+        self.send_header("Content-Security-Policy", POLICY)
         self.end_headers()
         self.wfile.write(data)
 
@@ -502,6 +543,13 @@ def _local(host: str) -> bool:
         ipaddress.ip_address(host)
         return True
     return host in ("localhost", socket.gethostname().lower()) or host.endswith(".local")
+
+
+def _loopback(host: str) -> bool:
+    # an address or a name of this machine's alone
+    with contextlib.suppress(ValueError):
+        return ipaddress.ip_address(host).is_loopback
+    return host == "localhost"
 
 
 def _device(headers: Any) -> str:

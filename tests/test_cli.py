@@ -270,7 +270,7 @@ def test_agent(tmp_path, monkeypatch, capsys):
     class Fake:
         server_port = 8000
 
-        def __init__(self, agent, host, port):
+        def __init__(self, agent, host, port, name=None):
             agents.append(agent)
 
         def __enter__(self):
@@ -287,6 +287,15 @@ def test_agent(tmp_path, monkeypatch, capsys):
     assert (tmp_path / "leat" / "leat.db").exists()
     assert agents[0].engine.url == "http://127.0.0.1:9999"
     assert "leat agent at http://127.0.0.1:8000" in capsys.readouterr().out
+    # served by its name, through its HTTPS proxy, which alone reaches it on this machine
+    data = ["--data", str(tmp_path / "leat")]
+    main(["agent", *data, "--name", "K7X2.leatbox.net"])
+    assert "leat agent at https://k7x2.leatbox.net" in capsys.readouterr().out
+    with pytest.raises(SystemExit, match="--host must be this machine's"):
+        main(["agent", *data, "--name", "k7x2.leatbox.net", "--host", "0.0.0.0"])
+    for name in ("leat.local", "192.168.1.20", "https://k7x2.leatbox.net"):
+        with pytest.raises(SystemExit):
+            main(["agent", *data, "--name", name])
 
 
 def test_run_refused_chat(tiny_model, monkeypatch):
