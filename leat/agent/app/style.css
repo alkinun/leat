@@ -446,12 +446,18 @@ body.gated #gate { display: grid; flex: 1; place-items: center; min-height: 100v
   flex: 1; padding: 10px 16px; border: 1px solid var(--line); border-radius: var(--round-large);
   background: var(--card); font: inherit; color: inherit;
 }
-#join button {
+:is(#join .row, #join .actions) button {
   padding: 10px 20px; border-radius: var(--round-large); background: var(--accent); color: var(--on-accent);
   white-space: nowrap;
 }
 #code b { display: block; margin-top: 8px; font-size: 2rem; letter-spacing: 4px; color: var(--text); }
 #join .error { color: var(--error, #b3261e); }
+/* the box set up by its first person, a step at a time */
+#join > input { display: block; width: 100%; margin: 8px 0 0; }
+#join .choice { margin: 8px 0 0; }
+#join .actions { display: flex; gap: 8px; align-items: center; margin-top: 24px; }
+#join .actions .steps { flex: 1; margin: 0; color: var(--muted); font-size: 0.8125rem; }
+#join .actions button.previous { background: none; color: var(--muted); }
 /* the box's people and devices, the owner's to manage */
 #accounts h3 { margin: 16px 0 0; font-size: 1rem; font-weight: 600; }
 #accounts li > div { display: flex; flex-direction: column; gap: 2px; }
@@ -478,9 +484,14 @@ body.gated #gate { display: grid; flex: 1; place-items: center; min-height: 100v
 #room { margin: 4px 0 4px; font-size: 0.875rem; }
 #room.meta { color: var(--muted); }
 #room.warning { color: var(--error); }
-/* whether Leat may reach the internet, the owner's to choose */
-#internet[hidden] { display: none; }
-#internet .about { margin: 4px 0 12px; color: var(--muted); font-size: 0.875rem; }
+/* the box, and whether Leat may reach the internet, the owner's to choose */
+:is(#box, #internet)[hidden] { display: none; }
+:is(#box, #internet) .about { margin: 4px 0 12px; color: var(--muted); font-size: 0.875rem; }
+#office {
+  display: block; width: min(360px, 100%); margin-top: 8px; padding: 8px 12px; border: 1px solid var(--line);
+  border-radius: var(--round); background: var(--card); font: inherit; color: inherit;
+}
+#office:focus { border-color: var(--muted); outline: none; }
 /* a choice of a few, as the mode Leat's look is in, and whom a project is shared with */
 #modes, .choice {
   display: inline-flex; gap: 2px; margin: 8px 0; padding: 3px;

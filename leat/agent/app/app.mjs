@@ -19,7 +19,9 @@ const unfolded = new Set(); // the folders whose files the lists show, by space 
 let workflows = []; // the requests saved to make again, by name: {id, name, prompt, project, schedule}
 let me = null; // the person whose this device is: {person, name, owner, device}
 let accounts = null; // the owner's to manage: the people and their devices, and those asking
-let offline = false; // whether the box is kept from the internet, as its owner chose
+// the box's settings, as its owner chose them: whether it is kept from the internet, its office's
+// name, and whether its screen shows its address
+let settings = { offline: false, office: null, address: true };
 // the conversations whose turns ended while another was shown, as this device saw them
 const unread = new Set(JSON.parse(localStorage.getItem("leat.unread") ?? "[]"));
 let models = [], loading = null, unreachable = null; // the engine's, a model it loads, or why not
@@ -148,6 +150,7 @@ async function start() {
 // other asks to join, showing a code the owner's device shows too
 function gate(empty) {
   document.body.classList.add("gated");
+  if (empty) return setup();
   $("welcome").textContent = empty
     ? "Welcome! This Leat is new. What's your name? You'll be the one who lets the others in."
     : "This device has not joined this Leat yet. What's your name?";
@@ -168,6 +171,79 @@ function gate(empty) {
       $("refusal").textContent = error.message;
     }
   };
+}
+
+// the box set up by its first person, its owner, a step at a time: its office's name, theirs, and
+// whether it may reach the internet, sent at once at the end
+function setup() {
+  const chosen = { office: "", name: "", offline: false };
+  const steps = [
+    { title: "Welcome to Leat", about: "Your office's own assistant. It runs on this box, and what " +
+      "you give it stays here. Setting it up takes a minute.", next: "Begin" },
+    { title: "Your office", about: "What is your office called? The box's screen shows its name. " +
+      "You can change it later in Settings.", key: "office", placeholder: "Kanzlei Weber",
+      autocomplete: "organization", max: 60 },
+    { title: "Your name", about: "You'll own this Leat: you let the others in, and look after it " +
+      "in Settings.", key: "name", placeholder: "Your name", autocomplete: "name", max: 40,
+      needed: true },
+    { title: "The internet", about: null, next: "Set up Leat" },
+  ];
+  const show = (at) => {
+    const step = steps[at];
+    const parts = [element("h1", "", step.title)];
+    if (step.about) parts.push(element("p", "", step.about));
+    let input = null;
+    if (step.key) {
+      input = Object.assign(element("input"), { value: chosen[step.key], placeholder: step.placeholder,
+        autocomplete: step.autocomplete, maxLength: step.max });
+      parts.push(input);
+    }
+    if (at === steps.length - 1) { // the internet, on or off, and what each means
+      const said = element("p");
+      const choice = element("div", "choice");
+      const pick = (off) => {
+        chosen.offline = off;
+        choice.replaceChildren(...[[false, "On"], [true, "Off"]].map(([value, label]) => {
+          const button = element("button", value === off ? "on" : "", label);
+          button.type = "button";
+          button.onclick = () => pick(value);
+          return button;
+        }));
+        said.textContent = off
+          ? "Leat answers from what it knows and your files alone: nothing it does reaches the internet."
+          : "Leat may search the web and read pages to answer. What it searches for leaves the " +
+            "office; your files never do.";
+      };
+      pick(chosen.offline);
+      parts.push(choice, said);
+    }
+    const refusal = element("p", "error");
+    const actions = element("div", "actions");
+    actions.append(element("span", "steps", `${at + 1} of ${steps.length}`));
+    if (at > 0) {
+      const back = element("button", "previous", "Back");
+      back.type = "button";
+      back.onclick = () => show(at - 1);
+      actions.append(back);
+    }
+    actions.append(element("button", "", step.next ?? "Next"));
+    parts.push(actions, refusal);
+    $("join").replaceChildren(...parts);
+    input?.focus();
+    $("join").onsubmit = async (event) => {
+      event.preventDefault();
+      if (input) chosen[step.key] = input.value.trim();
+      if (step.needed && !chosen[step.key]) return input.focus();
+      if (at < steps.length - 1) return show(at + 1);
+      try {
+        await post("/api/setup", { name: chosen.name, office: chosen.office || null, offline: chosen.offline });
+        location.reload();
+      } catch (error) {
+        refusal.textContent = error.message;
+      }
+    };
+  };
+  show(0);
 }
 
 // asks after a request to join until it is answered: the app once let in
@@ -272,8 +348,9 @@ function handle(event) {
       renderAccounts();
       return;
     case "settings":
-      offline = event.offline;
+      settings = { offline: event.offline, office: event.office, address: event.address };
       renderInternet();
+      renderBox();
       return;
     case "loading":
       loading = event.model;
@@ -761,13 +838,35 @@ function dayOf(seconds) {
 function renderInternet() {
   $("internet").hidden = !me?.owner;
   $("reach").replaceChildren(...[[false, "On"], [true, "Off"]].map(([off, said]) => {
-    const button = element("button", off === offline ? "on" : "", said);
-    button.onclick = () => off !== offline && post("/api/offline", { offline: off }).catch((e) => status(e.message, true));
+    const button = element("button", off === settings.offline ? "on" : "", said);
+    button.onclick = () => off !== settings.offline && changeSettings({ offline: off });
     return button;
   }));
-  $("reached").textContent = offline
+  $("reached").textContent = settings.offline
     ? "Leat answers from what it knows and your files alone: nothing it does reaches the internet."
     : "Leat may search the web and read pages to answer. What it searches for leaves the office; your files never do.";
+}
+
+// the box itself, the owner's to set: its office's name, which its screen shows beside Leat's, and
+// whether the screen shows its address and the code a phone scans to open it
+function renderBox() {
+  $("box").hidden = !me?.owner;
+  const office = $("office");
+  if (document.activeElement !== office) office.value = settings.office ?? "";
+  office.onchange = () => changeSettings({ office: office.value });
+  $("showing").replaceChildren(...[[true, "Address shown"], [false, "Hidden"]].map(([shown, said]) => {
+    const button = element("button", shown === settings.address ? "on" : "", said);
+    button.onclick = () => shown !== settings.address && changeSettings({ address: shown });
+    return button;
+  }));
+  $("shown").textContent = settings.address
+    ? "The box's screen shows its address, and a code a phone scans to open Leat."
+    : "The box's screen says Leat is ready, without its address: tell the office where it is yourself.";
+}
+
+// changes the box's settings, which every app is told of as they change
+function changeSettings(changes) {
+  post("/api/settings", changes, "PATCH").catch((e) => status(e.message, true));
 }
 
 // the files of a project's space, or of the person's own
