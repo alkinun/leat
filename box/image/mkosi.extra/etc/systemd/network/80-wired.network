@@ -1,0 +1,7 @@
+# every wired link, by DHCP, the box answering at leat.local
+[Match]
+Type=ether
+
+[Network]
+DHCP=yes
+MulticastDNS=yes

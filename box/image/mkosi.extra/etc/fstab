@@ -1,0 +1,2 @@
+# the office's data, on the partition systemd-repart makes on the first boot
+PARTLABEL=leat-data  /var/lib/leat  ext4  defaults,x-systemd.requires=systemd-repart.service  0 2

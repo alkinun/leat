@@ -1,0 +1,2 @@
+# for development alone: SSH on the network, by the keys mkosi.local.extra/ gives
+enable sshd.service
