@@ -155,9 +155,13 @@ class _Handler(BaseHTTPRequestHandler):
                 if not _loopback(urllib.parse.urlsplit(f"//{self.headers.get('Host', '')}").hostname
                                  or ""):  # fmt: skip
                     return self._error(404, f"there is no GET {path}")
-                accounts = self.server.accounts  # and its setup code, while it is to be set up
-                code = accounts.locked and accounts.empty()
-                return self._json(200, agent.box() | ({"setup": accounts.code} if code else {}))
+                # and its setup code, while it is to be set up, and a recovery code, while one holds
+                accounts, shown = self.server.accounts, agent.box()
+                if accounts.locked and accounts.empty():
+                    shown["setup"] = accounts.code
+                if recovery := accounts.recovery():
+                    shown["recovery"] = recovery
+                return self._json(200, shown)
             me = self._device()
             if path == "/api/me":
                 self._json(
@@ -217,6 +221,20 @@ class _Handler(BaseHTTPRequestHandler):
                 agent.note(
                     agent.store.people()[0]["id"], "set Leat up", detail=settings.get("office")
                 )
+                return self._json(200, {}, secret)
+            if path == "/api/box/recovery":  # of the box's power button, on this machine alone
+                if not _loopback(urllib.parse.urlsplit(f"//{self.headers.get('Host', '')}").hostname
+                                 or ""):  # fmt: skip
+                    return self._error(404, f"there is no POST {path}")
+                if accounts.empty():
+                    return self._error(409, "this Leat is not set up: there is no one to recover")
+                return self._json(200, {"code": accounts.begin_recovery()})
+            if path == "/api/recover":  # a new admin, of the recovery code the box's screen shows
+                given = body.get("code") if isinstance(body.get("code"), str) else ""
+                person, secret = accounts.recover(
+                    str(given), _text(body, "name"), _device(self.headers)
+                )
+                agent.note(person["id"], "got back in, as an admin, by the box's recovery code")
                 return self._json(200, {}, secret)
             if path == "/api/pairings":  # a device's request to join
                 return self._json(200, accounts.ask(_text(body, "name"), _device(self.headers)))
@@ -608,6 +626,8 @@ class _Handler(BaseHTTPRequestHandler):
             body["empty"] = self.server.accounts.empty()
             if body["empty"]:
                 body["locked"] = self.server.accounts.locked
+            else:  # and whether a recovery code holds, the box's power button pressed
+                body["recovering"] = self.server.accounts.recovery() is not None
         self._json(status, body)
 
 

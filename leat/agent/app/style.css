@@ -455,6 +455,8 @@ body.gated #gate { display: grid; flex: 1; place-items: center; min-height: 100v
 /* the box set up by its first person, a step at a time */
 #join > input { display: block; width: 100%; margin: 8px 0 0; }
 #join > input.code { text-transform: uppercase; letter-spacing: 2px; font-family: var(--font-mono); }
+#join p.recovering { margin: 24px 0 0; font-size: 0.875rem; }
+#join p.recovering + a { color: var(--text); font-size: 0.875rem; }
 #join .choice { margin: 8px 0 0; }
 #join .actions { display: flex; gap: 8px; align-items: center; margin-top: 24px; }
 #join .actions .steps { flex: 1; margin: 0; color: var(--muted); font-size: 0.8125rem; }

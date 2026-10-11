@@ -16,8 +16,9 @@ TTYPath=/dev/tty2
 Restart=always
 RestartSec=2
 DynamicUser=yes
-# the display's framebuffer, and its console
-SupplementaryGroups=video tty
+# the display's framebuffer, and its console; the power button, whose presses show a recovery code,
+# and the helper that switches the box off, of a press again
+SupplementaryGroups=video tty input leat
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

@@ -130,8 +130,8 @@ async function start() {
   }
   status("");
   if (response.status === 401) {
-    const { empty, locked } = await response.json();
-    return gate(empty, locked);
+    const { empty, locked, recovering } = await response.json();
+    return gate(empty, locked, recovering);
   }
   me = await response.json();
   renderAccounts();
@@ -154,9 +154,19 @@ async function start() {
 
 // the gate of a device not yet paired: the box's first person sets it up, and is its first admin;
 // any other asks to join, showing a code the devices paired show too
-function gate(empty, locked) {
+function gate(empty, locked, recovering) {
   document.body.classList.add("gated");
   if (empty) return setup(locked);
+  const scanned = new URLSearchParams(location.hash.slice(1)).get("recover");
+  if (scanned) history.replaceState(null, "", location.pathname); // kept out of the address bar
+  if (scanned || recovering) { // the box's power button pressed: its recovery code, to give
+    const link = element("a", "", "Use the recovery code the box's screen shows");
+    link.href = "#";
+    link.onclick = (event) => (event.preventDefault(), recover(""));
+    $("join").append(element("p", "recovering", "Has everyone who looks after this Leat lost " +
+      "their devices? "), link);
+    if (scanned) return recover(scanned);
+  }
   $("welcome").textContent = empty
     ? "Welcome! This Leat is new. What's your name? You'll be the one who lets the others in."
     : "This device has not joined this Leat yet. What's your name?";
@@ -264,6 +274,36 @@ function setup(locked) {
     };
   };
   show(0);
+}
+
+// a new admin, of the recovery code the box's screen shows once its power button is pressed, and a
+// name, as an office whose every admin's device is gone gets back in
+function recover(code) {
+  const title = element("h1", "", "Recovery");
+  const about = element("p", "", "Type the recovery code the box's screen shows, and your name. " +
+    "This device becomes an admin of this Leat, as someone new.");
+  const typed = Object.assign(element("input", "code"), { value: code, placeholder: "K7X 2QM",
+    autocomplete: "off", maxLength: 7, ariaLabel: "The recovery code" });
+  const name = Object.assign(element("input"), { placeholder: "Your name", autocomplete: "name",
+    maxLength: 40, ariaLabel: "Your name" });
+  const refusal = element("p", "error"), actions = element("div", "actions");
+  const back = element("button", "previous", "Back");
+  back.type = "button";
+  back.onclick = () => location.reload();
+  actions.append(element("span", "steps"), back, element("button", "", "Get back in"));
+  $("join").replaceChildren(title, about, typed, name, actions, refusal);
+  (code ? name : typed).focus();
+  $("join").onsubmit = async (event) => {
+    event.preventDefault();
+    if (!typed.value.trim()) return typed.focus();
+    if (!name.value.trim()) return name.focus();
+    try {
+      await post("/api/recover", { code: typed.value, name: name.value.trim() });
+      location.reload();
+    } catch (error) {
+      refusal.textContent = error.message[0].toUpperCase() + error.message.slice(1) + ".";
+    }
+  };
 }
 
 // asks after a request to join until it is answered: the app once let in

@@ -13,6 +13,11 @@ anyone's work.
 It is painted, in the app's colours and Inter, onto the kernel's framebuffer, or, where there is
 none, written as text. It is drawn again as it changes, looked at every few seconds, and every
 minute whatever, as the time does, should anything have written over it.
+
+The box's power button is the screen's, logind leaving it be: pressed, the screen shows a recovery
+code, of the agent's, which makes whoever gives it an admin, as an office whose every admin's device
+is gone gets back in; or, of a box that has none to give, asks whether to switch off. Pressed again
+then, the box switches off, cleanly.
 """
 
 import argparse
@@ -23,12 +28,15 @@ import fcntl
 import functools
 import io
 import json
+import re
+import select
 import shutil
 import socket
 import ssl
 import struct
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -37,6 +45,7 @@ from pathlib import Path
 
 from PIL import Image, ImageColor, ImageDraw, ImageFont
 
+from leat.box import system
 from leat.box.address import ipv4
 from leat.box.provision import ROOT
 
@@ -58,6 +67,9 @@ BOLD, PLAIN = "\033[1;97m", "\033[0m"  # of the words that matter, written as te
 _TIOCLINUX, _KMSG_REDIRECT = 0x541C, 11  # the ioctl that sends the kernel's messages to a console
 _KDSETMODE, _KD_GRAPHICS = 0x4B3A, 1  # the ioctl that keeps the console's text off the display
 _FBIOGET_VSCREENINFO = 0x4600
+_EVENT = struct.Struct("llHHi")  # an input event, of a 64-bit kernel: its time, type, code, value
+_EV_KEY, _KEY_POWER = 1, 116
+ARMED = 10  # seconds a press of the power button waits for another, which switches the box off
 
 
 @dataclass(frozen=True)
@@ -66,9 +78,10 @@ class State:
     whether its certificate holds for its name; whether the app answers; whether the box is yet to
     be set up by its first person; whether it was switched on just now; and, of the agent, the
     office's name, whether to show the address, the model, its id and whether it is "loaded" or
-    "loading", whether the box is kept from the internet, and the code that sets it up, while it
-    is to be; and its link, "Wired" or "Wi-Fi", the bytes left on its data's partition, and its
-    image's version."""
+    "loading", whether the box is kept from the internet, the code that sets it up, while it is
+    to be, and a recovery code, while one holds; whether the power button was pressed just now,
+    once, so that a press again switches the box off; and its link, "Wired" or "Wi-Fi", the bytes
+    left on its data's partition, and its image's version."""
 
     name: str | None
     address: str | None
@@ -84,6 +97,8 @@ class State:
     free: int | None = None
     version: str | None = None
     setup: str | None = None
+    recovery: str | None = None
+    switching: bool = False
 
 
 def look(root: Path = ROOT) -> State:
@@ -101,13 +116,16 @@ def look(root: Path = ROOT) -> State:
         state, certified=_certified(name), answering=True, empty=bool(box.get("empty")),
         office=box.get("office"), show_address=bool(box.get("address", True)),
         model=(model["id"], model["status"]) if model else None, offline=bool(box.get("offline")),
-        setup=box.get("setup"),
+        setup=box.get("setup"), recovery=box.get("recovery"),
     )  # fmt: skip
 
 
 def said(state: State) -> tuple[str, str, str | None]:
     """What the screen says of a state: a few words, a sentence, and the address to open, if it is
     to be shown."""
+    off = "Press the power button again to switch the box off."
+    if state.switching and not state.recovery:
+        return "Switch off?", off, None
     if state.address is None and state.booting:
         return "Starting", "This takes a minute.", None
     if state.address is None:
@@ -117,6 +135,13 @@ def said(state: State) -> tuple[str, str, str | None]:
     if not (state.certified and state.answering):
         return "Starting", "This takes a minute.", None
     url, scan = f"https://{state.name}", "Scan the code, or open this address in a browser."
+    if state.recovery:  # whatever its admins chose, as none may be there
+        return (
+            "Recovery",
+            "Scan the code, or open this address and choose Use a recovery code: "
+            "that device becomes an admin.",
+            url,
+        )
     if state.empty and state.setup:  # whatever its admins choose, as there are none yet
         typed = "Scan the code with a phone, or open this address and type the setup code."
         return "Set up your Leat", typed, url
@@ -130,6 +155,8 @@ def said(state: State) -> tuple[str, str, str | None]:
 def scanned(state: State, url: str) -> str:
     """What the QR code of an address holds: the address, and the setup code too while the box is
     to be set up, which the app takes, so that whoever scans it types none."""
+    if state.recovery:
+        return f"{url}/#recover={state.recovery}"
     return f"{url}/#setup={state.setup}" if state.empty and state.setup else url
 
 
@@ -188,11 +215,17 @@ def paint(state: State, size: tuple[int, int], now: datetime.datetime) -> Image.
         lines += [(url.removeprefix("https://"), font(round(3.2 * u), "Medium"), TEXT, 1.1 * u),
                   ("or type leat.local", font(round(2.4 * u)), MUTED, 0.0)]  # fmt: skip
         lines[-3] = (*lines[-3][:3], 4.0 * u)  # room before the address
-        if state.empty and state.setup:  # and the code that sets it up, below
+        # and the code that recovers it, or sets it up, below
+        shown = ("Recovery code", state.recovery) if state.recovery else ("Setup code", state.setup)
+        if shown[1] and (state.recovery or state.empty):
             lines[-1] = (*lines[-1][:3], 3.0 * u)
             code = font(round(4.4 * u), "SemiBold")
-            lines += [("Setup code", font(round(2.4 * u)), MUTED, 0.6 * u),
-                      (spaced(state.setup), code, TEXT, 0.0)]  # fmt: skip
+            lines += [(shown[0], font(round(2.4 * u)), MUTED, 0.6 * u),
+                      (spaced(shown[1]), code, TEXT, 0.0)]  # fmt: skip
+        if state.recovery:  # and that a press again switches the box off
+            lines[-1] = (*lines[-1][:3], 3.0 * u)
+            lines.append(("Press the power button again to switch the box off.",
+                          font(round(2.4 * u)), MUTED, 0.0))  # fmt: skip
     tall = sum(_height(pen, f) + gap for _, f, _, gap in lines)
     y = height / 2 - tall / 2
     for line, f, colour, gap in lines:
@@ -221,7 +254,10 @@ def written(state: State, qr: str = "") -> list[str]:
     lines = [f"{BOLD}{title}{PLAIN}", "", f"{BOLD}{headline}{PLAIN}", "", sentence]
     if url:
         lines += ["", url, "", *qr.splitlines(), "", "or type leat.local"]
-    if url and state.empty and state.setup:
+    if url and state.recovery:
+        lines += ["", f"Recovery code: {BOLD}{spaced(state.recovery)}{PLAIN}", "",
+                  "Press the power button again to switch the box off."]  # fmt: skip
+    elif url and state.empty and state.setup:
         lines += ["", f"Setup code: {BOLD}{spaced(state.setup)}{PLAIN}"]
     return lines
 
@@ -424,15 +460,75 @@ def _box() -> dict | None:
     return None
 
 
+def power_buttons(devices: Path = Path("/proc/bus/input/devices")) -> list[str]:
+    """The event devices of the box's power buttons, as the kernel lists its inputs."""
+    found = []
+    for block in devices.read_text().split("\n\n"):
+        handlers = re.search(r"H: Handlers=(.*)", block)
+        if 'N: Name="Power Button"' in block and handlers:
+            found += [f"/dev/input/{h}" for h in handlers[1].split() if h.startswith("event")]
+    return found
+
+
+class Power:
+    """The box's power button, its presses heard: the first asks the agent for a recovery code,
+    or, of a box that has none to give, arms the button; a press again, while the screen shows the
+    code or the button is armed, switches the box off."""
+
+    def __init__(self, buttons: list[str], woken: threading.Event):
+        self.woken, self.armed, self.recovering = woken, 0.0, False
+        self._buttons = [open(path, "rb", buffering=0) for path in buttons]  # noqa: SIM115
+        threading.Thread(target=self._listen, daemon=True).start()
+
+    def switching(self) -> bool:
+        """Whether a press now switches the box off: of one just now, without a recovery code."""
+        return time.monotonic() < self.armed
+
+    def press(self) -> None:
+        """A press of the button."""
+        if self.recovering or self.switching():
+            with contextlib.suppress(OSError, ValueError):
+                system.ask({"power": "off"})
+            return
+        try:
+            request = urllib.request.Request(f"{AGENT}/api/box/recovery", b"{}", method="POST")
+            urllib.request.urlopen(request, timeout=3).close()
+        except OSError:  # no agent, or a box not set up: none to recover, but the box to switch off
+            self.armed = time.monotonic() + ARMED
+        self.woken.set()
+
+    def _listen(self) -> None:
+        # each press, as the kernel tells it: a key's going down; a button that tells nothing more,
+        # as one gone, no more listened to
+        while self._buttons:
+            ready, _, _ = select.select(self._buttons, [], [])
+            for button in ready:
+                if not (data := button.read(_EVENT.size * 64)):
+                    self._buttons.remove(button)
+                    button.close()
+                    continue
+                for at in range(0, len(data), _EVENT.size):
+                    _, _, kind, code, value = _EVENT.unpack_from(data, at)
+                    if kind == _EV_KEY and code == _KEY_POWER and value == 1:
+                        self.press()
+
+
 def main() -> None:
     try:
         display: Framebuffer | None = Framebuffer()
     except OSError:  # written as text, then
         display = None
+    woken = threading.Event()  # by the power button, to look again at once
+    power = None
+    with contextlib.suppress(OSError):
+        power = Power(power_buttons(), woken)
     shown: tuple | None = None
     drawn = 0.0
     while True:
         state, now = look(), datetime.datetime.now()
+        if power is not None:
+            power.recovering = state.recovery is not None
+            state = dataclasses.replace(state, switching=power.switching())
         seen = (state, now.strftime("%H:%M"))
         if seen != shown or time.monotonic() - drawn > AGAIN:
             if display is not None:
@@ -443,7 +539,8 @@ def main() -> None:
                 sys.stdout.write(draw(lines, *shutil.get_terminal_size((80, 25))))
                 sys.stdout.flush()
             shown, drawn = seen, time.monotonic()
-        time.sleep(EVERY)
+        woken.wait(EVERY)
+        woken.clear()
 
 
 @functools.lru_cache(maxsize=4)

@@ -5,6 +5,7 @@ checked, by a helper systemd runs as root for each request, on a socket leat's g
     {"wifi": "scan"}                                       the Wi-Fi networks in reach
     {"wifi": "join", "name": "Office", "passphrase": "…"}  joins one, and again whenever in reach
     {"wifi": "forget", "name": "Office"}                   forgets one
+    {"power": "off"}                                       switches the box off, or "restart"
 
 Each answer is a JSON object: {} or what was asked, or {"error": why}. The agent asks by ask().
 
@@ -48,6 +49,8 @@ def handle(request: Any) -> dict[str, Any]:
             return join(request.get("name"), request.get("passphrase"))
         if wifi == "forget":
             return forget(request.get("name"))
+        if "power" in request:
+            return power(request["power"])
         raise Refused(f"there is no such request: {json.dumps(request)[:100]}")
     except (Refused, OSError, subprocess.SubprocessError) as e:
         return {"error": str(e)}
@@ -115,6 +118,16 @@ def forget(name: Any) -> dict[str, Any]:
     _checked_name(name)
     for kind in ("psk", "open", "8021x"):
         (IWD / f"{_file(name)}.{kind}").unlink(missing_ok=True)
+    return {}
+
+
+def power(how: Any) -> dict[str, Any]:
+    """Switches the box off, or restarts it, by systemd, as cleanly as ever: its answer given
+    first, the box going a moment after."""
+    if how not in ("off", "restart"):
+        raise Refused('the box\'s power is "off" or "restart"')
+    verb = "poweroff" if how == "off" else "reboot"
+    subprocess.run(["systemctl", "--no-block", verb], check=True, capture_output=True, timeout=10)
     return {}
 
 

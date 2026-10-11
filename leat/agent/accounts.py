@@ -10,6 +10,10 @@ pairing has it: a person lets in their own new device, from one of theirs; an ad
 new, or someone whose every device is gone, as one lost is unpaired. So no admin joins as another
 who has a device, and sees what is theirs.
 
+An office whose every admin's device is gone gets back in at the box: its power button pressed, its
+screen shows a recovery code for ten minutes, which its QR code holds too, and makes whoever gives
+it, on a device, a new admin; a few wrong, and it holds no more.
+
 An admin looks after the box and its people: lets them in, renames and removes them, makes them
 admins or not; there may be several, and there is one always. No admin sees another's own
 conversations or files. A device keeps a secret, sent as a cookie, of which the box keeps the hash
@@ -33,7 +37,8 @@ ASKING = 5  # requests waiting at most, so that no one fills the apps' pages wit
 NAME = 40  # characters of a person's name at most
 SEEN = 300  # seconds between the times a device is noted as seen
 CODE = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # a setup code's letters, none mistaken for another
-TRIES = 5  # wrong setup codes before the screen shows another
+TRIES = 5  # wrong setup or recovery codes before the screen shows another, or none
+RECOVERING = 600  # seconds a recovery code holds
 
 
 @dataclass
@@ -56,6 +61,8 @@ class Accounts:
         self.locked = locked  # whether setting up takes the code the box's screen shows
         self.code = _setup_code()
         self._wrong = 0  # wrong codes given for this one
+        self._recovery: tuple[str, float] | None = None  # a recovery code, and until when it holds
+        self._unrecovered = 0  # wrong recovery codes given for it
         self._requests: dict[str, _Request] = {}
         self._lock = threading.Lock()
 
@@ -81,6 +88,43 @@ class Accounts:
             person = self.store.add_person(name)
             self.agent.settle()  # the files that were no one's, now theirs
             return self._pair(person["id"], device)
+
+    def begin_recovery(self) -> str:
+        """A new recovery code, as the box's power button asks, which holds for ten minutes."""
+        with self._lock:
+            self._recovery, self._unrecovered = (_setup_code(), time.time() + RECOVERING), 0
+            return self._recovery[0]
+
+    def recovery(self) -> str | None:
+        """The recovery code that holds now, if one does."""
+        with self._lock:
+            if self._recovery and time.time() < self._recovery[1]:
+                return self._recovery[0]
+            self._recovery = None
+            return None
+
+    def recover(self, code: str, name: str, device: str) -> tuple[dict[str, Any], str]:
+        """Makes a new admin of a name, on a device, of the recovery code the box's screen
+        shows, which then holds no more; returns them and the device's secret. Raises Refused of a
+        wrong code, or none holding, ValueError of no name."""
+        name = _checked(name)
+        holding = self.recovery()
+        with self._lock:
+            given = "".join(c for c in code.upper() if c.isalnum())
+            if holding is None:
+                raise Refused("no recovery code holds now: press the box's power button for one")
+            if not secrets.compare_digest(given, holding):
+                self._unrecovered += 1
+                if self._unrecovered >= TRIES:
+                    self._recovery = None
+                    raise Refused("that is not the recovery code, and it holds no more: press the "
+                                  "box's power button for another")  # fmt: skip
+                raise Refused("that is not the recovery code the box's screen shows")
+            self._recovery = None
+            person = self.store.add_person(name, admin=True)
+            secret = self._pair(person["id"], device)
+        self._publish()
+        return person, secret
 
     def device(self, secret: str | None) -> dict[str, Any] | None:
         """The device that keeps a secret, with its person's name and whether they are an admin,

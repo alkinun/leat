@@ -2,6 +2,7 @@ import base64
 import datetime
 import io
 import json
+import os
 import shutil
 import socket
 import subprocess
@@ -201,6 +202,73 @@ def test_said():
     assert screen.scanned(replace(READY, setup="K7X2QM"), url) == url  # set up: none
     lines = screen.written(said["by code"], "##")
     assert lines[-1] == f"Setup code: {screen.BOLD}K7X 2QM{screen.PLAIN}"
+    # the power button pressed: a recovery code, of any box set up, whatever its admins chose; or,
+    # of one with none, whether to switch off
+    recovering = replace(READY, show_address=False, recovery="P4WR8N")
+    headline, sentence, shown = screen.said(recovering)
+    assert headline == "Recovery" and "recovery code" in sentence and shown == url
+    assert screen.scanned(recovering, url) == f"{url}/#recover=P4WR8N"
+    assert screen.written(recovering, "##")[-3:] == [
+        f"Recovery code: {screen.BOLD}P4W R8N{screen.PLAIN}",
+        "", "Press the power button again to switch the box off."]  # fmt: skip
+    asking = screen.said(screen.State(None, None, switching=True))
+    assert asking == ("Switch off?", "Press the power button again to switch the box off.", None)
+
+
+def test_power_buttons(tmp_path):
+    # the power buttons' event devices, of the kernel's list of its inputs
+    devices = tmp_path / "devices"
+    devices.write_text(
+        'I: Bus=0019\nN: Name="Power Button"\nH: Handlers=kbd event1 \n\n'
+        'I: Bus=0019\nN: Name="Sleep Button"\nH: Handlers=kbd event2 \n\n'
+        'I: Bus=0019\nN: Name="Power Button"\nH: Handlers=kbd event0 \n'
+    )
+    assert screen.power_buttons(devices) == ["/dev/input/event1", "/dev/input/event0"]
+
+
+def test_power_presses(tmp_path, monkeypatch):
+    # a press asks the agent for a recovery code; of a box with none to give, it arms the button;
+    # a press again then, or while the screen shows a code, switches the box off
+    asked, off = [], []
+    answers = iter([OSError("no agent"), None])
+
+    def urlopen(request, timeout):
+        asked.append(request.full_url)
+        if (answer := next(answers)) is not None:
+            raise answer
+        return io.BytesIO(b"{}")
+
+    monkeypatch.setattr(screen.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(screen.system, "ask", lambda request: off.append(request) or {})
+    (tmp_path / "button").write_bytes(b"")
+    power = screen.Power([str(tmp_path / "button")], threading.Event())
+    power.press()  # no agent: armed
+    assert power.switching() and power.woken.is_set() and off == []
+    power.press()  # again: off
+    assert off == [{"power": "off"}]
+    power.armed, off[:] = 0.0, []
+    power.press()  # the agent's recovery code asked for
+    assert asked[-1] == f"{screen.AGENT}/api/box/recovery" and not power.switching()
+    power.recovering = True  # as the screen shows it
+    power.press()
+    assert off == [{"power": "off"}]
+
+
+def test_power_listens():
+    # a press is the power key going down, of the kernel's input events; not its going up, nor
+    # another key's
+    read, write = os.pipe()
+    pressed = []
+    power = screen.Power.__new__(screen.Power)
+    power._buttons = [open(read, "rb", buffering=0)]  # noqa: SIM115
+    power.press = lambda: pressed.append(True)  # type: ignore[method-assign]
+    listening = threading.Thread(target=power._listen, daemon=True)
+    listening.start()
+    for code, value in ((116, 0), (30, 1), (116, 1)):
+        os.write(write, screen._EVENT.pack(0, 0, screen._EV_KEY, code, value))
+    os.close(write)  # the button gone: no more listened to
+    listening.join(timeout=5)
+    assert not listening.is_alive() and pressed == [True]
 
 
 def test_footer():
@@ -308,7 +376,8 @@ def test_system_refuses():
                     {"wifi": "join", "name": ""}, {"wifi": "join", "name": "x" * 33},
                     {"wifi": "join", "name": "Office", "passphrase": "short"},
                     {"wifi": "join", "name": "Office", "passphrase": "x" * 64},
-                    {"wifi": "join", "name": "Office", "passphrase": "pass\nword"}):  # fmt: skip
+                    {"wifi": "join", "name": "Office", "passphrase": "pass\nword"},
+                    {"power": "now"}, {"power": True}):  # fmt: skip
         assert "error" in system.handle(request), request
 
 
@@ -317,6 +386,14 @@ def test_system_timezone(monkeypatch):
     monkeypatch.setattr(system.subprocess, "run", lambda args, **kw: ran.append(args))
     assert system.handle({"timezone": "Europe/Istanbul"}) == {}
     assert ran == [["timedatectl", "set-timezone", "Europe/Istanbul"]]
+
+
+def test_system_power(monkeypatch):
+    # the box switched off, or restarted, by systemd, the answer given first
+    ran = []
+    monkeypatch.setattr(system.subprocess, "run", lambda args, **kw: ran.append(args))
+    assert system.handle({"power": "off"}) == {} and system.handle({"power": "restart"}) == {}
+    assert ran == [["systemctl", "--no-block", "poweroff"], ["systemctl", "--no-block", "reboot"]]
 
 
 def test_system_wifi_files(tmp_path, monkeypatch):

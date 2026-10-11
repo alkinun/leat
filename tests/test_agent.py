@@ -760,6 +760,45 @@ def test_setup_code(agent):
             server.shutdown()
 
 
+def test_recovery(agent):
+    # the box's power button pressed, a recovery code holds for a while, to this machine alone to
+    # see; given, with a name, it makes a new admin, once; a few wrong, and it holds no more
+    with Server(agent, port=0, name="k7x2qm.leatbox.net") as server:
+        threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True).start()
+        base, accounts = f"http://127.0.0.1:{server.server_port}", server.accounts
+        try:
+            assert request(f"{base}/api/box/recovery", "POST", {})[0] == 409  # none to recover
+            setup = {"name": "Alkın", "code": accounts.code}
+            assert request(f"{base}/api/setup", "POST", setup)[0] == 200
+            urllib.request.install_opener(None)  # type: ignore[arg-type]
+            front = {"Host": "k7x2qm.leatbox.net", "Origin": "https://k7x2qm.leatbox.net"}
+            assert request(f"{base}/api/box/recovery", "POST", {}, **front)[0] == 404
+            assert json.loads(request(f"{base}/api/me")[1])["recovering"] is False
+            status, body = request(f"{base}/api/box/recovery", "POST", {})
+            code = json.loads(body)["code"]
+            assert status == 200 and json.loads(request(f"{base}/api/box")[1])["recovery"] == code
+            assert json.loads(request(f"{base}/api/me")[1])["recovering"] is True
+            wrong = {"name": "Ada", "code": "AAAAAA"}
+            status, body = request(f"{base}/api/recover", "POST", wrong)
+            assert status == 403 and b"not the recovery code" in body
+            given = {"name": "Ada", "code": f"{code[:3].lower()}-{code[3:]}"}
+            status, _ = request(f"{base}/api/recover", "POST", given)
+            assert status == 200 and agent.store.person(2) == agent.store.person(2) | {
+                "name": "Ada", "admin": 1}  # fmt: skip
+            assert request(f"{base}/api/recover", "POST", given)[0] == 403  # once
+            assert "recovery" not in json.loads(request(f"{base}/api/box")[1])
+            assert agent.store.activity()[0]["action"].startswith("got back in, as an admin")
+            # five wrong, and the code holds no more
+            code = json.loads(request(f"{base}/api/box/recovery", "POST", {})[1])["code"]
+            for _ in range(5):
+                status, body = request(f"{base}/api/recover", "POST", wrong)
+            assert b"holds no more" in body
+            right = {"name": "Eve", "code": code}
+            assert request(f"{base}/api/recover", "POST", right)[0] == 403
+        finally:
+            server.shutdown()
+
+
 def test_person_to_the_engine(agent, engine, events):
     # each request of a person's conversation names them to the engine, which keeps the prefixes
     # it caches of their prompts to theirs: their turns', and the naming of their conversations;
@@ -1248,7 +1287,7 @@ def test_joining(server, agent, engine, events):
         except urllib.error.HTTPError as e:
             return e.code, json.loads(e.read())
 
-    assert ask("/api/me") == (401, {"error": {"message": ANY}, "empty": False})
+    assert ask("/api/me") == (401, {"error": {"message": ANY}, "empty": False, "recovering": False})
     assert ask("/api/setup", "POST", {"name": "Eve"})[0] == 400  # the box is set up
     status, asked = ask("/api/pairings", "POST", {"name": "Ada"})
     assert status == 200 and len(asked["code"]) == 6
