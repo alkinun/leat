@@ -461,13 +461,23 @@ def _box() -> dict | None:
 
 
 def power_buttons(devices: Path = Path("/proc/bus/input/devices")) -> list[str]:
-    """The event devices of the box's power buttons, as the kernel lists its inputs."""
+    """The event devices of the box's power buttons, as the kernel lists its inputs: each that has
+    the power key, as logind takes them, the ACPI's "Power Button" or another, as a Dell laptop's
+    "Intel HID events"."""
     found = []
     for block in devices.read_text().split("\n\n"):
-        handlers = re.search(r"H: Handlers=(.*)", block)
-        if 'N: Name="Power Button"' in block and handlers:
+        handlers, keys = re.search(r"H: Handlers=(.*)", block), re.search(r"B: KEY=(.*)", block)
+        if handlers and keys and _has_key(keys[1], _KEY_POWER):
             found += [f"/dev/input/{h}" for h in handlers[1].split() if h.startswith("event")]
     return found
+
+
+def _has_key(bitmap: str, key: int) -> bool:
+    # whether a device's keys, as the kernel writes their bitmap, in words of 64 bits, the highest
+    # first, have a key
+    words = bitmap.split()[::-1]
+    word, bit = divmod(key, 64)
+    return word < len(words) and bool(int(words[word], 16) >> bit & 1)
 
 
 class Power:

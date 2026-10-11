@@ -218,12 +218,15 @@ def test_said():
 def test_power_buttons(tmp_path):
     # the power buttons' event devices, of the kernel's list of its inputs
     devices = tmp_path / "devices"
-    devices.write_text(
-        'I: Bus=0019\nN: Name="Power Button"\nH: Handlers=kbd event1 \n\n'
-        'I: Bus=0019\nN: Name="Sleep Button"\nH: Handlers=kbd event2 \n\n'
-        'I: Bus=0019\nN: Name="Power Button"\nH: Handlers=kbd event0 \n'
+    devices.write_text(  # as a Dell laptop lists them: its power key on two
+        'N: Name="Lid Switch"\nH: Handlers=event0 \n\n'
+        'N: Name="Power Button"\nH: Handlers=kbd event1 \nB: KEY=8000 10000000000000 0\n\n'
+        'N: Name="Sleep Button"\nH: Handlers=kbd event2 \nB: KEY=4000 0 0\n\n'
+        'N: Name="Intel HID events"\nH: Handlers=kbd event4 rfkill \n'
+        "B: KEY=81000300000000 5000004000 1e294000000020 0\n\n"
+        'N: Name="PS/2 Generic Mouse"\nH: Handlers=event10 mouse0 \nB: KEY=70000 0 0 0 0\n'
     )
-    assert screen.power_buttons(devices) == ["/dev/input/event1", "/dev/input/event0"]
+    assert screen.power_buttons(devices) == ["/dev/input/event1", "/dev/input/event4"]
 
 
 def test_power_presses(tmp_path, monkeypatch):
