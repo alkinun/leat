@@ -31,6 +31,9 @@ from leat.box.provision import ROOT
 
 EVERY = 3  # seconds between looks
 AGAIN = 60  # seconds after which the screen is drawn again, unchanged
+# seconds after the box is switched on in which it is starting, its network not said to be missing:
+# a laptop's screen said "No network" for the 2 s before DHCP gave it an address
+BOOTING = 45
 BOLD, PLAIN = "\033[1;97m", "\033[0m"  # of the words that matter: bright white, bold
 AGENT = "http://127.0.0.1:8000"  # leat agent, behind Caddy
 TTY = "/dev/tty2"  # the screen's virtual console: the boot's messages are on the first
@@ -41,29 +44,33 @@ _TIOCLINUX, _KMSG_REDIRECT = 0x541C, 11  # the ioctl that sends the kernel's mes
 @dataclass(frozen=True)
 class State:
     """What the screen says: the box's name, if provisioned; its IPv4 address, if it has one;
-    whether its certificate holds for its name; whether the app answers; and whether the box is yet
-    to be set up by its first person."""
+    whether its certificate holds for its name; whether the app answers; whether the box is yet
+    to be set up by its first person; and whether it was switched on just now."""
 
     name: str | None
     address: str | None
     certified: bool = False
     answering: bool = False
     empty: bool = False
+    booting: bool = False
 
 
 def look(root: Path = ROOT) -> State:
     """The box's state, as it is now."""
     name = _name(root)
     address = _address()
+    booting = time.clock_gettime(time.CLOCK_BOOTTIME) < BOOTING
     if name is None or address is None:
-        return State(name, address)
+        return State(name, address, booting=booting)
     answering, empty = _app(name)
-    return State(name, address, _certified(name), answering, empty)
+    return State(name, address, _certified(name), answering, empty, booting)
 
 
 def render(state: State, qr: str = "") -> list[str]:
     """The screen's lines, of a state, and the QR code of its address, if any."""
     title = f"{BOLD}Leat{PLAIN}"
+    if state.address is None and state.booting:
+        return [title, "", f"{BOLD}Starting...{PLAIN}"]
     if state.address is None:
         return [title, "", f"{BOLD}No network{PLAIN}", "", "Plug the network cable into the box."]
     if state.name is None:

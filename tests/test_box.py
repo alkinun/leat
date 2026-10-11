@@ -165,6 +165,7 @@ def test_screen():
     name = "k7x2qm.leatbox.net"
     said = {
         "no network": screen.State(name, None),
+        "switched on": screen.State(name, None, booting=True),
         "not provisioned": screen.State(None, "192.168.1.20"),
         "starting": screen.State(name, "192.168.1.20", certified=False, answering=True),
         "set up": screen.State(name, "192.168.1.20", certified=True, answering=True, empty=True),
@@ -178,6 +179,7 @@ def test_screen():
         for k, s in said.items()
     }
     assert "No network" in lines["no network"] and "Not set up" in lines["not provisioned"]
+    assert lines["switched on"][2] == "Starting..."  # its network not yet up, as it is switched on
     assert lines["starting"][2:] == ["Starting...", "", f"https://{name}"]  # no QR code yet
     assert "Open this address to set up your Leat" in lines["set up"]
     assert lines["ready"][2] == "Ready" and f"https://{name}" in lines["ready"]
