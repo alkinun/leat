@@ -199,7 +199,8 @@ def rotary(x: Tensor, cos: Tensor, sin: Tensor, halves: bool) -> Tensor:
 @dataclass(frozen=True)
 class Span:
     """`length` consecutive tokens of one sequence, from position `start` of cache slot `slot`;
-    each sees those before it, or if not `causal` all the span's, as an image's do."""
+    each sees those before it, or if not `causal` all the span's, as an image's and an encoder's
+    do."""
 
     slot: int | UOp
     start: int | UOp
@@ -306,8 +307,8 @@ def attention(
 ) -> Tensor:  # fmt: skip
     # q: (1, H, T, D), the spans' tokens in turn; cache: (2, slots, KV_H, positions, D). Each
     # token attends over its span's slot, causally or over all the span's tokens as the span
-    # has it, and over only the last `window` positions before it if given, with scores
-    # q.k * scale; with a sink per head, if given, a score that takes its
+    # has it, and over only those fewer than `window` positions from it if given, either way,
+    # with scores q.k * scale; with a sink per head, if given, a score that takes its
     # share of the softmax and adds no value, as gpt-oss's. A `ring` holds position p at p mod its
     # positions, as many as the window and the tokens of a span more. Returns (1, T, H * D), the
     # layout the output projection reads.
@@ -356,11 +357,11 @@ def _attention(
         k, v = (cache[i, slot : slot + 1, :, :end].cast(q.dtype) for i in (0, 1))
     if not ring and (window or causal):
         full = Tensor.full((1, 1, T, k.shape[2]), float("-inf"), dtype=q.dtype)
-        # later positions, where the span sees only those before each token, and positions
-        # `window` or more back
-        masks = ([full.triu(start_pos + 1)] if causal else []) + (
-            [full.tril(start_pos - window)] if window else [])  # fmt: skip
-        mask = sum(masks[1:], masks[0])
+        # later positions, where the span sees only those before each token, else those `window`
+        # or more on; and positions `window` or more back
+        mask = full.triu(start_pos + (1 if causal else window))
+        if window:
+            mask = mask + full.tril(start_pos - window)
     if sinks is None:
         out = (q * (scale * math.sqrt(D))).scaled_dot_product_attention(k, v, mask, enable_gqa=True)
         return out.transpose(1, 2).reshape(B, T, H * D)
@@ -376,14 +377,14 @@ def _ring_mask(
 ) -> Tensor:
     # (1, 1, T, n): -inf where token t of T, at start + t, does not see row r of a ring of n
     # positions, which holds the last position up to the tokens' last that is r mod n: a row that
-    # holds no position yet, one past the window, or with `causal`, one past the token. Worked
-    # out for as many tokens as there may be, `most`, as T may be bound.
+    # holds no position yet, one past the window either way, or with `causal`, one past the
+    # token. Worked out for as many tokens as there may be, `most`, as T may be bound.
     end = Tensor(start + T - 1)
     held = end - (end + n - Tensor.arange(n)) % n  # each row's position
     back = (Tensor(start) + Tensor.arange(most)).reshape(most, 1) - held.reshape(1, n)
     hidden = (held < 0).reshape(1, n).expand(most, n)
     if window:
-        hidden = hidden | (back >= window)
+        hidden = hidden | (back.abs() >= window)
     if causal:
         hidden = hidden | (back < 0)
     return hidden.where(float("-inf"), 0.0).shrink(((0, T), (0, n))).reshape(1, 1, T, n)

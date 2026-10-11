@@ -472,12 +472,12 @@ def reference_attention(
     sinks: np.ndarray | None = None, slot: int = SLOT, causal: bool = True,
 ) -> np.ndarray:  # fmt: skip
     # q (heads, T, dim) at positions start.. against a slot, causally or over all T, and within
-    # the window if given, with a sink per head if given, in f64: (T, heads, dim)
+    # the window either way if given, with a sink per head if given, in f64: (T, heads, dim)
     heads, tokens, dim = q.shape
     group = heads // cache.shape[2]
     k, v = (cache[i, slot, :, : start + tokens].astype(np.float64) for i in range(2))
     back = start + np.arange(tokens)[:, None] - np.arange(start + tokens)
-    hidden = (back < 0) & causal | (back >= window) & (window > 0)
+    hidden = (back < 0) & causal | (np.abs(back) >= window) & (window > 0)
     out = np.empty((tokens, heads, dim))
     for h in range(heads):
         scores = q[h] @ k[h // group].T * (dim**-0.5 if scale is None else scale)
@@ -652,9 +652,10 @@ def test_flash_attention_window(tokens, start, dim, window, symbolic):
 
 
 # an image's tokens, which see each other: Gemma 4's sliding-window and full-attention heads, a
-# tile of queries whose keys blocks split, and several tiles
+# tile of queries whose keys blocks split, and several tiles; and an encoder's, within a window
+# narrower than most of them, either way
 @pytest.mark.parametrize("tokens, start", [(280, 0), (256, 1000), (16, 1500), (100, 3000)])
-@pytest.mark.parametrize("kv_heads, dim, window", [(8, 256, 1024), (2, 512, 0)])
+@pytest.mark.parametrize("kv_heads, dim, window", [(8, 256, 1024), (2, 512, 0), (2, 256, 41)])
 @pytest.mark.parametrize("symbolic", [False, True])
 @matrix_cores
 def test_flash_attention_not_causal(tokens, start, kv_heads, dim, window, symbolic):

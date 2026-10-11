@@ -461,8 +461,8 @@ def _flash_attention_kernel(
 ) -> UOp:  # fmt: skip
     # srcs: q (count, heads, dim) in f16, scaled so that exp2 gives the softmax, and the f16
     # cache, read as words of f16 pairs; query i is at position start + i and sees the slot's
-    # positions up to it, or if not causal up to the last query's, and of those before it the
-    # last `window` only, if given. Blocks take key_tile keys at a time, and
+    # positions up to it, or if not causal up to the last query's, and of those only the ones
+    # fewer than `window` from it, either way, if given. Blocks take key_tile keys at a time, and
     # 1 / parts of their outputs, which warps work out on WMMA's fragments if wmma, else on
     # mma.sync's. Split, the queries are one tile, whose key tiles blocks take in turn, each
     # writing out (count * heads, splits, dim) unnormalized and first in srcs the max and sum of
@@ -539,7 +539,7 @@ def _flash_attention_kernel(
         position = kt * key_tile + key
         back = start + rows[r] - position  # how far the key is
         seen = back >= 0 if causal else position < start + tokens
-        seen = seen & (back < window) if window else seen
+        seen = seen & (back < window) & (back > -window) if window else seen
         of.append(r)
         scores.append(seen.where(score, -math.inf))
 
@@ -612,9 +612,9 @@ def flash_attention(
 ) -> Tensor:  # fmt: skip
     """Attention of query tokens (1, H, T, D) at positions start_pos.. over a slot of the cache,
     which already holds their keys and values: causal, or if not over all the tokens', and over
-    the last `window` positions before each if given, with scores q.k * scale, and a sink (H,)
-    per head if given. Returns (1, T, H * D). A `ring` holds position p at p mod its positions,
-    as many as the window and the tokens more."""
+    those fewer than `window` positions from each, either way, if given, with scores q.k * scale,
+    and a sink (H,) per head if given. Returns (1, T, H * D). A `ring` holds position p at p mod
+    its positions, as many as the window and the tokens more."""
     _, heads, tokens, dim = q.shape
     count = -(-q.max_shape[2] // QUERIES) * QUERIES
     shape = _flash_shape(int(cache.shape[3]), int(dim))
