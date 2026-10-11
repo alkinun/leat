@@ -1,0 +1,12 @@
+[Unit]
+Description=The box's system, changed for leat agent: its time zone and Wi-Fi
+
+[Socket]
+ListenStream=/run/leat/system.sock
+SocketUser=root
+SocketGroup=leat
+SocketMode=0660
+Accept=yes
+
+[Install]
+WantedBy=sockets.target

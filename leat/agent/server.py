@@ -39,6 +39,7 @@ from leat.agent.accounts import Accounts
 from leat.agent.agent import Agent, Busy, NotFound, Refused
 from leat.agent.client import EngineError
 from leat.agent.workspace import Workspace
+from leat.box import system
 from leat.chat import EFFORTS
 
 APP = Path(__file__).parent / "app"
@@ -95,6 +96,7 @@ _HISTORY = re.compile(r"/api/(?:projects/([0-9a-f]{12})/)?history")
 _PROJECT_PAGE = re.compile(r"/projects/[0-9a-f]{12}")
 _REQUEST = re.compile(r"/api/pairings/([0-9a-f]{16})(/allow)?")
 _DEVICE = re.compile(r"/api/devices/([0-9]+)")
+_WIFI = re.compile(r"/api/wifi/(.+)")
 _PERSON = re.compile(r"/api/people/([0-9]+)")
 _FILE = re.compile(r"/(?:api/)?(?:projects/([0-9a-f]{12})/)?files/(.+)")
 
@@ -162,6 +164,9 @@ class _Handler(BaseHTTPRequestHandler):
             elif path == "/api/overview":  # the box, as its owner looks after it
                 _owner(me)
                 self._json(200, agent.overview())
+            elif path == "/api/wifi":  # the Wi-Fi networks in reach, the owner's to see
+                _owner(me)
+                self._json(200, _system({"wifi": "scan"}))
             elif path == "/api/activity":  # what was done, the latest first, before ?before
                 _owner(me)
                 query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
@@ -196,9 +201,14 @@ class _Handler(BaseHTTPRequestHandler):
             if not isinstance(body, dict):
                 raise ValueError("the body must be a JSON object")
             if path == "/api/setup":  # the box's first person, its owner, and its settings
-                settings = _settings(body, ("offline", "office"))
+                settings = _settings(body, ("offline", "office", "timezone"))
+                zone = settings.pop("timezone", None)
                 secret = accounts.setup(_text(body, "name"), _device(self.headers))
                 agent.change(**settings)
+                with contextlib.suppress(ValueError):  # their device's, which a box takes as its
+                    # own, if it can; one that is no box keeps its own
+                    if zone:
+                        agent.change(timezone=zone)
                 agent.note(
                     agent.store.people()[0]["id"], "set Leat up", detail=settings.get("office")
                 )
@@ -240,6 +250,12 @@ class _Handler(BaseHTTPRequestHandler):
                 allowed = accounts.allow(match[1], to, name)
                 agent.note(person, "let in", detail=f"{allowed['name']}'s {allowed['device']}")
                 self._json(200, allowed)
+            elif path == "/api/wifi":  # a Wi-Fi network joined, the owner's to choose
+                _owner(me)
+                name, passphrase = _text(body, "name"), body.get("passphrase")
+                _system({"wifi": "join", "name": name, "passphrase": passphrase})
+                agent.note(person, "joined the Wi-Fi network", detail=name)
+                self._json(200, {})
             elif path == "/api/models/load":
                 _owner(me)
                 agent.load(model := _text(body, "model"))
@@ -262,6 +278,12 @@ class _Handler(BaseHTTPRequestHandler):
         with self._answering():
             me = self._device()
             person, store = me["person"], agent.store
+            if wifi := _WIFI.fullmatch(path):  # a Wi-Fi network forgotten, the owner's
+                _owner(me)
+                name = urllib.parse.unquote(wifi[1])
+                _system({"wifi": "forget", "name": name})
+                agent.note(person, "forgot the Wi-Fi network", detail=name)
+                return self._json(200, {})
             if (match := _CONVERSATION.fullmatch(path)) and not match[2]:
                 held = (store.conversation(match[1]) or {}).get("project")
                 agent.delete(match[1], person)
@@ -316,7 +338,7 @@ class _Handler(BaseHTTPRequestHandler):
                 raise ValueError("the body must be a JSON object")
             if path == "/api/settings":
                 _owner(me)
-                settings = _settings(body, ("offline", "office", "address"), only=True)
+                settings = _settings(body, ("offline", "office", "address", "timezone"), only=True)
                 agent.change(**settings)
                 for key, value in settings.items():  # each change noted
                     said = {
@@ -324,8 +346,10 @@ class _Handler(BaseHTTPRequestHandler):
                         "office": "named the office" if value else "took the office's name away",
                         "address": "showed the address on the box's screen" if value
                         else "hid the address from the box's screen",
+                        "timezone": "set the time zone",
                     }  # fmt: skip
-                    agent.note(me["person"], said[key], detail=value if key == "office" else None)
+                    shown = value if key in ("office", "timezone") else None
+                    agent.note(me["person"], said[key], detail=shown)
                 return self._json(200, {})
             if flow:
                 if (when := body.get("schedule")) is not None and not isinstance(when, str):
@@ -627,6 +651,15 @@ def _project(body: dict[str, Any], new: bool = False) -> dict[str, Any]:
     return fields
 
 
+def _system(request: dict[str, Any]) -> dict[str, Any]:
+    # the box's system helper's answer. Raises ValueError of its refusal, or of a Leat that is no
+    # box, which has none
+    try:
+        return system.ask(request)
+    except OSError as e:
+        raise ValueError("this Leat runs on no box of its own, so it cannot do that") from e
+
+
 def _settings(body: dict[str, Any], keys: tuple[str, ...], only: bool = False) -> dict[str, Any]:
     # the box's settings a body gives, of `keys`, each as it must be, a body of others refused if
     # `only`: whether it is kept from the internet, the office's name, and whether the box's screen
@@ -637,6 +670,8 @@ def _settings(body: dict[str, Any], keys: tuple[str, ...], only: bool = False) -
     for key in ("offline", "address"):
         if key in settings and not isinstance(settings[key], bool):
             raise ValueError(f"{key} must be true or false")
+    if "timezone" in settings and not isinstance(settings["timezone"], str):
+        raise ValueError("timezone must be one of the IANA database's, as Europe/Berlin")
     if "office" in settings:
         if not isinstance(settings["office"], str | None):
             raise ValueError("office must be the office's name, or null")

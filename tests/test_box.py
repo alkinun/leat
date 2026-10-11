@@ -2,6 +2,7 @@ import base64
 import datetime
 import io
 import json
+import socket
 import subprocess
 import threading
 from collections.abc import Iterator
@@ -13,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image, ImageColor
 
-from leat.box import address, provision, screen
+from leat.box import address, provision, screen, system
 
 REGISTERED = {
     "id": "k7x2qm",
@@ -278,6 +279,105 @@ def test_screen_name(tmp_path):
     provision.provision(REGISTERED, tmp_path)
     assert screen._name(tmp_path) == "k7x2qm.leatbox.net"
     assert screen.look(tmp_path / "none").name is None
+
+
+def test_system_refuses():
+    # the helper does a few things alone, each checked
+    for request in ([], {}, {"wifi": "reboot"}, {"timezone": "Mars/Olympus"}, {"timezone": 3},
+                    {"wifi": "join", "name": ""}, {"wifi": "join", "name": "x" * 33},
+                    {"wifi": "join", "name": "Office", "passphrase": "short"},
+                    {"wifi": "join", "name": "Office", "passphrase": "x" * 64},
+                    {"wifi": "join", "name": "Office", "passphrase": "pass\nword"}):  # fmt: skip
+        assert "error" in system.handle(request), request
+
+
+def test_system_timezone(monkeypatch):
+    ran = []
+    monkeypatch.setattr(system.subprocess, "run", lambda args, **kw: ran.append(args))
+    assert system.handle({"timezone": "Europe/Istanbul"}) == {}
+    assert ran == [["timedatectl", "set-timezone", "Europe/Istanbul"]]
+
+
+def test_system_wifi_files(tmp_path, monkeypatch):
+    # a network joined is iwd's known network: a file of its name, or of its name's bytes in hex,
+    # root's alone to read; open of no passphrase; forgotten, gone
+    monkeypatch.setattr(system, "IWD", tmp_path / "iwd")
+    assert system.handle({"wifi": "join", "name": "Office", "passphrase": "s3cret pass"}) == {}
+    known = tmp_path / "iwd" / "Office.psk"
+    assert known.read_text() == "[Security]\nPassphrase=s3cret pass\n"
+    assert (
+        known.stat().st_mode & 0o777 == 0o600 and (tmp_path / "iwd").stat().st_mode & 0o777 == 0o700
+    )
+    assert system.handle({"wifi": "join", "name": "Café Ü"}) == {}  # open, of a name in hex
+    assert (tmp_path / "iwd" / f"={'Café Ü'.encode().hex()}.open").exists()
+    system.handle({"wifi": "join", "name": "Office"})  # open now: the passphrase's file gone
+    assert sorted(p.name for p in (tmp_path / "iwd").iterdir()) == sorted(
+        ["Office.open", f"={'Café Ü'.encode().hex()}.open"])  # fmt: skip
+    assert system.handle({"wifi": "forget", "name": "Office"}) == {}
+    assert not (tmp_path / "iwd" / "Office.open").exists()
+
+
+def test_system_scan(monkeypatch):
+    # the networks in reach, the strongest first, as iwd orders them, of its objects over D-Bus
+    def prop(kind, value):
+        return {"type": kind, "data": value}
+
+    objects = {
+        "/net/connman/iwd/0/4": {"net.connman.iwd.Station": {"Scanning": prop("b", False)}},
+        "/net/connman/iwd/0/4/a": {"net.connman.iwd.Network": {
+            "Name": prop("s", "Office"), "Type": prop("s", "psk"), "Connected": prop("b", True)}},
+        "/net/connman/iwd/0/4/b": {"net.connman.iwd.Network": {
+            "Name": prop("s", "Guests"), "Type": prop("s", "open"), "Connected": prop("b", False)}},
+    }  # fmt: skip
+
+    def bus(*args, check=True):
+        if args[-1] == "GetManagedObjects":
+            return {"type": "a{oa{sa{sv}}}", "data": [objects]}
+        if args[-1] == "GetOrderedNetworks":
+            return {"type": "a(on)", "data": [[["/net/connman/iwd/0/4/a", -4500],
+                                               ["/net/connman/iwd/0/4/b", -7600]]]}  # fmt: skip
+        if args[-1] == "Scanning":
+            return prop("b", False)
+        return {}
+
+    monkeypatch.setattr(system, "_bus", bus)
+    assert system.handle({"wifi": "scan"}) == {
+        "radio": True, "connected": "Office", "networks": [
+            {"name": "Office", "secure": True, "strength": 4, "connected": True},
+            {"name": "Guests", "secure": False, "strength": 1, "connected": False},
+        ],
+    }  # fmt: skip
+    monkeypatch.setattr(system, "_objects", lambda: {})
+    assert system.handle({"wifi": "scan"}) == {"radio": False, "networks": [], "connected": None}
+
+
+def test_system_ask(tmp_path):
+    # the agent's question over the socket, sent whole, and the helper's answer, or its refusal
+    # raised; a box without the helper, as off a box, an OSError
+    path = str(tmp_path / "system.sock")
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(path)
+    server.listen()
+    asked = []
+
+    def read(connection: socket.socket) -> bytes:
+        return b"".join(iter(lambda: connection.recv(4096), b""))
+
+    def answer():
+        for said in ({"error": "there is no time zone 'Mars/Olympus'"}, {"networks": []}):
+            connection, _ = server.accept()
+            with connection:
+                asked.append(json.loads(read(connection)))
+                connection.sendall(json.dumps(said).encode())
+
+    threading.Thread(target=answer, daemon=True).start()
+    with pytest.raises(ValueError, match="no time zone"):
+        system.ask({"timezone": "Mars/Olympus"}, path)
+    assert system.ask({"wifi": "scan"}, path) == {"networks": []}
+    assert asked == [{"timezone": "Mars/Olympus"}, {"wifi": "scan"}]
+    server.close()
+    with pytest.raises(OSError):
+        system.ask({"wifi": "scan"}, str(tmp_path / "none.sock"))
 
 
 def test_units():

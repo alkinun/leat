@@ -1,4 +1,4 @@
-# every wired link, by DHCP, the box answering at leat.local
+# every wired link, by DHCP, the box answering at leat.local; its way out, before Wi-Fi
 [Match]
 Type=ether
 

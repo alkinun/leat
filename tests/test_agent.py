@@ -25,8 +25,12 @@ from leat.agent.context import message as _api
 from leat.agent.server import BODY, HSTS, POLICY, Server
 from leat.agent.store import Store
 from leat.agent.tools import Result, Tool, strings
+from leat.box import system
 
 HOLD = None  # in a scripted reply: wait there until the test releases it
+
+
+ZONE = system.zone()  # this machine's, which the box's settings tell
 
 
 class FakeEngine(ThreadingHTTPServer):
@@ -583,7 +587,13 @@ def test_offline(engine, tmp_path):
                   [tool("search_web", WEB), tool("fetch", WEB), tool("echo")])  # fmt: skip
     with agent.events.watch() as told:
         agent.change(offline=True)
-        assert told.get() == {"type": "settings", "offline": True, "office": None, "address": True}
+        assert told.get() == {
+            "type": "settings",
+            "offline": True,
+            "office": None,
+            "address": True,
+            "timezone": ZONE,
+        }
     engine.replies.put(REPLY)
     with agent.events.watch() as events:
         id = agent.send(None, "What's new?")
@@ -610,9 +620,14 @@ def test_api_settings(server, agent):
         assert request(url, "PATCH", wrong)[0] == 400
     assert request(url, "PATCH", {"offline": True, "office": "  Kanzlei   Weber "})[0] == 200
     assert request(url, "PATCH", {"address": False})[0] == 200
-    assert agent.settings() == {"offline": True, "office": "Kanzlei Weber", "address": False}
+    assert agent.settings() == {
+        "offline": True,
+        "office": "Kanzlei Weber",
+        "address": False,
+        "timezone": ZONE,
+    }
     assert request(url, "PATCH", {"office": "", "address": True})[0] == 200
-    assert agent.settings() == {"offline": True, "office": None, "address": True}
+    assert agent.settings() == {"offline": True, "office": None, "address": True, "timezone": ZONE}
     done = [a["action"] for a in agent.store.activity()]
     for action in (
         "turned the internet off",
@@ -625,6 +640,62 @@ def test_api_settings(server, agent):
     assert request(f"{server}/api/offline", "POST", {"offline": False})[0] == 404  # gone
 
 
+def test_timezone(server, agent, monkeypatch):
+    # the box's time zone, set by its system helper, and noted; refused, or off a box, said
+    asked = []
+
+    def ask(request):
+        asked.append(request)
+        if request["timezone"] == "Mars/Olympus":
+            raise ValueError("there is no time zone 'Mars/Olympus'")
+        return {}
+
+    monkeypatch.setattr(system, "ask", ask)
+    url = f"{server}/api/settings"
+    assert request(url, "PATCH", {"timezone": "Europe/Istanbul"})[0] == 200
+    assert asked == [{"timezone": "Europe/Istanbul"}]
+    assert ("set the time zone", "Europe/Istanbul") in [
+        (a["action"], a["detail"]) for a in agent.store.activity()]  # fmt: skip
+    status, body = request(url, "PATCH", {"timezone": "Mars/Olympus"})
+    assert status == 400 and b"no time zone" in body
+    assert request(url, "PATCH", {"timezone": 7})[0] == 400
+
+    def away(request):
+        raise ConnectionRefusedError("no helper")
+
+    monkeypatch.setattr(system, "ask", away)
+    status, body = request(url, "PATCH", {"timezone": "Europe/Istanbul"})
+    assert status == 400 and b"cannot set its time zone" in body and b"Errno" not in body
+
+
+def test_wifi(server, agent, monkeypatch):
+    # the Wi-Fi networks in reach, joined and forgotten, the owner's, each noted but for its
+    # passphrase; off a box, said
+    asked = []
+    scanned = {"radio": True, "networks": [], "connected": None}
+    monkeypatch.setattr(
+        system, "ask", lambda r: asked.append(r) or (scanned if r["wifi"] == "scan" else {})
+    )
+    status, body = request(f"{server}/api/wifi")
+    assert status == 200 and json.loads(body) == scanned
+    join = {"name": "Office", "passphrase": "s3cret pass"}
+    assert request(f"{server}/api/wifi", "POST", join)[0] == 200
+    assert request(f"{server}/api/wifi/Caf%C3%A9", "DELETE")[0] == 200
+    assert asked[1:] == [{"wifi": "join", "name": "Office", "passphrase": "s3cret pass"},
+                         {"wifi": "forget", "name": "Café"}]  # fmt: skip
+    noted = [(a["action"], a["detail"]) for a in agent.store.activity()]
+    assert ("joined the Wi-Fi network", "Office") in noted
+    assert ("forgot the Wi-Fi network", "Café") in noted
+    assert "s3cret" not in json.dumps(agent.store.activity())
+
+    def away(request):
+        raise ConnectionRefusedError("no helper")
+
+    monkeypatch.setattr(system, "ask", away)
+    status, body = request(f"{server}/api/wifi")
+    assert status == 400 and b"no box" in body and b"Errno" not in body
+
+
 def test_setup_settings(agent):
     # the box's first person sets it up with its office's name and whether it reaches the internet
     with Server(agent, port=0) as server:
@@ -633,9 +704,15 @@ def test_setup_settings(agent):
         try:
             assert request(url, "POST", {"name": "Alkın", "office": 3})[0] == 400
             assert agent.store.people() == []  # nothing set up of a body refused
-            setup = {"name": "Alkın", "office": "Kanzlei Weber", "offline": True}
-            assert request(url, "POST", setup)[0] == 200
-            assert agent.settings() == {"offline": True, "office": "Kanzlei Weber", "address": True}
+            setup = {"name": "Alkın", "office": "Kanzlei Weber", "offline": True,
+                     "timezone": "Europe/Istanbul"}  # fmt: skip
+            assert request(url, "POST", setup)[0] == 200  # no helper here: its own zone kept
+            assert agent.settings() == {
+                "offline": True,
+                "office": "Kanzlei Weber",
+                "address": True,
+                "timezone": ZONE,
+            }
         finally:
             server.shutdown()
 
@@ -649,7 +726,7 @@ def test_box(agent, engine):
             status, body = request(url)
             assert status == 200 and json.loads(body) == {
                 "empty": True, "offline": False, "office": None, "address": True,
-                "model": {"id": "fake", "status": "loaded"},
+                "timezone": ZONE, "model": {"id": "fake", "status": "loaded"},
             }  # fmt: skip
             assert request(url, Host="k7x2qm.leatbox.net")[0] == 404
         finally:
@@ -1307,7 +1384,13 @@ def test_events(server, agent, engine):
     assert event() == {"type": "files", "project": None, "files": []}
     assert event()["type"] == "accounts"  # the owner's
     assert event()["type"] == "models"
-    assert event() == {"type": "settings", "offline": False, "office": None, "address": True}
+    assert event() == {
+        "type": "settings",
+        "offline": False,
+        "office": None,
+        "address": True,
+        "timezone": ZONE,
+    }
     engine.replies.put(REPLY)
     id = agent.send(None, "Hi", person=1)
     assert event()["conversation"]["id"] == id

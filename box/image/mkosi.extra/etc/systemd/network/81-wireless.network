@@ -1,0 +1,14 @@
+# every Wi-Fi link iwd joins, by DHCP, the box answering at leat.local, a wired link its way out
+# whenever it has one
+[Match]
+Type=wlan
+
+[Network]
+DHCP=yes
+MulticastDNS=yes
+
+[DHCPv4]
+RouteMetric=2048
+
+[IPv6AcceptRA]
+RouteMetric=2048

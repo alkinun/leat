@@ -21,7 +21,7 @@ let me = null; // the person whose this device is: {person, name, owner, device}
 let accounts = null; // the owner's to manage: the people and their devices, and those asking
 // the box's settings, as its owner chose them: whether it is kept from the internet, its office's
 // name, and whether its screen shows its address
-let settings = { offline: false, office: null, address: true };
+let settings = { offline: false, office: null, address: true, timezone: null };
 // the conversations whose turns ended while another was shown, as this device saw them
 const unread = new Set(JSON.parse(localStorage.getItem("leat.unread") ?? "[]"));
 let models = [], loading = null, unreachable = null; // the engine's, a model it loads, or why not
@@ -236,7 +236,8 @@ function setup() {
       if (step.needed && !chosen[step.key]) return input.focus();
       if (at < steps.length - 1) return show(at + 1);
       try {
-        await post("/api/setup", { name: chosen.name, office: chosen.office || null, offline: chosen.offline });
+        const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone; // this device's, the box's too
+        await post("/api/setup", { name: chosen.name, office: chosen.office || null, offline: chosen.offline, timezone });
         location.reload();
       } catch (error) {
         refusal.textContent = error.message;
@@ -348,7 +349,8 @@ function handle(event) {
       renderAccounts();
       return;
     case "settings":
-      settings = { offline: event.offline, office: event.office, address: event.address };
+      settings = { offline: event.offline, office: event.office, address: event.address,
+        timezone: event.timezone };
       renderInternet();
       renderBox();
       return;
@@ -862,6 +864,90 @@ function renderBox() {
   $("shown").textContent = settings.address
     ? "The box's screen shows its address, and a code a phone scans to open Leat."
     : "The box's screen says Leat is ready, without its address: tell the office where it is yourself.";
+  const zone = $("zone");
+  const zones = Intl.supportedValuesOf("timeZone");
+  if (settings.timezone && !zones.includes(settings.timezone)) zones.unshift(settings.timezone);
+  zone.replaceChildren(...zones.map((z) => Object.assign(element("option", "", z.replaceAll("_", " ")), { value: z })));
+  zone.value = settings.timezone ?? "";
+  zone.onchange = () => changeSettings({ timezone: zone.value });
+  if (!$("wifi").childElementCount) renderWifi();
+}
+
+// the box's Wi-Fi, the owner's to set: the networks in reach, found as asked, each joined of its
+// passphrase, the one the box is on forgotten; a cable stays its way out while it has one
+function renderWifi(found = null, error = "") {
+  const parts = [element("h3", "", "Wi-Fi")];
+  if (!found) {
+    const find = element("button", "quiet", "Find Wi-Fi networks");
+    find.type = "button";
+    find.onclick = () => scanWifi();
+    parts.push(find);
+  } else if (!found.radio) {
+    parts.push(element("p", "about", "This box has no Wi-Fi: it is on its network by cable."));
+  } else {
+    const list = element("ul");
+    for (const network of found.networks) {
+      const row = element("li");
+      const name = element("span", "", network.name);
+      const about = [["", "▂", "▂▄", "▂▄▆", "▂▄▆█"][network.strength], network.secure ? "secured" : "open"];
+      if (network.connected) about.push("connected");
+      row.append(name, element("span", "meta", about.filter(Boolean).join(" · ")));
+      if (network.connected) {
+        const forget = element("button", "quiet", "Forget");
+        forget.type = "button";
+        forget.onclick = () => del(`/api/wifi/${encodeURIComponent(network.name)}`).then(() => scanWifi());
+        row.append(forget);
+      } else {
+        row.onclick = () => joinWifi(row, network);
+      }
+      list.append(row);
+    }
+    if (!found.networks.length) list.append(element("li", "meta", "No Wi-Fi network is in reach."));
+    const again = element("button", "quiet", "Look again");
+    again.type = "button";
+    again.onclick = () => scanWifi();
+    parts.push(list, again);
+  }
+  if (error) parts.push(element("p", "error", error));
+  $("wifi").replaceChildren(...parts);
+}
+
+// the Wi-Fi networks in reach, as the box finds them
+async function scanWifi() {
+  $("wifi").querySelector("button")?.setAttribute("disabled", "");
+  try {
+    const response = await fetch("/api/wifi");
+    const found = await response.json();
+    if (!response.ok) throw new Error(found.error.message);
+    renderWifi(found);
+  } catch (error) {
+    renderWifi(null, error.message);
+  }
+}
+
+// a Wi-Fi network joined, of its passphrase if it asks for one, the box on it a few seconds after
+function joinWifi(row, network) {
+  if (row.querySelector("form")) return;
+  const form = element("form", "join");
+  const passphrase = Object.assign(element("input"), { type: "password", placeholder: "Passphrase",
+    autocomplete: "off", minLength: 8, maxLength: 63, required: true });
+  const join = element("button", "", "Join");
+  if (network.secure) form.append(passphrase);
+  form.append(join);
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    join.disabled = true;
+    try {
+      await post("/api/wifi", { name: network.name, passphrase: network.secure ? passphrase.value : null });
+      renderWifi({ radio: true, networks: [] }, "");
+      $("wifi").querySelector("ul").replaceChildren(element("li", "meta", `Joining ${network.name}…`));
+      setTimeout(scanWifi, 6000);
+    } catch (error) {
+      renderWifi(null, error.message);
+    }
+  };
+  row.append(form);
+  (network.secure ? passphrase : join).focus();
 }
 
 // changes the box's settings, which every app is told of as they change
