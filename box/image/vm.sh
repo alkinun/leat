@@ -1,7 +1,8 @@
 #!/bin/sh
 # Boots the image just built, as a fresh box would, in a VM of its own: a copy of the image on a
 # 24 GB disk, which its first boot partitions; its console logged to ~/.cache/leat-vm/serial.log;
-# SSH, HTTPS and HTTP forwarded to this machine's 2222, 9443 and 9080. Stops the VM it booted before.
+# SSH, HTTPS and HTTP forwarded to this machine's 2222, 9443 and 9080; its QEMU monitor, as for
+# screenshots of its display, at monitor.sock. Stops the VM it booted before.
 #
 #     box/image/vm.sh                  # then: ssh leat-vm (of ~/.ssh/config)
 #     box/image/vm.sh leat-box.json    # with a box's registration on its boot partition, as a
@@ -36,10 +37,20 @@ qemu-system-x86_64 -enable-kvm -cpu host -smp 4 -m 4G -machine q35 \
     -drive if=pflash,format=raw,file="$vm/vars.fd" \
     -drive file="$vm/disk.raw",format=raw,if=virtio \
     -nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:2222-:22,hostfwd=tcp:127.0.0.1:9443-:443,hostfwd=tcp:127.0.0.1:9080-:80 \
-    -display none -serial file:"$vm/serial.log" -monitor none -daemonize -pidfile "$vm/qemu.pid"
-for _ in $(seq 60); do
-    grep -q "Reached target.*Multi-User System" "$vm/serial.log" 2>/dev/null && break
+    -display none -serial file:"$vm/serial.log" -monitor unix:"$vm/monitor.sock",server,nowait \
+    -daemonize -pidfile "$vm/qemu.pid"
+# booted once it answers: by SSH, of a dev build, or its front door, of any provisioned one
+for _ in $(seq 90); do
+    if ssh -p 2222 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o LogLevel=ERROR -o ConnectTimeout=1 root@127.0.0.1 true 2>/dev/null; then
+        echo "booted: ssh leat-vm"
+        exit 0
+    fi
+    if curl -s -o /dev/null --max-time 1 http://127.0.0.1:9080/; then
+        echo "booted: no SSH, as a product build has none"
+        exit 0
+    fi
     sleep 1
 done
-grep -o "Reached target.*Multi-User System" "$vm/serial.log" >/dev/null && echo "booted: ssh leat-vm" \
-    || { echo "not booted in 60 s: see $vm/serial.log"; exit 1; }
+echo "no answer in 90 s: see $vm/serial.log"
+exit 1

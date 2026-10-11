@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from leat.box import address, provision
+from leat.box import address, provision, screen
 
 REGISTERED = {
     "id": "k7x2qm",
@@ -159,6 +159,43 @@ def test_ula(monkeypatch):
     assert address._ula("192.168.1.20") is None
 
 
+def test_screen():
+    # what the box's screen says of each state, ready once its certificate holds and the app answers
+    name = "k7x2qm.leatbox.net"
+    said = {
+        "no network": screen.State(name, None),
+        "not provisioned": screen.State(None, "192.168.1.20"),
+        "starting": screen.State(name, "192.168.1.20", certified=False, answering=True),
+        "set up": screen.State(name, "192.168.1.20", certified=True, answering=True, empty=True),
+        "ready": screen.State(name, "192.168.1.20", certified=True, answering=True),
+    }
+    lines = {
+        k: [
+            line.replace(screen.BOLD, "").replace(screen.PLAIN, "")
+            for line in screen.render(s, "##\n##")
+        ]
+        for k, s in said.items()
+    }
+    assert "No network" in lines["no network"] and "Not set up" in lines["not provisioned"]
+    assert lines["starting"][2:] == ["Starting...", "", f"https://{name}"]  # no QR code yet
+    assert "Open this address to set up your Leat" in lines["set up"]
+    assert lines["ready"][2] == "Ready" and f"https://{name}" in lines["ready"]
+    assert [line for line in lines["ready"] if line == "##"] == ["##", "##"]  # the QR code
+    assert "leat.local" in lines["ready"][-1]
+    # centred, the screen cleared first and the cursor hidden
+    drawn = screen.draw([f"{screen.BOLD}Leat{screen.PLAIN}", "", "Ready"], 20, 9)
+    assert drawn.startswith("\033[2J\033[H\033[?25l")
+    body = drawn.split("\033[?25l", 1)[1]
+    assert body == "\n" * 3 + f"        {screen.BOLD}Leat{screen.PLAIN}\n\n       Ready"
+
+
+def test_screen_name(tmp_path):
+    assert screen._name(tmp_path) is None
+    provision.provision(REGISTERED, tmp_path)
+    assert screen._name(tmp_path) == "k7x2qm.leatbox.net"
+    assert screen.look(tmp_path / "none").name is None
+
+
 def test_units():
     # the box's units run what this package has, as it reads its files
     box = Path(__file__).parent.parent / "box"
@@ -168,3 +205,5 @@ def test_units():
     updater = (box / "systemd/leat-address.service").read_text()
     assert "LoadCredential=registry-secret:/etc/leat/registry-secret" in updater
     assert "-m leat.box.address" in updater
+    shown = (box / "systemd/leat-screen.service").read_text()
+    assert "TTYPath=/dev/tty1" in shown and "-m leat.box.screen" in shown

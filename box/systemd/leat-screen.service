@@ -1,0 +1,27 @@
+[Unit]
+Description=The box's screen: whether it is ready, and the address to open
+# in place of a login on the box's display, which no box has
+Conflicts=getty@tty1.service
+After=systemd-user-sessions.service getty-pre.target leat-provision.service
+
+[Service]
+# a font read across a room, if the display takes it, the screen drawn in the console's own if not
+ExecStartPre=-+/usr/bin/setfont -C /dev/tty1 ter-i28b
+ExecStart=/opt/leat/.venv/bin/python -m leat.box.screen
+StandardInput=null
+StandardOutput=tty
+StandardError=journal
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+Restart=always
+RestartSec=2
+DynamicUser=yes
+SupplementaryGroups=tty
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

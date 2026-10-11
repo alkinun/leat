@@ -9,3 +9,6 @@ enable leat-searxng.service
 enable leat-proxy.service
 enable leat-address.service
 enable leat-address.timer
+enable leat-screen.service
+# no login on the box's display, whose screen leat-screen.service draws, nor on any other
+disable getty@.service

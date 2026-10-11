@@ -37,10 +37,15 @@ def addresses() -> dict[str, str | None]:
     """The box's addresses on its network: the IPv4 one it reaches others from, and an IPv6 unique
     local one of the same link, if it has one, not a VPN's, as Tailscale's. Raises OSError if it
     has no IPv4 address."""
+    found = ipv4()
+    return {"ipv4": found, "ipv6": _ula(found)}
+
+
+def ipv4() -> str:
+    """The IPv4 address the box reaches others from. Raises OSError if it has none."""
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         s.connect(_OUT)  # chooses a route, sending nothing
-        ipv4 = s.getsockname()[0]
-    return {"ipv4": ipv4, "ipv6": _ula(ipv4)}
+        return s.getsockname()[0]
 
 
 def _ula(ipv4: str) -> str | None:
