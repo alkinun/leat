@@ -17,11 +17,12 @@ forms are one, as ü and u, and ß is ss, as Switzerland writes it.
 With a transcriber, an image's text is read too, and a PDF's scanned pages', by the model that sees
 images; while none does, a PDF's scans are left unread, and read once one does, at rescan().
 
-With an embedder, each passage is embedded too, after its file is read, and a search finds them by
-what they mean as well as by their words: the passages likeliest by each, those by meaning MEANT
-similar at least and NEAR the most similar, ranked as their reciprocal ranks add up, as reciprocal
-rank fusion ranks them, so that a question finds a passage in other words or another language, and
-an invoice's number still finds its own.
+With an embedder, each passage is embedded too, after its file is read, and again by another
+embedding model once the embedder has one, and a search finds them by what they mean as well as by
+their words: the passages likeliest by each, those by meaning as similar as the embedding model's
+form has them, ranked as their reciprocal ranks add up, as reciprocal rank fusion ranks them, so
+that a question finds a passage in other words or another language, and an invoice's number still
+finds its own.
 """
 
 import collections
@@ -42,7 +43,7 @@ from leat.agent.embeddings import Embedder, similarity
 from leat.agent.ocr import Transcriber
 from leat.agent.workspace import Workspace
 
-VERSION = 5  # of the index's tables, and of the text it keeps: one of another is made anew
+VERSION = 6  # of the index's tables, and of the text it keeps: one of another is made anew
 PASSAGE = 1200  # characters of a passage at most
 FOUND = 8  # passages a search finds at most
 EACH = 3  # of one file at most
@@ -63,11 +64,6 @@ dann hat haben hatte gibt viel viele bitte
 COMMON = frozenset(_COMMON.split())
 SEEN = 200  # passages of the index past which its words in more than half of them are common
 CANDIDATES = 50  # passages found by their words, and by what they mean, before they are ranked
-# the similarity, a cosine, of a passage found by what it means, at least, and below the most
-# similar's at most: Qwen3-Embedding 0.6B's cosines of a firm's files and questions of them were
-# 0.46 to 0.60 of the files that answered and 0.36 to 0.56 of those that did not, but within 0.05
-# of the first only of those that came close to answering
-MEANT, NEAR = 0.45, 0.05
 FUSION = 60  # of reciprocal rank fusion: a rank's score is 1 / (FUSION + its rank)
 EMBEDDED = 32  # passages embedded at once
 _TABLES = """
@@ -85,7 +81,9 @@ CREATE VIRTUAL TABLE passages USING fts5 (
   words, text UNINDEXED, folder UNINDEXED, name UNINDEXED, place UNINDEXED, start UNINDEXED,
   tokenize = 'unicode61 remove_diacritics 2'
 );
-CREATE TABLE vectors (passage INTEGER PRIMARY KEY, folder TEXT NOT NULL, vector BLOB NOT NULL);
+CREATE TABLE vectors (
+  passage INTEGER PRIMARY KEY, folder TEXT NOT NULL, model TEXT NOT NULL, vector BLOB NOT NULL
+);
 CREATE INDEX vectors_folder ON vectors (folder);
 """
 # deletes the vectors of a file's passages, of its folder and name, before they are deleted
@@ -208,10 +206,12 @@ class Index:
                 (match, folder, file, CANDIDATES))]  # fmt: skip
 
     def _meant(self, folder: str, query: str, file: str | None) -> list[int]:
-        # the passages that mean what the query asks, MEANT similar at least, the likeliest
-        # first, by their rows; none without an embedder, or while it fails
+        # the passages that mean what the query asks, as similar as the embedding model's form
+        # has them, the likeliest first, by their rows, of the vectors the model made; none
+        # without an embedder, or while it fails
         if self.embedder is None or not self.embedder.available():
             return []
+        model, form = self.embedder.model, self.embedder.form
         try:
             asked = self.embedder.question(query)
         except EngineError:
@@ -219,10 +219,11 @@ class Index:
         with self._lock:
             rows = self._db.execute(
                 "SELECT v.passage, v.vector FROM vectors v JOIN passages p ON p.rowid = v.passage"
-                " WHERE v.folder = ?1 AND (?2 IS NULL OR p.name = ?2)", (folder, file),
+                " WHERE v.folder = ?1 AND v.model = ?2 AND (?3 IS NULL OR p.name = ?3)",
+                (folder, model, file),
             ).fetchall()  # fmt: skip
         scored = sorted(((similarity(asked, vector), row) for row, vector in rows), reverse=True)
-        least = max(MEANT, scored[0][0] - NEAR) if scored else MEANT
+        least = max(form.meant, scored[0][0] - form.near) if scored else form.meant
         return [row for score, row in scored[:CANDIDATES] if score >= least]
 
     def states(self, folder: str) -> dict[str, dict[str, str]]:
@@ -298,10 +299,14 @@ class Index:
         self._embed(folder)
 
     def _embed(self, folder: str) -> None:
-        # embeds a space's passages not yet embedded, EMBEDDED at a time, with the embedder if it
-        # embeds: those it fails to, at the next update
+        # embeds a space's passages not yet embedded by the embedder's model, EMBEDDED at a time,
+        # if it embeds, those of another model's vectors again: those it fails to, at the next
+        # update
         if self.embedder is None or not self.embedder.available():
             return
+        model = self.embedder.model
+        with self._lock:
+            self._db.execute("DELETE FROM vectors WHERE folder = ? AND model != ?", (folder, model))
         while True:
             with self._lock:
                 rows = self._db.execute(
@@ -318,9 +323,9 @@ class Index:
             with self._lock, self._db:  # those of passages still there, as a file may change
                 self._db.execute("BEGIN")
                 self._db.executemany(
-                    "INSERT OR REPLACE INTO vectors SELECT ?1, ?2, ?3"
+                    "INSERT OR REPLACE INTO vectors SELECT ?1, ?2, ?3, ?4"
                     " WHERE EXISTS (SELECT 1 FROM passages WHERE rowid = ?1)",
-                    [(row, folder, v) for (row, _), v in zip(rows, vectors, strict=True)],
+                    [(row, folder, model, v) for (row, _), v in zip(rows, vectors, strict=True)],
                 )
 
     def _read(self, space: Workspace, name: str) -> tuple[str, int]:

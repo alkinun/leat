@@ -11,6 +11,7 @@ from leat.agent import documents
 from leat.agent import index as index_module
 from leat.agent.agent import Agent, _system
 from leat.agent.client import Client
+from leat.agent.embeddings import GEMMA2, QWEN3, Embedder
 from leat.agent.index import COMMON, PASSAGE, Index, _match, fold, passages
 from leat.agent.store import Store
 from leat.agent.tools import Context, files
@@ -303,13 +304,14 @@ def test_transcriber(engine):
 class Meaning:
     """An embedder whose embeddings point along each concept a text names, in English or German,
     or, for a text that names none, along one of seven other directions, by its checksum; that may
-    fail."""
+    fail, and whose model may change."""
 
     CONCEPTS = [("rent", "miete"), ("deposit", "kaution"), ("notice", "kündigung")]
 
     def __init__(self):
         self.embedded: list[str] = []
         self.fails = False
+        self.model, self.form = "meaning", QWEN3
 
     def available(self) -> bool:
         return True
@@ -369,3 +371,38 @@ def test_meaning(workspace, tmp_path, monkeypatch):
     assert [f["place"] for f in index.search(space, "notice period")] == ["Kündigung"]
     count = index._db.execute("SELECT count(*) FROM vectors").fetchone()[0]
     assert count == 3  # the changed file's old passages' vectors gone
+    meaning.model, meaning.embedded = "another", []
+    assert index.search(space, "notice period") == []  # none of the new model's yet
+    index.update("people/1")
+    assert len(meaning.embedded) == 3  # each passage again, by the new model
+    assert [f["place"] for f in index.search(space, "notice period")] == ["Kündigung"]
+
+
+class Embeddings:
+    """An engine whose embedding model is `model`, which embeds every text alike, and keeps the
+    texts it was asked to embed."""
+
+    def __init__(self, model: str):
+        self.model, self.asked = model, []
+
+    def embed(self, texts):
+        self.asked += texts
+        return self.model, [[1.0] + [0.0] * 1023 for _ in texts]
+
+
+@pytest.mark.parametrize(
+    "model, form",
+    [("Qwen3-Embedding-0.6B-Q8_0", QWEN3), ("embeddinggemma-2-Q8_0", GEMMA2),
+     ("text-embedding-3-small", QWEN3)],
+)  # fmt: skip
+def test_embedder_forms(model, form):
+    # a question and a passage, each embedded as the engine's embedding model was taught, which
+    # its name tells, Qwen3-Embedding's by default; the embeddings cut to DIMS dimensions
+    engine = Embeddings(model)
+    embedder = Embedder(engine)  # type: ignore[arg-type]
+    assert embedder.available() and embedder.model == model and embedder.form == form
+    engine.asked = []
+    assert len(embedder.question("When is the rent due?")) == 4 * 512
+    embedder.passages(["Die Miete ist zum 3. fällig."])
+    assert engine.asked == [form.question.format("When is the rent due?"),
+                            form.passage.format("Die Miete ist zum 3. fällig.")]  # fmt: skip

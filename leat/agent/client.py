@@ -92,11 +92,12 @@ class Client:
         """Loads a model in place of the loaded one; returns once it is ready."""
         self._json("POST", "/v1/models/load", {"model": model})
 
-    def embed(self, texts: list[str]) -> list[list[float]]:
-        """Each text's embedding, by the embedding model the engine has beside its model. Raises
-        EngineError, of status 404 if it has none."""
-        data = self._json("POST", "/v1/embeddings", {"input": texts}).get("data", [])
-        return [d["embedding"] for d in sorted(data, key=lambda d: d["index"])]
+    def embed(self, texts: list[str]) -> tuple[str, list[list[float]]]:
+        """The name of the embedding model the engine has beside its model, as it gives it, and
+        each text's embedding by it. Raises EngineError, of status 404 if it has none."""
+        said = self._json("POST", "/v1/embeddings", {"input": texts})
+        data = sorted(said.get("data", []), key=lambda d: d["index"])
+        return str(said.get("model", "")), [d["embedding"] for d in data]
 
     def complete(self, body: dict[str, Any], person: int | None = None) -> Completion:
         """A chat completion of `body`, streamed, for a person of the box's, by their id, if it is
