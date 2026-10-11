@@ -1179,8 +1179,8 @@ def test_trust(server, engine):
 def test_named(agent):
     # a box served by its name, through the HTTPS proxy in front: that name alone, and loopback,
     # writes from https://<name>, and a cookie sent over HTTPS alone, to that name alone
-    name = "k7x2.leatbox.net"
-    with Server(agent, port=0, name="K7X2.leatbox.net") as server:
+    name = "k7x2qm.leatbox.net"
+    with Server(agent, port=0, name="K7X2QM.leatbox.net") as server:
         threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True).start()
         port = server.server_port
 
@@ -1226,6 +1226,7 @@ def test_headers(server):
         assert response.headers["Referrer-Policy"] == "no-referrer"
         assert response.headers["X-Content-Type-Options"] == "nosniff"
         assert response.headers["Strict-Transport-Security"] is None
+        assert response.headers["Server"] == "leat"
         assert b"<script>" not in response.read()  # none within the page, which the policy runs not
     with urllib.request.urlopen(f"{server}/mode.js") as response:
         assert response.headers["Content-Type"] == "text/javascript; charset=utf-8"

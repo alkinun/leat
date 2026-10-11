@@ -1,0 +1,10 @@
+[Unit]
+Description=Point the box's name at its address, at boot and every few minutes
+
+[Timer]
+OnBootSec=20s
+OnUnitActiveSec=5min
+RandomizedDelaySec=30s
+
+[Install]
+WantedBy=timers.target

@@ -60,7 +60,7 @@ def main(argv: list[str] | None = None) -> None:
     agent.add_argument("--port", type=int, default=8000)
     agent.add_argument(
         "--name", type=_name,
-        help="the box's name, as k7x2.leatbox.net, which the HTTPS proxy in front of the agent "
+        help="the box's name, as k7x2qm.leatbox.net, which the HTTPS proxy in front of the agent "
         "serves it at: it then answers that name alone, and this machine, as --host must be",
     )  # fmt: skip
     agent.add_argument(
@@ -217,10 +217,10 @@ _NAME = re.compile(r"(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))+")
 
 
 def _name(text: str) -> str:
-    # a box's name, as k7x2.leatbox.net: a name a certificate can be of, not an address
+    # a box's name, as k7x2qm.leatbox.net: a name a certificate can be of, not an address
     name = text.strip().lower().rstrip(".")
     if not _NAME.fullmatch(name) or name.endswith(".local") or name.replace(".", "").isdigit():
-        raise argparse.ArgumentTypeError(f"must be a host's name, as k7x2.leatbox.net, not {text}")
+        raise argparse.ArgumentTypeError(f"must be a name, as k7x2qm.leatbox.net, not {text}")
     return name
 
 

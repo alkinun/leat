@@ -5,7 +5,7 @@ It answers this machine and its own network alone. A request must name the box b
 a local name, which a site's page turned on the box by DNS rebinding cannot; and a write must come
 from the app's own page, or from no browser, not from another site's page.
 
-On a box, the server is reached by its name, as k7x2.leatbox.net, through the proxy in front of it
+On a box, the server is reached by its name, as k7x2qm.leatbox.net, through the proxy in front of it
 that serves the name over HTTPS, with a certificate of its own: it then answers that name alone,
 and loopback, as the box's own screen asks; writes come from https://<name>; and a device's cookie
 is sent over HTTPS alone, to exactly that name. Every page of the app runs its own scripts, styles
@@ -100,7 +100,7 @@ _FILE = re.compile(r"/(?:api/)?(?:projects/([0-9a-f]{12})/)?files/(.+)")
 
 class Server(ThreadingHTTPServer):
     """Serves `agent` at http://host:port, until shut down, to the devices of its people; of a
-    `name`, as k7x2.leatbox.net, behind the proxy that serves it at https://name."""
+    `name`, as k7x2qm.leatbox.net, behind the proxy that serves it at https://name."""
 
     daemon_threads = True  # event streams end with the server
 
@@ -129,6 +129,9 @@ class _Refused(Exception):
 
 class _Handler(BaseHTTPRequestHandler):
     server: Server
+
+    def version_string(self) -> str:
+        return "leat"  # of every answer, which tells no versions
 
     def do_GET(self) -> None:
         if not self._trusted():

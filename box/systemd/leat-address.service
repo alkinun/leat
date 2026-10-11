@@ -1,0 +1,16 @@
+[Unit]
+Description=Point the box's name at its address on the office's network
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+LoadCredential=registry-secret:/etc/leat/registry-secret
+ExecStart=/opt/leat/.venv/bin/python -m leat.box.address --state /var/lib/leat-address
+DynamicUser=yes
+StateDirectory=leat-address
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
