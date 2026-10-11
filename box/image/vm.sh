@@ -1,6 +1,6 @@
 #!/bin/sh
 # Boots the image just built, as a fresh box would, in a VM of its own: a copy of the image on a
-# 24 GB disk, which its first boot partitions; its console logged to ~/.cache/leat-vm/serial.log;
+# 24 GB disk, which its first boot partitions; its serial port logged to ~/.cache/leat-vm/serial.log;
 # SSH, HTTPS and HTTP forwarded to this machine's 2222, 9443 and 9080; its QEMU monitor, as for
 # screenshots of its display, at monitor.sock. Stops the VM it booted before.
 #

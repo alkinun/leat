@@ -1,15 +1,18 @@
 """The box's screen: what a display plugged into it shows, in place of a login, which no box has.
 
-    python -m leat.box.screen      # by leat-screen.service, on tty1
+    python -m leat.box.screen          # by leat-screen.service, on tty2
+    python -m leat.box.screen --take   # as root, before: the display the screen's alone
 
 It says, in a few large words, whether the box is ready, and the address to open, with a QR code of
 it for a phone: starting, without a network, not provisioned, ready for its first person to set it
 up, or ready. Ready is said once a browser would find it so: the box's certificate, checked as a
-browser checks it, of its name, and the app answering behind it. It is drawn again only as it
-changes, every few seconds.
+browser checks it, of its name, and the app answering behind it. It is drawn again as it changes,
+looked at every few seconds, and every minute whatever, should anything have written over it.
 """
 
+import argparse
 import contextlib
+import fcntl
 import functools
 import json
 import shutil
@@ -27,8 +30,12 @@ from leat.box.address import ipv4
 from leat.box.provision import ROOT
 
 EVERY = 3  # seconds between looks
+AGAIN = 60  # seconds after which the screen is drawn again, unchanged
 BOLD, PLAIN = "\033[1;97m", "\033[0m"  # of the words that matter: bright white, bold
 AGENT = "http://127.0.0.1:8000"  # leat agent, behind Caddy
+TTY = "/dev/tty2"  # the screen's virtual console: the boot's messages are on the first
+FONT = "ter-i28b"  # Terminus, of 28 pixels, bold, with QR codes' half blocks and German's letters
+_TIOCLINUX, _KMSG_REDIRECT = 0x541C, 11  # the ioctl that sends the kernel's messages to a console
 
 
 @dataclass(frozen=True)
@@ -101,6 +108,17 @@ def qr(text: str) -> str:
     return ""
 
 
+def take(tty: str = TTY, font: str = FONT) -> None:
+    """Takes the display, as root: shows the screen's console, in its font if the display takes it,
+    and sends the kernel's messages to the first console, which the kernel would otherwise write
+    over whatever console the display shows, as it did over the QR code."""
+    number = tty.removeprefix("/dev/tty")
+    subprocess.run(["chvt", number], check=False)
+    subprocess.run(["setfont", "-C", tty, font], check=False, capture_output=True)
+    with open(tty, "w") as console:
+        fcntl.ioctl(console, _TIOCLINUX, bytes([_KMSG_REDIRECT, 1]))
+
+
 def _shown(line: str) -> int:
     # the characters a line takes on the screen, its styles' codes but none
     return len(line.replace(BOLD, "").replace(PLAIN, ""))
@@ -151,17 +169,23 @@ def _app(name: str) -> tuple[bool, bool]:
 
 def main() -> None:
     shown: tuple[list[str], int, int] | None = None
+    drawn = 0.0
     while True:
         state = look()
         lines = render(state, qr(f"https://{state.name}") if state.name else "")
         width, height = shutil.get_terminal_size((80, 25))
-        if (lines, width, height) != shown:
+        if (lines, width, height) != shown or time.monotonic() - drawn > AGAIN:
             sys.stdout.write(draw(lines, width, height))
             sys.stdout.flush()
-            shown = (lines, width, height)
+            shown, drawn = (lines, width, height), time.monotonic()
         time.sleep(EVERY)
 
 
 if __name__ == "__main__":
-    with contextlib.suppress(KeyboardInterrupt):
-        main()
+    parser = argparse.ArgumentParser(prog="python -m leat.box.screen", description=__doc__)
+    parser.add_argument("--take", action="store_true", help="take the display, as root, and end")
+    if parser.parse_args().take:
+        take()
+    else:
+        with contextlib.suppress(KeyboardInterrupt):
+            main()

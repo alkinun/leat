@@ -133,6 +133,9 @@ class _Handler(BaseHTTPRequestHandler):
     def version_string(self) -> str:
         return "leat"  # of every answer, which tells no versions
 
+    def log_message(self, format: str, *args: Any) -> None:
+        pass  # no access log: which device asked for what, and when, is kept nowhere
+
     def do_GET(self) -> None:
         if not self._trusted():
             return self._error(403, "this server answers its own network's requests alone")

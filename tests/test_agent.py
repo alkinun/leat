@@ -1218,6 +1218,14 @@ def test_named(agent):
             server.shutdown()
 
 
+def test_quiet(server, capsys):
+    # no line of each request, which would keep which device asked for what, and when
+    capsys.readouterr()
+    for path in ("/", "/api/me", "/api/nothing"):
+        request(f"{server}{path}")
+    assert capsys.readouterr().err == ""
+
+
 def test_headers(server):
     # every page of the app's runs its own scripts, styles and images alone, in no other's frame,
     # and tells no site it links to its address; without a name, the box is no HTTPS one

@@ -1,4 +1,5 @@
 import base64
+import io
 import json
 import subprocess
 import threading
@@ -189,6 +190,18 @@ def test_screen():
     assert body == "\n" * 3 + f"        {screen.BOLD}Leat{screen.PLAIN}\n\n       Ready"
 
 
+def test_screen_take(monkeypatch):
+    # the screen's console shown, in its font, and the kernel's messages sent to the first
+    ran, ioctls, opened = [], [], []
+    monkeypatch.setattr(screen.subprocess, "run", lambda args, **kw: ran.append(args))
+    monkeypatch.setattr(screen.fcntl, "ioctl", lambda fd, op, arg: ioctls.append((op, arg)))
+    monkeypatch.setattr(screen, "open", lambda path, mode: opened.append(path) or io.StringIO(),
+                        raising=False)  # fmt: skip
+    screen.take()
+    assert ran == [["chvt", "2"], ["setfont", "-C", "/dev/tty2", "ter-i28b"]]
+    assert opened == ["/dev/tty2"] and ioctls == [(0x541C, bytes([11, 1]))]
+
+
 def test_screen_name(tmp_path):
     assert screen._name(tmp_path) is None
     provision.provision(REGISTERED, tmp_path)
@@ -206,4 +219,4 @@ def test_units():
     assert "LoadCredential=registry-secret:/etc/leat/registry-secret" in updater
     assert "-m leat.box.address" in updater
     shown = (box / "systemd/leat-screen.service").read_text()
-    assert "TTYPath=/dev/tty1" in shown and "-m leat.box.screen" in shown
+    assert "TTYPath=/dev/tty2" in shown and "-m leat.box.screen --take" in shown

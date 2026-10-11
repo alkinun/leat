@@ -1,17 +1,18 @@
 [Unit]
 Description=The box's screen: whether it is ready, and the address to open
 # in place of a login on the box's display, which no box has
-Conflicts=getty@tty1.service
+Conflicts=getty@tty2.service
 After=systemd-user-sessions.service getty-pre.target leat-provision.service
 
 [Service]
-# a font read across a room, if the display takes it, the screen drawn in the console's own if not
-ExecStartPre=-+/usr/bin/setfont -C /dev/tty1 ter-i28b
+# on a virtual console of its own, which the display shows, in a font read across a room, the kernel's
+# and the boot's messages sent to the first, never written over it
+ExecStartPre=+/opt/leat/.venv/bin/python -m leat.box.screen --take
 ExecStart=/opt/leat/.venv/bin/python -m leat.box.screen
 StandardInput=null
 StandardOutput=tty
 StandardError=journal
-TTYPath=/dev/tty1
+TTYPath=/dev/tty2
 TTYReset=yes
 TTYVHangup=yes
 Restart=always
