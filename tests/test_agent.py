@@ -19,6 +19,7 @@ from unittest.mock import ANY
 import pytest
 
 from leat.agent import background, context
+from leat.agent.accounts import CODE, Accounts
 from leat.agent.agent import LAST, Agent, Busy, NotFound, Refused
 from leat.agent.client import Client, EngineError
 from leat.agent.context import message as _api
@@ -390,13 +391,13 @@ def test_rounds(agent, engine, events, monkeypatch):
 
 
 def test_people(agent, engine, events):
-    # all that was no one's becomes the first person's, the owner's; then each person's
+    # all that was no one's becomes the first person's, an admin's; then each person's
     # conversations are their own, and each event says whose it is
     engine.replies.put(REPLY)
     before = agent.send(None, "Hi")
     until(events, ended)
     owner, ada = agent.store.add_person("Alkın"), agent.store.add_person("Ada")
-    assert (owner["owner"], ada["owner"]) == (1, 0)
+    assert (owner["admin"], ada["admin"]) == (1, 0)
     assert [c["id"] for c in agent.conversations(owner["id"])] == [before]
     assert agent.conversations(ada["id"]) == [] and agent.conversations() == []
     engine.replies.put(REPLY)
@@ -727,8 +728,34 @@ def test_box(agent, engine):
             assert status == 200 and json.loads(body) == {
                 "empty": True, "offline": False, "office": None, "address": True,
                 "timezone": ZONE, "model": {"id": "fake", "status": "loaded"},
+                "setup": server.accounts.code,
             }  # fmt: skip
             assert request(url, Host="k7x2qm.leatbox.net")[0] == 404
+        finally:
+            server.shutdown()
+
+
+def test_setup_code(agent):
+    # a box is set up by the code its screen shows alone, as typed, of any case and spacing; a few
+    # wrong, and it shows another; once set up, it shows none
+    with Server(agent, port=0, name="k7x2qm.leatbox.net") as server:
+        threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True).start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        try:
+            status, body = request(f"{base}/api/me")
+            assert status == 401 and json.loads(body)["locked"] is True
+            first = server.accounts.code
+            assert len(first) == 6 and set(first) <= set(CODE)
+            for code in (None, "", "AAAAAA", "AAAAAA"):
+                status, body = request(f"{base}/api/setup", "POST", {"name": "Alkın", "code": code})
+                assert status == 403 and b"not the setup code" in body
+            assert server.accounts.code == first
+            status, body = request(f"{base}/api/setup", "POST", {"name": "Alkın", "code": "AAAAAA"})
+            assert status == 403 and b"shows a new one" in body and server.accounts.code != first
+            typed = f"{server.accounts.code[:3].lower()} {server.accounts.code[3:]}"
+            status, _ = request(f"{base}/api/setup", "POST", {"name": "Alkın", "code": typed})
+            assert status == 200 and agent.store.people()[0]["admin"] == 1
+            assert "setup" not in json.loads(request(f"{base}/api/box")[1])
         finally:
             server.shutdown()
 
@@ -1208,8 +1235,8 @@ def test_api_busy(server, engine, events):
 
 
 def test_joining(server, agent, engine, events):
-    # a device asks to join, showing a code the owner's device shows too; let in as a new person,
-    # it sees their own alone, may not do what the owner alone may, and is unpaired by the owner
+    # a device asks to join, showing a code the admin's device shows too; let in as a new person,
+    # it sees their own alone, may not do what admins alone may, and is unpaired by the admin
     jar = urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
     phone = urllib.request.build_opener(jar)
 
@@ -1222,7 +1249,7 @@ def test_joining(server, agent, engine, events):
             return e.code, json.loads(e.read())
 
     assert ask("/api/me") == (401, {"error": {"message": ANY}, "empty": False})
-    assert ask("/api/setup", "POST", {"name": "Eve"})[0] == 400  # the box has its owner
+    assert ask("/api/setup", "POST", {"name": "Eve"})[0] == 400  # the box is set up
     status, asked = ask("/api/pairings", "POST", {"name": "Ada"})
     assert status == 200 and len(asked["code"]) == 6
     connection = http.client.HTTPConnection(server.replace("http://", ""))
@@ -1242,8 +1269,8 @@ def test_joining(server, agent, engine, events):
     assert status == 200 and json.loads(ada)["name"] == "Ada"
     assert ask(f"/api/pairings/{asked['id']}", "POST")[0] == 200  # its cookie, taken once
     assert ask(f"/api/pairings/{asked['id']}", "POST")[0] == 404
-    assert ask("/api/me") == (200, {"person": 2, "name": "Ada", "owner": False, "device": 2})
-    # Ada's own alone: her events tell of her conversations, not the owner's
+    assert ask("/api/me") == (200, {"person": 2, "name": "Ada", "admin": False, "device": 2})
+    # Ada's own alone: her events tell of her conversations, not the admin's
     adas = "; ".join(f"{c.name}={c.value}" for c in jar.cookiejar)
     connection = http.client.HTTPConnection(server.replace("http://", ""))
     connection.request("GET", "/api/events", headers={"Cookie": adas})
@@ -1260,14 +1287,14 @@ def test_joining(server, agent, engine, events):
         if (line := stream.readline()).startswith(b"data: "):
             told.append(json.loads(line[6:]))
     assert told[0] == {"type": "conversations", "conversations": []}
-    assert told[-1]["conversation"]["id"] == mine["id"]  # the owner's never told
+    assert told[-1]["conversation"]["id"] == mine["id"]  # the admin's never told
     connection.close()
     for path, body in [("/api/models/load", {"model": "fake"}),
                        ("/api/pairings/0123456789abcdef/allow", {})]:  # fmt: skip
         assert ask(path, "POST", body)[0] in (403, 404)
     assert ask("/api/models/load", "POST", {"model": "fake"})[0] == 403
     assert ask("/api/people/1", "DELETE")[0] == 403
-    # unpaired by the owner, it must ask again; and removed, with all that is hers
+    # unpaired by the admin, it must ask again; and removed, with all that is hers
     (device,) = [d["id"] for d in agent.store.devices() if d["person"] == 2]
     connection = http.client.HTTPConnection(server.replace("http://", ""), timeout=5)
     connection.request("GET", "/api/events", headers={"Cookie": adas})
@@ -1275,12 +1302,127 @@ def test_joining(server, agent, engine, events):
     assert request(f"{server}/api/devices/{device}", "DELETE")[0] == 200
     assert ask("/api/me")[0] == 401
     time.sleep(1.1)  # the stream open before ends, at the next event past a second
-    agent.events.publish({"type": "files", "files": [], "to": "owner"})
+    agent.events.publish({"type": "files", "files": [], "to": "admins"})
     assert stream.read().endswith(b"\n\n")  # to its end, which the server closed
     connection.close()
     assert request(f"{server}/api/people/2", "DELETE")[0] == 200
     assert agent.store.person(2) is None and agent.conversations(2) == []
-    assert request(f"{server}/api/people/1", "DELETE")[0] == 400  # the owner
+    assert request(f"{server}/api/people/1", "DELETE")[0] == 400  # themselves
+
+
+def device(server: str) -> Callable[..., tuple[int, Any]]:
+    """A device of its own cookies, not yet paired: a request of it, and its answer's JSON."""
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
+    )
+
+    def ask(path: str, method: str = "GET", body: Any = None) -> tuple[int, Any]:
+        data = None if body is None else json.dumps(body).encode()
+        try:
+            with opener.open(urllib.request.Request(f"{server}{path}", data, method=method)) as r:
+                return r.status, json.loads(r.read() or b"{}")
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    return ask
+
+
+def joining(server: str, name: str, allow: Callable[..., tuple[int, Any]],
+            person: int | None = None) -> tuple[int, Callable[..., tuple[int, Any]]]:  # fmt: skip
+    """A new device asking to join as a name, let in by `allow`, a paired device's request, as
+    someone new or a person: the status it answered, and the device."""
+    new = device(server)
+    _, asked = new("/api/pairings", "POST", {"name": name})
+    chosen = {} if person is None else {"person": person}
+    status, _ = allow(f"/api/pairings/{asked['id']}/allow", "POST", chosen)
+    if status == 200:
+        assert new(f"/api/pairings/{asked['id']}", "POST")[0] == 200
+    return status, new
+
+
+def test_own_devices(server, agent):
+    # a person lets in a new device of their own, as they are, admin or not; an admin lets in
+    # someone new, or someone whose every device is gone, never as someone with one
+    admin = device(server)  # serving()'s device, as the requests of this module send its cookie
+
+    def admins(path: str, method: str = "GET", body: Any = None) -> tuple[int, Any]:
+        status, answer = request(f"{server}{path}", method, body)
+        return status, json.loads(answer or b"{}")
+
+    status, phone = joining(server, "Ada", admins)
+    assert status == 200 and phone("/api/me")[1]["person"] == 2
+    status, laptop = joining(server, "Ada's laptop", phone, person=2)  # hers, from her phone
+    assert status == 200 and laptop("/api/me")[1] == {
+        "person": 2, "name": "Ada", "admin": False, "device": 3}  # fmt: skip
+    assert joining(server, "Eve", phone)[0] == 403  # someone new: an admin's to let in
+    assert joining(server, "Alkın", phone, person=1)[0] == 403  # as another: never
+    assert joining(server, "Ada", admins, person=2)[0] == 403  # as Ada, while she has devices
+    assert joining(server, "Ada", admins, person=9)[0] == 404
+    # her devices lost, and unpaired, by her admin, Ada is let in again by them
+    for d in [d for d in agent.store.devices() if d["person"] == 2]:
+        assert admins(f"/api/devices/{d['id']}", "DELETE")[0] == 200
+    status, again = joining(server, "Ada", admins, person=2)
+    assert status == 200 and again("/api/me")[1]["name"] == "Ada"
+    # a person unpairs a device of their own, not another's
+    (alkins,) = [d["id"] for d in agent.store.devices() if d["person"] == 1]
+    status, other = joining(server, "Ada's tablet", again, person=2)
+    tablet = max(d["id"] for d in agent.store.devices())
+    assert again(f"/api/devices/{alkins}", "DELETE")[0] == 403
+    assert again(f"/api/devices/{tablet}", "DELETE")[0] == 200 and other("/api/me")[0] == 401
+    assert admin("/api/me")[0] == 401  # a device of no cookie
+
+
+def test_admins(server, agent):
+    # an admin makes others admins, or not, and renames anyone; a person renames themselves; the
+    # box has an admin always; each noted
+    def admins(path: str, method: str = "GET", body: Any = None) -> tuple[int, Any]:
+        status, answer = request(f"{server}{path}", method, body)
+        return status, json.loads(answer or b"{}")
+
+    _, ada = joining(server, "Ada", admins)
+    assert ada("/api/people/2", "PATCH", {"name": "Ada Lovelace"})[0] == 200
+    assert ada("/api/people/1", "PATCH", {"name": "Al"})[0] == 403
+    assert ada("/api/people/2", "PATCH", {"admin": True})[0] == 403
+    assert ada("/api/overview")[0] == 403
+    for body in ({"admin": "yes"}, {"owner": True}, {"name": " "}):
+        assert admins("/api/people/2", "PATCH", body)[0] == 400
+    assert admins("/api/people/9", "PATCH", {"name": "No one"})[0] == 404
+    status, made = admins("/api/people/2", "PATCH", {"admin": True})
+    assert status == 200 and made["admin"] == 1 and made["name"] == "Ada Lovelace"
+    assert ada("/api/me")[1]["admin"] is True and ada("/api/overview")[0] == 200
+    # Alkın steps down; Ada, the last admin, may not, nor be removed
+    assert admins("/api/people/1", "PATCH", {"admin": False})[0] == 200
+    assert admins("/api/overview")[0] == 403
+    status, said = ada("/api/people/2", "PATCH", {"admin": False})
+    assert status == 400 and "needs an admin" in said["error"]["message"]
+    assert ada("/api/people/2", "DELETE")[0] == 400  # themselves
+    assert agent.store.person(2)["admin"] == 1  # the refusal changed nothing
+    assert ada("/api/people/1", "PATCH", {"name": "Al", "admin": True})[0] == 200
+    seen = [(a["person"], a["action"], a["detail"]) for a in agent.store.activity()[:5]]
+    assert seen == [
+        ("Ada Lovelace", "made an admin", "Al"),
+        ("Ada Lovelace", "renamed", "Alkın as Al"),
+        ("Al", "made no longer an admin", "Alkın"),  # who did it, by their name now
+        ("Al", "made an admin", "Ada Lovelace"),
+        ("Ada Lovelace", "renamed", "Ada as Ada Lovelace"),
+    ]  # fmt: skip
+
+
+def test_accounts_seen(agent):
+    # the accounts as each device sees them: an admin, everyone's devices; anyone else, their
+    # own alone; and the requests to join, which anyone may let in as their own
+    accounts = Accounts(agent)
+    accounts.setup("Alkın", "Phone")
+    accounts.allow(accounts.ask("Ada", "Laptop")["id"], {"person": 1, "admin": True})
+    asked = accounts.ask("Eve", "Tablet")
+    of = {d["person"]: d for d in agent.store.devices()}
+    mine = accounts.state(of[1] | {"name": "Alkın", "admin": True})
+    hers = accounts.state(of[2] | {"name": "Ada", "admin": False})
+    assert [(p["name"], p["admin"], len(p["devices"])) for p in mine["people"]] == [
+        ("Alkın", True, 1), ("Ada", False, 1)]  # fmt: skip
+    assert [len(p["devices"]) for p in hers["people"]] == [0, 1]
+    assert hers["me"] == {"person": 2, "name": "Ada", "admin": False, "device": of[2]["id"]}
+    assert [r["code"] for r in hers["requests"]] == [asked["code"]]
 
 
 def test_trust(server, engine):
@@ -1327,7 +1469,7 @@ def test_named(agent):
             assert response.headers["Strict-Transport-Security"] == HSTS
             assert response.headers["Content-Security-Policy"] == POLICY
             assert response.headers["Referrer-Policy"] == "no-referrer"
-            setup = {"name": "Alkın"}
+            setup = {"name": "Alkın", "code": server.accounts.code}  # as its screen shows
             evil = ("https://evil.example", f"https://{name}.evil.example")
             for origin in (f"http://{name}", *evil):
                 assert ask("POST", "/api/setup", setup, Origin=origin).status == 403

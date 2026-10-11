@@ -8,9 +8,10 @@ conversation is named by the model once.
 A conversation's context is the state of what its prompt keeps of it, as leat.agent.context fits it
 to the model's.
 
-The accounts are the box's people, the first its owner, and the devices paired to each, known by the
-hash of a secret each holds. A conversation is a person's. Before the box has its first person,
-every conversation is no one's, and becomes the owner's.
+The accounts are the box's people, its admins among them, the first always, and the devices paired
+to each, known by the hash of a secret each holds. The box has an admin always, once it has a
+person. A conversation is a person's. Before the box has its first person, every conversation is
+no one's, and becomes theirs.
 
 A project is a client's or a matter's: its files, instructions for the model, and the conversations
 held in it. It is a person's own, or shared with everyone on the box; a conversation in it is still
@@ -23,7 +24,7 @@ the person who set it, counted from when it was set or last ran.
 The settings are the box's, each a value of JSON by its key, as whether it is kept from the
 internet.
 
-The activity is what was done on the box, by whom, and where, as its owner looks back on it: a
+The activity is what was done on the box, by whom, and where, as its admins look back on it: a
 chat begun, a file uploaded or read for one, a project shared; never what anyone asked, nor what
 was answered. It is kept a year.
 """
@@ -270,6 +271,10 @@ _MIGRATIONS = [
     ALTER TABLE workflows ADD COLUMN since REAL;
     ALTER TABLE workflows ADD COLUMN by INTEGER REFERENCES people (id) ON DELETE SET NULL;
     """,
+    # the box's admins, of whom there may be several, as the one owner was
+    """
+    ALTER TABLE people RENAME COLUMN owner TO admin
+    """,
 ]
 KEPT = 365 * 86400  # seconds the activity is kept
 # a conversation's columns as the apps list it
@@ -465,7 +470,7 @@ class Store:
 
     def use(self, since: float) -> list[dict[str, Any]]:
         """Each person's use since a time: the conversations they began, and the messages they
-        sent, counted alone, not read; the owner first."""
+        sent, counted alone, not read; the first person first."""
         sql = """
           SELECT p.id, p.name,
             (SELECT count(*) FROM conversations c WHERE c.person = p.id AND c.created >= ?1) chats,
@@ -512,22 +517,22 @@ class Store:
             self._query(sql, key, json.dumps(value, ensure_ascii=False))
 
     def people(self) -> list[dict[str, Any]]:
-        """The box's people, the owner first."""
+        """The box's people, the first first."""
         return [dict(row) for row in self._query("SELECT * FROM people ORDER BY id")]
 
     def person(self, id: int) -> dict[str, Any] | None:
         rows = self._query("SELECT * FROM people WHERE id = ?", id)
         return dict(rows[0]) if rows else None
 
-    def add_person(self, name: str) -> dict[str, Any]:
-        """A new person of the box's; the first its owner, whose every conversation and project
-        that was no one's becomes."""
+    def add_person(self, name: str, admin: bool = False) -> dict[str, Any]:
+        """A new person of the box's, an admin or not; the first an admin always, whose every
+        conversation and project that was no one's becomes."""
         with self._lock, self._db:
             self._db.execute("BEGIN")
             first = self._db.execute("SELECT count(*) FROM people").fetchone()[0] == 0
             person = self._row(
-                "INSERT INTO people (name, owner, created) VALUES (?, ?, ?) RETURNING *",
-                name, int(first), time.time(),
+                "INSERT INTO people (name, admin, created) VALUES (?, ?, ?) RETURNING *",
+                name, int(first or admin), time.time(),
             )  # fmt: skip
             assert person is not None
             if first:
@@ -536,21 +541,37 @@ class Store:
                     self._db.execute(sql, (person["id"],))
         return person
 
-    def remove_person(self, id: int) -> None:
-        """Removes a person who is not the owner, and all that is theirs: their conversations,
-        devices and own projects, with the conversations in those. The projects they shared
-        become the owner's."""
+    def rename(self, id: int, name: str) -> bool:
+        """Renames a person; whether there is one of the id."""
+        return bool(self._query("UPDATE people SET name = ? WHERE id = ? RETURNING id", name, id))
+
+    def set_admin(self, id: int, admin: bool) -> None:
+        """Makes a person an admin, or no longer one. Raises LookupError if there is no such
+        person, ValueError of the last admin, as the box has one always."""
+        with self._lock, self._db:
+            self._db.execute("BEGIN")
+            if self._row("SELECT id FROM people WHERE id = ?", id) is None:
+                raise LookupError(f"there is no person {id}")
+            self._db.execute("UPDATE people SET admin = ? WHERE id = ?", (int(admin), id))
+            if not self._db.execute("SELECT count(*) FROM people WHERE admin").fetchone()[0]:
+                raise ValueError("this Leat needs an admin: make someone else one first")
+
+    def remove_person(self, id: int, heir: int) -> None:
+        """Removes a person, and all that is theirs: their conversations, devices and own projects,
+        with the conversations in those. The projects they shared become their heir's. Raises
+        ValueError of the last admin, as the box has one always."""
         with self._lock, self._db:
             self._db.execute("BEGIN")
             own = "SELECT id FROM projects WHERE person = ? AND NOT shared"
             for table in ("conversations", "workflows"):
                 self._db.execute(f"DELETE FROM {table} WHERE project IN ({own})", (id,))
             self._db.execute("DELETE FROM projects WHERE person = ? AND NOT shared", (id,))
-            owner = "SELECT id FROM people WHERE owner"
-            self._db.execute(f"UPDATE projects SET person = ({owner}) WHERE person = ?", (id,))
+            self._db.execute("UPDATE projects SET person = ? WHERE person = ?", (heir, id))
             for table in ("conversations", "devices", "workflows"):
                 self._db.execute(f"DELETE FROM {table} WHERE person = ?", (id,))
-            self._db.execute("DELETE FROM people WHERE id = ? AND NOT owner", (id,))
+            self._db.execute("DELETE FROM people WHERE id = ?", (id,))
+            if not self._db.execute("SELECT count(*) FROM people WHERE admin").fetchone()[0]:
+                raise ValueError("this Leat needs an admin: make someone else one first")
 
     def devices(self) -> list[dict[str, Any]]:
         """The devices paired, without their tokens, the latest seen first."""

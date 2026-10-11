@@ -1,6 +1,7 @@
 // leat agent's app. It keeps nothing of its own: it shows the conversations on the box as the
 // agent's events change them, the turns running there too, and sends what the user writes. A device
-// is its person's once paired: the first sets the box up, any other asks the owner to let it in.
+// is its person's once paired: the first sets the box up, any other asks to be let in, by its
+// person from a device of theirs, or by an admin.
 
 import { markdown } from "/markdown.mjs";
 
@@ -17,9 +18,11 @@ const spaces = {};
 let attached = []; // the files and folders the next message attaches: {name, uploading, files}
 const unfolded = new Set(); // the folders whose files the lists show, by space and name
 let workflows = []; // the requests saved to make again, by name: {id, name, prompt, project, schedule}
-let me = null; // the person whose this device is: {person, name, owner, device}
-let accounts = null; // the owner's to manage: the people and their devices, and those asking
-// the box's settings, as its owner chose them: whether it is kept from the internet, its office's
+let me = null; // the person whose this device is: {person, name, admin, device}
+// the accounts as this device sees them: the people, each whether an admin, with their devices, of
+// an admin's, or else this person's own; and the devices asking to join
+let accounts = null;
+// the box's settings, as its admins chose them: whether it is kept from the internet, its office's
 // name, and whether its screen shows its address
 let settings = { offline: false, office: null, address: true, timezone: null };
 // the conversations whose turns ended while another was shown, as this device saw them
@@ -126,7 +129,10 @@ async function start() {
     return setTimeout(start, 3000);
   }
   status("");
-  if (response.status === 401) return gate((await response.json()).empty);
+  if (response.status === 401) {
+    const { empty, locked } = await response.json();
+    return gate(empty, locked);
+  }
   me = await response.json();
   renderAccounts();
   const events = new EventSource("/api/events");
@@ -146,11 +152,11 @@ async function start() {
   route();
 }
 
-// the gate of a device not yet paired: the box's first person sets it up, and is its owner; any
-// other asks to join, showing a code the owner's device shows too
-function gate(empty) {
+// the gate of a device not yet paired: the box's first person sets it up, and is its first admin;
+// any other asks to join, showing a code the devices paired show too
+function gate(empty, locked) {
   document.body.classList.add("gated");
-  if (empty) return setup();
+  if (empty) return setup(locked);
   $("welcome").textContent = empty
     ? "Welcome! This Leat is new. What's your name? You'll be the one who lets the others in."
     : "This device has not joined this Leat yet. What's your name?";
@@ -164,8 +170,8 @@ function gate(empty) {
       if (empty) return (await post("/api/setup", { name }), location.reload());
       const { id, code } = await (await post("/api/pairings", { name })).json();
       $("join").querySelector(".row").hidden = true;
-      $("code").replaceChildren("Ask whoever set Leat up to let this device in, in its Settings, " +
-        "where they will see this code:", element("b", "", `${code.slice(0, 3)} ${code.slice(3)}`));
+      $("code").replaceChildren("Let this device in from Leat on a device of yours, in Settings, " +
+        "or ask an admin to. They'll see this code:", element("b", "", `${code.slice(0, 3)} ${code.slice(3)}`));
       await waitToJoin(id);
     } catch (error) {
       $("refusal").textContent = error.message;
@@ -173,18 +179,25 @@ function gate(empty) {
   };
 }
 
-// the box set up by its first person, its owner, a step at a time: its office's name, theirs, and
-// whether it may reach the internet, sent at once at the end
-function setup() {
-  const chosen = { office: "", name: "", offline: false };
+// the box set up by its first person, its first admin, a step at a time: of a box, the code its
+// screen shows, which its QR code gives the address it opens, else typed; its office's name, theirs,
+// and whether it may reach the internet, sent at once at the end
+function setup(locked) {
+  const scanned = new URLSearchParams(location.hash.slice(1)).get("setup");
+  if (scanned) history.replaceState(null, "", location.pathname); // kept out of the address bar
+  const chosen = { code: scanned ?? "", office: "", name: "", offline: false };
+  const typing = { title: "The setup code", about: "Type the setup code the box's screen shows, " +
+    "below its address. It shows that you're in the office with the box.", key: "code",
+    placeholder: "K7X 2QM", autocomplete: "off", max: 7, needed: true };
   const steps = [
     { title: "Welcome to Leat", about: "Your office's own assistant. It runs on this box, and what " +
       "you give it stays here. Setting it up takes a minute.", next: "Begin" },
+    ...(locked && !scanned ? [typing] : []),
     { title: "Your office", about: "What is your office called? The box's screen shows its name. " +
       "You can change it later in Settings.", key: "office", placeholder: "Kanzlei Weber",
       autocomplete: "organization", max: 60 },
-    { title: "Your name", about: "You'll own this Leat: you let the others in, and look after it " +
-      "in Settings.", key: "name", placeholder: "Your name", autocomplete: "name", max: 40,
+    { title: "Your name", about: "You'll be this Leat's admin: you let the others in, and look " +
+      "after it in Settings. You can make others admins too.", key: "name", placeholder: "Your name", autocomplete: "name", max: 40,
       needed: true },
     { title: "The internet", about: null, next: "Set up Leat" },
   ];
@@ -194,7 +207,7 @@ function setup() {
     if (step.about) parts.push(element("p", "", step.about));
     let input = null;
     if (step.key) {
-      input = Object.assign(element("input"), { value: chosen[step.key], placeholder: step.placeholder,
+      input = Object.assign(element("input", step.key), { value: chosen[step.key], placeholder: step.placeholder,
         autocomplete: step.autocomplete, maxLength: step.max });
       parts.push(input);
     }
@@ -237,10 +250,16 @@ function setup() {
       if (at < steps.length - 1) return show(at + 1);
       try {
         const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone; // this device's, the box's too
-        await post("/api/setup", { name: chosen.name, office: chosen.office || null, offline: chosen.offline, timezone });
+        await post("/api/setup", { code: chosen.code || null, name: chosen.name, office: chosen.office || null,
+          offline: chosen.offline, timezone });
         location.reload();
       } catch (error) {
-        refusal.textContent = error.message;
+        if (error.status !== 403 || !locked) return (refusal.textContent = error.message);
+        // the code wrong, or a new one shown: typed again, at its step
+        if (!steps.includes(typing)) steps.splice(1, 0, typing);
+        chosen.code = "";
+        show(1);
+        $("join").querySelector(".error").textContent = error.message[0].toUpperCase() + error.message.slice(1) + ".";
       }
     };
   };
@@ -345,6 +364,8 @@ function handle(event) {
       renderProjects(); // as they count them
       return;
     case "accounts":
+      if (event.me.admin !== me.admin) return location.reload(); // made an admin, or no longer
+      me = { ...me, ...event.me };
       accounts = event;
       renderAccounts();
       return;
@@ -504,7 +525,9 @@ async function load(model) {
 
 async function post(path, body, method = "POST") {
   const response = await fetch(path, { method, body: JSON.stringify(body) });
-  if (!response.ok) throw new Error((await response.json()).error.message);
+  if (!response.ok) {
+    throw Object.assign(new Error((await response.json()).error.message), { status: response.status });
+  }
   return response;
 }
 
@@ -560,11 +583,11 @@ function showProject(id, push = true) {
 }
 
 // whether a project's files are synced with a folder of the box's, and how the last sync went; the
-// owner's to set up, with the folder's path, or to stop
-let choosing = false; // the owner choosing the folder, its form shown
+// an admin's to set up, with the folder's path, or to stop
+let choosing = false; // an admin choosing the folder, its form shown
 function renderSyncing(p) {
-  const box = $("syncing"), owner = me?.owner;
-  if (choosing && owner && !p.source) {
+  const box = $("syncing"), admin = me?.admin;
+  if (choosing && admin && !p.source) {
     if (box.querySelector("form")) return; // as they type
     const form = element("form"), path = element("input"), ok = element("button", "", "Sync"), cancel = element("button", "", "Cancel");
     Object.assign(path, { placeholder: "The folder's path, as /mnt/office/Yılmaz", spellcheck: false });
@@ -588,13 +611,13 @@ function renderSyncing(p) {
     const said = p.unsynced ? `Couldn't sync with ${p.source}: ${p.unsynced}`
       : p.synced ? `Synced from ${p.source} · ${ago(p.synced)}` : `Syncing with ${p.source}…`;
     parts.push(element("span", p.unsynced ? "warning" : "meta", said));
-    if (owner) {
+    if (admin) {
       const stop = element("button", "", "Stop syncing");
       stop.onclick = () => confirm(`Stop syncing with ${p.source}? The files copied so far stay.`)
         && post(`/api/projects/${p.id}/sync`, { source: null }).catch((e) => status(e.message, true));
       parts.push(stop);
     }
-  } else if (owner) {
+  } else if (admin) {
     const start = element("button", "", "Sync with a folder on this computer…");
     start.title = "Keep a copy of a folder here, as a network drive's, in this project's files";
     start.onclick = () => (choosing = true, renderSyncing(p));
@@ -625,17 +648,18 @@ function day(seconds) {
   return new Date(seconds * 1000).toLocaleDateString(undefined, { day: "numeric", month: "short" });
 }
 
-// the box's people, their devices, and the devices asking to join, which the owner lets in as a
-// person known or new, once the code they show is the one their device shows; for any other, who
-// they are here
+// the accounts: who this person is here, and their own devices, each to unpair; the devices asking
+// to join, which they let in as their own, once the code shown is the one the device shows, and an
+// admin lets in as someone new, or as someone whose every device is gone; and, of an admin, the
+// box's people, each to rename, make an admin or not, or remove, with their devices
 function renderAccounts() {
   const box = $("accounts");
-  const unpair = element("button", "", "Unpair this device");
-  unpair.onclick = () => confirm("Unpair this device? Using Leat on it again takes asking to join.")
-    && del(`/api/devices/${me.device}`).then((done) => done && location.reload());
-  const you = element("p", "meta", `You are ${me?.name ?? ""} here. `);
-  you.append(unpair);
-  if (!me?.owner || !accounts) return box.replaceChildren(you);
+  if (!me || !accounts) return box.replaceChildren();
+  const self = accounts.people.find((p) => p.id === me.person);
+  const you = element("p", "", `You are ${me.name} here`);
+  you.append(element("span", "meta", me.admin ? " · Admin" : ""), " ", renaming(self ?? { id: me.person, name: me.name }));
+  const mine = element("ul");
+  mine.append(...(self?.devices ?? []).map((d) => deviceRow(d)));
   const asking = accounts.requests.map((r) => {
     const item = element("li"), about = element("div");
     const code = element("b", "", `${r.code.slice(0, 3)} ${r.code.slice(3)}`);
@@ -643,39 +667,91 @@ function renderAccounts() {
     meta.append(code);
     about.append(element("span", "", `${r.name} asks to join`), meta);
     const as = element("select");
-    as.append(new Option(`as someone new, ${r.name}`, ""),
-      ...accounts.people.map((p) => new Option(`as ${p.name}`, p.id)));
-    const allow = element("button", "allow", "Let in"), no = element("button", "", "×");
+    as.append(new Option(`as you, ${me.name}`, me.person));
+    if (me.admin) {
+      as.append(new Option(`as someone new, ${r.name}`, ""), ...accounts.people
+        .filter((p) => p.id !== me.person && !p.devices.length)
+        .map((p) => new Option(`as ${p.name}, who has no device`, p.id)));
+      as.value = r.name === me.name ? me.person : "";
+    }
+    as.hidden = !me.admin;
+    const allow = element("button", "allow", me.admin ? "Let in" : "It's mine");
     allow.onclick = () => post(`/api/pairings/${r.id}/allow`, as.value ? { person: Number(as.value) } : {})
       .catch((error) => status(error.message, true));
-    no.title = "Turn down";
-    no.onclick = () => del(`/api/pairings/${r.id}`);
-    item.append(about, as, allow, no);
-    return item;
-  });
-  const people = accounts.people.flatMap((p) => {
-    const devices = element("ul");
-    devices.append(...p.devices.map((d) => {
-      const item = element("li"), remover = element("button", "", "×");
-      remover.title = "Unpair";
-      remover.hidden = d.id === me.device;
-      remover.onclick = () => del(`/api/devices/${d.id}`);
-      item.append(element("span", "", d.name), element("span", "meta", `seen ${day(d.seen)}`), remover);
-      return item;
-    }));
-    const heading = element("h3", "", p.owner ? `${p.name} (owner)` : p.name);
-    if (!p.owner) {
-      const remover = element("button", "", "Remove");
-      remover.onclick = () => confirm(`Remove ${p.name}, with all their chats?`)
-        && del(`/api/people/${p.id}`);
-      heading.append(" ", remover);
+    item.append(about, as, allow);
+    if (me.admin) {
+      const no = element("button", "", "×");
+      no.title = "Turn down";
+      no.onclick = () => del(`/api/pairings/${r.id}`);
+      item.append(no);
     }
-    return [heading, devices];
+    return item;
   });
   const requests = element("ul");
   requests.append(...asking);
-  const how = element("p", "meta", "To add someone, open Leat on their device: it asks to join, and shows here.");
-  box.replaceChildren(...(asking.length ? [requests] : []), ...people, how);
+  const parts = [you, element("h3", "", "Your devices"), mine];
+  if (asking.length) parts.push(element("h3", "", "Asking to join"), requests);
+  const others = accounts.people.filter((p) => p.id !== me.person);
+  if (me.admin) {
+    const people = element("ul", "people");
+    if (others.length) parts.push(element("h3", "", "People"), people);
+    people.append(...others.map((p) => {
+      const item = element("li"), about = element("div");
+      const seen = p.devices.length ? `${p.devices.length} device${p.devices.length > 1 ? "s" : ""}` : "no device";
+      about.append(element("span", "", p.name), element("span", "meta", `${p.admin ? "Admin" : "Member"} · ${seen}`));
+      const devices = element("ul");
+      devices.append(...p.devices.map((d) => deviceRow(d)));
+      about.append(devices);
+      const making = element("button", "", p.admin ? "Remove admin" : "Make admin");
+      making.onclick = () => patchPerson(p.id, { admin: !p.admin });
+      const remover = element("button", "", "Remove");
+      remover.onclick = () => confirm(`Remove ${p.name}, with their own chats, projects and files? ` +
+        "The projects they shared stay, as yours.") && del(`/api/people/${p.id}`);
+      item.append(about, making, renaming(p), remover);
+      return item;
+    }));
+    parts.push(element("p", "meta", "To add someone, open Leat on their device: it asks to join, " +
+      "and shows here for you to let in. Admins let people in and look after the box; no one sees " +
+      "another's own chats or files."));
+  } else {
+    const admins = accounts.people.filter((p) => p.admin).map((p) => p.name).join(", ");
+    parts.push(element("p", "meta", "To add a device of yours, open Leat on it: it asks to join, and " +
+      `shows here for you to let in. To add someone else, ask an admin: ${admins}.`));
+  }
+  box.replaceChildren(...parts);
+}
+
+// a device's row: its name, when it was last seen, and a button that unpairs it; this device's
+// signs it out
+function deviceRow(d) {
+  const item = element("li"), about = element("div"), self = d.id === me.device;
+  about.append(element("span", "", self ? `${d.name} (this device)` : d.name),
+    element("span", "meta", `seen ${day(d.seen)}`));
+  const remover = element("button", "", self ? "Sign out" : "Unpair");
+  remover.onclick = () => self
+    ? confirm("Sign this device out? Using Leat on it again takes asking to join.")
+      && del(`/api/devices/${d.id}`).then((done) => done && location.reload())
+    : confirm(`Unpair ${d.name}? Using Leat on it again takes asking to join.`) && del(`/api/devices/${d.id}`);
+  item.append(about, remover);
+  return item;
+}
+
+// a button that renames a person, asking for the name
+function renaming(p) {
+  const button = element("button", "", "Rename");
+  button.onclick = () => {
+    const name = prompt(`A new name for ${p.name}:`, p.name)?.trim();
+    if (name && name !== p.name) patchPerson(p.id, { name });
+  };
+  return button;
+}
+
+async function patchPerson(id, change) {
+  try {
+    await post(`/api/people/${id}`, change, "PATCH");
+  } catch (error) {
+    status(error.message, true);
+  }
 }
 
 function renderFiles() {
@@ -771,11 +847,11 @@ function versionRow(v, project) {
 // what a file's state in the index says, while it is not read: being read, or not readable
 const STATES = { reading: "Reading…", failed: "Couldn't read", scanned: "Scanned" };
 
-// the box as its owner looks after it, asked as Settings opens: the room its files take and that
+// the box as its admins look after it, asked as Settings opens: the room its files take and that
 // left on their disk, a warning if little is, and each person's use this month, counted
 async function renderOverview() {
-  $("overview").hidden = !me?.owner;
-  if (!me?.owner) return;
+  $("overview").hidden = !me?.admin;
+  if (!me?.admin) return;
   try {
     const response = await fetch("/api/overview");
     if (!response.ok) throw new Error((await response.json()).error.message);
@@ -793,7 +869,7 @@ async function renderOverview() {
   }
 }
 
-// what was done on the box, the owner's to look back on, by day, the latest first: each at its time,
+// what was done on the box, the admins' to look back on, by day, the latest first: each at its time,
 // by whom, or by Leat for whom, what, and where; asked anew, or `older`, after what is shown
 let activity = [];
 async function renderActivity(older = false) {
@@ -836,9 +912,9 @@ function dayOf(seconds) {
     : at.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" });
 }
 
-// whether Leat may reach the internet, the owner's to choose, and what each choice means
+// whether Leat may reach the internet, an admin's to choose, and what each choice means
 function renderInternet() {
-  $("internet").hidden = !me?.owner;
+  $("internet").hidden = !me?.admin;
   $("reach").replaceChildren(...[[false, "On"], [true, "Off"]].map(([off, said]) => {
     const button = element("button", off === settings.offline ? "on" : "", said);
     button.onclick = () => off !== settings.offline && changeSettings({ offline: off });
@@ -849,10 +925,10 @@ function renderInternet() {
     : "Leat may search the web and read pages to answer. What it searches for leaves the office; your files never do.";
 }
 
-// the box itself, the owner's to set: its office's name, which its screen shows beside Leat's, and
+// the box itself, an admin's to set: its office's name, which its screen shows beside Leat's, and
 // whether the screen shows its address and the code a phone scans to open it
 function renderBox() {
-  $("box").hidden = !me?.owner;
+  $("box").hidden = !me?.admin;
   const office = $("office");
   if (document.activeElement !== office) office.value = settings.office ?? "";
   office.onchange = () => changeSettings({ office: office.value });
@@ -873,7 +949,7 @@ function renderBox() {
   if (!$("wifi").childElementCount) renderWifi();
 }
 
-// the box's Wi-Fi, the owner's to set: the networks in reach, found as asked, each joined of its
+// the box's Wi-Fi, an admin's to set: the networks in reach, found as asked, each joined of its
 // passphrase, the one the box is on forgotten; a cable stays its way out while it has one
 function renderWifi(found = null, error = "") {
   const parts = [element("h3", "", "Wi-Fi")];
@@ -1093,7 +1169,7 @@ function renderProject() {
     button.onclick = () => shared !== p.shared && change(p.id, { shared });
     return button;
   }));
-  $("discard").hidden = !mine && !me?.owner;
+  $("discard").hidden = !mine && !me?.admin;
   renderSyncing(p);
   $("chats").replaceChildren(...conversations.filter((c) => c.project === p.id).map((c) => {
     const item = element("li"), a = element("a", "", c.title);
@@ -1419,7 +1495,7 @@ function controls() {
   const uploading = attached.some((a) => a.uploading);
   $("send").disabled = !running && !(model && input.value.trim() && !uploading);
   $("model").value = loading ?? model ?? "";
-  $("model").disabled = !me?.owner || loading !== null || conversations.some((c) => c.running);
+  $("model").disabled = !me?.admin || loading !== null || conversations.some((c) => c.running);
 }
 
 function status(text, error = false) {

@@ -66,8 +66,9 @@ class State:
     whether its certificate holds for its name; whether the app answers; whether the box is yet to
     be set up by its first person; whether it was switched on just now; and, of the agent, the
     office's name, whether to show the address, the model, its id and whether it is "loaded" or
-    "loading", and whether the box is kept from the internet; and its link, "Wired" or "Wi-Fi",
-    the bytes left on its data's partition, and its image's version."""
+    "loading", whether the box is kept from the internet, and the code that sets it up, while it
+    is to be; and its link, "Wired" or "Wi-Fi", the bytes left on its data's partition, and its
+    image's version."""
 
     name: str | None
     address: str | None
@@ -82,6 +83,7 @@ class State:
     link: str | None = None
     free: int | None = None
     version: str | None = None
+    setup: str | None = None
 
 
 def look(root: Path = ROOT) -> State:
@@ -99,6 +101,7 @@ def look(root: Path = ROOT) -> State:
         state, certified=_certified(name), answering=True, empty=bool(box.get("empty")),
         office=box.get("office"), show_address=bool(box.get("address", True)),
         model=(model["id"], model["status"]) if model else None, offline=bool(box.get("offline")),
+        setup=box.get("setup"),
     )  # fmt: skip
 
 
@@ -114,11 +117,25 @@ def said(state: State) -> tuple[str, str, str | None]:
     if not (state.certified and state.answering):
         return "Starting", "This takes a minute.", None
     url, scan = f"https://{state.name}", "Scan the code, or open this address in a browser."
-    if state.empty:  # whatever the owner chose, as there is none yet
+    if state.empty and state.setup:  # whatever its admins choose, as there are none yet
+        typed = "Scan the code with a phone, or open this address and type the setup code."
+        return "Set up your Leat", typed, url
+    if state.empty:
         return "Set up your Leat", scan, url
     if not state.show_address:
         return "Ready", "Open Leat in a browser in the office.", None
     return "Ready", scan, url
+
+
+def scanned(state: State, url: str) -> str:
+    """What the QR code of an address holds: the address, and the setup code too while the box is
+    to be set up, which the app takes, so that whoever scans it types none."""
+    return f"{url}/#setup={state.setup}" if state.empty and state.setup else url
+
+
+def spaced(code: str) -> str:
+    """A setup code as the screen shows it, in two halves: "K7X 2QM"."""
+    return f"{code[:3]} {code[3:]}"
 
 
 def footer(state: State) -> list[str]:
@@ -160,7 +177,7 @@ def paint(state: State, size: tuple[int, int], now: datetime.datetime) -> Image.
 
     # the middle: what the box says, and the address to open, with its QR code on a card
     headline, sentence, url = said(state)
-    card = qr_card(url, round(min(40 * u, width * 0.28))) if url else None
+    card = qr_card(scanned(state, url), round(min(40 * u, width * 0.28))) if url else None
     right = width - margin - (card.width + round(8 * u) if card else 0)
     lines: list[tuple[str, ImageFont.FreeTypeFont | ImageFont.ImageFont, str, float]] = [
         (headline, font(round(6.4 * u), "SemiBold"), TEXT, 2.4 * u),
@@ -171,6 +188,11 @@ def paint(state: State, size: tuple[int, int], now: datetime.datetime) -> Image.
         lines += [(url.removeprefix("https://"), font(round(3.2 * u), "Medium"), TEXT, 1.1 * u),
                   ("or type leat.local", font(round(2.4 * u)), MUTED, 0.0)]  # fmt: skip
         lines[-3] = (*lines[-3][:3], 4.0 * u)  # room before the address
+        if state.empty and state.setup:  # and the code that sets it up, below
+            lines[-1] = (*lines[-1][:3], 3.0 * u)
+            code = font(round(4.4 * u), "SemiBold")
+            lines += [("Setup code", font(round(2.4 * u)), MUTED, 0.6 * u),
+                      (spaced(state.setup), code, TEXT, 0.0)]  # fmt: skip
     tall = sum(_height(pen, f) + gap for _, f, _, gap in lines)
     y = height / 2 - tall / 2
     for line, f, colour, gap in lines:
@@ -199,6 +221,8 @@ def written(state: State, qr: str = "") -> list[str]:
     lines = [f"{BOLD}{title}{PLAIN}", "", f"{BOLD}{headline}{PLAIN}", "", sentence]
     if url:
         lines += ["", url, "", *qr.splitlines(), "", "or type leat.local"]
+    if url and state.empty and state.setup:
+        lines += ["", f"Setup code: {BOLD}{spaced(state.setup)}{PLAIN}"]
     return lines
 
 
@@ -415,7 +439,7 @@ def main() -> None:
                 display.show(paint(state, display.size, now))
             else:
                 url = said(state)[2]
-                lines = written(state, _text_qr(url) if url else "")
+                lines = written(state, _text_qr(scanned(state, url)) if url else "")
                 sys.stdout.write(draw(lines, *shutil.get_terminal_size((80, 25))))
                 sys.stdout.flush()
             shown, drawn = seen, time.monotonic()

@@ -173,13 +173,14 @@ READY = screen.State(NAME, "192.168.1.20", certified=True, answering=True, link=
 
 def test_said():
     # what the box's screen says of each state: ready once its certificate holds and the app
-    # answers, the address shown as its owner chose, and always before it is set up
+    # answers, the address shown as its admins chose, and always before it is set up
     said = {
         "switched on": screen.State(NAME, None, booting=True),
         "no network": screen.State(NAME, None),
         "not provisioned": screen.State(None, "192.168.1.20"),
         "starting": screen.State(NAME, "192.168.1.20", answering=True),
         "set up": replace(READY, empty=True, show_address=False),
+        "by code": replace(READY, empty=True, setup="K7X2QM"),
         "ready": READY,
         "hidden": replace(READY, show_address=False),
     }
@@ -189,9 +190,17 @@ def test_said():
     assert words["not provisioned"][0] == "Not set up"
     scan = "Scan the code, or open this address in a browser."
     assert words["set up"] == ("Set up your Leat", scan, f"https://{NAME}")
+    typed = "Scan the code with a phone, or open this address and type the setup code."
+    assert words["by code"] == ("Set up your Leat", typed, f"https://{NAME}")
     assert words["ready"][0] == "Ready" and words["ready"][2] == f"https://{NAME}"
     assert words["hidden"][2] is None
-    assert all(w[2] is None for k, w in words.items() if k not in ("set up", "ready"))
+    assert all(w[2] is None for k, w in words.items() if k not in ("set up", "by code", "ready"))
+    # the QR code holds the setup code while the box is to be set up, which the app takes
+    url = f"https://{NAME}"
+    assert screen.scanned(said["by code"], url) == f"{url}/#setup=K7X2QM"
+    assert screen.scanned(replace(READY, setup="K7X2QM"), url) == url  # set up: none
+    lines = screen.written(said["by code"], "##")
+    assert lines[-1] == f"Setup code: {screen.BOLD}K7X 2QM{screen.PLAIN}"
 
 
 def test_footer():

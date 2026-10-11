@@ -14,9 +14,10 @@ and images alone, framed by none, and a link followed tells no site the box's na
 Every request but for the app's own files, the box's setup and a device's request to join comes
 from a device paired to one of the box's people, by the secret its cookie holds. A person sees and
 changes their own conversations and files, and their own projects and those shared, with their
-files; the owner alone the box's people and devices, and the engine's model.
+files, and lets in their own new devices; an admin looks after the box: its people and devices,
+its settings and the engine's model, never another's own conversations or files.
 
-What people do is noted here, as each request asks it, for the owner to look back on: who did what,
+What people do is noted here, as each request asks it, for the admins to look back on: who did what,
 where, and of what, never what anyone asked; what Leat does for them, the agent notes.
 """
 
@@ -110,8 +111,9 @@ class Server(ThreadingHTTPServer):
     def __init__(
         self, agent: Agent, host: str = "127.0.0.1", port: int = 8000, name: str | None = None
     ):
-        self.agent, self.accounts = agent, Accounts(agent)
         self.name = name.lower() if name else None
+        # a box's, set up by the code its screen shows
+        self.agent, self.accounts = agent, Accounts(agent, locked=self.name is not None)
         self.cookie = SECURE_COOKIE if self.name else COOKIE
         super().__init__((host, port), _Handler)
 
@@ -127,7 +129,7 @@ class _Unpaired(Exception):
 
 
 class _Refused(Exception):
-    """The request asks what only the box's owner may."""
+    """The request asks what only the box's admins may."""
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -153,22 +155,24 @@ class _Handler(BaseHTTPRequestHandler):
                 if not _loopback(urllib.parse.urlsplit(f"//{self.headers.get('Host', '')}").hostname
                                  or ""):  # fmt: skip
                     return self._error(404, f"there is no GET {path}")
-                return self._json(200, agent.box())
+                accounts = self.server.accounts  # and its setup code, while it is to be set up
+                code = accounts.locked and accounts.empty()
+                return self._json(200, agent.box() | ({"setup": accounts.code} if code else {}))
             me = self._device()
             if path == "/api/me":
                 self._json(
-                    200, {k: me[k] for k in ("person", "name", "owner")} | {"device": me["id"]}
+                    200, {k: me[k] for k in ("person", "name", "admin")} | {"device": me["id"]}
                 )
             elif path == "/api/events":
                 self._events(me)
-            elif path == "/api/overview":  # the box, as its owner looks after it
-                _owner(me)
+            elif path == "/api/overview":  # the box, as its admins look after it
+                _admin(me)
                 self._json(200, agent.overview())
-            elif path == "/api/wifi":  # the Wi-Fi networks in reach, the owner's to see
-                _owner(me)
+            elif path == "/api/wifi":  # the Wi-Fi networks in reach, the admins' to see
+                _admin(me)
                 self._json(200, _system({"wifi": "scan"}))
             elif path == "/api/activity":  # what was done, the latest first, before ?before
-                _owner(me)
+                _admin(me)
                 query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
                 before = query.get("before", [""])[0]
                 if before and not before.isdigit():
@@ -200,10 +204,11 @@ class _Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(size))
             if not isinstance(body, dict):
                 raise ValueError("the body must be a JSON object")
-            if path == "/api/setup":  # the box's first person, its owner, and its settings
+            if path == "/api/setup":  # the box's first person, its first admin, and its settings
                 settings = _settings(body, ("offline", "office", "timezone"))
                 zone = settings.pop("timezone", None)
-                secret = accounts.setup(_text(body, "name"), _device(self.headers))
+                code = body.get("code") if isinstance(body.get("code"), str) else None
+                secret = accounts.setup(_text(body, "name"), _device(self.headers), code)
                 agent.change(**settings)
                 with contextlib.suppress(ValueError):  # their device's, which a box takes as its
                     # own, if it can; one that is no box keeps its own
@@ -227,7 +232,7 @@ class _Handler(BaseHTTPRequestHandler):
                 agent.note(person, "made the project", project["id"])
                 self._json(200, project)
             elif synced := _SYNC.fullmatch(path):  # a project's files synced with a folder, or not
-                _owner(me)
+                _admin(me)
                 if (source := body.get("source")) is not None and not isinstance(source, str):
                     raise ValueError("source must be a folder's path, or null")
                 agent.sync(synced[1], (source or "").strip() or None, person)
@@ -242,22 +247,21 @@ class _Handler(BaseHTTPRequestHandler):
                 agent.stop(match[1], person)
                 self._json(200, {})
             elif (match := _REQUEST.fullmatch(path)) and match[2]:
-                _owner(me)
-                to = body.get("person")
+                to = body.get("person")  # whoever allows it, an admin or not, as Accounts says
                 if to is not None and (not isinstance(to, int) or isinstance(to, bool)):
                     raise ValueError("person must be the id of one of this Leat's people")
                 name = body.get("name") if isinstance(body.get("name"), str) else None
-                allowed = accounts.allow(match[1], to, name)
+                allowed = accounts.allow(match[1], me, to, name)
                 agent.note(person, "let in", detail=f"{allowed['name']}'s {allowed['device']}")
                 self._json(200, allowed)
-            elif path == "/api/wifi":  # a Wi-Fi network joined, the owner's to choose
-                _owner(me)
+            elif path == "/api/wifi":  # a Wi-Fi network joined, an admin's to choose
+                _admin(me)
                 name, passphrase = _text(body, "name"), body.get("passphrase")
                 _system({"wifi": "join", "name": name, "passphrase": passphrase})
                 agent.note(person, "joined the Wi-Fi network", detail=name)
                 self._json(200, {})
             elif path == "/api/models/load":
-                _owner(me)
+                _admin(me)
                 agent.load(model := _text(body, "model"))
                 agent.note(person, "loaded the model", detail=model)
                 self._json(200, {})
@@ -278,8 +282,8 @@ class _Handler(BaseHTTPRequestHandler):
         with self._answering():
             me = self._device()
             person, store = me["person"], agent.store
-            if wifi := _WIFI.fullmatch(path):  # a Wi-Fi network forgotten, the owner's
-                _owner(me)
+            if wifi := _WIFI.fullmatch(path):  # a Wi-Fi network forgotten, an admin's
+                _admin(me)
                 name = urllib.parse.unquote(wifi[1])
                 _system({"wifi": "forget", "name": name})
                 agent.note(person, "forgot the Wi-Fi network", detail=name)
@@ -302,19 +306,19 @@ class _Handler(BaseHTTPRequestHandler):
                 agent.space(match[1], person).delete(name := urllib.parse.unquote(match[2]))
                 agent.files_changed(match[1], person)
                 agent.note(person, "deleted", match[1], name)
-            elif match := _DEVICE.fullmatch(path):  # the owner's, or a device unpairing itself
-                if int(match[1]) != me["id"]:
-                    _owner(me)
+            elif match := _DEVICE.fullmatch(path):  # a person's own, or any, of an admin
                 device = next((d for d in store.devices() if d["id"] == int(match[1])), {})
+                if device.get("person") != person:
+                    _admin(me)
                 accounts.unpair(int(match[1]))
                 agent.note(person, "unpaired", detail=device.get("name"))
             elif (match := _REQUEST.fullmatch(path)) and not match[2]:
-                _owner(me)
+                _admin(me)
                 accounts.refuse(match[1])
             elif match := _PERSON.fullmatch(path):
-                _owner(me)
+                _admin(me)
                 removed = (store.person(int(match[1])) or {}).get("name")
-                accounts.remove(int(match[1]))
+                accounts.remove(int(match[1]), person)
                 agent.note(person, "removed", detail=removed)
             else:
                 return self._error(404, f"there is no DELETE {path}")
@@ -322,22 +326,26 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_PATCH(self) -> None:
         # a project changed: its name, instructions, or whether it is shared; a workflow's
-        # schedule, set or cleared; or the box's settings, the owner's
+        # schedule, set or cleared; a person renamed, of themselves or an admin, or made an admin
+        # or not, of an admin; or the box's settings, an admin's
         if not self._trusted(write=True):
             return self._error(403, "requests from other sites' pages are refused")
         path, agent = urllib.parse.urlsplit(self.path).path, self.server.agent
         with self._answering():
             me = self._device()
             flow, match = _WORKFLOW.fullmatch(path), _PROJECT.fullmatch(path)
-            if not flow and not match and path != "/api/settings":
+            changed = _PERSON.fullmatch(path)
+            if not flow and not match and not changed and path != "/api/settings":
                 return self._error(404, f"there is no PATCH {path}")
             if (size := self._length()) > BODY:
                 return self._error(413, f"a request may be {BODY >> 20} MB at most")
             body = json.loads(self.rfile.read(size))
             if not isinstance(body, dict):
                 raise ValueError("the body must be a JSON object")
+            if changed:
+                return self._json(200, self._person(int(changed[1]), body, me))
             if path == "/api/settings":
-                _owner(me)
+                _admin(me)
                 settings = _settings(body, ("offline", "office", "address", "timezone"), only=True)
                 agent.change(**settings)
                 for key, value in settings.items():  # each change noted
@@ -410,7 +418,7 @@ class _Handler(BaseHTTPRequestHandler):
         except _Unpaired:
             self._error(401, "this device has not joined this Leat: ask to join")
         except _Refused:
-            self._error(403, "only this Leat's owner may do that")
+            self._error(403, "only this Leat's admins may do that")
         except Refused as e:
             self._error(403, str(e))
         except (ValueError, RecursionError) as e:  # JSON nested too deep to parse, too
@@ -432,16 +440,38 @@ class _Handler(BaseHTTPRequestHandler):
             raise _Unpaired
         return device
 
-    def _still(self, person: int | None) -> bool:
-        # whether the request's device is still paired, as the person's: unpaired, or its person
+    def _still(self, person: int | None) -> dict[str, Any] | None:
+        # the request's device, if it is still paired, as the person's: unpaired, or its person
         # removed, an open stream of events ends
         try:
-            return self._device()["person"] == person
+            device = self._device()
         except _Unpaired:
-            return False
+            return None
+        return device if device["person"] == person else None
+
+    def _person(self, id: int, body: dict[str, Any], me: dict[str, Any]) -> dict[str, Any]:
+        # a person changed: renamed, of themselves or an admin; made an admin or not, of an admin;
+        # each noted. Returns the person
+        agent, accounts = self.server.agent, self.server.accounts
+        if (was := agent.store.person(id)) is None:
+            raise LookupError(f"there is no person {id}")
+        if unknown := set(body) - {"name", "admin"}:
+            raise ValueError(f"a person has no {', '.join(sorted(unknown))} to change")
+        if "admin" in body and not isinstance(body["admin"], bool):
+            raise ValueError("admin must be true or false")
+        if id != me["person"] or "admin" in body:
+            _admin(me)
+        if "name" in body:
+            accounts.rename(id, _text(body, "name"))
+            agent.note(me["person"], "renamed", detail=f"{was['name']} as {_text(body, 'name')}")
+        if "admin" in body and body["admin"] != bool(was["admin"]):
+            accounts.set_admin(id, body["admin"])
+            said = "made an admin" if body["admin"] else "made no longer an admin"
+            agent.note(me["person"], said, detail=(agent.store.person(id) or was)["name"])
+        return agent.store.person(id) or {}
 
     def _joined(self, id: str) -> None:
-        # a request to join, asked after: its device's secret once the owner let it in
+        # a request to join, asked after: its device's secret once it was let in
         try:
             secret = self.server.accounts.answer(id)
         except LookupError as e:
@@ -472,8 +502,9 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _events(self, me: dict[str, Any]) -> None:
-        # what there is of a device's person's, then every change for them, until the client goes;
-        # what is the owner's, to theirs alone
+        # what there is of a device's person's, then every change for them, until the client goes:
+        # the admins', to admins alone, as the device's person is one still; the accounts, as the
+        # device sees them, each time they change
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -486,8 +517,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._event({"type": "workflows", "workflows": agent.workflows(person)})
             for project in [None, *(p["id"] for p in projects)]:
                 self._event(agent.files_event(project, person))
-            if me["owner"]:
-                self._event(self.server.accounts.state())
+            self._event(self.server.accounts.state(me))
             self._event(agent.models_event())
             self._event(agent.settings_event())
             checked = time.monotonic()
@@ -496,15 +526,17 @@ class _Handler(BaseHTTPRequestHandler):
                     event = events.get(timeout=_KEEP_ALIVE)
                 except queue.Empty:
                     event = None
-                if time.monotonic() - checked > 1:  # the device still paired, as the person's
-                    if not self._still(person):
+                if time.monotonic() - checked > 1 or event and event["type"] == "accounts":
+                    if (now := self._still(person)) is None:  # its person's still, as they are
                         return
-                    checked = time.monotonic()
+                    me, checked = now, time.monotonic()
                 if event is None:
                     self.wfile.write(b": keep-alive\n\n")
                     continue
                 to = event.get("to", person)
-                if to == person or to == "owner" and me["owner"]:
+                if event["type"] == "accounts":
+                    self._event(self.server.accounts.state(me))
+                elif to == person or to == "admins" and me["admin"]:
                     self._event(event)
 
     def _trusted(self, write: bool = False) -> bool:
@@ -571,14 +603,17 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _error(self, status: int, message: str) -> None:
         body: dict[str, Any] = {"error": {"message": message}}
-        if status == 401:  # and whether the box is yet to be set up, by its first person
+        if status == 401:  # and whether the box is yet to be set up, by its first person, and
+            # whether that takes the code its screen shows
             body["empty"] = self.server.accounts.empty()
+            if body["empty"]:
+                body["locked"] = self.server.accounts.locked
         self._json(status, body)
 
 
-def _owner(device: dict[str, Any]) -> None:
-    # raises _Refused unless the device is the owner's
-    if not device["owner"]:
+def _admin(device: dict[str, Any]) -> None:
+    # raises _Refused unless the device's person is an admin
+    if not device["admin"]:
         raise _Refused
 
 

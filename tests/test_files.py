@@ -578,7 +578,7 @@ def test_api_folders(server, agent):
 
 def test_activity(server, agent, engine, tmp_path):
     # what people do, and what Leat does for them, noted as it is done, never what was asked;
-    # the owner's alone to see, the latest first, in pages
+    # the admins' alone to see, the latest first, in pages
     from tests.test_agent import request
 
     agent.engine = Client(engine.url)
@@ -593,7 +593,7 @@ def test_activity(server, agent, engine, tmp_path):
                                                         "project": project})  # fmt: skip
         until(events, ended)
     request(f"{server}/api/projects/{project}", "PATCH", {"shared": True})
-    request(f"{server}/api/offline", "POST", {"offline": True})
+    request(f"{server}/api/settings", "PATCH", {"offline": True})
     status, body = request(f"{server}/api/activity")
     seen = [(a["person"], a["leat"], a["action"], a["place"], a["detail"])
             for a in json.loads(body)["activity"]]  # fmt: skip

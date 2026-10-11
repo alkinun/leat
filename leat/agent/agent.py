@@ -93,7 +93,7 @@ class NotFound(Exception):
 
 
 class Refused(Exception):
-    """The person may not do that: delete a project of another's, as only the box's owner may."""
+    """The person may not do that: delete a project of another's, as only the box's admins may."""
 
 
 class Busy(Exception):
@@ -278,12 +278,12 @@ class Agent:
 
     def delete_project(self, id: str, person: int | None = None) -> None:
         """Deletes a project a person sees, with every conversation in it, whoever's, stopping
-        their turns: its own person's to do, or the box's owner's. Raises NotFound if they see no
+        their turns: its own person's to do, or an admin's. Raises NotFound if they see no
         such project, Refused if it is not theirs to delete."""
         with self._lock:
             project, who = self._project(id, person), self.store.person(person or 0) or {}
-            if project["person"] != person and not who.get("owner"):
-                raise Refused("only whoever made a project, or this Leat's owner, may delete it")
+            if project["person"] != person and not who.get("admin"):
+                raise Refused("only whoever made a project, or an admin, may delete it")
             held = self.store.conversations_in(id)
             for c in held:
                 if (turn := self._turns.pop(c["id"], None)) is not None:
@@ -389,7 +389,7 @@ class Agent:
             self._publish_workflows()
 
     def overview(self) -> dict[str, Any]:
-        """The box as its owner looks after it: the room its files take, and their earlier
+        """The box as its admins look after it: the room its files take, and their earlier
         versions, and the room left on their disk, and each person's use this month, counted,
         not read."""
         month = datetime.date.today().replace(day=1)
@@ -420,11 +420,11 @@ class Agent:
             self.workspace.forget()
 
     def offline(self) -> bool:
-        """Whether the agent is kept from the internet, as the owner chose."""
+        """Whether the agent is kept from the internet, as an admin chose."""
         return bool(self.store.setting("offline"))
 
     def settings(self) -> dict[str, Any]:
-        """The box's settings, as its owner chose them: whether it is kept from the internet, the
+        """The box's settings, as its admins chose them: whether it is kept from the internet, the
         office's name, if given, whether its screen shows its address, and its time zone, as the
         system has it."""
         office, hidden = self.store.setting("office"), self.store.setting("hide_address")
@@ -567,18 +567,18 @@ class Agent:
                 self.index.forget(_folder(None, person))
 
     def settle(self) -> None:
-        """Moves the files that are no one's into the owner's space, once the box has one: those
-        of the workspace before it had spaces, at its top, and those of a box that had no people,
-        no one's own, at people/0."""
+        """Moves the files that are no one's into the first person's space, once the box has one:
+        those of the workspace before it had spaces, at its top, and those of a box that had no
+        people, no one's own, at people/0."""
         if self.workspace is None:
             return
         root, no_one = self.workspace.root, self.workspace.root / "people" / "0"
-        owner = next((p["id"] for p in self.store.people() if p["owner"]), None)
+        first = next((p["id"] for p in self.store.people()), None)
         strays = [path for path in root.iterdir() if path.name not in ("people", "projects")]
-        if owner is not None and no_one.is_dir():
+        if first is not None and no_one.is_dir():
             strays += list(no_one.iterdir())
         if strays:
-            home = self._space(None, owner)
+            home = self._space(None, first)
             for path in strays:  # each by a name free there; a hidden one, of saved pages, once
                 if not path.name.startswith("."):
                     path.rename(home.root / home.free(path.name))
@@ -586,7 +586,7 @@ class Agent:
                     shutil.rmtree(path, ignore_errors=True)
                 else:
                     path.rename(home.root / path.name)
-        if owner is not None and no_one.is_dir():
+        if first is not None and no_one.is_dir():
             no_one.rmdir()
 
     def models(self) -> list[dict[str, Any]]:

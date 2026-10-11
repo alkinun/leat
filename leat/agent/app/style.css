@@ -187,7 +187,7 @@ body.project :is(#log, #greeting) {
 }
 #instructions:focus { border-color: var(--muted); }
 #saved { margin: 6px 0 0; }
-/* whether a project's files are synced with a folder, and the owner's controls of it */
+/* whether a project's files are synced with a folder, and an admin's controls of it */
 #syncing { display: flex; align-items: center; gap: 12px; margin: 4px 0 6px; font-size: 0.8125rem; }
 #syncing:empty { display: none; }
 #syncing .meta { color: var(--muted); }
@@ -454,12 +454,24 @@ body.gated #gate { display: grid; flex: 1; place-items: center; min-height: 100v
 #join .error { color: var(--error, #b3261e); }
 /* the box set up by its first person, a step at a time */
 #join > input { display: block; width: 100%; margin: 8px 0 0; }
+#join > input.code { text-transform: uppercase; letter-spacing: 2px; font-family: var(--font-mono); }
 #join .choice { margin: 8px 0 0; }
 #join .actions { display: flex; gap: 8px; align-items: center; margin-top: 24px; }
 #join .actions .steps { flex: 1; margin: 0; color: var(--muted); font-size: 0.8125rem; }
 #join .actions button.previous { background: none; color: var(--muted); }
-/* the box's people and devices, the owner's to manage */
-#accounts h3 { margin: 16px 0 0; font-size: 1rem; font-weight: 600; }
+/* the box's people and devices: each person's own, and an admin's to manage */
+#accounts h3 { margin: 20px 0 0; font-size: 0.9375rem; font-weight: 600; }
+#accounts > p { margin: 8px 0 0; }
+#accounts > p.meta { margin-top: 12px; white-space: normal; }
+#accounts ul { margin: 0; padding: 0; list-style: none; }
+#accounts li button { font-size: 0.8125rem; }
+#accounts > p button { padding: 0 8px; color: var(--muted); font-size: 0.8125rem; }
+#accounts > p button:hover, #accounts li button:hover { color: var(--text); }
+#accounts .people ul { margin-top: 4px; }
+#accounts .people li li { padding: 2px 0; border: none; font-size: 0.875rem; }
+#accounts .people li li > div { flex-direction: row; gap: 8px; align-items: baseline; }
+#accounts .people li li .meta { font-size: 0.75rem; }
+#accounts select[hidden] { display: none; }
 #accounts li > div { display: flex; flex-direction: column; gap: 2px; }
 #accounts h3 button { font-size: 0.8125rem; color: var(--muted); }
 #accounts .meta b { color: var(--text); letter-spacing: 1px; }
@@ -469,7 +481,7 @@ body.gated #gate { display: grid; flex: 1; place-items: center; min-height: 100v
   padding: 4px 12px; border-radius: var(--round); background: var(--accent); color: var(--on-accent);
   font-size: 0.875rem;
 }
-/* the box as its owner looks after it, and what was done on it */
+/* the box as its admins look after it, and what was done on it */
 #seeActivity { font-weight: 400; color: var(--muted); text-decoration: none; }
 #seeActivity:hover { color: var(--text); }
 #seeActivity::after { content: " ›"; }
@@ -484,7 +496,7 @@ body.gated #gate { display: grid; flex: 1; place-items: center; min-height: 100v
 #room { margin: 4px 0 4px; font-size: 0.875rem; }
 #room.meta { color: var(--muted); }
 #room.warning { color: var(--error); }
-/* the box, and whether Leat may reach the internet, the owner's to choose */
+/* the box, and whether Leat may reach the internet, an admin's to choose */
 :is(#box, #internet)[hidden] { display: none; }
 :is(#box, #internet) .about { margin: 4px 0 12px; color: var(--muted); font-size: 0.875rem; }
 #office {
