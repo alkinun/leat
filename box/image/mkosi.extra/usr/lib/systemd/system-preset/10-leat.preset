@@ -7,4 +7,5 @@ enable leat-provision.service
 enable leat-agent.service
 enable leat-searxng.service
 enable leat-proxy.service
+enable leat-address.service
 enable leat-address.timer

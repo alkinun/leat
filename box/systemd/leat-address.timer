@@ -1,8 +1,8 @@
 [Unit]
-Description=Point the box's name at its address, at boot and every few minutes
+Description=Point the box's name at its address, every 5 minutes
 
 [Timer]
-OnBootSec=20s
+OnBootSec=5min
 OnUnitActiveSec=5min
 RandomizedDelaySec=30s
 

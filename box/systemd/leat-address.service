@@ -17,3 +17,10 @@ ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
+# at boot, as soon as the network is up, so that the name points at the box by the time anyone opens
+# it, and again in 30 s if the registry cannot be reached; the timer tells it every 5 minutes after
+Restart=on-failure
+RestartSec=30s
+
+[Install]
+WantedBy=multi-user.target
