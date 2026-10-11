@@ -384,11 +384,26 @@ def test_system_refuses():
         assert "error" in system.handle(request), request
 
 
-def test_system_timezone(monkeypatch):
+def test_system_timezone(tmp_path, monkeypatch):
+    # the time zone set, and kept on the state's partition; put back at boot once an update
+    # replaced the system's, of a zone the system has not, and not of one it has
     ran = []
     monkeypatch.setattr(system.subprocess, "run", lambda args, **kw: ran.append(args))
+    monkeypatch.setattr(system, "KEPT", tmp_path / "kept")
     assert system.handle({"timezone": "Europe/Istanbul"}) == {}
     assert ran == [["timedatectl", "set-timezone", "Europe/Istanbul"]]
+    assert (tmp_path / "kept/timezone").read_text() == "Europe/Istanbul\n"
+    ran.clear()
+    monkeypatch.setattr(system, "zone", lambda: "Europe/Berlin")  # the new system's
+    system.restore()
+    assert ran == [["timedatectl", "set-timezone", "Europe/Istanbul"]]
+    ran.clear()
+    monkeypatch.setattr(system, "zone", lambda: "Europe/Istanbul")
+    system.restore()
+    assert ran == []
+    (tmp_path / "kept/timezone").unlink()
+    system.restore()  # none kept: none put back
+    assert ran == []
 
 
 def test_system_power(monkeypatch):

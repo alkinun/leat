@@ -5,6 +5,8 @@ After=network-online.target
 # a box is served by its name, which provisioning gives it, on its first boot
 After=leat-provision.service
 ConditionPathExists=/etc/leat/box.env
+# its identity, of its own partition, mounted before it is looked for
+RequiresMountsFor=/etc/leat
 
 [Service]
 Type=oneshot

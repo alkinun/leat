@@ -11,7 +11,9 @@ StandardError=journal
 TimeoutSec=30
 NoNewPrivileges=yes
 ProtectSystem=strict
+# iwd's known networks, and what it keeps of what it set, the time zone's name
 ReadWritePaths=/var/lib/iwd
+StateDirectory=leat-system
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes

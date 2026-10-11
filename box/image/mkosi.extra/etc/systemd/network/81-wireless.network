@@ -1,5 +1,5 @@
 # every Wi-Fi link iwd joins, by DHCP, the box answering at leat.local, a wired link its way out
-# whenever it has one
+# whenever it has one; its address asked for by its link's own, as a wired link's is
 [Match]
 Type=wlan
 
@@ -8,6 +8,7 @@ DHCP=yes
 MulticastDNS=yes
 
 [DHCPv4]
+ClientIdentifier=mac
 RouteMetric=2048
 
 [IPv6AcceptRA]

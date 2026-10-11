@@ -1,0 +1,13 @@
+[Unit]
+Description=Put back what the box's system helper set, as an update replaced the system's partition
+# the time zone, kept on the state's partition, before anything tells the time by it
+RequiresMountsFor=/var/lib
+Before=leat-agent.service leat-screen.service
+ConditionPathExists=/var/lib/leat-system
+
+[Service]
+Type=oneshot
+ExecStart=/opt/leat/.venv/bin/python -m leat.box.system --restore
+
+[Install]
+WantedBy=multi-user.target

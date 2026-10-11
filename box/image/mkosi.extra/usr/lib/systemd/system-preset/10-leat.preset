@@ -11,6 +11,7 @@ enable leat-address.service
 enable leat-address.timer
 enable leat-screen.service
 enable leat-system.socket
+enable leat-system-restore.service
 enable iwd.service
 # no login on the box's display, whose screen leat-screen.service draws, nor on any other
 disable getty@.service

@@ -5,8 +5,9 @@ After=network-online.target leat-searxng.service
 # a box is served by its name, which provisioning gives it, on its first boot
 After=leat-provision.service
 ConditionPathExists=/etc/leat/box.env
-# the office's data on its own partition, never the system's, as the folder is there unmounted too
-RequiresMountsFor=/var/lib/leat
+# its identity, and the office's data, each of its own partition, never the system's, as the
+# folders are there unmounted too
+RequiresMountsFor=/etc/leat /var/lib/leat
 
 [Service]
 User=leat

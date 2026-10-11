@@ -9,11 +9,15 @@ checked, by a helper systemd runs as root for each request, on a socket leat's g
 
 Each answer is a JSON object: {} or what was asked, or {"error": why}. The agent asks by ask().
 
+What it sets that the system's partition holds, as the time zone, it keeps on the state's too, and
+puts back at boot, by --restore, as an update replaces the system's.
+
 Wi-Fi is iwd's, its addresses systemd-networkd's, as a wired link's are: a network joined is one of
 iwd's known networks, a file of /var/lib/iwd, which iwd joins by itself whenever it is in reach; a
 wired link stays the box's way out while it has one.
 """
 
+import contextlib
 import json
 import re
 import socket
@@ -26,6 +30,9 @@ from typing import Any
 
 SOCKET = "/run/leat/system.sock"
 IWD = Path("/var/lib/iwd")  # iwd's known networks
+# what the helper set that the system's partition holds, as the time zone's /etc/localtime, kept on
+# the state's, as the system's is replaced by an update, and put back at boot
+KEPT = Path("/var/lib/leat-system")
 LONGEST = 4096  # bytes of a request at most
 SCANNING = 6  # seconds a scan for networks is waited for at most
 _PLAIN = re.compile(r"[A-Za-z0-9 _-]+")  # a network's name iwd names its file by, as it is
@@ -62,7 +69,17 @@ def set_timezone(zone: Any) -> dict[str, Any]:
         raise Refused(f"there is no time zone {zone!r}")
     subprocess.run(["timedatectl", "set-timezone", zone], check=True, capture_output=True,
                    timeout=10)  # fmt: skip
+    KEPT.mkdir(exist_ok=True)  # systemd's StateDirectory, on a box
+    (KEPT / "timezone").write_text(f"{zone}\n")
     return {}
+
+
+def restore() -> None:
+    """Puts back what the helper set that the system's partition holds, as an update replaced it:
+    the time zone, of its kept name."""
+    with contextlib.suppress(FileNotFoundError):
+        if (kept := (KEPT / "timezone").read_text().strip()) != zone():
+            set_timezone(kept)
 
 
 def scan() -> dict[str, Any]:
@@ -195,7 +212,10 @@ def _properties(interface: dict[str, Any]) -> dict[str, Any]:
 
 
 def main() -> None:
-    # a request on stdin, the socket systemd accepted, and its answer on stdout
+    # a request on stdin, the socket systemd accepted, and its answer on stdout; or, of --restore,
+    # at boot, what the helper set put back
+    if sys.argv[1:] == ["--restore"]:
+        return restore()
     raw = sys.stdin.buffer.read(LONGEST + 1)
     try:
         request = json.loads(raw) if len(raw) <= LONGEST else None

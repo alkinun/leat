@@ -3,6 +3,8 @@ Description=Take in the box's identity, of the file of its registration on its b
 # the file, leatbox-registry register's JSON, as one is put beside a box's image; deleted once taken in
 ConditionPathExists=/boot/leat-box.json
 Before=leat-address.service leat-proxy.service leat-agent.service
+# into the identity's own partition
+RequiresMountsFor=/etc/leat
 
 [Service]
 Type=oneshot

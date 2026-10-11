@@ -1,7 +1,11 @@
-# every wired link, by DHCP, the box answering at leat.local; its way out, before Wi-Fi
+# every wired link, by DHCP, the box answering at leat.local; its way out, before Wi-Fi. Its address
+# asked for by its link's own, the same whatever system an update brings, of a machine ID anew
 [Match]
 Type=ether
 
 [Network]
 DHCP=yes
 MulticastDNS=yes
+
+[DHCPv4]
+ClientIdentifier=mac

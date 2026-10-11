@@ -1,3 +1,4 @@
-# the office's data, on the partition systemd-repart makes on the first boot, waited for as long as a
-# slow disk takes to make it
-PARTLABEL=leat-data  /var/lib/leat  ext4  defaults,x-systemd.requires=systemd-repart.service,x-systemd.device-timeout=5min  0 2
+# the box's identity, and its state, on the partitions systemd-repart makes on the first boot,
+# waited for as long as a slow disk takes to make them
+PARTLABEL=leat-identity  /etc/leat  ext4  defaults,x-systemd.requires=systemd-repart.service,x-systemd.device-timeout=5min  0 2
+PARTLABEL=leat-data      /var       ext4  defaults,x-systemd.requires=systemd-repart.service,x-systemd.device-timeout=5min  0 2
