@@ -19,6 +19,7 @@ wired link stays the box's way out while it has one.
 
 import contextlib
 import json
+import os
 import re
 import socket
 import subprocess
@@ -70,14 +71,14 @@ def set_timezone(zone: Any) -> dict[str, Any]:
     subprocess.run(["timedatectl", "set-timezone", zone], check=True, capture_output=True,
                    timeout=10)  # fmt: skip
     KEPT.mkdir(exist_ok=True)  # systemd's StateDirectory, on a box
-    (KEPT / "timezone").write_text(f"{zone}\n")
+    _write(KEPT / "timezone", f"{zone}\n", 0o644)
     return {}
 
 
 def restore() -> None:
     """Puts back what the helper set that the system's partition holds, as an update replaced it:
     the time zone, of its kept name."""
-    with contextlib.suppress(FileNotFoundError):
+    with contextlib.suppress(FileNotFoundError, Refused):  # none kept, or no zone the system has
         if (kept := (KEPT / "timezone").read_text().strip()) != zone():
             set_timezone(kept)
 
@@ -125,8 +126,7 @@ def join(name: Any, passphrase: Any = None) -> dict[str, Any]:
     forget(name)  # of another kind, if it was known
     IWD.mkdir(mode=0o700, exist_ok=True)
     path = IWD / f"{_file(name)}.{kind}"
-    path.touch(mode=0o600)
-    path.write_text(text)
+    _write(path, text, 0o600)
     return {}
 
 
@@ -166,6 +166,22 @@ def ask(request: dict[str, Any], path: str = SOCKET, timeout: float = 30) -> dic
     if "error" in answer:
         raise ValueError(answer["error"])
     return answer
+
+
+def _write(path: Path, text: str, mode: int) -> None:
+    # a file whole, of its mode from the start, on the disk before it takes its name, as a power cut
+    # just after left a file written but not yet on the disk empty
+    temporary = path.with_name(f".{path.name}.new")
+    with open(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode), "w") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    temporary.replace(path)
+    directory = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def _checked_name(name: Any) -> None:

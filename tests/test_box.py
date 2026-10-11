@@ -401,9 +401,11 @@ def test_system_timezone(tmp_path, monkeypatch):
     monkeypatch.setattr(system, "zone", lambda: "Europe/Istanbul")
     system.restore()
     assert ran == []
+    (tmp_path / "kept/timezone").write_text("")  # as a power cut left one not yet on the disk
+    system.restore()
     (tmp_path / "kept/timezone").unlink()
     system.restore()  # none kept: none put back
-    assert ran == []
+    assert ran == [] and not list((tmp_path / "kept").iterdir())
 
 
 def test_system_power(monkeypatch):
