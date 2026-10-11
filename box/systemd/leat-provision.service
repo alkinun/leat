@@ -1,0 +1,12 @@
+[Unit]
+Description=Take in the box's identity, of the file of its registration on its boot partition
+# the file, leatbox-registry register's JSON, as one is put beside a box's image; deleted once taken in
+ConditionPathExists=/boot/leat-box.json
+Before=leat-address.service leat-proxy.service leat-agent.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/leat/.venv/bin/python -m leat.box.provision --take /boot/leat-box.json
+
+[Install]
+WantedBy=multi-user.target

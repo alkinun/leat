@@ -40,6 +40,21 @@ def test_provision(tmp_path):
             provision.provision(wrong, tmp_path / "wrong")
 
 
+def test_take(tmp_path, capsys):
+    # a registration beside the image, taken in once and deleted; one that is not, left, and said
+    taken = tmp_path / "leat-box.json"
+    taken.write_text(json.dumps(REGISTERED))
+    provision.main(["--root", str(tmp_path / "leat"), "--take", str(taken)])
+    assert not taken.exists() and (tmp_path / "leat" / "registry-secret").read_text() == "s3cret"
+    assert capsys.readouterr().out.startswith("provisioned k7x2qm.leatbox.net")
+    taken.write_text("{}")
+    with pytest.raises(SystemExit, match="not a box's registration"):
+        provision.main(["--root", str(tmp_path / "other"), "--take", str(taken)])
+    assert taken.exists() and not (tmp_path / "other").exists()
+    with pytest.raises(SystemExit, match="cannot provision"):
+        provision.main(["--take", str(tmp_path / "none.json")])
+
+
 class Registry(BaseHTTPRequestHandler):
     """The registry's PUT /address, which answers `answer`, and keeps what it was told."""
 

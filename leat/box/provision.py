@@ -1,6 +1,11 @@
 """Provisioning: the files a box keeps of its registration, written when we build it.
 
     ssh leatbox leatbox-registry register | python -m leat.box.provision [--root /etc/leat]
+    python -m leat.box.provision --take /boot/leat-box.json
+
+A box takes its registration in on its first boot, by leat-provision.service, of a file beside its
+image, on its boot partition, which any computer writes: the file is deleted once taken in, so
+that its secrets are kept nowhere but the box's root.
 
 Of the registration's JSON, it writes into the root:
 
@@ -56,12 +61,17 @@ def main(argv: list[str] | None = None) -> None:
         "stdin into the files the box's services read.",
     )
     parser.add_argument("--root", type=Path, default=ROOT, help=f"by default {ROOT}")
+    parser.add_argument(
+        "--take", type=Path, help="a file of the registration to read, not stdin, then delete"
+    )
     args = parser.parse_args(argv)
     try:
-        box = json.load(sys.stdin)
+        box = json.loads(args.take.read_text()) if args.take else json.load(sys.stdin)
         provision(box, args.root)
-    except ValueError as e:
+    except (OSError, ValueError) as e:
         raise SystemExit(f"cannot provision: {e}") from e
+    if args.take:
+        args.take.unlink()
     print(f"provisioned {box['name']} in {args.root}")
 
 

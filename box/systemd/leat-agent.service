@@ -2,7 +2,8 @@
 Description=Leat: the assistant, and its app, behind the box's front door
 Wants=network-online.target leat-searxng.service leat-proxy.service
 After=network-online.target leat-searxng.service
-# a box is served by its name, which provisioning gives it
+# a box is served by its name, which provisioning gives it, on its first boot
+After=leat-provision.service
 ConditionPathExists=/etc/leat/box.env
 
 [Service]

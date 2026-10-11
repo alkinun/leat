@@ -11,9 +11,10 @@ searxng_sha256=a377e229d3f05bba445894f83c0d450093174201c416441b565c772787f85ffd
 export UV_CACHE_DIR="$BUILDDIR/uv" UV_PYTHON_DOWNLOADS=never
 export UV_LINK_MODE=copy UV_COMPILE_BYTECODE=1
 
-# leat, as uv.lock has it, without its development's tools
+# leat, as uv.lock has it, without its development's tools; leat itself built anew each time, as uv
+# would take a build of it cached of an earlier commit, its pyproject.toml unchanged
 UV_PROJECT_ENVIRONMENT=/opt/leat/.venv uv sync --project "$src" --python /usr/bin/python3 \
-    --frozen --no-dev --no-editable
+    --frozen --no-dev --no-editable --reinstall-package leat
 # the libraries the sandbox offers the model's code
 uv venv --quiet --python /usr/bin/python3 /opt/leat/sandbox
 uv pip install --quiet --python /opt/leat/sandbox/bin/python -r "$src/leat/agent/sandbox.txt"

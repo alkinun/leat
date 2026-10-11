@@ -2,7 +2,8 @@
 Description=Point the box's name at its address on the office's network
 Wants=network-online.target
 After=network-online.target
-# a box is served by its name, which provisioning gives it
+# a box is served by its name, which provisioning gives it, on its first boot
+After=leat-provision.service
 ConditionPathExists=/etc/leat/box.env
 
 [Service]
