@@ -1,0 +1,28 @@
+[Unit]
+Description=Leat: the assistant, and its app, behind the box's front door
+Wants=network-online.target leat-searxng.service leat-proxy.service
+After=network-online.target leat-searxng.service
+# a box is served by its name, which provisioning gives it
+ConditionPathExists=/etc/leat/box.env
+
+[Service]
+User=leat
+Group=leat
+EnvironmentFile=/etc/leat/box.env
+# its engine: leat serve on the box, or one elsewhere, as a box under test uses, of engine.env:
+# LEAT_ENGINE, and LEAT_ENGINE_KEY if it asks for a key
+Environment=LEAT_ENGINE=http://127.0.0.1:8080
+EnvironmentFile=-/etc/leat/engine.env
+ExecStart=/opt/leat/.venv/bin/leat agent --name ${LEAT_NAME} --host 127.0.0.1 --port 8000 \
+    --data /var/lib/leat --engine ${LEAT_ENGINE} --search http://127.0.0.1:8888
+Restart=on-failure
+RestartSec=2
+# what bubblewrap's sandbox leaves it: user namespaces, by which it runs the model's code
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/leat
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

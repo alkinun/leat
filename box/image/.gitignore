@@ -4,3 +4,4 @@ mkosi.tools/
 mkosi.local.extra/
 mkosi.local.conf
 mkosi.tools.manifest
+mkosi.builddir/

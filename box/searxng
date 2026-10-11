@@ -1,0 +1,11 @@
+#!/bin/sh
+# SearXNG, with a secret of the box's own, made on its first start; its settings at
+# $SEARXNG_SETTINGS_PATH, its state where systemd keeps it
+set -eu
+secret="$STATE_DIRECTORY/secret"
+if [ ! -s "$secret" ]; then
+    (umask 077 && /usr/bin/python3 -c "import secrets; print(secrets.token_hex(32))" > "$secret")
+fi
+SEARXNG_SECRET=$(cat "$secret")
+export SEARXNG_SECRET
+exec /opt/searxng/.venv/bin/python -m searx.webapp

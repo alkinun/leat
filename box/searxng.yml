@@ -1,0 +1,12 @@
+# SearXNG's settings on a box: its defaults, on this machine alone, with the JSON API leat agent
+# searches by, and no limiter, as leat agent is its one client
+use_default_settings: true
+general:
+  instance_name: Leat
+server:
+  bind_address: "127.0.0.1"
+  port: 8888
+  limiter: false
+  public_instance: false
+search:
+  formats: [html, json]

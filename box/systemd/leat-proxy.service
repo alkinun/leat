@@ -2,6 +2,8 @@
 Description=Leat's front door: the app over HTTPS at the box's name
 Wants=network-online.target
 After=network-online.target
+# a box is served by its name, which provisioning gives it
+ConditionPathExists=/etc/leat/box.env
 
 [Service]
 EnvironmentFile=/etc/leat/box.env

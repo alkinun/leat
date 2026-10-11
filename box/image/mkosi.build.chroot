@@ -1,0 +1,49 @@
+#!/bin/sh
+# Builds what the box runs beyond Arch's packages, into $DESTDIR, which mkosi copies into the image:
+# leat, of uv.lock, and the sandbox's libraries; SearXNG, of a pinned commit; Caddy, with the
+# acme-dns module; and box/'s units, settings, users and files. Each built where it will run, as
+# its environments keep their paths, then copied. Downloads are cached in $BUILDDIR.
+set -eu
+src=/work/src/leat
+searxng=f4822b3fc46726bb259d14c6332b702c76b98f82
+searxng_sha256=a377e229d3f05bba445894f83c0d450093174201c416441b565c772787f85ffd
+
+export UV_CACHE_DIR="$BUILDDIR/uv" UV_PYTHON_DOWNLOADS=never
+export UV_LINK_MODE=copy UV_COMPILE_BYTECODE=1
+
+# leat, as uv.lock has it, without its development's tools
+UV_PROJECT_ENVIRONMENT=/opt/leat/.venv uv sync --project "$src" --python /usr/bin/python3 \
+    --frozen --no-dev --no-editable
+# the libraries the sandbox offers the model's code
+uv venv --quiet --python /usr/bin/python3 /opt/leat/sandbox
+uv pip install --quiet --python /opt/leat/sandbox/bin/python -r "$src/leat/agent/sandbox.txt"
+
+# SearXNG, of its commit, its version frozen, as it reads its version of git otherwise
+mkdir -p /opt/searxng
+curl -sSfL -o /tmp/searxng.tar.gz "https://github.com/searxng/searxng/archive/$searxng.tar.gz"
+echo "$searxng_sha256  /tmp/searxng.tar.gz" | sha256sum -c --quiet -
+tar -xzf /tmp/searxng.tar.gz -C /opt/searxng --strip-components=1
+uv venv --quiet --python /usr/bin/python3 /opt/searxng/.venv
+uv pip install --quiet --python /opt/searxng/.venv/bin/python -r /opt/searxng/requirements.txt
+cat > /opt/searxng/searx/version_frozen.py <<EOF
+VERSION_STRING = VERSION_TAG = DOCKER_TAG = "$searxng"
+GIT_URL = "https://github.com/searxng/searxng"
+GIT_BRANCH = "master"
+EOF
+echo /opt/searxng > "$(/opt/searxng/.venv/bin/python -c 'import site; print(site.getsitepackages()[0])')/searxng.pth"
+
+# Caddy, of box/build-caddy.sh's pinned versions
+mkdir -p "$DESTDIR/usr/local/bin"
+GOPATH="$BUILDDIR/go" GOCACHE="$BUILDDIR/gocache" GOFLAGS=-modcacherw \
+    "$src/box/build-caddy.sh" "$DESTDIR/usr/local/bin/leat-caddy"
+
+mkdir -p "$DESTDIR/opt"
+cp -a /opt/leat /opt/searxng "$DESTDIR/opt/"
+
+# box/'s files
+install -Dm644 -t "$DESTDIR/usr/lib/systemd/system" "$src"/box/systemd/*
+install -Dm644 "$src/box/Caddyfile" "$DESTDIR/usr/share/leat/box/Caddyfile"
+install -Dm644 "$src/box/searxng.yml" "$DESTDIR/usr/share/leat/searxng.yml"
+install -Dm755 "$src/box/searxng" "$DESTDIR/usr/lib/leat/searxng"
+install -Dm644 "$src/box/sysusers.d/leat.conf" "$DESTDIR/usr/lib/sysusers.d/leat.conf"
+install -Dm644 "$src/box/tmpfiles.d/leat.conf" "$DESTDIR/usr/lib/tmpfiles.d/leat.conf"
