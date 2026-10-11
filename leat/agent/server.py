@@ -64,6 +64,7 @@ _KEEP_ALIVE = 15  # seconds between comments on a quiet event stream, which find
 UPLOAD = 100 << 20  # bytes of a file uploaded at most
 BODY = 10 << 20  # bytes of a request's JSON at most, which may come before its device is known
 PROJECT_NAME = 80  # characters of a project's name at most
+OFFICE = 60  # characters of an office's name at most, as the box's screen shows it
 INSTRUCTIONS = 20000  # characters of a project's instructions at most
 COOKIE = "leat"  # the cookie of a device's secret
 # of a box served by its name over HTTPS: a cookie browsers send over HTTPS alone, to that name
@@ -146,6 +147,11 @@ class _Handler(BaseHTTPRequestHandler):
             file = APP / path[1:]
             return self._send(200, _TYPES[file.suffix], file.read_bytes())
         with self._answering():
+            if path == "/api/box":  # of the box's own screen, on this machine, never its front door
+                if not _loopback(urllib.parse.urlsplit(f"//{self.headers.get('Host', '')}").hostname
+                                 or ""):  # fmt: skip
+                    return self._error(404, f"there is no GET {path}")
+                return self._json(200, agent.box())
             me = self._device()
             if path == "/api/me":
                 self._json(
@@ -189,9 +195,13 @@ class _Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(size))
             if not isinstance(body, dict):
                 raise ValueError("the body must be a JSON object")
-            if path == "/api/setup":  # the box's first person, its owner
+            if path == "/api/setup":  # the box's first person, its owner, and its settings
+                settings = _settings(body, ("offline", "office"))
                 secret = accounts.setup(_text(body, "name"), _device(self.headers))
-                agent.note(agent.store.people()[0]["id"], "set Leat up")
+                agent.change(**settings)
+                agent.note(
+                    agent.store.people()[0]["id"], "set Leat up", detail=settings.get("office")
+                )
                 return self._json(200, {}, secret)
             if path == "/api/pairings":  # a device's request to join
                 return self._json(200, accounts.ask(_text(body, "name"), _device(self.headers)))
@@ -234,13 +244,6 @@ class _Handler(BaseHTTPRequestHandler):
                 _owner(me)
                 agent.load(model := _text(body, "model"))
                 agent.note(person, "loaded the model", detail=model)
-                self._json(200, {})
-            elif path == "/api/offline":  # the agent kept from the internet, or let reach it
-                _owner(me)
-                if not isinstance(offline := body.get("offline"), bool):
-                    raise ValueError("offline must be true or false")
-                agent.set_offline(offline)
-                agent.note(person, f"turned the internet {'off' if offline else 'on'}")
                 self._json(200, {})
             elif match := _HISTORY.fullmatch(path):  # a file restored as it was
                 name = _text(body, "name")
@@ -296,21 +299,34 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(200, {})
 
     def do_PATCH(self) -> None:
-        # a project changed: its name, instructions, or whether it is shared; or a workflow's
-        # schedule, set or cleared
+        # a project changed: its name, instructions, or whether it is shared; a workflow's
+        # schedule, set or cleared; or the box's settings, the owner's
         if not self._trusted(write=True):
             return self._error(403, "requests from other sites' pages are refused")
         path, agent = urllib.parse.urlsplit(self.path).path, self.server.agent
         with self._answering():
             me = self._device()
             flow, match = _WORKFLOW.fullmatch(path), _PROJECT.fullmatch(path)
-            if not flow and not match:
+            if not flow and not match and path != "/api/settings":
                 return self._error(404, f"there is no PATCH {path}")
             if (size := self._length()) > BODY:
                 return self._error(413, f"a request may be {BODY >> 20} MB at most")
             body = json.loads(self.rfile.read(size))
             if not isinstance(body, dict):
                 raise ValueError("the body must be a JSON object")
+            if path == "/api/settings":
+                _owner(me)
+                settings = _settings(body, ("offline", "office", "address"), only=True)
+                agent.change(**settings)
+                for key, value in settings.items():  # each change noted
+                    said = {
+                        "offline": f"turned the internet {'off' if value else 'on'}",
+                        "office": "named the office" if value else "took the office's name away",
+                        "address": "showed the address on the box's screen" if value
+                        else "hid the address from the box's screen",
+                    }  # fmt: skip
+                    agent.note(me["person"], said[key], detail=value if key == "office" else None)
+                return self._json(200, {})
             if flow:
                 if (when := body.get("schedule")) is not None and not isinstance(when, str):
                     raise ValueError("schedule must be as 'daily 08:00', or null")
@@ -609,6 +625,25 @@ def _project(body: dict[str, Any], new: bool = False) -> dict[str, Any]:
     if not isinstance(fields.get("shared", False), bool):
         raise ValueError("shared must be true or false")
     return fields
+
+
+def _settings(body: dict[str, Any], keys: tuple[str, ...], only: bool = False) -> dict[str, Any]:
+    # the box's settings a body gives, of `keys`, each as it must be, a body of others refused if
+    # `only`: whether it is kept from the internet, the office's name, and whether the box's screen
+    # shows its address. Raises ValueError
+    if only and (others := set(body) - set(keys)):
+        raise ValueError(f"there are no settings {', '.join(sorted(others))}")
+    settings = {k: body[k] for k in keys if k in body}
+    for key in ("offline", "address"):
+        if key in settings and not isinstance(settings[key], bool):
+            raise ValueError(f"{key} must be true or false")
+    if "office" in settings:
+        if not isinstance(settings["office"], str | None):
+            raise ValueError("office must be the office's name, or null")
+        settings["office"] = " ".join((settings["office"] or "").split()) or None
+        if settings["office"] and len(settings["office"]) > OFFICE:
+            raise ValueError(f"an office's name is {OFFICE} characters at most")
+    return settings
 
 
 def _message(body: dict[str, Any]) -> tuple[str, str | None, list[str]]:

@@ -13,12 +13,11 @@ StandardInput=null
 StandardOutput=tty
 StandardError=journal
 TTYPath=/dev/tty2
-TTYReset=yes
-TTYVHangup=yes
 Restart=always
 RestartSec=2
 DynamicUser=yes
-SupplementaryGroups=tty
+# the display's framebuffer, and its console
+SupplementaryGroups=video tty
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

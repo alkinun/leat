@@ -1,14 +1,17 @@
 import base64
+import datetime
 import io
 import json
 import subprocess
 import threading
 from collections.abc import Iterator
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from PIL import Image, ImageColor
 
 from leat.box import address, provision, screen
 
@@ -160,48 +163,114 @@ def test_ula(monkeypatch):
     assert address._ula("192.168.1.20") is None
 
 
-def test_screen():
-    # what the box's screen says of each state, ready once its certificate holds and the app answers
-    name = "k7x2qm.leatbox.net"
+NAME = "k7x2qm.leatbox.net"
+READY = screen.State(NAME, "192.168.1.20", certified=True, answering=True, link="Wired",
+                     model=("Qwen_Qwen3.6-35B-A3B-Q4_K_M", "loaded"), free=212e9,
+                     version="2026.10.11")  # fmt: skip
+
+
+def test_said():
+    # what the box's screen says of each state: ready once its certificate holds and the app
+    # answers, the address shown as its owner chose, and always before it is set up
     said = {
-        "no network": screen.State(name, None),
-        "switched on": screen.State(name, None, booting=True),
+        "switched on": screen.State(NAME, None, booting=True),
+        "no network": screen.State(NAME, None),
         "not provisioned": screen.State(None, "192.168.1.20"),
-        "starting": screen.State(name, "192.168.1.20", certified=False, answering=True),
-        "set up": screen.State(name, "192.168.1.20", certified=True, answering=True, empty=True),
-        "ready": screen.State(name, "192.168.1.20", certified=True, answering=True),
+        "starting": screen.State(NAME, "192.168.1.20", answering=True),
+        "set up": replace(READY, empty=True, show_address=False),
+        "ready": READY,
+        "hidden": replace(READY, show_address=False),
     }
-    lines = {
-        k: [
-            line.replace(screen.BOLD, "").replace(screen.PLAIN, "")
-            for line in screen.render(s, "##\n##")
-        ]
-        for k, s in said.items()
-    }
-    assert "No network" in lines["no network"] and "Not set up" in lines["not provisioned"]
-    assert lines["switched on"][2] == "Starting..."  # its network not yet up, as it is switched on
-    assert lines["starting"][2:] == ["Starting...", "", f"https://{name}"]  # no QR code yet
-    assert "Open this address to set up your Leat" in lines["set up"]
-    assert lines["ready"][2] == "Ready" and f"https://{name}" in lines["ready"]
-    assert [line for line in lines["ready"] if line == "##"] == ["##", "##"]  # the QR code
-    assert "leat.local" in lines["ready"][-1]
-    # centred, the screen cleared first and the cursor hidden
+    words = {k: screen.said(state) for k, state in said.items()}
+    assert words["switched on"][0] == "Starting" and words["starting"][0] == "Starting"
+    assert words["no network"][:2] == ("No network", "Plug the network cable into the box.")
+    assert words["not provisioned"][0] == "Not set up"
+    scan = "Scan the code, or open this address in a browser."
+    assert words["set up"] == ("Set up your Leat", scan, f"https://{NAME}")
+    assert words["ready"][0] == "Ready" and words["ready"][2] == f"https://{NAME}"
+    assert words["hidden"][2] is None
+    assert all(w[2] is None for k, w in words.items() if k not in ("set up", "ready"))
+
+
+def test_footer():
+    assert screen.footer(READY) == [
+        "Qwen3.6 35B A3B · ready",
+        "Wired · 192.168.1.20",
+        "Internet on",
+        "212 GB free",
+    ]
+    loading = replace(READY, model=("gpt-oss-20b-MXFP4", "loading"), offline=True, link="Wi-Fi")
+    assert screen.footer(loading)[:3] == ["gpt oss 20b · loading", "Wi-Fi · 192.168.1.20",
+                                          "Internet off"]  # fmt: skip
+    assert screen.footer(replace(READY, model=None))[0] == "No model"
+    assert screen.footer(screen.State(None, None)) == []  # nothing known, nothing said
+    for id, name in (("google_gemma-4-26B-A4B-it-Q4_K_M", "gemma 4 26B A4B"),
+                     ("Meta-Llama-3.1-8B-Instruct-Q4_K_M", "Meta Llama 3.1 8B"),
+                     ("occamy-1.0-Q4_K_M", "occamy 1.0")):  # fmt: skip
+        assert screen._model(id) == name
+
+
+def test_paint(monkeypatch):
+    # the screen painted in the app's colours: Leat's mark at the top left, the QR code's white
+    # card at the right of a box ready, none of one whose address its owner hid
+    card = Image.new("RGB", (300, 300), screen.CARD)
+    monkeypatch.setattr(screen, "qr_card", lambda url, side: card)
+    now = datetime.datetime(2026, 10, 11, 14, 32)
+    painted = screen.paint(replace(READY, office="Kanzlei Weber"), (1280, 800), now)
+    assert painted.size == (1280, 800)
+    page, white = ImageColor.getrgb(screen.PAGE), ImageColor.getrgb(screen.CARD)
+    assert painted.getpixel((0, 0)) == page
+    u, margin = 8.0, 64
+    mark = round(4.4 * u)
+    top = round(7 * u) + round(2.2 * u) - mark // 2
+    assert painted.getpixel((margin + mark - 4, top + 4)) != page  # the mark's top right quarter
+    assert painted.getpixel((1280 - margin - 150, 400)) == white  # the card, at the middle's right
+    hidden = screen.paint(replace(READY, show_address=False), (1280, 800), now)
+    assert hidden.getpixel((1280 - margin - 150, 400)) == page
+    assert screen.paint(READY, (3840, 2160), now).size == (3840, 2160)  # any display's size
+
+
+def test_logo():
+    # Leat's mark, a pinwheel of four quarter circles, each about a corner, the middle empty
+    mask = screen.logo(96)
+    assert mask.size == (96, 96)
+    for x, y in ((10, 30), (66, 10), (86, 66), (30, 86)):  # within each quarter circle
+        assert mask.getpixel((x, y)) > 200
+    for x, y in ((48, 48), (48, 20), (20, 48), (76, 48)):  # the channels between them
+        assert mask.getpixel((x, y)) < 64
+
+
+def test_written():
+    # the screen written as text, of a display without a framebuffer, centred
+    lines = screen.written(replace(READY, office="Kanzlei Weber"), "##\n##")
+    plain = [line.replace(screen.BOLD, "").replace(screen.PLAIN, "") for line in lines]
+    assert plain[0] == "Leat · Kanzlei Weber" and plain[2] == "Ready"
+    assert (
+        f"https://{NAME}" in plain and plain.count("##") == 2 and plain[-1] == "or type leat.local"
+    )
     drawn = screen.draw([f"{screen.BOLD}Leat{screen.PLAIN}", "", "Ready"], 20, 9)
     assert drawn.startswith("\033[2J\033[H\033[?25l")
-    body = drawn.split("\033[?25l", 1)[1]
-    assert body == "\n" * 3 + f"        {screen.BOLD}Leat{screen.PLAIN}\n\n       Ready"
+    assert (
+        drawn.split("\033[?25l", 1)[1]
+        == "\n" * 3 + f"        {screen.BOLD}Leat{screen.PLAIN}\n\n       Ready"
+    )
 
 
-def test_screen_take(monkeypatch):
-    # the screen's console shown, in its font, and the kernel's messages sent to the first
-    ran, ioctls, opened = [], [], []
+def test_screen_take(monkeypatch, tmp_path):
+    # the screen's console shown and the kernel's messages sent to the first; with a framebuffer,
+    # the console's text kept off the display, and without one, the text's font set
+    ran, ioctls = [], []
     monkeypatch.setattr(screen.subprocess, "run", lambda args, **kw: ran.append(args))
     monkeypatch.setattr(screen.fcntl, "ioctl", lambda fd, op, arg: ioctls.append((op, arg)))
-    monkeypatch.setattr(screen, "open", lambda path, mode: opened.append(path) or io.StringIO(),
-                        raising=False)  # fmt: skip
-    screen.take()
+    monkeypatch.setattr(screen, "open", lambda path, mode: io.StringIO(), raising=False)
+    framebuffer = tmp_path / "fb0"
+    framebuffer.touch()
+    screen.take(framebuffer=str(framebuffer))
+    assert ran == [["chvt", "2"]] and ioctls == [(0x541C, bytes([11, 1])), (0x4B3A, 1)]
+    ran.clear(), ioctls.clear()
+    screen.take(framebuffer=str(tmp_path / "none"))
     assert ran == [["chvt", "2"], ["setfont", "-C", "/dev/tty2", "ter-i28b"]]
-    assert opened == ["/dev/tty2"] and ioctls == [(0x541C, bytes([11, 1]))]
+    assert ioctls == [(0x541C, bytes([11, 1]))]
 
 
 def test_screen_name(tmp_path):

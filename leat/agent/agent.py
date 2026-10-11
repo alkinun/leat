@@ -422,15 +422,38 @@ class Agent:
         """Whether the agent is kept from the internet, as the owner chose."""
         return bool(self.store.setting("offline"))
 
-    def set_offline(self, offline: bool) -> None:
-        """Keeps the agent from the internet, or lets it reach it, from each turn begun now on,
-        telling every app."""
-        self.store.set_setting("offline", offline or None)
+    def settings(self) -> dict[str, Any]:
+        """The box's settings, as its owner chose them: whether it is kept from the internet, the
+        office's name, if given, and whether its screen shows its address."""
+        office = self.store.setting("office")
+        return {"offline": self.offline(), "office": office, "address": not self.store.setting(
+            "hide_address")}  # fmt: skip
+
+    def change(self, **changes: Any) -> None:
+        """Changes the box's settings, of settings()'s keys, telling every app: kept from the
+        internet, or let reach it, from each turn begun now on; the office named, or not; the
+        address shown on the box's screen, or hidden."""
+        stored = {"offline": lambda v: v or None, "office": lambda v: v or None,
+                  "address": lambda v: None if v else True}  # fmt: skip
+        keys = {"offline": "offline", "office": "office", "address": "hide_address"}
+        for key, value in changes.items():
+            self.store.set_setting(keys[key], stored[key](value))
         self.events.publish(self.settings_event())
 
     def settings_event(self) -> Event:
-        """The box's settings that every app shows: whether it is kept from the internet."""
-        return {"type": "settings", "offline": self.offline()}
+        """The box's settings, as every app shows them."""
+        return {"type": "settings"} | self.settings()
+
+    def box(self) -> dict[str, Any]:
+        """The box as its own screen shows it: whether it is yet to be set up by its first person,
+        its settings, and its model, loaded or loading, as the apps were last told, or None while
+        the engine is away."""
+        with self._lock:
+            told = self._models
+        models = (told or self.models_event())["models"]
+        model = next((m for m in models if m.get("status") in ("loaded", "loading")), None)
+        shown = {"id": model["id"], "status": model["status"]} if model else None
+        return {"empty": not self.store.people()} | self.settings() | {"model": shown}
 
     def offered(self) -> dict[str, Tool]:
         """The tools the model is offered: all, but for those that reach the internet while the

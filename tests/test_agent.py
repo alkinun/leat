@@ -582,8 +582,8 @@ def test_offline(engine, tmp_path):
     agent = Agent(Store(tmp_path / "leat.db"), Client(engine.url),
                   [tool("search_web", WEB), tool("fetch", WEB), tool("echo")])  # fmt: skip
     with agent.events.watch() as told:
-        agent.set_offline(True)
-        assert told.get() == {"type": "settings", "offline": True}
+        agent.change(offline=True)
+        assert told.get() == {"type": "settings", "offline": True, "office": None, "address": True}
     engine.replies.put(REPLY)
     with agent.events.watch() as events:
         id = agent.send(None, "What's new?")
@@ -591,7 +591,7 @@ def test_offline(engine, tmp_path):
     assert OFFLINE in agent.store.messages(id)[0]["content"]
     assert "Call search_web." not in agent.store.messages(id)[0]["content"]
     assert [t["function"]["name"] for t in engine.requests[-1]["tools"]] == ["echo"]
-    agent.set_offline(False)
+    agent.change(offline=False)
     assert agent.store.setting("offline") is None and list(agent.offered()) == [
         "search_web", "fetch", "echo"]  # fmt: skip
     engine.replies.put(REPLY)
@@ -602,10 +602,58 @@ def test_offline(engine, tmp_path):
     assert "## The web\n- Call search_web.\n- Call fetch." in system and OFFLINE not in system
 
 
-def test_api_offline(server, agent):
-    assert request(f"{server}/api/offline", "POST", {"offline": "yes"})[0] == 400
-    assert request(f"{server}/api/offline", "POST", {"offline": True})[0] == 200
-    assert agent.offline()
+def test_api_settings(server, agent):
+    # the box's settings, its owner's to change, each as it must be, and each change noted
+    url = f"{server}/api/settings"
+    for wrong in ({"offline": "yes"}, {"address": 1}, {"office": 7}, {"office": "x" * 61},
+                  {"colour": "red"}):  # fmt: skip
+        assert request(url, "PATCH", wrong)[0] == 400
+    assert request(url, "PATCH", {"offline": True, "office": "  Kanzlei   Weber "})[0] == 200
+    assert request(url, "PATCH", {"address": False})[0] == 200
+    assert agent.settings() == {"offline": True, "office": "Kanzlei Weber", "address": False}
+    assert request(url, "PATCH", {"office": "", "address": True})[0] == 200
+    assert agent.settings() == {"offline": True, "office": None, "address": True}
+    done = [a["action"] for a in agent.store.activity()]
+    for action in (
+        "turned the internet off",
+        "named the office",
+        "took the office's name away",
+        "hid the address from the box's screen",
+        "showed the address on the box's screen",
+    ):
+        assert action in done  # fmt: skip
+    assert request(f"{server}/api/offline", "POST", {"offline": False})[0] == 404  # gone
+
+
+def test_setup_settings(agent):
+    # the box's first person sets it up with its office's name and whether it reaches the internet
+    with Server(agent, port=0) as server:
+        threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True).start()
+        url = f"http://127.0.0.1:{server.server_port}/api/setup"
+        try:
+            assert request(url, "POST", {"name": "Alkın", "office": 3})[0] == 400
+            assert agent.store.people() == []  # nothing set up of a body refused
+            setup = {"name": "Alkın", "office": "Kanzlei Weber", "offline": True}
+            assert request(url, "POST", setup)[0] == 200
+            assert agent.settings() == {"offline": True, "office": "Kanzlei Weber", "address": True}
+        finally:
+            server.shutdown()
+
+
+def test_box(agent, engine):
+    # the box as its screen shows it, to this machine alone, never through its front door
+    with Server(agent, port=0, name="k7x2qm.leatbox.net") as server:
+        threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True).start()
+        url = f"http://127.0.0.1:{server.server_port}/api/box"
+        try:
+            status, body = request(url)
+            assert status == 200 and json.loads(body) == {
+                "empty": True, "offline": False, "office": None, "address": True,
+                "model": {"id": "fake", "status": "loaded"},
+            }  # fmt: skip
+            assert request(url, Host="k7x2qm.leatbox.net")[0] == 404
+        finally:
+            server.shutdown()
 
 
 def test_person_to_the_engine(agent, engine, events):
@@ -1259,7 +1307,7 @@ def test_events(server, agent, engine):
     assert event() == {"type": "files", "project": None, "files": []}
     assert event()["type"] == "accounts"  # the owner's
     assert event()["type"] == "models"
-    assert event() == {"type": "settings", "offline": False}
+    assert event() == {"type": "settings", "offline": False, "office": None, "address": True}
     engine.replies.put(REPLY)
     id = agent.send(None, "Hi", person=1)
     assert event()["conversation"]["id"] == id
