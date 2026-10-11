@@ -116,9 +116,10 @@ class Engine:
     shares a prefix of its tokens only where they still hold the window before the prefix's end,
     as llama.cpp's.
 
-    An embedding model, as Qwen3-Embedding, embeds a prompt rather than generating: embed() runs
-    it in the first slot, chunk by chunk, and gives the normed hidden state of its last token, of
-    unit length, as such a model pools its tokens.
+    An embedding model embeds a prompt rather than generating: embed() runs it in the first slot
+    and pools its tokens' normed hidden states as the model does, of unit length: Qwen3-Embedding's
+    last token's, of a prompt run chunk by chunk, or EmbeddingGemma 2's mean, projected, of an
+    encoder's prompt, whose tokens see each other, run in one chunk.
     """
 
     def __init__(
@@ -270,6 +271,8 @@ class Engine:
         """Starts a generation in a free slot, as generate() would; step() advances it. The
         prompt shows each of `images` with its tokens, and shares cached tokens only of prompts
         of the same `owner`."""
+        if not self.config.causal:
+            raise ValueError("an encoder, whose tokens see each other, only embeds")
         if max_tokens < 1:
             raise ValueError(f"max_tokens must be at least 1, got {max_tokens}")
         if not 0 < len(prompt) < self.max_context:
@@ -362,15 +365,17 @@ class Engine:
         self.reset()
 
     def embed(self, prompt: list[int]) -> list[float]:
-        """A prompt's embedding: the normed hidden state of its last token, of unit length, as an
-        embedding model that pools its last token gives it. Runs alone, as generate() does, in
-        the first slot, whose cached tokens it takes, chunk by chunk."""
+        """A prompt's embedding, as the embedding model pools its tokens' normed hidden states, of
+        unit length. Runs alone, as generate() does, in the first slot, whose cached tokens it
+        takes, chunk by chunk where the model embeds so, else in one of prefill_chunk tokens at
+        most."""
         if self.active:
             raise RuntimeError("another generation is unfinished: exhaust or close it first")
-        if not 0 < len(prompt) < self.max_context:
-            raise ValueError(
-                f"prompt must have 1 to {self.max_context - 1} tokens, got {len(prompt)}"
-            )
+        most = self.max_context - 1
+        if not self.config.embeds_in_chunks:
+            most = min(self.prefill_chunk, most)
+        if not 0 < len(prompt) <= most:
+            raise ValueError(f"prompt must have 1 to {most} tokens, got {len(prompt)}")
         self._cached[0], self._owners[0] = [], "\0embedding"  # shared with no prompt after
         vector = None
         for pos in range(0, len(prompt), self.prefill_chunk):
@@ -734,9 +739,9 @@ class Engine:
         return sample(logits, options, seed, positions, seen).realize()
 
     def _embedded(self, tokens: Tensor, slot: UOp, start: UOp) -> Tensor:
-        # runs a chunk of a prompt to embed: its last token's normed hidden state, of unit length
-        hidden = self.model.run(tokens, [Span(slot, start, tokens.shape[1])])[:, -1, :]
-        return (hidden / (hidden * hidden).sum(axis=-1, keepdim=True).sqrt()).realize()
+        # runs a chunk of a prompt to embed, causally or as an encoder's: its tokens pooled
+        hidden = self.model.run(tokens, [Span(slot, start, tokens.shape[1], self.config.causal)])
+        return self.model.pool(hidden).realize()
 
     def _followed(self, tokens: Tensor, hidden: Tensor, spans: list[Span]) -> Tensor:
         # hidden (1, T, dim), the target's of a run of the spans' tokens; with a drafter, which

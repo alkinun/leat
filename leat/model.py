@@ -25,15 +25,21 @@ _DELTA_NET = ("attn_norm", "attn_qkv", "attn_gate", "ssm_alpha", "ssm_beta", "ss
               "ssm_conv1d", "ssm_norm", "ssm_out", "ffn_norm")  # fmt: skip
 _MLP = ("ffn_gate", "ffn_up", "ffn_down")
 _EXPERTS = ("ffn_gate_inp", "ffn_down_exps")  # the router, and the experts' down projections
+# a layer's block of its own input, EmbeddingGemma 2's: its gate, projection and norm
+_PER_LAYER = ("inp_gate", "proj", "post_norm")
 # the supported architectures, and whether their RoPE rotates dimension i with i + D/2, ggml's
 # "neox" mode, rather than adjacent pairs, its "normal" mode, as GGUF lays out llama's q and k
 _ROPE_HALVES = {
     "llama": False, "qwen2": True, "qwen3": True, "qwen3moe": True, "gemma3": True,
-    "gemma4": True, "gpt-oss": True, "phi3": True, "qwen35": True, "qwen35moe": True,
+    "gemma4": True, "gemma-embedding2": True, "gpt-oss": True, "phi3": True, "qwen35": True,
+    "qwen35moe": True,
 }  # fmt: skip
 QWEN35 = ("qwen35", "qwen35moe")  # Qwen3.5's and Qwen3.6's architectures: dense, and of experts
+GEMMA4 = ("gemma4", "gemma-embedding2")  # Gemma 4's, and EmbeddingGemma 2's of its layers
 # the period of attention.sliding_window_pattern where a GGUF has none, as llama.cpp's
 _SLIDING_EVERY = {"gemma3": 6, "gpt-oss": 2}
+# how an architecture's MLPs combine their gate and up, as ops.glu has it, where not by SiLU
+_GLU = {"gemma3": "gelu", "gemma4": "gelu", "gemma-embedding2": "gelu", "gpt-oss": "oai"}
 
 
 @dataclass(frozen=True)
@@ -96,6 +102,15 @@ class Config:
     # M-RoPE's sections of the frequencies, interleaved, that turn by an image's time, height and
     # width, as Qwen3.5's: text, of the same position on each, turns as by plain RoPE
     mrope: tuple[int, ...] = ()
+    # an embedding model's: whether each token sees only those before it, or all, as an
+    # encoder's; whether it pools its tokens' hidden states by their mean, or takes the last's;
+    # and whether output.weight projects that, rather than giving logits
+    causal: bool = True
+    mean_pool: bool = False
+    projected: bool = False
+    # the dimensions of each layer's input of its own, projected from the token's embedding, as
+    # EmbeddingGemma 2's, 0 for none
+    per_layer: int = 0
 
     @staticmethod
     def from_gguf(metadata: dict[str, Any]) -> "Config":
@@ -125,14 +140,24 @@ class Config:
         rotated = m.get("rope.dimension_count", head_dim)
         if m.get("rope.dimension_count_swa", swa_dim) != swa_dim:
             raise NotImplementedError("partial rotary embeddings of sliding layers")
-        # Gemma 4 E2B's and E4B's: an embedding of each token for each layer, and the last layers
-        # attending over the keys and values of those before
-        if m.get("embedding_length_per_layer_input") or m.get("attention.shared_kv_layers"):
+        # Gemma 4 E2B's and E4B's: an embedding of each token for each layer, beside the input
+        # projected from its embedding that EmbeddingGemma 2's layers take alone, and the last
+        # layers attending over the keys and values of those before
+        layer_inputs = m.get("embedding_length_per_layer_input", 0)
+        if layer_inputs and arch == "gemma4" or m.get("attention.shared_kv_layers"):
             raise NotImplementedError("per-layer embeddings and layers that share keys and values")
+        # llama.cpp's pooling types: 0 none, 1 the mean, 2 a CLS token's, 3 the last token's and 4
+        # a reranker's
+        if (pooling := m.get("pooling_type", 0)) not in (0, 1, 3):
+            raise NotImplementedError(f"pooling of type {pooling}")
+        causal = m.get("attention.causal", True)
+        windows = tuple(m["attention.sliding_window"] if s else 0 for s in sliding)
+        if not causal:  # as llama.cpp's, an encoder's window spans half of it either way
+            windows = tuple(w // 2 + 1 if w else 0 for w in windows)
         ropes = [
             _rope(m, arch, s, d if s else rotated) for s, d in zip(sliding, head_dims, strict=True)
         ]
-        if arch == "gemma4":  # unit attention scale, as its q and k are normed
+        if arch in GEMMA4:  # unit attention scale, as its q and k are normed
             scales = (1.0,) * n_layers
         elif arch == "gemma3" and n_layers == 62:  # 27B's query_pre_attn_scalar, as llama.cpp
             scales = (1 / math.sqrt(dim / n_heads),) * n_layers
@@ -158,7 +183,7 @@ class Config:
             rope_halves=_ROPE_HALVES[arch],
             kv_heads=per_layer(m.get("attention.head_count_kv", n_heads)),
             head_dims=head_dims,
-            windows=tuple(m["attention.sliding_window"] if s else 0 for s in sliding),
+            windows=windows,
             ropes=tuple(ropes),
             scales=scales,
             recurrent=recurrent,
@@ -166,12 +191,23 @@ class Config:
             q_gate=arch in QWEN35,
             experts=m.get("expert_count", 0),
             experts_used=m.get("expert_used_count", 0),
-            glu={"gemma3": "gelu", "gemma4": "gelu", "gpt-oss": "oai"}.get(arch, "silu"),
-            embed_scale=math.sqrt(dim) if arch in ("gemma3", "gemma4") else 1.0,
-            v_norm=arch == "gemma4",
+            glu=_GLU.get(arch, "silu"),
+            embed_scale=math.sqrt(dim) if arch in ("gemma3", *GEMMA4) else 1.0,
+            v_norm=arch in GEMMA4,
             logit_cap=m.get("final_logit_softcapping", 0.0),
             mrope=tuple(m.get("rope.dimension_sections", [])[:3]) if arch in QWEN35 else (),
+            causal=causal,
+            mean_pool=pooling == 1,
+            projected="embedding_length_out" in m,
+            per_layer=layer_inputs,
         )
+
+    @property
+    def embeds_in_chunks(self) -> bool:
+        """Whether a prompt's embedding may run chunk by chunk: a causal model's of its last
+        token, which sees those of every chunk before it, rather than of tokens that see each
+        other or of all of them."""
+        return self.causal and not self.mean_pool
 
     def uses(self, name: str) -> bool:
         """Whether the model reads a tensor: all but those of layers past its own, as Qwen3.5's
@@ -225,7 +261,8 @@ class Transformer:
     Optional parts are used where the GGUF has their tensors: biases of q, k, v and the attention
     output, RMSNorms of q and k, of the attention and MLP outputs, attention sinks, a shared MLP
     beside the experts, gated or not, the router's and experts' biases, and a scale per layer
-    output. Fused tensors, q, k and v in one or gate and up in one, are split.
+    output. Fused tensors, q, k and v in one or gate and up in one, are split. EmbeddingGemma 2's
+    layers each take an input of their own too, projected from the tokens' embeddings.
     """
 
     def __init__(
@@ -245,7 +282,11 @@ class Transformer:
                 self.layers[int(i)][part.removesuffix(".weight")] = w
         for n, layer in enumerate(self.layers):
             _unfuse(layer, config, n)
-        mlp = _EXPERTS if config.experts else _MLP
+        if config.per_layer:  # each layer's rows of the projection of the embeddings to its input
+            proj, rows = weights["per_layer_model_proj.weight"], config.per_layer
+            for n, layer in enumerate(self.layers):
+                layer["per_layer_model_proj"] = _rows(proj, n * rows, (n + 1) * rows)
+        mlp = (_EXPERTS if config.experts else _MLP) + (_PER_LAYER if config.per_layer else ())
         # values of their own, but in Gemma 4, whose full-attention layers' keys are their values
         attention = _LAYER + (() if config.arch == "gemma4" else ("attn_v",))
         missing = [
@@ -268,8 +309,15 @@ class Transformer:
             if "ffn_gate_inp.scale" in s:
                 s["router_norm"] = (s["ffn_gate_inp.scale"] / math.sqrt(config.dim)).realize()
         self.embed = weights["token_embd.weight"]
-        self.output = weights.get("output.weight", self.embed)  # tied embeddings when absent
+        # an embedding model's projection of its pooled hidden states, if it has one, as
+        # EmbeddingGemma 2's; logits of tied embeddings when output.weight is absent or that
+        self.projection = weights["output.weight"] if config.projected else None
+        self.output = self.embed if config.projected else weights.get("output.weight", self.embed)
         self.output_norm = weights["output_norm.weight"].dequant()
+        # the norm of each layer's input of its own, if any
+        self.per_layer_norm = (
+            weights["per_layer_proj_norm.weight"].dequant() if config.per_layer else None
+        )
         # RoPE tables by base, rotated dimensions and scaling
         tables: dict[Rope, tuple[Tensor, Tensor]] = {}
         for rope in config.ropes:
@@ -348,13 +396,25 @@ class Transformer:
         if held and most > min(held):
             raise ValueError(f"a run of {most} tokens is longer than the {min(held)} the cache's "
                              "sliding windows hold at once: give the most a run takes")  # fmt: skip
+        first = x  # the first layer's inputs, from which each layer's own input is projected
         for i in range(self.config.n_layers):
             if self.config.recurrent[i]:
                 x = self._delta_net(i, x, spans, save)
             else:
                 x = self._attention(i, x, spans, positions)
             x = self._feed_forward(i, x, live)
+            if self.per_layer_norm is not None:
+                x = self._per_layer_block(i, x, first, self.per_layer_norm)
         return ops.rms_norm(x, self.output_norm, self.config.norm_eps)
+
+    def pool(self, hidden: Tensor) -> Tensor:
+        """An embedding model's embedding (1, dims) of normed hidden states (1, T, dim): their mean
+        or the last one's, as the model pools them, through its projection if it has one, of unit
+        length."""
+        x = hidden.mean(axis=1, keepdim=True) if self.config.mean_pool else hidden[:, -1:]
+        if self.projection is not None:
+            x = ops.linear(x, self.projection)
+        return (x / (x * x).sum(axis=-1, keepdim=True).sqrt())[:, 0]
 
     def logits(self, hidden: Tensor) -> Tensor:
         logits = ops.linear(hidden, self.output)
@@ -489,7 +549,8 @@ class Transformer:
         # normed and then their sum, and the layer's output scaled, or as in Qwen3.5 experts beside
         # a shared one
         c, w, s = self.config, self.layers[i], self.small[i]
-        eps, scale = c.norm_eps, s.get("layer_output_scale")
+        # the layer's output scaled, here but where its block of its own input comes after
+        eps, scale = c.norm_eps, None if c.per_layer else s.get("layer_output_scale")
         norm = (s["ffn_norm"], eps)
         mlp = (w["ffn_gate"], w["ffn_up"], w["ffn_down"]) if "ffn_gate" in w else None
         if mlp and not c.experts:
@@ -520,6 +581,17 @@ class Transformer:
         shared = ops.feed_forward(x, *mlp, norm, c.glu, residual=False)
         parts = [(shared, s["post_ffw_norm_1"]), (mixed, s["post_ffw_norm_2"])]
         return ops.add_normed(x, parts, s["post_ffw_norm"], eps, scale)
+
+    def _per_layer_block(self, i: int, x: Tensor, first: Tensor, norm: Tensor) -> Tensor:
+        # x + layer i's block of its own input, as EmbeddingGemma 2's: the first layer's inputs
+        # projected, over sqrt(dim), and normed, which x gates, projected and normed again; and the
+        # layer's output scaled
+        c, w, s = self.config, self.layers[i], self.small[i]
+        projected = ops.linear(first, w["per_layer_model_proj"]) * c.dim**-0.5
+        gated = ops.linear(x, w["inp_gate"]).gelu() * ops.rms_norm(projected, norm, c.norm_eps)
+        out = ops.linear(gated, w["proj"])
+        return ops.add_normed(x, [(out, s["post_norm"])], None, c.norm_eps,
+                              s.get("layer_output_scale"))  # fmt: skip
 
 
 def _mrope(

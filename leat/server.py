@@ -4,8 +4,8 @@ loading a model, and the metrics of what it did, in Prometheus's format.
 Handler threads parse requests, render prompts and write responses. One worker thread owns the
 engines: it runs completions together, one per slot, a token of each per batched step, and loads a
 model once the completions before have finished; the rest wait their turn in the order they arrive.
-With an embedding model beside the model, as Qwen3-Embedding, it embeds texts too, one between
-steps, so that a long list of them never holds the completions up.
+With an embedding model beside the model, as Qwen3-Embedding or EmbeddingGemma 2, it embeds texts
+too, one between steps, so that a long list of them never holds the completions up.
 
 Given keys, every request must hold one, as OpenAI's clients send it, `Authorization: Bearer KEY`,
 or as Anthropic's do, `x-api-key: KEY`; each key's requests, tokens and time are counted apart,
@@ -49,6 +49,7 @@ from leat.draft import own_drafter
 from leat.engine import Engine, Sequence
 from leat.gguf import GGUF
 from leat.keys import Keys
+from leat.model import Config
 from leat.sampler import Sampling
 from leat.tokenizer import Tokenizer
 from leat.vision import Image, beside
@@ -827,18 +828,21 @@ class _Handler(BaseHTTPRequestHandler):
 
 def _embedded(engine: Engine, text: str) -> list[int]:
     # a text's tokens, as the embedding model reads it: its start, and its end-of-text token if the
-    # model's tokenizer adds one, as Qwen3-Embedding's does, whose state it pools
+    # model's tokenizer adds one, as Qwen3-Embedding's does, whose state it pools, and
+    # EmbeddingGemma 2's
     eos, adds = engine.tokenizer.eos_id, engine.gguf.metadata.get("tokenizer.ggml.add_eos_token")
     end = [eos] if eos is not None and adds else []
     return engine.tokenizer.encode(text)[: engine.max_context - 1 - len(end)] + end
 
 
 def _embedder(path: Path) -> Engine:
-    # an embedding model's engine, of EMBED_CONTEXT or its own context if less, its graphs
-    # compiled, for a text of a few tokens and for more
-    metadata = GGUF.open(path).metadata
-    trained = metadata.get(f"{metadata['general.architecture']}.context_length", EMBED_CONTEXT)
-    engine = Engine(path, max_context=min(EMBED_CONTEXT, trained), prefill_chunk=512)
+    # an embedding model's engine, of EMBED_CONTEXT or its own context if less, a text in chunks
+    # of 512 tokens where the model embeds so, else in one; its graphs compiled, for a text of a
+    # few tokens and for more
+    config = Config.from_gguf(GGUF.open(path).metadata)
+    context = min(EMBED_CONTEXT, config.context_length)
+    chunk = 512 if config.embeds_in_chunks else context
+    engine = Engine(path, max_context=context, prefill_chunk=chunk)
     engine.embed([0])
     engine.embed([0] * 32)
     return engine

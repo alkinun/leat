@@ -17,8 +17,8 @@ from tests.helpers import (
     P3_MSCALE,
     P3_ORIGINAL,
     P3_ROTATED,
-    D,
     random_blocks,
+    reference_embedding,
     reference_logits,
 )
 
@@ -248,14 +248,41 @@ def test_embed(tiny):
     path, weights = tiny("qwen3")
     engine = Engine(path, max_context=CONTEXT, prefill_chunk=FEW_TOKENS + 4)
     prompt = PROMPT * 3  # chunks of FEW_TOKENS + 4 and 36 - FEW_TOKENS - 4
-    hidden = reference_logits(weights | {"output.weight": np.eye(D)}, prompt, "qwen3")[-1]
-    got = np.array(engine.embed(prompt))
-    np.testing.assert_allclose(got, hidden / np.linalg.norm(hidden), rtol=2e-3, atol=2e-3)
+    expected = reference_embedding(weights, prompt, "qwen3")
+    np.testing.assert_allclose(engine.embed(prompt), expected, rtol=2e-3, atol=2e-3)
     assert engine._embedding.captured is not None and engine._few_embedding.captured is not None
     assert engine.cached_prefix(prompt) == 0
     assert list(engine.generate(prompt, 3)) == generated(path, prompt, 3)
     with pytest.raises(ValueError, match="prompt must have"):
         engine.embed([])
+
+
+@pytest.mark.usefixtures("reference_ops")
+def test_embed_encoder(tiny):
+    # EmbeddingGemma 2's embedding: the mean of its tokens' normed hidden states, each of which
+    # sees those within its window either way, projected, of unit length, as the reference's is,
+    # of a prompt in one chunk of either graph; one longer than a chunk is refused, and so is
+    # generating
+    path, weights = tiny("gemma-embedding2")
+    engine = Engine(path, max_context=CONTEXT, prefill_chunk=len(PROMPT) * 3)
+    for prompt in (PROMPT * 3, PROMPT[:5]):
+        expected = reference_embedding(weights, prompt, "gemma-embedding2")
+        np.testing.assert_allclose(engine.embed(prompt), expected, rtol=2e-3, atol=2e-3)
+    assert engine._embedding.captured is not None and engine._few_embedding.captured is not None
+    with pytest.raises(ValueError, match="prompt must have 1 to 36 tokens"):
+        engine.embed(PROMPT * 4)
+    with pytest.raises(ValueError, match="embeds"):
+        engine.start(PROMPT, 1)
+
+
+@pytest.mark.gpu
+def test_embed_encoder_kernels(tiny):
+    # the kernels embed as the f64 reference does but for their int8 activations' rounding
+    path, weights = tiny("gemma-embedding2")
+    engine = Engine(path, max_context=CONTEXT, prefill_chunk=len(PROMPT) * 3)
+    for prompt in (PROMPT * 3, PROMPT[:5]):
+        expected = reference_embedding(weights, prompt, "gemma-embedding2")
+        assert np.dot(engine.embed(prompt), expected) > 0.999
 
 
 def generated(path, prompt: list[int], n: int, sampling=GREEDY, seed=None) -> list[int]:

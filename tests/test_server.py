@@ -22,7 +22,7 @@ from leat.keys import Keys
 from leat.sampler import Sampling
 from leat.server import Server, _calls, _completion, _Load, _Writer
 from leat.tokenizer import Tokenizer
-from tests.helpers import CONTEXT, Oracle, chat_template
+from tests.helpers import CONTEXT, Oracle, chat_template, reference_embedding
 
 WEATHER = {
     "type": "function",
@@ -915,3 +915,17 @@ def test_embeddings(tiny_model, tiny):
         pytest.raises(openai.NotFoundError, match="--embed"),
     ):
         connect(server).embeddings.create(model="any", input="x")
+
+
+@pytest.mark.usefixtures("reference_ops")
+def test_embeddings_of_an_encoder(tiny_model, tiny):
+    # an encoder's embedding, EmbeddingGemma 2's, of a text's start, as many tokens as its context
+    # holds but one, run in one chunk, as its tokens see each other
+    embedder, weights = tiny("gemma-embedding2")
+    text = "the tenant pays the rent by the third working day of each month, in advance"
+    with serving(tiny_model[0], max_context=CONTEXT, embed=embedder) as server:
+        said = connect(server).embeddings.create(model="any", input=text)
+    tokens = Tokenizer(GGUF.open(embedder).metadata).encode(text)
+    assert len(tokens) >= CONTEXT
+    expected = reference_embedding(weights, tokens[: CONTEXT - 1], "gemma-embedding2")
+    assert said.data[0].embedding == pytest.approx(expected, abs=2e-3)

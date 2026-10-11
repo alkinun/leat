@@ -99,6 +99,8 @@ def write_tiny_model(path: Path, arch: str = "llama") -> dict[str, np.ndarray]:
     # and k, and qwen3moe also a mixture of experts for MLP.
     if arch.startswith("gemma4"):
         return _write_gemma4(path, experts=arch == "gemma4")
+    if arch == "gemma-embedding2":
+        return _write_gemma4(path, experts=False, encoder=True)
     if arch in _WRITERS:
         return _WRITERS[arch](path)
     # llama's vocab with the tokens of Mistral Small 3's images, as it is of the llama kind
@@ -179,19 +181,25 @@ def _finish(w: gguf.GGUFWriter) -> None:
 # and up are stacked. Its vocab ends with the tokens that open, fill and close an image.
 G_WINDOW, G_DIMS, G_KV_HEADS, G_CAP = 4, (32, 64), (2, 1), 5.0
 G_IMAGE = ("<|image>", "<|image|>", "<image|>")
+# EmbeddingGemma 2, of Gemma 4's layers: an encoder's, whose window of 2 * G_WINDOW spans
+# G_WINDOW either way, each with an input of its own, and the projection of their tokens' mean
+E_PER_LAYER, E_OUT = 64, 128
 
 
-def _write_gemma4(path: Path, experts: bool) -> dict[str, np.ndarray]:
-    # with experts beside each MLP, as Gemma 4 26B A4B, or without, as the dense models
-    w, weights, add = _writer(path, "gemma4", G_IMAGE)
-    a = "gemma4."
+def _write_gemma4(path: Path, experts: bool, encoder: bool = False) -> dict[str, np.ndarray]:
+    # with experts beside each MLP, as Gemma 4 26B A4B, or without, as the dense models; or as
+    # EmbeddingGemma 2's encoder
+    arch = "gemma-embedding2" if encoder else "gemma4"
+    w, weights, add = _writer(path, arch, G_IMAGE)
+    a = f"{arch}."
+    window = 2 * G_WINDOW if encoder else G_WINDOW
     for key, value in [("block_count", LAYERS), ("embedding_length", D),
                        ("feed_forward_length", HIDDEN), ("attention.head_count", HEADS),
                        ("attention.key_length", G_DIMS[1]), ("attention.key_length_swa", G_DIMS[0]),
                        ("attention.value_length", G_DIMS[1]),
                        ("attention.value_length_swa", G_DIMS[0]),
                        ("rope.dimension_count", G_DIMS[1]), ("rope.dimension_count_swa", G_DIMS[0]),
-                       ("attention.sliding_window", G_WINDOW)]:  # fmt: skip
+                       ("attention.sliding_window", window)]:  # fmt: skip
         w.add_uint32(a + key, value)
     if experts:
         w.add_uint32(a + "expert_count", EXPERTS)
@@ -201,18 +209,31 @@ def _write_gemma4(path: Path, experts: bool) -> dict[str, np.ndarray]:
     w.add_array(a + "attention.sliding_window_pattern", [True, False])
     w.add_float32(a + "rope.freq_base", 10000.0)
     w.add_float32(a + "rope.freq_base_swa", 1000.0)
-    w.add_float32(a + "final_logit_softcapping", G_CAP)
     add("token_embd.weight", (V, D), GGMLType.Q4_K, 2e-4)  # also the output, tied
     add("output_norm.weight", (D,))
-    # the full-attention layer rotates the first quarter of its dimensions only
-    weights["rope_freqs.weight"] = np.array([1.0] * 8 + [1e30] * 24, dtype=np.float32)
-    w.add_tensor("rope_freqs.weight", weights["rope_freqs.weight"])
+    if encoder:
+        w.add_bool(a + "attention.causal", False)
+        w.add_uint32(a + "pooling_type", 1)
+        w.add_uint32(a + "embedding_length_per_layer_input", E_PER_LAYER)
+        w.add_uint32(a + "embedding_length_out", E_OUT)
+        add("output.weight", (E_OUT, D), GGMLType.Q8_0, 1e-3)
+        add("per_layer_model_proj.weight", (LAYERS * E_PER_LAYER, D), GGMLType.F32, 0.05)
+        add("per_layer_proj_norm.weight", (E_PER_LAYER,))
+    else:
+        w.add_float32(a + "final_logit_softcapping", G_CAP)
+        # the full-attention layer rotates the first quarter of its dimensions only
+        weights["rope_freqs.weight"] = np.array([1.0] * 8 + [1e30] * 24, dtype=np.float32)
+        w.add_tensor("rope_freqs.weight", weights["rope_freqs.weight"])
     for i, (dim, kv_heads) in enumerate(zip(G_DIMS, G_KV_HEADS, strict=True)):
         b = f"blk.{i}."
         add(b + "attn_q.weight", (HEADS * dim, D), GGMLType.Q4_K, 2e-4)
         add(b + "attn_k.weight", (kv_heads * dim, D), GGMLType.Q8_0, 1e-3)
-        if i == 0:
+        if i == 0 or encoder:
             add(b + "attn_v.weight", (kv_heads * dim, D), GGMLType.Q8_0, 1e-3)
+        if encoder:
+            add(b + "inp_gate.weight", (E_PER_LAYER, D), GGMLType.Q8_0, 1e-3)
+            add(b + "proj.weight", (D, E_PER_LAYER), GGMLType.F32, 0.05)
+            add(b + "post_norm.weight", (D,))
         add(b + "attn_output.weight", (D, HEADS * dim), GGMLType.F32, 0.05)
         for name in ("attn_q_norm", "attn_k_norm"):
             add(b + name + ".weight", (dim,))
@@ -379,14 +400,19 @@ def _gemma4_hidden(
     w: dict[str, np.ndarray], tokens: list[int], images: dict[int, np.ndarray] | None = None
 ):  # fmt: skip
     # the normed hidden states (T, D) and each layer's keys and values, as in the cache; images'
-    # embeddings (n, D) by key in place of the tokens that hold it, which see each other
+    # embeddings (n, D) by key in place of the tokens that hold it, which see each other; of
+    # EmbeddingGemma 2, every token sees the others, and each layer takes an input of its own
     T, positions, cache = len(tokens), np.arange(len(tokens)), []
     x, image = _embedded(w, tokens, images), _same_image(tokens)
+    encoder = "per_layer_model_proj.weight" in w
+    if encoder:
+        inputs = (x @ w["per_layer_model_proj.weight"].T / np.sqrt(D)).reshape(T, LAYERS, -1)
+        inputs = norm(inputs, w["per_layer_proj_norm.weight"])
     for i, (dim, kv_heads, sliding) in enumerate(
         zip(G_DIMS, G_KV_HEADS, (True, False), strict=True)
     ):
         lw = _layer(w, i)
-        cos, sin = _gemma4_rope(dim, sliding, positions, w["rope_freqs.weight"])
+        cos, sin = _gemma4_rope(dim, sliding, positions, w.get("rope_freqs.weight", 1.0))
 
         h = norm(x, lw["attn_norm"])
         q = (h @ lw["attn_q"].T).reshape(T, HEADS, dim)
@@ -396,7 +422,9 @@ def _gemma4_hidden(
             rotate_halves(norm(z, lw[f"attn_{n}_norm"]), cos, sin) for z, n in ((q, "q"), (k, "k"))
         )
         back = positions[:, None] - positions
-        mask = np.where((back < 0) & ~image | (sliding & (back >= G_WINDOW)), -np.inf, 0)
+        hidden = sliding & (np.abs(back) > G_WINDOW) if encoder else (
+            (back < 0) & ~image | (sliding & (back >= G_WINDOW)))  # fmt: skip
+        mask = np.where(hidden, -np.inf, 0)
         cache.append((k, v))
         out = attention(q, k, v, mask, 1.0) @ lw["attn_output"].T
         x = x + norm(out, lw["post_attention_norm"])
@@ -407,8 +435,22 @@ def _gemma4_hidden(
             expert = functools.partial(_gemma4_expert, lw)
             mixed = experts(norm(x, lw["pre_ffw_norm_2"]), scores, expert)
             out = norm(out, lw["post_ffw_norm_1"]) + norm(mixed, lw["post_ffw_norm_2"])
-        x = (x + norm(out, lw["post_ffw_norm"])) * lw["layer_output_scale"]
+        x = x + norm(out, lw["post_ffw_norm"])
+        if encoder:  # the layer's input, gated by x, projected
+            gated = glu("gelu", x @ lw["inp_gate"].T, inputs[:, i])
+            x = x + norm(gated @ lw["proj"].T, lw["post_norm"])
+        x = x * lw["layer_output_scale"]
     return norm(x, w["output_norm.weight"]), cache
+
+
+def reference_embedding(w: dict[str, np.ndarray], tokens: list[int], arch: str) -> np.ndarray:
+    # an embedding model's embedding of tokens, of unit length: Qwen3-Embedding's normed hidden
+    # state of the last, or EmbeddingGemma 2's mean of them, projected
+    if arch == "gemma-embedding2":
+        pooled = _gemma4_hidden(w, tokens)[0].mean(0) @ w["output.weight"].T
+    else:
+        pooled = reference_logits(w | {"output.weight": np.eye(D)}, tokens, arch)[-1]
+    return pooled / np.linalg.norm(pooled)
 
 
 # Gemma 4's assistant for the tiny Gemma 4: as wide as half the target, a layer of a window over

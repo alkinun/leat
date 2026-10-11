@@ -110,8 +110,8 @@ def main(argv: list[str] | None = None) -> None:
     )  # fmt: skip
     serve.add_argument(
         "--embed", type=Path,
-        help="an embedding model's GGUF, as Qwen3-Embedding's, loaded beside the models to answer "
-        "/v1/embeddings, as leat agent's search of the files asks",
+        help="an embedding model's GGUF, as Qwen3-Embedding's or EmbeddingGemma 2's, loaded "
+        "beside the models to answer /v1/embeddings, as leat agent's search of the files asks",
     )  # fmt: skip
     serve.add_argument(
         "--keys", type=Path, nargs="?", const=_data() / "keys.json",
