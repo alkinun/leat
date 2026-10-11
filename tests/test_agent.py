@@ -670,7 +670,7 @@ def test_timezone(server, agent, monkeypatch):
 
 
 def test_wifi(server, agent, monkeypatch):
-    # the Wi-Fi networks in reach, joined and forgotten, the owner's, each noted but for its
+    # the Wi-Fi networks in reach, joined and forgotten, an admin's, each noted but for its
     # passphrase; off a box, said
     asked = []
     scanned = {"radio": True, "networks": [], "connected": None}
@@ -695,6 +695,21 @@ def test_wifi(server, agent, monkeypatch):
     monkeypatch.setattr(system, "ask", away)
     status, body = request(f"{server}/api/wifi")
     assert status == 400 and b"no box" in body and b"Errno" not in body
+
+
+def test_power(server, agent, monkeypatch):
+    # the box restarted or switched off by an admin, noted first
+    asked = []
+    monkeypatch.setattr(system, "ask", lambda r: asked.append(r) or {})
+    for power in ("on", None, "reboot"):
+        assert request(f"{server}/api/power", "POST", {"power": power})[0] == 400
+    assert request(f"{server}/api/power", "POST", {"power": "restart"})[0] == 200
+    assert request(f"{server}/api/power", "POST", {"power": "off"})[0] == 200
+    assert asked == [{"power": "restart"}, {"power": "off"}]
+    noted = [a["action"] for a in agent.store.activity()[:2]]
+    assert noted == ["switched the box off", "restarted the box"]
+    _, ada = joining(server, "Ada", paired(server))
+    assert ada("/api/power", "POST", {"power": "off"})[0] == 403
 
 
 def test_setup_settings(agent):
@@ -802,10 +817,7 @@ def test_recovery(agent):
 def test_cancel_recovery(server, agent):
     # a recovery code begun is told to the admins, with the seconds it holds for, and the screen;
     # an admin cancels it, noted; anyone else may not
-    def admins(path: str, method: str = "GET", body: Any = None) -> tuple[int, Any]:
-        status, answer = request(f"{server}{path}", method, body)
-        return status, json.loads(answer or b"{}")
-
+    admins = paired(server)
     _, ada = joining(server, "Ada", admins)
     admins("/api/box/recovery", "POST", {})
     _, box = admins("/api/box")
@@ -1390,6 +1402,16 @@ def device(server: str) -> Callable[..., tuple[int, Any]]:
     return ask
 
 
+def paired(server: str) -> Callable[..., tuple[int, Any]]:
+    """The device serving() set up, as device() asks: a request of it, and its answer's JSON."""
+
+    def ask(path: str, method: str = "GET", body: Any = None) -> tuple[int, Any]:
+        status, answer = request(f"{server}{path}", method, body)
+        return status, json.loads(answer or b"{}")
+
+    return ask
+
+
 def joining(server: str, name: str, allow: Callable[..., tuple[int, Any]],
             person: int | None = None) -> tuple[int, Callable[..., tuple[int, Any]]]:  # fmt: skip
     """A new device asking to join as a name, let in by `allow`, a paired device's request, as
@@ -1406,12 +1428,7 @@ def joining(server: str, name: str, allow: Callable[..., tuple[int, Any]],
 def test_own_devices(server, agent):
     # a person lets in a new device of their own, as they are, admin or not; an admin lets in
     # someone new, or someone whose every device is gone, never as someone with one
-    admin = device(server)  # serving()'s device, as the requests of this module send its cookie
-
-    def admins(path: str, method: str = "GET", body: Any = None) -> tuple[int, Any]:
-        status, answer = request(f"{server}{path}", method, body)
-        return status, json.loads(answer or b"{}")
-
+    admins = paired(server)
     status, phone = joining(server, "Ada", admins)
     assert status == 200 and phone("/api/me")[1]["person"] == 2
     status, laptop = joining(server, "Ada's laptop", phone, person=2)  # hers, from her phone
@@ -1432,16 +1449,13 @@ def test_own_devices(server, agent):
     tablet = max(d["id"] for d in agent.store.devices())
     assert again(f"/api/devices/{alkins}", "DELETE")[0] == 403
     assert again(f"/api/devices/{tablet}", "DELETE")[0] == 200 and other("/api/me")[0] == 401
-    assert admin("/api/me")[0] == 401  # a device of no cookie
+    assert device(server)("/api/me")[0] == 401  # a device of no cookie
 
 
 def test_admins(server, agent):
     # an admin makes others admins, or not, and renames anyone; a person renames themselves; the
     # box has an admin always; each noted
-    def admins(path: str, method: str = "GET", body: Any = None) -> tuple[int, Any]:
-        status, answer = request(f"{server}{path}", method, body)
-        return status, json.loads(answer or b"{}")
-
+    admins = paired(server)
     _, ada = joining(server, "Ada", admins)
     assert ada("/api/people/2", "PATCH", {"name": "Ada Lovelace"})[0] == 200
     assert ada("/api/people/1", "PATCH", {"name": "Al"})[0] == 403

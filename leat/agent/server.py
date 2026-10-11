@@ -279,6 +279,15 @@ class _Handler(BaseHTTPRequestHandler):
                 _system({"wifi": "join", "name": name, "passphrase": passphrase})
                 agent.note(person, "joined the Wi-Fi network", detail=name)
                 self._json(200, {})
+            elif path == "/api/power":  # the box restarted, or switched off, an admin's to do
+                _admin(me)
+                if (power := body.get("power")) not in ("restart", "off"):
+                    raise ValueError('power must be "restart" or "off"')
+                agent.note(
+                    person, "restarted the box" if power == "restart" else "switched the box off"
+                )
+                _system({"power": power})
+                self._json(200, {})
             elif path == "/api/models/load":
                 _admin(me)
                 agent.load(model := _text(body, "model"))

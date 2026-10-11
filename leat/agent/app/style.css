@@ -533,7 +533,9 @@ body.gated #gate { display: grid; flex: 1; place-items: center; min-height: 100v
   flex: 1; padding: 6px 10px; border: 1px solid var(--line); border-radius: var(--round);
   background: var(--card); font: inherit; color: inherit;
 }
-#wifi button { padding: 6px 14px; border: 1px solid var(--line); border-radius: var(--round); font-size: 0.875rem; }
+#wifi button, #power button { padding: 6px 14px; border: 1px solid var(--line); border-radius: var(--round); font-size: 0.875rem; }
+#power { display: flex; gap: 8px; margin-top: 8px; }
+#power button:hover { background: var(--bubble); }
 #wifi form.join button { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
 #wifi .error { color: var(--error); font-size: 0.875rem; }
 /* a choice of a few, as the mode Leat's look is in, and whom a project is shared with */

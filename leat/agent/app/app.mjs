@@ -1008,6 +1008,21 @@ function renderBox() {
   zone.value = settings.timezone ?? "";
   zone.onchange = () => changeSettings({ timezone: zone.value });
   if (!$("wifi").childElementCount) renderWifi();
+  if (!$("power").childElementCount) renderPower();
+}
+
+// the box restarted, or switched off, of an admin, once they confirm it
+function renderPower() {
+  $("power").replaceChildren(...[["restart", "Restart", "Restart the box? Leat is away for a minute or two."],
+    ["off", "Switch off", "Switch the box off? Leat is away until someone presses its power button."]]
+    .map(([power, label, asked]) => {
+      const button = element("button", "quiet", label);
+      button.type = "button";
+      button.onclick = () => confirm(asked) && post("/api/power", { power })
+        .then(() => status(power === "off" ? "The box is switching off." : "The box is restarting…"))
+        .catch((error) => status(error.message, true));
+      return button;
+    }));
 }
 
 // the box's Wi-Fi, an admin's to set: the networks in reach, found as asked, each joined of its
