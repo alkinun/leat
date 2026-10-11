@@ -18,7 +18,7 @@ ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
 # at boot, as soon as the network is up, so that the name points at the box by the time anyone opens
-# it, and again in 30 s if the registry cannot be reached; the timer tells it every 5 minutes after
+# it, and again in 30 s if the registry cannot be reached; the timer checks every 30 s after
 Restart=on-failure
 RestartSec=30s
 

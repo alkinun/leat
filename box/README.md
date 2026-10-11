@@ -19,7 +19,7 @@ browser ── https://k7x2qm.leatbox.net ──▶ Caddy (leat-proxy) ──▶
 | `build-caddy.sh` | builds `leat-caddy`, Caddy of a pinned release with the acme-dns module, which goes to `/usr/local/bin/leat-caddy` |
 | `Caddyfile` | the front door, at `/usr/share/leat/box/Caddyfile`: the app at the box's name over HTTPS, HTTP/2 and 3; plain HTTP, as `http://leat.local`, redirected there |
 | `systemd/leat-proxy.service` | runs it, as a user of its own, on 80 and 443 |
-| `systemd/leat-address.service`, `.timer` | `python -m leat.box.address`: at boot and every 5 minutes, the registry is told the box's address on the office's network, when it changed or a day went by |
+| `systemd/leat-address.service`, `.timer` | `python -m leat.box.address`: at boot and every 30 s, the registry is told the box's address on the office's network, when it changed or a day went by |
 | `leat/box/provision.py` | writes a box's registration into `/etc/leat`, when we build it |
 
 leat agent runs with `--name <id>.leatbox.net`, on loopback alone, behind Caddy.

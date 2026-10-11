@@ -1,10 +1,13 @@
 [Unit]
-Description=Point the box's name at its address, every 5 minutes
+Description=Point the box's name at its address, as soon as it changes
 
+# every 30 s, as the address is checked on the box alone, the registry told only once it changed,
+# or a day went by: a box moved from its cable to Wi-Fi is found at its new address within a minute,
+# but for what resolvers cached of the old one
 [Timer]
-OnBootSec=5min
-OnUnitActiveSec=5min
-RandomizedDelaySec=30s
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=5s
 
 [Install]
 WantedBy=timers.target
