@@ -15,6 +15,11 @@
 		# the challenge's lookups, of public resolvers: an office's router may refuse them, as a
 		# router in Turkey answered its own data as REFUSED
 		resolvers 1.1.1.1 9.9.9.9 8.8.8.8
+		# no check of its own that the challenge's record is out, which asks leatbox.net's server
+		# directly, as a network that takes DNS over never let it, a box in Turkey waiting in vain:
+		# acme-dns has it at once, and Let's Encrypt checks it from its own servers
+		propagation_delay 10s
+		propagation_timeout -1
 	}
 	reverse_proxy 127.0.0.1:{$LEAT_AGENT_PORT:8000}
 }
