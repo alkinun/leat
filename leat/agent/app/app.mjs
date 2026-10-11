@@ -408,6 +408,7 @@ function handle(event) {
       me = { ...me, ...event.me };
       accounts = event;
       renderAccounts();
+      renderRecovering();
       return;
     case "settings":
       settings = { offline: event.offline, office: event.office, address: event.address,
@@ -760,6 +761,26 @@ function renderAccounts() {
   }
   box.replaceChildren(...parts);
 }
+
+// of an admin's: that the box's power button was pressed, its screen showing a recovery code, which
+// makes whoever gives it an admin, for as long as it holds; theirs to cancel, if it was not them
+let recoveryEnds = 0, recoveryTimer = null;
+function renderRecovering() {
+  const left = me?.admin ? accounts?.recovering : null;
+  if (left) recoveryEnds = Date.now() + left * 1000;
+  const minutes = Math.ceil((recoveryEnds - Date.now()) / 60000);
+  $("recovering").hidden = !left || minutes <= 0;
+  clearTimeout(recoveryTimer);
+  if ($("recovering").hidden) return;
+  $("recovering").querySelector("span").textContent = "Someone pressed the box's power button: its " +
+    `screen shows a recovery code, which makes whoever types it an admin, for ${minutes} more ` +
+    `minute${minutes > 1 ? "s" : ""}. Not you?`;
+  recoveryTimer = setTimeout(() => {
+    if (accounts) accounts.recovering = Math.max(0, (recoveryEnds - Date.now()) / 1000) || null;
+    renderRecovering();
+  }, 15000);
+}
+$("cancelRecovery").onclick = () => del("/api/recovery");
 
 // a device's row: its name, when it was last seen, and a button that unpairs it; this device's
 // signs it out

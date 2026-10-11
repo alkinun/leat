@@ -98,6 +98,7 @@ class State:
     version: str | None = None
     setup: str | None = None
     recovery: str | None = None
+    recovery_left: int = 0  # seconds the recovery code holds for yet
     switching: bool = False
 
 
@@ -117,6 +118,7 @@ def look(root: Path = ROOT) -> State:
         office=box.get("office"), show_address=bool(box.get("address", True)),
         model=(model["id"], model["status"]) if model else None, offline=bool(box.get("offline")),
         setup=box.get("setup"), recovery=box.get("recovery"),
+        recovery_left=int(box.get("recovery_left") or 0),
     )  # fmt: skip
 
 
@@ -158,6 +160,13 @@ def scanned(state: State, url: str) -> str:
     if state.recovery:
         return f"{url}/#recover={state.recovery}"
     return f"{url}/#setup={state.setup}" if state.empty and state.setup else url
+
+
+def holds(state: State) -> str:
+    """What the recovery code is said to be, and for how long it holds: "Recovery code, for 4 more
+    minutes", by the minute begun."""
+    minutes = max(1, -(-state.recovery_left // 60))
+    return f"Recovery code, for {minutes} more minute{'s' if minutes > 1 else ''}"
 
 
 def spaced(code: str) -> str:
@@ -216,7 +225,7 @@ def paint(state: State, size: tuple[int, int], now: datetime.datetime) -> Image.
                   ("or type leat.local", font(round(2.4 * u)), MUTED, 0.0)]  # fmt: skip
         lines[-3] = (*lines[-3][:3], 4.0 * u)  # room before the address
         # and the code that recovers it, or sets it up, below
-        shown = ("Recovery code", state.recovery) if state.recovery else ("Setup code", state.setup)
+        shown = (holds(state), state.recovery) if state.recovery else ("Setup code", state.setup)
         if shown[1] and (state.recovery or state.empty):
             lines[-1] = (*lines[-1][:3], 3.0 * u)
             code = font(round(4.4 * u), "SemiBold")
@@ -255,7 +264,7 @@ def written(state: State, qr: str = "") -> list[str]:
     if url:
         lines += ["", url, "", *qr.splitlines(), "", "or type leat.local"]
     if url and state.recovery:
-        lines += ["", f"Recovery code: {BOLD}{spaced(state.recovery)}{PLAIN}", "",
+        lines += ["", f"{holds(state)}: {BOLD}{spaced(state.recovery)}{PLAIN}", "",
                   "Press the power button again to switch the box off."]  # fmt: skip
     elif url and state.empty and state.setup:
         lines += ["", f"Setup code: {BOLD}{spaced(state.setup)}{PLAIN}"]

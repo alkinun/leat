@@ -799,6 +799,30 @@ def test_recovery(agent):
             server.shutdown()
 
 
+def test_cancel_recovery(server, agent):
+    # a recovery code begun is told to the admins, with the seconds it holds for, and the screen;
+    # an admin cancels it, noted; anyone else may not
+    def admins(path: str, method: str = "GET", body: Any = None) -> tuple[int, Any]:
+        status, answer = request(f"{server}{path}", method, body)
+        return status, json.loads(answer or b"{}")
+
+    _, ada = joining(server, "Ada", admins)
+    admins("/api/box/recovery", "POST", {})
+    _, box = admins("/api/box")
+    assert box["recovery"] and 295 <= box["recovery_left"] <= 300
+    accounts = Accounts(agent)
+    accounts.begin_recovery()
+    of = {d["person"]: d for d in agent.store.devices()}
+    assert 295 <= accounts.state(of[1] | {"name": "Alkın", "admin": True})["recovering"] <= 300
+    assert "recovering" not in accounts.state(of[2] | {"name": "Ada", "admin": False})
+    assert ada("/api/recovery", "DELETE")[0] == 403
+    assert admins("/api/recovery", "DELETE")[0] == 200
+    assert "recovery" not in admins("/api/box")[1]
+    assert agent.store.activity()[0]["action"] == "cancelled the box's recovery code"
+    assert admins("/api/recovery", "DELETE")[0] == 200  # none to cancel: nothing noted
+    assert agent.store.activity()[1]["action"] != "cancelled the box's recovery code"
+
+
 def test_person_to_the_engine(agent, engine, events):
     # each request of a person's conversation names them to the engine, which keeps the prefixes
     # it caches of their prompts to theirs: their turns', and the naming of their conversations;

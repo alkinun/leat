@@ -80,6 +80,16 @@ select {
   border: none; border-radius: var(--round); background: none; font-weight: 600; cursor: pointer;
 }
 #status { color: var(--muted); font-size: 0.875rem; }
+/* an admin told that the box's power button was pressed, its recovery code shown */
+#recovering {
+  display: flex; gap: 12px; align-items: center; margin: 8px 16px 16px; padding: 10px 14px;
+  border: 1px solid var(--error); border-radius: var(--round); font-size: 0.875rem;
+}
+#recovering[hidden] { display: none; }
+#recovering span { flex: 1; }
+#recovering button {
+  padding: 4px 12px; border-radius: var(--round); background: var(--error); color: #fff; font-size: 0.875rem;
+}
 /* the project the conversation is in, which opens its page */
 #crumb {
   display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 40vw; margin-left: auto;

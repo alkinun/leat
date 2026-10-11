@@ -159,8 +159,9 @@ class _Handler(BaseHTTPRequestHandler):
                 accounts, shown = self.server.accounts, agent.box()
                 if accounts.locked and accounts.empty():
                     shown["setup"] = accounts.code
-                if recovery := accounts.recovery():
-                    shown["recovery"] = recovery
+                recovery, left = accounts.recovering()
+                if recovery:
+                    shown |= {"recovery": recovery, "recovery_left": left}
                 return self._json(200, shown)
             me = self._device()
             if path == "/api/me":
@@ -333,6 +334,10 @@ class _Handler(BaseHTTPRequestHandler):
             elif (match := _REQUEST.fullmatch(path)) and not match[2]:
                 _admin(me)
                 accounts.refuse(match[1])
+            elif path == "/api/recovery":  # the recovery code the box's screen shows, voided
+                _admin(me)
+                if accounts.cancel_recovery():
+                    agent.note(person, "cancelled the box's recovery code")
             elif match := _PERSON.fullmatch(path):
                 _admin(me)
                 removed = (store.person(int(match[1])) or {}).get("name")

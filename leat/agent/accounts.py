@@ -11,8 +11,9 @@ new, or someone whose every device is gone, as one lost is unpaired. So no admin
 who has a device, and sees what is theirs.
 
 An office whose every admin's device is gone gets back in at the box: its power button pressed, its
-screen shows a recovery code for ten minutes, which its QR code holds too, and makes whoever gives
-it, on a device, a new admin; a few wrong, and it holds no more.
+screen shows a recovery code for five minutes, which its QR code holds too, and makes whoever gives
+it, on a device, a new admin; a few wrong, and it holds no more. The admins' apps tell them, each
+of whom may cancel it.
 
 An admin looks after the box and its people: lets them in, renames and removes them, makes them
 admins or not; there may be several, and there is one always. No admin sees another's own
@@ -38,7 +39,7 @@ NAME = 40  # characters of a person's name at most
 SEEN = 300  # seconds between the times a device is noted as seen
 CODE = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # a setup code's letters, none mistaken for another
 TRIES = 5  # wrong setup or recovery codes before the screen shows another, or none
-RECOVERING = 600  # seconds a recovery code holds
+RECOVERING = 300  # seconds a recovery code holds
 
 
 @dataclass
@@ -90,18 +91,31 @@ class Accounts:
             return self._pair(person["id"], device)
 
     def begin_recovery(self) -> str:
-        """A new recovery code, as the box's power button asks, which holds for ten minutes."""
+        """A new recovery code, as the box's power button asks, which holds for five minutes."""
         with self._lock:
             self._recovery, self._unrecovered = (_setup_code(), time.time() + RECOVERING), 0
-            return self._recovery[0]
+            code = self._recovery[0]
+        self._publish()
+        return code
 
     def recovery(self) -> str | None:
         """The recovery code that holds now, if one does."""
+        return self.recovering()[0]
+
+    def recovering(self) -> tuple[str | None, int]:
+        """The recovery code that holds now, if one does, and the seconds it holds for yet."""
         with self._lock:
-            if self._recovery and time.time() < self._recovery[1]:
-                return self._recovery[0]
+            if self._recovery and (left := self._recovery[1] - time.time()) > 0:
+                return self._recovery[0], int(left)
             self._recovery = None
-            return None
+            return None, 0
+
+    def cancel_recovery(self) -> bool:
+        """Voids the recovery code, as an admin may; whether one held."""
+        with self._lock:
+            held, self._recovery = self._recovery is not None, None
+        self._publish()
+        return held
 
     def recover(self, code: str, name: str, device: str) -> tuple[dict[str, Any], str]:
         """Makes a new admin of a name, on a device, of the recovery code the box's screen
@@ -249,7 +263,12 @@ class Accounts:
             for p in self.store.people()
         ]  # fmt: skip
         me = {k: device[k] for k in ("person", "name", "admin")} | {"device": device["id"]}
-        return {"type": "accounts", "me": me, "people": people, "requests": requests}
+        state: dict[str, Any] = {"type": "accounts", "me": me, "people": people,
+                                 "requests": requests}  # fmt: skip
+        if device["admin"]:  # and the seconds a recovery code holds for yet, if one does
+            code, left = self.recovering()
+            state["recovering"] = left if code else None
+        return state
 
     def _pair(self, person: int, device: str) -> str:
         # pairs a device to a person; returns the secret it keeps

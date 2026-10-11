@@ -204,12 +204,12 @@ def test_said():
     assert lines[-1] == f"Setup code: {screen.BOLD}K7X 2QM{screen.PLAIN}"
     # the power button pressed: a recovery code, of any box set up, whatever its admins chose; or,
     # of one with none, whether to switch off
-    recovering = replace(READY, show_address=False, recovery="P4WR8N")
+    recovering = replace(READY, show_address=False, recovery="P4WR8N", recovery_left=241)
     headline, sentence, shown = screen.said(recovering)
     assert headline == "Recovery" and "recovery code" in sentence and shown == url
     assert screen.scanned(recovering, url) == f"{url}/#recover=P4WR8N"
     assert screen.written(recovering, "##")[-3:] == [
-        f"Recovery code: {screen.BOLD}P4W R8N{screen.PLAIN}",
+        f"Recovery code, for 5 more minutes: {screen.BOLD}P4W R8N{screen.PLAIN}",
         "", "Press the power button again to switch the box off."]  # fmt: skip
     asking = screen.said(screen.State(None, None, switching=True))
     assert asking == ("Switch off?", "Press the power button again to switch the box off.", None)
