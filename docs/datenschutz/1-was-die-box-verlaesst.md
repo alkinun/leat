@@ -35,8 +35,10 @@ Es gibt keine Telemetrie und keine Nutzungsstatistik, die an den Anbieter geht.
 Einzelheiten aus den Akten. Zusätzlich prüft die Box jede Suchanfrage, bevor sie hinausgeht: Enthält
 sie einen Namen aus den Dateien des Chats oder aus dem, was die Person geschrieben hat (etwa nach
 „Herr“, „Frau“, „Mandantin“ oder vor „GmbH“), die Namen der Personen des Büros, den Namen des Büros, eine
-E-Mail-Adresse oder eine IBAN, wird sie nicht gesendet. Leat erfährt, warum, und sucht allgemeiner;
-die App zeigt an, welcher Name zurückgehalten wurde. Diese Prüfung ist ein Schutznetz, keine Garantie:
+E-Mail-Adresse oder eine IBAN, wird sie nicht gesendet. Ebenso prüft sie die Adresse jeder Webseite,
+die Leat selbst zusammensetzt (etwa die einer Suchmaschine mit einem Namen darin); Adressen, die die
+Person selbst eingefügt oder eine Suche gefunden hat, liest Leat. Leat erfährt, warum, und sucht
+allgemeiner; die App zeigt an, welcher Name zurückgehalten wurde. Diese Prüfung ist ein Schutznetz, keine Garantie:
 Wer ganz sicher gehen will, schaltet das Internet für Leat aus.
 
 **Zum Namen der Box:** Die Box ist im Büro unter einer Adresse wie `https://k7x2qm.leatbox.net`
