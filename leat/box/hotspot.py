@@ -42,7 +42,8 @@ AGENT = "http://127.0.0.1:8000"  # leat agent, of the box's language
 LOOK = 5  # seconds between looks
 AFTER = 60  # seconds without a network before the hotspot opens, of a box that knows none
 KNOWN_AFTER = 300  # of one that knows a Wi-Fi network, which may come back
-RESCAN = 60  # seconds between the hotspot's scans, for a known network back in reach
+RESCAN = 60  # seconds between the hotspot's scans, for a known network back in reach; LOOK, till
+# it found any, as one just opened finds none
 JOINING = 30  # seconds a network chosen has to give the box an address
 CLOSING = 2  # seconds a page has to reach its phone before the hotspot closes
 WORDS = "abcdefghijkmnpqrstuvwxyz23456789"  # of a passphrase: none mistaken for another
@@ -91,7 +92,9 @@ class Hotspot:
                     self.ask({"wifi": "forget", "name": name})
                 return self._open()
             if self.passphrase:
-                if now - self._scanned >= RESCAN:
+                if not self.ask({"hotspot": "status"}).get("started"):  # as iwd restarted
+                    return self._open()
+                if now - self._scanned >= (RESCAN if self.networks else LOOK):
                     self._scan()
                     if known := next((n["name"] for n in self.networks if n["known"]), None):
                         self._close()  # the box joins it by itself

@@ -769,12 +769,14 @@ def test_hotspot(tmp_path, monkeypatch):
     monkeypatch.setattr(hotspot, "CLOSING", 0)
     now, online, asked = [0.0], [False], []
     found = [{"name": "Office", "secure": True, "strength": 3, "known": False}]
-    known = []
+    known, started = [], [False]
 
     def ask(request):
         asked.append(request)
         if request == {"hotspot": "status"}:
-            return {"radio": True, "started": False, "known": known}
+            return {"radio": True, "started": started[0], "known": known}
+        if request.get("hotspot") in ("start", "stop"):
+            started[0] = request["hotspot"] == "start"
         return {"networks": found} if request == {"hotspot": "scan"} else {}
 
     state = tmp_path / "state.json"
@@ -791,6 +793,10 @@ def test_hotspot(tmp_path, monkeypatch):
                                              "failed": None}  # fmt: skip
     spot.look()
     assert spot.networks == found  # of its first scan
+    started[0] = False  # iwd restarted, its access point gone: opened again
+    was = spot.passphrase
+    spot.look()
+    assert started[0] and spot.passphrase != was
     spot.join("Office", "wrong-passphrase")
     assert asked[-1] == {"wifi": "join", "name": "Office", "passphrase": "wrong-passphrase"}
     for _ in range(50):  # closed, of a thread, once its page reached the phone
@@ -908,3 +914,30 @@ def test_screen_hotspot():
                           f"Password: {screen.BOLD}kq7x-2mpa{screen.PLAIN}"]  # fmt: skip
     painted = screen.paint(state, (1280, 720), datetime.datetime(2026, 10, 12, 9, 0))
     assert painted.size == (1280, 720)
+
+
+def test_screen_look(tmp_path, monkeypatch):
+    # the box as its screen looks at it: the agent's warnings in the screen's language, German of
+    # a box of none yet; and, without a network, its hotspot, and the network it could not join
+    monkeypatch.setattr(screen, "_name", lambda root: NAME)
+    monkeypatch.setattr(screen, "_certified", lambda name: True)
+    for helper in ("_link", "_free", "_version"):
+        monkeypatch.setattr(screen, helper, lambda: None)
+    warned = {"key": "model", "title": "Leat can't reach its model",
+              "said": "Chats get no answer until it is back. Restart the box."}  # fmt: skip
+    monkeypatch.setattr(screen, "box", lambda: {"empty": True, "warnings": [warned]})
+    monkeypatch.setattr(screen, "_address", lambda: "192.168.1.20")
+    looked = screen.look()
+    said = "Chats bekommen keine Antwort, bis es wieder da ist. Starten Sie die Box neu."
+    assert looked.language == "de"
+    assert looked.warnings == (("Leat erreicht sein Modell nicht", said),)
+    state = tmp_path / "state.json"
+    monkeypatch.setattr(hotspot, "STATE", state)
+    monkeypatch.setattr(screen, "_address", lambda: None)
+    assert screen.look().hotspot is None
+    state.write_text(
+        json.dumps({"name": "Leat-7J32", "passphrase": "kq7x-2mpa", "failed": "Office"})
+    )
+    looked = screen.look()
+    assert looked.hotspot == ("Leat-7J32", "kq7x-2mpa")
+    assert looked.warnings[0][0] == "Die Box konnte sich nicht mit Office verbinden"

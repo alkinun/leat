@@ -134,15 +134,17 @@ def look(root: Path = ROOT) -> State:
     told = box()
     if told is None:
         return dataclasses.replace(state, certified=_certified(name))
-    model = told.get("model")
+    model, language = told.get("model"), told.get("language") or LANGUAGE
+    # the warnings in the screen's language, as the agent says them in English of a box of none
+    t = functools.partial(locales.translated, language=language)
     return dataclasses.replace(
         state, certified=_certified(name), answering=True, empty=bool(told.get("empty")),
         office=told.get("office"), show_address=bool(told.get("address", True)),
         model=(model["id"], model["status"]) if model else None, offline=bool(told.get("offline")),
         setup=told.get("setup"), recovery=told.get("recovery"),
         recovery_left=int(told.get("recovery_left") or 0),
-        warnings=tuple((w["title"], w["said"]) for w in told.get("warnings", [])),
-        language=told.get("language") or LANGUAGE,
+        warnings=tuple((t(w["title"]), t(w["said"])) for w in told.get("warnings", [])),
+        language=language,
     )  # fmt: skip
 
 
