@@ -284,6 +284,11 @@ _MIGRATIONS = [
       PRIMARY KEY (project, person)
     )
     """,
+    # what a device is: an app's, of a browser's cookie, or a network drive's, of a password its
+    # computer keeps, which reaches the person's files alone
+    """
+    ALTER TABLE devices ADD COLUMN kind TEXT NOT NULL DEFAULT 'app'
+    """,
 ]
 KEPT = 365 * 86400  # seconds the activity is kept
 # a conversation's columns as the apps list it
@@ -609,21 +614,21 @@ class Store:
 
     def devices(self) -> list[dict[str, Any]]:
         """The devices paired, without their tokens, the latest seen first."""
-        sql = "SELECT id, person, name, created, seen FROM devices ORDER BY seen DESC"
+        sql = "SELECT id, person, name, kind, created, seen FROM devices ORDER BY seen DESC"
         return [dict(row) for row in self._query(sql)]
 
     def device(self, token: str) -> dict[str, Any] | None:
         """The device of a token's hash, without it, if it is paired."""
-        sql = "SELECT id, person, name, created, seen FROM devices WHERE token = ?"
+        sql = "SELECT id, person, name, kind, created, seen FROM devices WHERE token = ?"
         rows = self._query(sql, token)
         return dict(rows[0]) if rows else None
 
-    def add_device(self, person: int, name: str, token: str) -> dict[str, Any]:
-        """Pairs a device to a person, by its token's hash."""
+    def add_device(self, person: int, name: str, token: str, kind: str = "app") -> dict[str, Any]:
+        """Pairs a device to a person, by its token's hash: an app's, or a network drive's."""
         rows = self._query(
-            "INSERT INTO devices (person, name, token, created, seen) VALUES (?, ?, ?, ?, ?)"
-            " RETURNING id, person, name, created, seen",
-            person, name, token, now := time.time(), now,
+            "INSERT INTO devices (person, name, token, kind, created, seen) VALUES"
+            " (?, ?, ?, ?, ?, ?) RETURNING id, person, name, kind, created, seen",
+            person, name, token, kind, now := time.time(), now,
         )  # fmt: skip
         return dict(rows[0])
 

@@ -140,10 +140,12 @@ class Accounts:
         self._publish()
         return person, secret
 
-    def device(self, secret: str | None) -> dict[str, Any] | None:
-        """The device that keeps a secret, with its person's name and whether they are an admin,
-        if it is paired."""
+    def device(self, secret: str | None, kind: str = "app") -> dict[str, Any] | None:
+        """The device that keeps a secret, of a kind, an app's or a network drive's, with its
+        person's name and whether they are an admin, if it is paired."""
         if not secret or (device := self.store.device(_hash(secret))) is None:
+            return None
+        if device["kind"] != kind:  # a drive's password no app's cookie, nor the other way
             return None
         if time.time() - device["seen"] > SEEN:
             self.store.seen(device["id"])
@@ -270,6 +272,16 @@ class Accounts:
             code, left = self.recovering()
             state["recovering"] = left if code else None
         return state
+
+    def drive(self, person: int) -> str:
+        """A password of a person's own, by which a computer opens their files and projects as a
+        network drive, which their devices list as one of theirs, to unpair; returns it, which
+        the box keeps the hash of alone, as it is shown once."""
+        words = "abcdefghijkmnpqrstuvwxyz23456789"  # none mistaken for another
+        secret = "-".join("".join(secrets.choice(words) for _ in range(4)) for _ in range(4))
+        self.store.add_device(person, "Network drive", _hash(secret), kind="drive")
+        self._publish()
+        return secret
 
     def _pair(self, person: int, device: str) -> str:
         # pairs a device to a person; returns the secret it keeps

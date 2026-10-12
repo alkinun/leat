@@ -139,6 +139,7 @@ async function start() {
   if (response.status === 401) return gate(told.empty, told.locked, told.recovering);
   me = told;
   renderAccounts();
+  renderDrive();
   if (me.admin) watchHealth();
   const events = new EventSource("/api/events");
   events.onmessage = (event) => handle(JSON.parse(event.data));
@@ -801,6 +802,36 @@ function renderAccounts() {
   box.replaceChildren(...parts);
 }
 
+// the person's network drive: their files and projects in Explorer or Finder, of a password of
+// theirs, made here and shown once, the computer keeping it, among their devices to unpair
+function renderDrive(made = null) {
+  const parts = [element("p", "about", t("Open your files and projects in Explorer or Finder, and what Leat makes straight in Word."))];
+  if (made) {
+    const secure = location.protocol === "https:";
+    const share = made.path.replaceAll("/", "\\"); // \dav, as Windows writes a path
+    const windows = secure ? `\\\\${location.hostname}@SSL${share}` : `\\\\${location.host}${share}`;
+    const steps = [
+      [t("Windows: in Explorer, right-click This PC, choose Map network drive, and enter"), windows],
+      [t("Mac: in Finder, choose Go › Connect to Server, and enter"), `${location.origin}${made.path}`],
+      [t("Your name"), made.user], [t("Password"), made.password],
+    ];
+    const list = element("dl");
+    for (const [said, value] of steps) list.append(element("dt", "", said), element("dd", "code", value));
+    parts.push(list, element("p", "meta", t("The password is shown once: the computer keeps it. It is listed among your devices, to unpair.")));
+  }
+  const connect = element("button", "quiet", t("Connect a computer"));
+  connect.type = "button";
+  connect.onclick = async () => {
+    try {
+      renderDrive(await (await post("/api/drive", {})).json());
+    } catch (error) {
+      status(error.message, true);
+    }
+  };
+  parts.push(connect);
+  $("drive").replaceChildren(...parts);
+}
+
 // of an admin's: that the box's power button was pressed, its screen showing a recovery code, which
 // makes whoever gives it an admin, for as long as it holds; theirs to cancel, if it was not them
 let recoveryEnds = 0, recoveryTimer = null;
@@ -837,7 +868,7 @@ async function watchHealth() {
 // signs it out
 function deviceRow(d) {
   const item = element("li"), about = element("div"), self = d.id === me.device;
-  about.append(element("span", "", self ? t("{name} (this device)", { name: d.name }) : d.name),
+  about.append(element("span", "", self ? t("{name} (this device)", { name: d.name }) : t(d.name)),
     element("span", "meta", t("seen {day}", { day: day(d.seen) })));
   const remover = element("button", "", self ? t("Sign out") : t("Unpair"));
   remover.onclick = () => self

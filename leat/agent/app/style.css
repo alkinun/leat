@@ -575,3 +575,10 @@ body.gated #gate { display: grid; flex: 1; place-items: center; min-height: 100v
 #members button.on { border-color: transparent; background: var(--bubble); color: var(--text); }
 #members button.on::before { content: "✓ "; }
 #members button:disabled { opacity: 1; }
+/* the network drive's addresses and password, to type into a computer */
+#drive dl { margin: 4px 0 12px; }
+#drive dt { margin-top: 12px; color: var(--muted); font-size: 0.8125rem; }
+#drive dd {
+  margin: 4px 0 0; font-family: var(--font-mono); font-size: 0.9375rem; user-select: all;
+  overflow-wrap: anywhere;
+}

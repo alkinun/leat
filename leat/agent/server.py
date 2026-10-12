@@ -21,6 +21,7 @@ What people do is noted here, as each request asks it, for the admins to look ba
 where, and of what, never what anyone asked; what Leat does for them, the agent notes.
 """
 
+import base64
 import contextlib
 import http.cookies
 import ipaddress
@@ -37,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from leat import locales
+from leat.agent import dav
 from leat.agent.accounts import Accounts
 from leat.agent.agent import Agent, Busy, NotFound, Refused
 from leat.agent.client import EngineError
@@ -155,6 +157,8 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._trusted():
             return self._error(403, "this server answers its own network's requests alone")
         path, agent = urllib.parse.urlsplit(self.path).path, self.server.agent
+        if _drive(path):
+            return self._dav("GET")
         if path in _PAGES or path.startswith("/c/") or _PROJECT_PAGE.fullmatch(path):
             path = "/index.html"
         if path[1:] in _FILES:
@@ -280,6 +284,10 @@ class _Handler(BaseHTTPRequestHandler):
                 id = agent.send(None, *_message(body), person=person, project=_held(body))
                 agent.note(person, "began a chat", _held(body))
                 self._json(200, {"id": id})
+            elif path == "/api/drive":  # a password of the person's, of a computer's network drive
+                password = accounts.drive(person)
+                agent.note(person, "connected a network drive")
+                self._json(200, {"user": me["name"], "password": password, "path": dav.PREFIX})
             elif path == "/api/projects":
                 fields = _project(body, new=True)
                 project = agent.add_project(fields.pop("name"), person, **fields)
@@ -351,6 +359,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._error(403, "requests from other sites' pages are refused")
         path, agent = urllib.parse.urlsplit(self.path).path, self.server.agent
         accounts = self.server.accounts
+        if _drive(path):
+            return self._dav("DELETE")
         with self._answering():
             me = self._device()
             person, store = me["person"], agent.store
@@ -462,6 +472,8 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._trusted(write=True):
             return self._error(403, "requests from other sites' pages are refused")
         path, agent = urllib.parse.urlsplit(self.path).path, self.server.agent
+        if _drive(path):
+            return self._dav("PUT")
         with self._answering():
             person = self._device()["person"]
             if not path.startswith("/api/") or not (match := _FILE.fullmatch(path)):
@@ -485,6 +497,69 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"name": unpacked[0], "files": unpacked[1]})
             agent.note(person, "uploaded", match[1], name)
             self._json(200, {"name": name})
+
+    # the methods of the network drive's alone, WebDAV's: HEAD, OPTIONS, PROPFIND, PROPPATCH, MKCOL,
+    # MOVE, COPY, LOCK and UNLOCK; and GET, PUT and DELETE of its paths, above
+    def do_HEAD(self) -> None:
+        self._dav("HEAD")
+
+    def do_OPTIONS(self) -> None:
+        self._dav("OPTIONS")
+
+    def do_PROPFIND(self) -> None:
+        self._dav("PROPFIND")
+
+    def do_PROPPATCH(self) -> None:
+        self._dav("PROPPATCH")
+
+    def do_MKCOL(self) -> None:
+        self._dav("MKCOL")
+
+    def do_MOVE(self) -> None:
+        self._dav("MOVE")
+
+    def do_COPY(self) -> None:
+        self._dav("COPY")
+
+    def do_LOCK(self) -> None:
+        self._dav("LOCK")
+
+    def do_UNLOCK(self) -> None:
+        self._dav("UNLOCK")
+
+    def _dav(self, method: str) -> None:
+        # a person's network drive, of WebDAV, at /dav: theirs by the password of a drive of
+        # theirs, as Basic authentication sends it, by the box's name over HTTPS; OPTIONS of any
+        # path, of none, as Windows asks it first, of the server's top
+        if not self._trusted(write=method not in ("GET", "HEAD", "OPTIONS", "PROPFIND")):
+            return self._error(403, "this server answers its own network's requests alone")
+        path = urllib.parse.urlsplit(self.path).path
+        if method == "OPTIONS":
+            self.send_response(200)
+            for key, value in {"Allow": dav.METHODS, "DAV": "1, 2", "MS-Author-Via": "DAV",
+                               "Content-Length": "0"}.items():  # fmt: skip
+                self.send_header(key, value)
+            return self.end_headers()
+        if not _drive(path):
+            return self._error(405, f"{method} is the network drive's, at {dav.PREFIX}")
+        if (device := self._driven()) is None:
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Basic realm="Leat", charset="UTF-8"')
+            self.send_header("Content-Length", "0")
+            return self.end_headers()
+        with self._answering():
+            dav.Drive(self, self.server.agent, device["person"], self._language()).answer(method)
+
+    def _driven(self) -> dict[str, Any] | None:
+        # the drive the request comes from, by the password Basic authentication sends, if any
+        given = self.headers.get("Authorization", "")
+        if not given.lower().startswith("basic "):
+            return None
+        try:
+            password = base64.b64decode(given[6:]).decode().partition(":")[2]
+        except (ValueError, UnicodeDecodeError):
+            return None
+        return self.server.accounts.device(password, kind="drive")
 
     @contextlib.contextmanager
     def _answering(self):
@@ -703,6 +778,11 @@ class _Handler(BaseHTTPRequestHandler):
     def _language(self) -> str | None:
         # the box's language, if an admin chose one
         return self.server.agent.store.setting("language")
+
+
+def _drive(path: str) -> bool:
+    # whether a path is the network drive's
+    return path == dav.PREFIX or path.startswith(f"{dav.PREFIX}/")
 
 
 def _admin(device: dict[str, Any]) -> None:

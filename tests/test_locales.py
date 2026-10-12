@@ -192,7 +192,9 @@ def _actions() -> set[str]:
         "stopped sharing the project with everyone",
     }
     did = {"read", "searched the files", "searched the web", "read a page of", "made"}
-    return found | sharing | did
+    drive = {f"{done} by the network drive" for done in (
+        "uploaded", "changed", "deleted", "moved", "copied", "made the project")}  # fmt: skip
+    return found | sharing | did | drive
 
 
 def _strings(node: ast.AST) -> set[str]:

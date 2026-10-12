@@ -132,7 +132,7 @@ class Workspace:
                     self.keep(inside.relative_to(self.root).as_posix(), move)
             return
         relative = path.relative_to(self.root).as_posix()
-        if not path.is_file() or any(part.startswith(".") for part in relative.split("/")):
+        if not path.is_file() or hidden(relative):
             return
         versions = self.history / relative
         versions.mkdir(parents=True, exist_ok=True)
@@ -206,7 +206,7 @@ class Workspace:
         found = []
         for path in self.root.rglob("*"):
             name = path.relative_to(self.root).as_posix()
-            if any(part.startswith(".") for part in name.split("/")):
+            if hidden(name):
                 continue
             if not path.is_file() or not path.resolve().is_relative_to(self.root):
                 continue
@@ -419,6 +419,13 @@ def _clear(folder: Path) -> None:
             with contextlib.suppress(OSError):
                 inside.chmod(0o700)
     shutil.rmtree(folder, ignore_errors=True)
+
+
+def hidden(name: str) -> bool:
+    """Whether a file of the workspace, by its name there, is one no one sees, nor keeps: one of a
+    hidden folder's, or its own, as a page saved to read on, or the owner file Word makes beside a
+    document while it is open, ~$, which is no one's work."""
+    return any(part.startswith((".", "~$")) for part in name.split("/"))
 
 
 def _short(name: str, n: int = NAME) -> str:
