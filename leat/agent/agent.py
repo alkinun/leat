@@ -550,12 +550,13 @@ class Agent:
             except (OSError, ValueError) as e:
                 self.store.change_project(id, synced=time.time(), unsynced=str(e))
             else:
-                self.store.change_project(id, synced=time.time(), unsynced=None)
                 if copied or deleted:
                     did = f"{len(copied)} copied, {deleted} deleted, from {source}"
                     self.note(None, "synced the files", id, did, leat=True)
                     self.files_changed(id)
                     self.arrived(id, None, [f"{source.name}/{name}" for name in copied])
+                # synced once all of it is done, as whoever waits for it sees
+                self.store.change_project(id, synced=time.time(), unsynced=None)
         self.projects_changed()
 
     def projects_changed(self) -> None:

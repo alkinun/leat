@@ -628,12 +628,15 @@ def test_watchdays_left(tmp_path, monkeypatch):
     trusted, default = tmp_path / "cert.pem", ssl.create_default_context
     monkeypatch.setattr(watch.ssl, "create_default_context", lambda: default(cafile=trusted))
     assert serving("-days", "10") == 9
-    soon = datetime.datetime.now(datetime.UTC) + datetime.timedelta(hours=3)
-    assert serving("-not_before", "20260101000000Z", "-not_after",
-                   soon.strftime("%Y%m%d%H%M%SZ")) == 1  # its last day: valid still  # fmt: skip
-    day = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=1)
-    assert serving("-not_before", "20260101000000Z", "-not_after",
-                   day.strftime("%Y%m%d%H%M%SZ")) == 0  # fmt: skip
+    expires = ssl.cert_time_to_seconds(ssl._ssl._test_decode_cert(str(trusted))["notAfter"])
+    with monkeypatch.context() as clock:  # its last day, three hours before it expires: valid still
+        clock.setattr(watch.time, "time", lambda: expires - 3 * 3600)
+        assert serving("-days", "10") == 1
+    helped = subprocess.run(["openssl", "req", "-help"], capture_output=True, text=True).stderr
+    if "-not_after" in helped:  # of OpenSSL 3.4 on, which sets a certificate's dates
+        day = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=1)
+        assert serving("-not_before", "20260101000000Z", "-not_after",
+                       day.strftime("%Y%m%d%H%M%SZ")) == 0  # expired  # fmt: skip
     monkeypatch.setattr(watch.ssl, "create_default_context", default)
     assert serving("-days", "10") is None  # of a CA no browser trusts
     monkeypatch.setattr(watch, "HTTPS", ("127.0.0.1", 9))

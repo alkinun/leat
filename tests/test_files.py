@@ -71,17 +71,16 @@ def test_files(workspace, tmp_path):
     with pytest.raises(FileNotFoundError):
         workspace.delete("b.txt")
     # a file deleted between being found and looked at, as by code a call runs meanwhile, is gone
-    stat, gone, looks = Path.stat, workspace.root / "notes" / "a.txt", []
+    is_file, gone = Path.is_file, workspace.root / "notes" / "a.txt"
 
-    def deleting(path: Path, **kwargs) -> os.stat_result:  # at the second look, after is_file's
+    def deleting(path: Path, **kwargs) -> bool:  # found a file, then deleted before its stat
+        found = is_file(path, **kwargs)
         if path == gone:
-            looks.append(path)
-            if len(looks) == 2:
-                gone.unlink()
-        return stat(path, **kwargs)
+            gone.unlink()
+        return found
 
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(Path, "stat", deleting)
+        patch.setattr(Path, "is_file", deleting)
         assert workspace.files() == []
 
 
@@ -522,6 +521,7 @@ def test_overview(agent):
     assert seen["disk"]["free"] <= seen["disk"]["total"] and seen["people"] == []
 
 
+@needs_sandbox
 def test_sandbox_sees_its_space(agent):
     # code a conversation runs sees its space's files, and no other's
     project = agent.add_project("Payroll")["id"]
