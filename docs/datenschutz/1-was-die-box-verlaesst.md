@@ -55,6 +55,11 @@ sucht und liest Leat nichts im Web. Die Box selbst holt weiter Updates, meldet i
 ihr Zertifikat und prüft, ob sie erreichbar ist, wie oben beschrieben. Keine dieser Verbindungen
 enthält Daten des Büros.
 
+**Die Datensicherung bleibt im Büro:** Ist sie eingerichtet, schreibt die Box jede Nacht eine
+verschlüsselte Sicherung auf die USB-Festplatte an der Box oder die Netzwerkfreigabe des Büros, die
+ein Admin gewählt hat. Nichts davon geht ins Internet oder an den Anbieter. Ohne den
+Wiederherstellungsschlüssel, den nur das Büro hat, kann niemand sie lesen.
+
 ## Was der Anbieter sieht
 
 Der Anbieter von Leat sieht nur, was sein Server ohnehin erhält: die Kennung der Box, ihre private

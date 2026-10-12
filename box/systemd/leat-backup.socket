@@ -1,0 +1,12 @@
+[Unit]
+Description=The box's backups, for leat agent: where to, which there are, and a restore
+
+[Socket]
+ListenStream=/run/leat/backup.sock
+SocketUser=root
+SocketGroup=leat
+SocketMode=0660
+Accept=yes
+
+[Install]
+WantedBy=sockets.target

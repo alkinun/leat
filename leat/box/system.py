@@ -247,11 +247,11 @@ def ask(request: dict[str, Any], path: str = SOCKET, timeout: float = 30) -> dic
     return answer
 
 
-def asked(request: dict[str, Any]) -> dict[str, Any]:
-    """The helper's answer, as leat agent asks it. Raises ValueError of a refusal, saying why, or
-    of a Leat that is no box, which has no helper."""
+def asked(request: dict[str, Any], path: str = SOCKET, timeout: float = 30) -> dict[str, Any]:
+    """The helper's answer, as leat agent asks it, or another's, of its socket, as the backups'.
+    Raises ValueError of a refusal, saying why, or of a Leat that is no box, which has no helper."""
     try:
-        return ask(request)
+        return ask(request, path, timeout)
     except OSError as e:
         raise ValueError("this Leat runs on no box of its own, so it cannot do that") from e
 

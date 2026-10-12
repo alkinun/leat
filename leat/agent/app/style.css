@@ -304,6 +304,15 @@ body:not(.box) .box-only { display: none; } /* of a Leat that runs on no box of 
   overflow-wrap: anywhere;
 }
 #network form.fixed { display: grid; gap: 8px; max-width: 360px; margin: 12px 0 0; }
+/* the backups: where they go, its recovery key, shown once, and those to restore */
+#backups form.target { display: grid; gap: 8px; max-width: 360px; margin: 4px 0 0; }
+#backups .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+#backups .recovery-key, #backups .key {
+  font-family: var(--font-mono); letter-spacing: 1px; user-select: all;
+}
+#backups .recovery-key { margin: 12px 0; font-size: 1.125rem; }
+#backups .snapshots li { gap: 12px; }
+#backups .snapshots li > :first-child { flex: 1; }
 #room.warning { color: var(--error); }
 
 /* Activity: what was done, by day */

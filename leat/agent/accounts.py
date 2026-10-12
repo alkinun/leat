@@ -250,6 +250,39 @@ class Accounts:
         self.agent.projects_changed()  # those they shared, now another's
         self._publish()
 
+    def restoring(self, secret: str) -> dict[str, Any]:
+        """What leat.box.backup keeps of the device that asks to restore a backup, of its secret,
+        for restored() to pair it again: its secret's hash, its name and its person's. Raises
+        ValueError of a device not paired."""
+        token = _hash(secret)
+        if (device := self.store.device(token)) is None:
+            raise ValueError("that device is not paired")
+        person = self.store.person(device["person"]) or {}
+        return {"token": token, "name": device["name"], "person": person.get("name", "")}
+
+    def restored(self, kept: dict[str, Any], name: str | None) -> dict[str, Any] | None:
+        """Pairs the device that restored a backup, of what leat.box.backup kept of it: its
+        secret's hash, its name and its person's, to the backup's person of that name, made an
+        admin, as they had its recovery key, or to a new admin of it; returns its person. A backup
+        of another box, whose name, `name` not, no device paired reaches, has every device
+        unpaired first, each person's to join again."""
+        if kept.get("box") != name:
+            for device in self.store.devices():
+                self.store.remove_device(device["id"])
+        restoring = kept.get("device")
+        if not isinstance(restoring, dict):
+            return None
+        if paired := self.store.device(str(restoring.get("token", ""))):  # the backup has it
+            return self.store.person(paired["person"])
+        who = _checked(str(restoring.get("person", "")))
+        person = next((p for p in self.store.people() if p["name"] == who), None)
+        if person is None:
+            person = self.store.add_person(who, admin=True)
+        self.store.set_admin(person["id"], True)
+        self.store.add_device(person["id"], str(restoring.get("name", ""))[:60] or "A device",
+                              restoring["token"])  # fmt: skip
+        return person
+
     @staticmethod
     def me(device: dict[str, Any]) -> dict[str, Any]:
         """A device's person, as the app is told who it is: their id, name, whether they are an

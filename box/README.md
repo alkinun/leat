@@ -27,13 +27,14 @@ browser ── https://k7x2qm.leatbox.net ──▶ Caddy (leat-proxy) ──▶
 | `systemd/leat-screen.service` | `python -m leat.box.screen`: what a display plugged into the box shows, and its power button |
 | `systemd/leat-system.socket`, `leat-system@.service` | `python -m leat.box.system`: the few changes of the system leat agent asks for as root, each checked: time zone, fixed address, power, factory reset, updates, diagnostics |
 | `systemd/leat-system-restore.service` | puts back, at boot, the time zone and fixed address an update's new system lacks |
+| `systemd/leat-backup.socket`, `leat-backup@.service`, `leat-backup.service`, `.timer`, `leat-restore.service` | `python -m leat.box.backup`: each night, the office's data backed up, encrypted, to the USB disk or network share an admin chose; and a backup restored. Below |
 | `systemd/leat-health.service`, `leat-fallback.service` | an update's trial boot kept once Leat answers, and restarted if it never does, or falls into emergency mode, until systemd-boot goes back to the system before |
 | `/etc/leat/engine.env` | the engine leat agent uses: the image runs no `leat serve` and holds no model yet, so the agent reaches `http://127.0.0.1:8080`, or the engine this file names (`LEAT_ENGINE`, and `LEAT_ENGINE_KEY` if it asks for one), as a box under test reaches one on another machine, its prompts leaving the box |
 | `image/` | the disk image, of mkosi: below |
 
 `leat.box.watch`, in leat agent, says what needs attention, on the screen and in Settings: a disk
 nearly full, the model or the internet out of reach, a certificate about to expire, the name not
-found, an update that failed.
+found, an update that failed, a backup that failed or none for three days.
 
 ## Making a box
 
@@ -107,6 +108,27 @@ The last two are encrypted, sealed to the TPM by a signed PCR policy: they unloc
 ours alone, of any version, and a disk taken out of a box gives nothing away. The identity outlives
 updates and a factory reset; the data outlives updates. A factory reset, an admin's, puts a flag on
 the ESP, and the boot after deletes the data's partition and makes it anew, of a new key.
+
+## Backups
+
+An admin sets them up in Settings, Maintenance, Backups: a USB disk plugged into the box, of FAT,
+exFAT, NTFS, ext4, Btrfs or XFS, its files left as they are, or a network share of SMB, as a NAS's
+or a Windows server's, `\\nas\share`, with a user and password of the share's. The backups are
+restic's, in the folder `Leat backup` there, encrypted of a recovery key the box makes and shows
+once, which the admin writes down: without it no one reads them, we neither, and a new box restores
+of it alone. The box keeps the key and the share's password on its data partition.
+
+Each night at about half past one, before an update may restart the box, `leat-backup.timer` backs
+up leat agent's data, `/var/lib/leat`: the conversations and people, of SQLite's backup of the
+database, consistent as it is written to; the files and their earlier versions; and their index.
+Not the box's identity, nor its settings. Kept: a backup of each of the last 7 days, 5 weeks and 12
+months. A failed one is said on the screen and in Settings.
+
+A restore replaces everything of leat agent's with a backup: restored apart, then swapped in, the
+agent stopped for a moment. The device that restored it stays paired, as an admin of its person's
+name. Onto a new box, as one broken is replaced, the admin there chooses the old box's USB disk or
+share, types its recovery key and restores; every other device joins again, as the box's name is
+new, and the new box backs up to the same place from then on.
 
 ## Updates
 

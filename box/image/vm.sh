@@ -12,6 +12,12 @@
 #                                      # the same disk and TPM
 #     box/image/vm.sh stop
 #
+# A USB disk, an image of a file system, as mkfs.fat makes, is plugged into its USB port as into a
+# box's, of the QEMU monitor's commands, and unplugged of "device_del stick":
+#
+#     drive_add 0 if=none,id=stick,format=raw,file=/path/to/stick.raw
+#     device_add usb-storage,bus=usb.0,drive=stick,id=stick
+#
 # Of 2 GB of memory, or $LEAT_VM_MEMORY; its disk written past this machine's page cache, as an
 # update's 8 GB written into it would fill its memory else.
 set -eu
@@ -46,7 +52,7 @@ mkdir -p "$vm/tpm"
     --ctrl type=unixio,path="$vm/swtpm.sock" --pid file="$vm/swtpm.pid" --daemon)
 qemu-system-x86_64 -enable-kvm -cpu host -smp 4 -m "${LEAT_VM_MEMORY:-2G}" -machine q35 \
     -chardev socket,id=tpm,path="$vm/swtpm.sock" -tpmdev emulator,id=tpm,chardev=tpm \
-    -device tpm-tis,tpmdev=tpm \
+    -device tpm-tis,tpmdev=tpm -device qemu-xhci,id=usb \
     -drive if=pflash,format=raw,readonly=on,file="$firmware/OVMF_CODE.4m.fd" \
     -drive if=pflash,format=raw,file="$vm/vars.fd" \
     -drive file="$vm/disk.raw",format=raw,if=virtio,cache=none \

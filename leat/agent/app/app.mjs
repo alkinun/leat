@@ -1120,6 +1120,7 @@ function renderBox() {
   if (!$("network").childElementCount) renderNetwork();
   if (!$("power").childElementCount) renderPower();
   if (!$("software").childElementCount) renderSoftware();
+  if (!$("backups").childElementCount) renderBackups();
 }
 
 // the box's software, an admin's to see: its version, and an update installed, which it restarts
@@ -1160,6 +1161,168 @@ async function renderSoftware(asked = false) {
   buttons.append(Object.assign(element("a", "button quiet small", t("Download diagnostics")),
     { href: "/api/diagnostics", title: t("A file to send Leat's support when something is wrong: of the box's system alone, nothing of anyone's work") }));
   $("software").replaceChildren(...parts);
+}
+
+// the box's backups, an admin's to set up: each night, encrypted, to a USB disk plugged into the box
+// or a network share, of a recovery key shown once; where they go, and the last, or why it failed;
+// one made now, or one restored
+let backingUp = null;
+async function renderBackups() {
+  let state;
+  try {
+    state = await api("/api/backup");
+  } catch (error) {
+    return $("backups").replaceChildren(element("p", "about", sentence(error.message)));
+  }
+  clearTimeout(backingUp);
+  if (state.running) backingUp = setTimeout(renderBackups, 10000); // till it is done
+  if (!state.target) {
+    return $("backups").replaceChildren(element("p", "about", t("Without a backup, the box holds the only copy of the office's chats, files and people. Leat backs them up each night, encrypted, to a USB disk plugged into the box or a network share.")),
+      backupTarget(state.disks));
+  }
+  const { last, restore } = state;
+  const parts = [element("p", "", t("Backs up each night to {where}.", { where: state.target.share ?? t("the USB disk “{name}”", { name: state.target.label }) }))];
+  if (state.running) parts.push(element("p", "about", t("Backing up now…")));
+  else if (last?.error) parts.push(element("p", "error", t("The last backup failed, {when}: {why}", { when: moment(last.time), why: sentence(last.error) })));
+  else if (last?.ok) parts.push(element("p", "about", t("The last backup: {when}, of {size}.", { when: moment(last.ok), size: bytes(last.size ?? 0) })));
+  else parts.push(element("p", "about", t("No backup yet: the first is made tonight.")));
+  if (restore?.error) parts.push(element("p", "error", sentence(restore.error)));
+  const buttons = element("div", "buttons");
+  const now = element("button", "button small", t("Back up now")), back = element("button", "button quiet small", t("Restore…"));
+  const off = element("button", "button quiet small", t("Stop backing up"));
+  Object.assign(now, { type: "button", disabled: state.running });
+  back.type = off.type = "button";
+  now.onclick = () => post("/api/backup/now", {}).then(() => setTimeout(renderBackups, 1000)).catch(report);
+  back.onclick = () => renderSnapshots();
+  off.onclick = () => confirm(t("Stop backing up? The backups made are left where they are.")) &&
+    api("/api/backup", { method: "DELETE" }).then(() => renderBackups()).catch(report);
+  buttons.append(now, back, off);
+  $("backups").replaceChildren(...parts, buttons);
+}
+
+// where the box is to back up to: a USB disk plugged into it, or a network share, its address as
+// Windows writes it, and a user's name and password of the share's
+function backupTarget(disks, kind = "disk") {
+  const form = element("form", "target"), choice = element("div", "choice");
+  choice.append(...choices([["disk", t("USB disk")], ["share", t("Network share")]], kind,
+    (other) => form.replaceWith(backupTarget(disks, other))));
+  form.append(choice);
+  let target;
+  if (kind === "disk" && !disks.length) {
+    const again = element("button", "button small", t("Look again"));
+    again.type = "button";
+    again.onclick = () => renderBackups();
+    form.append(element("p", "about", t("Plug a USB disk into the box, then look again. Its files stay; the backups go into a folder of their own.")), again);
+    return form;
+  }
+  if (kind === "disk") {
+    const disk = element("select", "field");
+    disk.append(...disks.map((d) => new Option(t("{name}, {size}", { name: d.label || d.model || t("USB disk"), size: bytes(d.size) }), d.uuid)));
+    form.append(disk);
+    target = () => ({ disk: disk.value });
+  } else {
+    const field = (placeholder, type = "text") => Object.assign(element("input", "field"), { placeholder, type, required: true, spellcheck: false, autocomplete: "off" });
+    const share = field(t("Share, as \\\\nas\\backups")), user = field(t("User")), password = field(t("Password"), "password");
+    form.append(share, user, password);
+    target = () => ({ share: share.value, user: user.value, password: password.value });
+  }
+  const save = element("button", "button primary small", t("Back up here"));
+  form.append(save);
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    save.disabled = true;
+    try {
+      const chosen = target(), made = await post("/api/backup", chosen);
+      if (made.found) form.replaceWith(foundBackup(chosen));
+      else showRecoveryKey(made.key);
+    } catch (error) {
+      report(error);
+    } finally {
+      save.disabled = false;
+    }
+  };
+  return form;
+}
+
+// a backup of Leat's there already, as of a box this one replaces: its recovery key, to back up to
+// it from now on and restore of it
+function foundBackup(target) {
+  const form = element("form", "target");
+  const key = Object.assign(element("input", "field key"), { placeholder: "XXXX-XXXX-XXXX-XXXX-XXXX-XXXX", required: true, spellcheck: false, autocomplete: "off" });
+  const use = element("button", "button primary small", t("Use this backup"));
+  form.append(element("p", "", t("There's a backup of Leat there already. Type its recovery key to restore it, and to back up to it from now on.")), key, use);
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    try {
+      await post("/api/backup", { ...target, key: key.value });
+      renderSnapshots();
+    } catch (error) {
+      report(error);
+    }
+  };
+  return form;
+}
+
+// the recovery key of the backups, shown once, as the box keeps it alone
+function showRecoveryKey(key) {
+  const done = element("button", "button primary small", t("I've written it down"));
+  done.type = "button";
+  done.onclick = () => renderBackups();
+  $("backups").replaceChildren(
+    element("p", "", t("The first backup is being made. Write down its recovery key, and keep it apart from the box:")),
+    element("p", "recovery-key", key),
+    element("p", "about", t("It restores the backups, as onto a new box if this one breaks. Without it, no one can read them, Leat neither. It isn't shown again.")),
+    done);
+}
+
+// the backups to restore, newest first, each replacing everything on this Leat, once its admin
+// confirms it; the app loads again once the box has
+async function renderSnapshots() {
+  let found;
+  try {
+    found = (await api("/api/backup/snapshots")).snapshots;
+  } catch (error) {
+    return report(error);
+  }
+  const list = element("ul", "snapshots");
+  for (const snapshot of found) {
+    const item = element("li"), restore = element("button", "button small", t("Restore")), made = Date.parse(snapshot.time) / 1000;
+    restore.type = "button";
+    restore.onclick = () => restoreBackup(snapshot.id, made);
+    item.append(element("span", "", moment(made)), element("span", "meta", snapshot.size ? bytes(snapshot.size) : ""), restore);
+    list.append(item);
+  }
+  const cancel = element("button", "button quiet small", t("Cancel"));
+  cancel.type = "button";
+  cancel.onclick = () => renderBackups();
+  $("backups").replaceChildren(
+    element("p", "", t("Restore a backup")),
+    element("p", "about", found.length ? t("Everything on this Leat is replaced by the backup: what was done since it was made is lost.") : t("There's no backup to restore yet.")),
+    list, cancel);
+}
+
+async function restoreBackup(id, made) {
+  if (!confirm(t("Restore the backup of {when}? Everything on this Leat is replaced by it, and what was done since is lost.", { when: moment(made) }))) return;
+  try {
+    await post("/api/restore", { snapshot: id });
+  } catch (error) {
+    return report(error);
+  }
+  status(t("Restoring the backup… Leat is away for a few minutes, and loads again once it's back."));
+  const waiting = setInterval(async () => {
+    try {
+      if ((await api("/api/backup")).running) return;
+    } catch {
+      return; // away, as its data is swapped
+    }
+    clearInterval(waiting);
+    location.reload();
+  }, 5000);
+}
+
+// a time, in seconds, as a day and a clock read it
+function moment(seconds) {
+  return new Date(seconds * 1000).toLocaleString(locale(), { dateStyle: "medium", timeStyle: "short" });
 }
 
 // the box restarted, or switched off, of an admin, once they confirm it; or reset, its state erased,

@@ -80,7 +80,7 @@ Leat läuft vollständig auf einer Box im Büro; das KI-Modell ebenso.
 | Fehlerhafte oder erfundene Inhalte („Halluzinationen“), die in ein Schreiben übernommen werden | mittel | mittel | Quellenangaben zu jeder Aussage; wörtliche Prüfung jedes Zitats gegen die Quelle; Schulung; Verantwortung bleibt beim Menschen | mittel, durch Kontrolle der Ergebnisse zu senken |
 | Unbefugter Zugriff aus dem Netz | gering | hoch | Nur im Büronetz erreichbar; HTTPS; jedes Gerät einzeln zugelassen; kein Fernzugang (TOM 1.2) | gering |
 | Zugriff des Anbieters | gering | hoch | Kein Fernzugang, keine Inhalte beim Anbieter, signierte und quelloffene Software | gering |
-| Datenverlust (Defekt der Box) | gering | mittel | ⟨Sicherung durch das Büro, TOM 3⟩ | ⟨…⟩ |
+| Datenverlust (Defekt der Box) | gering | mittel | Nächtliche verschlüsselte Sicherung auf eine USB-Festplatte oder Netzwerkfreigabe, Wiederherstellung auf einer neuen Box (TOM 3); ⟨Sicherung eingerichtet, Schlüssel verwahrt⟩ | gering, sobald die Sicherung eingerichtet ist |
 | Überwachung der Beschäftigten über das Aktivitätsprotokoll und die Nutzungszahlen | gering | mittel | Protokoll ohne Inhalte, nur für Admins, ein Jahr; Nutzungszahlen nur gezählt, nur für Admins; ⟨Information der Beschäftigten, ggf. Betriebsvereinbarung⟩ | gering |
 
 ## 4. Abhilfemaßnahmen

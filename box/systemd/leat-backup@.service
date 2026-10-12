@@ -1,0 +1,19 @@
+[Unit]
+Description=The box's backups, for leat agent: one request
+# its key and target, on the data's partition
+RequiresMountsFor=/var/lib
+
+[Service]
+# as root, as mounting a USB disk or a network share takes it, for one request of leat agent's
+# alone, which leat.box.backup checks; a backup or a restore it asks for runs apart
+ExecStart=/opt/leat/.venv/bin/python -m leat.box.backup
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+# a share's mount, as one out of reach is waited for, then restic's look at it, as a slow one takes
+TimeoutSec=150
+StateDirectory=leat-backup
+StateDirectoryMode=0711
+RuntimeDirectory=leat-backup
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes

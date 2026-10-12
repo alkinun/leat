@@ -1,0 +1,11 @@
+[Unit]
+Description=A backup each night, before an update may restart the box
+
+[Timer]
+OnCalendar=*-*-* 01:30
+RandomizedDelaySec=30min
+# of a night the box was off, once it is on again
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,18 @@
+[Unit]
+Description=A backup restored, as an admin asked: leat agent stopped as its data is swapped for it
+RequiresMountsFor=/var/lib
+After=network-online.target
+ConditionPathExists=/var/lib/leat-backup/asked.json
+# never beside a backup, of the same repository
+Conflicts=leat-backup.service
+After=leat-backup.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/leat/.venv/bin/python -m leat.box.backup --restore
+StateDirectory=leat-backup
+StateDirectoryMode=0711
+RuntimeDirectory=leat-backup
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+CacheDirectory=leat-backup

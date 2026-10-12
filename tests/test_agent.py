@@ -634,7 +634,7 @@ def test_timezone(server, agent, monkeypatch):
     # the box's time zone, set by its system helper, and noted; refused, or off a box, said
     asked = []
 
-    def ask(request):
+    def ask(request, *_):
         asked.append(request)
         if request["timezone"] == "Mars/Olympus":
             raise ValueError("there is no time zone 'Mars/Olympus'")
@@ -650,7 +650,7 @@ def test_timezone(server, agent, monkeypatch):
     assert status == 400 and b"no time zone" in body
     assert request(url, "PATCH", {"timezone": 7})[0] == 400
 
-    def away(request):
+    def away(request, *_):
         raise ConnectionRefusedError("no helper")
 
     monkeypatch.setattr(system, "ask", away)
@@ -663,7 +663,7 @@ def test_network(server, agent, monkeypatch):
     # each noted; off a box, said
     asked = []
     status = {"fixed": None, "fell_back": True}
-    monkeypatch.setattr(system, "ask", lambda r: asked.append(r) or (
+    monkeypatch.setattr(system, "ask", lambda r, *_: asked.append(r) or (
         status if r["network"] == "status" else {}))  # fmt: skip
     assert json.loads(request(f"{server}/api/network")[1]) == status
     fixed = {"address": "192.168.1.50/24", "gateway": "192.168.1.1", "dns": ["192.168.1.1"]}
@@ -674,7 +674,7 @@ def test_network(server, agent, monkeypatch):
     assert noted == [("set the address to automatic", None),
                      ("set a fixed address", "192.168.1.50/24")]  # fmt: skip
 
-    def away(request):
+    def away(request, *_):
         raise ConnectionRefusedError("no helper")
 
     monkeypatch.setattr(system, "ask", away)
@@ -685,7 +685,7 @@ def test_network(server, agent, monkeypatch):
 def test_power(server, agent, monkeypatch):
     # the box restarted or switched off by an admin, noted first
     asked = []
-    monkeypatch.setattr(system, "ask", lambda r: asked.append(r) or {})
+    monkeypatch.setattr(system, "ask", lambda r, *_: asked.append(r) or {})
     for power in ("on", None, "reboot"):
         assert request(f"{server}/api/power", "POST", {"power": power})[0] == 400
     assert request(f"{server}/api/power", "POST", {"power": "restart"})[0] == 200
@@ -702,7 +702,7 @@ def test_update(server, monkeypatch):
     asked = []
     status_ = {"version": "2026.10.11.2241-fe75bd0", "ready": None, "checking": False,
                "checked": None}  # fmt: skip
-    monkeypatch.setattr(system, "ask", lambda r: asked.append(r) or (status_ if r["update"] ==
+    monkeypatch.setattr(system, "ask", lambda r, *_: asked.append(r) or (status_ if r["update"] ==
                         "status" else {}))  # fmt: skip
     assert json.loads(request(f"{server}/api/update")[1]) == status_
     assert request(f"{server}/api/update", "POST", {})[0] == 200
@@ -713,7 +713,7 @@ def test_update(server, monkeypatch):
 
 def test_diagnostics(server, monkeypatch):
     # the box's system, a file an admin downloads to send us
-    monkeypatch.setattr(system, "ask", lambda r: {"text": "## Version\n\nleat"})
+    monkeypatch.setattr(system, "ask", lambda r, *_: {"text": "## Version\n\nleat"})
     with urllib.request.urlopen(f"{server}/api/diagnostics") as response:
         assert response.read() == b"## Version\n\nleat"
         assert response.headers["Content-Type"] == "text/plain; charset=utf-8"
@@ -733,7 +733,7 @@ def test_reset(server, agent, monkeypatch):
     # the box's state erased by an admin once they typed the office's name, of any case, or
     # "reset" of a box of none; anyone else may not
     asked = []
-    monkeypatch.setattr(system, "ask", lambda r: asked.append(r) or {})
+    monkeypatch.setattr(system, "ask", lambda r, *_: asked.append(r) or {})
     status, body = request(f"{server}/api/reset", "POST", {"confirm": "yes"})
     assert status == 400 and b"type reset" in body
     agent.change(office="Kanzlei Weber")
@@ -1597,3 +1597,61 @@ def test_events(server, agent, engine):
     id = agent.send(None, "Hi", person=1)
     assert event()["conversation"]["id"] == id
     connection.close()
+
+
+def test_restored(agent):
+    # a backup restored onto this box: its devices kept, and the device that restored it, of a
+    # person paired since, paired again as an admin of their name; onto a new box, whose name no
+    # device reaches, every device unpaired, and the one that restored it paired to a new admin
+    accounts = Accounts(agent)
+    accounts.setup("Alkın", "Firefox")
+    ada = agent.store.add_person("Ada")
+    agent.store.add_device(ada["id"], "Phone", "a" * 64)
+    kept = accounts.restoring(accounts._pair(ada["id"], "Laptop"))
+    assert kept["person"] == "Ada" and kept["name"] == "Laptop" and len(kept["token"]) == 64
+    assert accounts.restored({"box": "k7x2qm.leatbox.net", "device": kept},
+                             "k7x2qm.leatbox.net")["name"] == "Ada"  # fmt: skip
+    assert len(agent.store.devices()) == 3  # as the backup had it, of this test
+    assert not agent.store.person(ada["id"])["admin"]  # the backup has their device
+    agent.store.remove_device(next(d["id"] for d in agent.store.devices() if d["name"] == "Laptop"))
+    assert accounts.restored({"box": "k7x2qm.leatbox.net", "device": kept},
+                             "k7x2qm.leatbox.net")["id"] == ada["id"]  # fmt: skip
+    assert agent.store.person(ada["id"])["admin"] and len(agent.store.devices()) == 3
+    stranger = {"token": "b" * 64, "name": "Edge", "person": "Grace"}
+    grace = accounts.restored({"box": "old.leatbox.net", "device": stranger}, "k7x2qm.leatbox.net")
+    assert grace["name"] == "Grace" and agent.store.person(grace["id"])["admin"]
+    assert [(d["person"], d["name"]) for d in agent.store.devices()] == [(grace["id"], "Edge")]
+    assert accounts.restored({"box": "k7x2qm.leatbox.net"}, "k7x2qm.leatbox.net") is None
+
+
+def test_backup_api(server, agent, monkeypatch):
+    # the box's backups, an admin's alone: where they go, set up and turned off, noted; the backups
+    # to restore, and one restored, of the device asking; errors in the box's language
+    asked = []
+
+    def backups(request):
+        asked.append(request)
+        if request == {"backup": "status"}:
+            return {"target": None, "last": {"time": 1, "error": "the box backs up nowhere"},
+                    "restore": None, "running": False, "disks": []}  # fmt: skip
+        return {"key": "ABCD-EFGH-JKLM-NPQR-STUV-WXYZ"} if "disk" in str(request) else {}
+
+    monkeypatch.setattr("leat.agent.server._backups", backups)
+    admins = paired(server)
+    _, ada = joining(server, "Ada", admins)
+    assert ada("/api/backup")[0] == 403
+    assert ada("/api/restore", "POST", {"snapshot": "latest"})[0] == 403
+    assert admins("/api/settings", "PATCH", {"language": "de"})[0] == 200
+    assert admins("/api/backup")[1]["last"]["error"] == "die Box sichert nirgendwohin"
+    assert admins("/api/backup", "POST", {"disk": "1234-ABCD"})[1]["key"].startswith("ABCD")
+    assert agent.store.activity()[0]["action"] == "set up backups"
+    assert admins("/api/backup/now", "POST", {})[0] == 200
+    assert admins("/api/backup/snapshots")[0] == 200
+    assert admins("/api/restore", "POST", {"snapshot": "latest"})[0] == 200
+    restore = asked[-1]["restore"]
+    assert restore["snapshot"] == "latest" and restore["device"]["person"] == "Alkın"
+    assert len(restore["device"]["token"]) == 64
+    assert admins("/api/backup", "DELETE")[0] == 200
+    assert agent.store.activity()[0]["action"] == "turned backups off"
+    assert asked[1:] == [{"backup": {"disk": "1234-ABCD"}}, {"backup": "now"},
+                         {"backup": "snapshots"}, asked[-2], {"backup": "off"}]  # fmt: skip

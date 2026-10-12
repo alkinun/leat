@@ -13,6 +13,9 @@ enable leat-address.timer
 enable leat-screen.service
 enable leat-system.socket
 enable leat-system-restore.service
+# backups: each night, of an admin's target, and their requests
+enable leat-backup.socket
+enable leat-backup.timer
 # updates: looked for every few hours, booted at night, kept once Leat answers
 enable systemd-sysupdate.timer
 enable systemd-sysupdate-reboot.timer

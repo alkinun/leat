@@ -1,0 +1,19 @@
+[Unit]
+Description=A backup of the office's data, encrypted, to the USB disk or network share an admin chose
+RequiresMountsFor=/var/lib
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/var/lib/leat-backup/target.json
+
+[Service]
+Type=oneshot
+ExecStart=/opt/leat/.venv/bin/python -m leat.box.backup --run
+# behind what the office does on the box, of its disk and processor
+Nice=10
+IOSchedulingClass=idle
+StateDirectory=leat-backup
+StateDirectoryMode=0711
+RuntimeDirectory=leat-backup
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+CacheDirectory=leat-backup

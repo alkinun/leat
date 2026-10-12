@@ -2,12 +2,13 @@
 sentence of what to do: its name not found on its office's network, as a router's DNS rebinding
 protection hides it; the internet out of its reach; its certificate expiring, as it renews it over
 the internet; its data's disk nearly full; its model out of reach; an update that failed, the box
-back on the version before.
+back on the version before; a backup that failed, or none for days.
 
 Looked at once a minute, in a thread of its own, so that whoever asks, as the box's screen every few
 seconds, has what was last seen at once, never waiting on DNS or the box's helper.
 """
 
+import json
 import shutil
 import socket
 import ssl
@@ -17,7 +18,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from leat.box import system
+from leat.box import backup, system
 from leat.box.address import ipv4
 
 LOOK = 60  # seconds between looks
@@ -25,6 +26,7 @@ HELD = 600  # seconds the name goes unfound, or the internet unreached, before i
 # address takes minutes, and a router restarting some
 EXPIRING = 14  # days of the certificate left, or fewer, which are said: Caddy renews it at 30
 FULL = 0.1  # of the data's disk left, or less, which is said
+UNSAVED = 3  # days without a backup, of a box that backs up, which are said
 FRITZ = "Heimnetz › Netzwerk › Netzwerkeinstellungen › DNS-Rebind-Schutz"
 KNOWN = "leatbox.net"  # a name found whenever the box's DNS answers at all
 REACHED = ("api.leatbox.net", 443)  # reached whenever the box reaches the internet: its registry
@@ -94,6 +96,10 @@ class Watch:
             found.append(_warning("update", "An update failed",
                                   f"The box went back to the version before, as {failed} did not "
                                   "start. Leat works as it did."))  # fmt: skip
+        if unsaved := _unsaved():
+            found.append(_warning("backup", unsaved,
+                                  "Check that its USB disk is plugged into the box, or its "
+                                  "network share is reachable. Settings shows why."))  # fmt: skip
         self.warnings = found
         return found
 
@@ -110,6 +116,19 @@ class Watch:
             return system.ask({"update": "status"}).get("failed")
         except (OSError, ValueError):
             return None
+
+
+def _unsaved() -> str | None:
+    # what of the box's backups needs attention, as their status says: the last failed, or the
+    # last made is days old; None of a box that backs up nowhere, or whose backups are made
+    try:
+        last = json.loads(backup.STATUS.read_text())
+    except (OSError, ValueError):
+        return None
+    if "error" in last:
+        return "The last backup failed"
+    days = int((time.time() - last.get("ok", 0)) // 86400)
+    return f"No backup for {days} days" if days >= UNSAVED else None
 
 
 def _found(name: str) -> bool | None:

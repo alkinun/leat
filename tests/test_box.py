@@ -7,9 +7,11 @@ import json
 import os
 import shutil
 import socket
+import sqlite3
 import ssl
 import subprocess
 import threading
+import time
 from collections.abc import Iterator
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -19,7 +21,7 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image, ImageColor
 
-from leat.box import address, enroll, health, provision, screen, system, watch
+from leat.box import address, backup, enroll, health, provision, screen, system, watch
 
 REGISTERED = {
     "id": "k7x2qm",
@@ -650,11 +652,14 @@ def test_units():
     shown = (box / "systemd/leat-screen.service").read_text()
     assert "TTYPath=/dev/tty2" in shown and "-m leat.box.screen --take" in shown
     # and each unit is enabled by the image's preset, as each the preset enables is one of these,
-    # but the helper's, of its socket, and systemd's own
+    # and systemd's own
     preset = box / "image/mkosi.extra/usr/lib/systemd/system-preset/10-leat.preset"
     enabled = {line.split()[1] for line in preset.read_text().splitlines()
                if line.startswith("enable leat-")}  # fmt: skip
-    units = {p.name for p in (box / "systemd").iterdir()} - {"leat-system@.service"}
+    # but the helpers', of their sockets, and a backup's and a restore's, of a timer's or a request
+    started = {"leat-system@.service", "leat-backup@.service", "leat-backup.service",
+               "leat-restore.service"}  # fmt: skip
+    units = {p.name for p in (box / "systemd").iterdir()} - started
     assert enabled == units
     # a dev image's updates of its own channel, as a box's never take its SSH
     postinst = (box / "image/mkosi.postinst.chroot").read_text()
@@ -779,3 +784,228 @@ def test_fingerprint():
         + "-----END PUBLIC KEY-----\n"
     )
     assert enroll.fingerprint(pem) == hashlib.sha256(der).hexdigest()
+
+
+def test_backup_key():
+    # a recovery key of 6 groups of 4, of letters none mistaken for another; one typed taken as it
+    # was made, its case, spaces and dashes anyhow
+    key = backup.new_key()
+    assert len(key) == 29 and key.count("-") == 5 and set(key) <= set(backup.LETTERS + "-")
+    assert backup.normal(key.lower().replace("-", " ")) == key
+    assert backup.new_key() != key
+    for wrong in ("", "ABCD", key + "A", key.replace(key[0], "0")):
+        with pytest.raises(system.Refused):
+            backup.normal(wrong)
+
+
+LSBLK = {"blockdevices": [
+    {"name": "nvme0n1", "tran": "nvme", "model": "Samsung", "children": [
+        {"name": "nvme0n1p1", "uuid": "AAAA-AAAA", "fstype": "vfat", "label": None, "size": 1,
+         "fsavail": 1}]},
+    {"name": "sda", "tran": "usb", "model": "SanDisk Extreme ", "uuid": None, "fstype": None,
+     "children": [
+        {"name": "sda1", "uuid": "1234-ABCD", "fstype": "exfat", "label": "BACKUP",
+         "size": 64e9, "fsavail": 60e9},
+        {"name": "sda2", "uuid": "beef", "fstype": "swap", "label": None, "size": 1e9,
+         "fsavail": None}]},
+    {"name": "sdb", "tran": "usb", "model": "Stick", "uuid": "5678", "fstype": "ntfs",
+     "label": "", "size": 32e9, "fsavail": None},
+]}  # fmt: skip
+
+
+def test_backup_disks(monkeypatch):
+    # the USB disks' file systems the box mounts, of a disk partitioned or not; never its own
+    # disk's, nor swap
+    monkeypatch.setattr(backup.subprocess, "run",
+                        lambda *a, **k: SimpleNamespace(stdout=json.dumps(LSBLK)))  # fmt: skip
+    assert backup.disks() == [
+        {"uuid": "1234-ABCD", "label": "BACKUP", "fstype": "exfat", "model": "SanDisk Extreme",
+         "size": 64e9, "free": 60e9},
+        {"uuid": "5678", "label": "", "fstype": "ntfs", "model": "Stick", "size": 32e9,
+         "free": None},
+    ]  # fmt: skip
+    assert backup._checked({"disk": "5678"}) == {"disk": "5678", "label": "Stick"}
+    with pytest.raises(system.Refused, match="not plugged"):
+        backup._checked({"disk": "AAAA-AAAA"})
+
+
+def test_backup_share():
+    # a share's address as Windows writes it, or as Linux; its user and password as given
+    assert backup._checked({"share": r"\\nas\backups\leat", "user": "office", "password": "p,w"}
+                           ) == {"share": "//nas/backups/leat", "user": "office",
+                                 "password": "p,w"}  # fmt: skip
+    assert backup._checked({"share": "smb://192.168.1.5/b", "user": "", "password": ""})["share"] \
+        == "//192.168.1.5/b"  # fmt: skip
+    for wrong in ({"share": "nas", "user": "u", "password": "p"},
+                  {"share": "//nas", "user": "u", "password": "p"},
+                  {"share": "//nas/b", "user": "u", "password": "p\nusername=root"},
+                  {"share": "//nas/b"}, {}):  # fmt: skip
+        with pytest.raises(system.Refused):
+            backup._checked(wrong)
+
+
+def test_backup_refuses(tmp_path, monkeypatch):
+    # its requests, each checked; none restores of a box that backs up nowhere
+    monkeypatch.setattr(backup, "STATE", tmp_path)
+    for request in ([], {}, {"backup": "everything"}, {"backup": {"disk": 3}},
+                    {"restore": "latest"}, {"restore": {"snapshot": "../../etc"}},
+                    {"restore": {"snapshot": "latest"}}):  # fmt: skip
+        assert "error" in backup.handle(request), request
+
+
+@pytest.fixture
+def backups(tmp_path, monkeypatch):
+    # the box's backups, of a target that is a folder, restic's commands noted and answered as a
+    # test has them, and systemd's
+    data, state, target = tmp_path / "data", tmp_path / "state", tmp_path / "target"
+    for folder in (data / "workspace/people/1", state, target):
+        folder.mkdir(parents=True)
+    monkeypatch.setattr(backup, "DATA", data)
+    monkeypatch.setattr(backup, "STATE", state)
+    monkeypatch.setattr(backup, "STATUS", state / "status.json")
+    monkeypatch.setattr(backup, "mounted", lambda t: contextlib.nullcontext(target))
+    monkeypatch.setattr(backup, "_name", lambda: "k7x2qm.leatbox.net")
+    told = SimpleNamespace(restic=[], ran=[], answers={}, data=data, state=state, target=target)
+
+    def restic(repository, key, *args):
+        told.restic.append((repository, key, args))
+        answer = told.answers.get(args[0], "")
+        return answer(args) if callable(answer) else answer
+
+    monkeypatch.setattr(backup, "_restic", restic)
+    monkeypatch.setattr(backup.subprocess, "run",
+                        lambda args, **kw: told.ran.append(args) or SimpleNamespace(
+                            returncode=0, stdout="inactive"))  # fmt: skip
+    plugged = {"uuid": "1234-ABCD", "label": "BACKUP", "model": "SanDisk", "fstype": "exfat"}
+    monkeypatch.setattr(backup, "disks", lambda: [plugged])
+    return told
+
+
+def test_backup_set_up(backups):
+    # a target of no repository: one made, of a new key, answered once, kept with the target, and
+    # backed up to at once; of one there, its key asked for, then kept, and nothing backed up
+    # before tonight, as a new box restores first; of a wrong key, refused
+    made = backup.handle({"backup": {"disk": "1234-ABCD"}})
+    assert backup.normal(made["key"]) == made["key"]
+    assert backups.restic == [(backups.target / "Leat backup", made["key"], ("init",))]
+    assert (backups.state / "key").read_text() == made["key"]
+    kept = json.loads((backups.state / "target.json").read_text())
+    assert kept == {"disk": "1234-ABCD", "label": "BACKUP"}
+    assert backups.ran[-1] == ["systemctl", "--no-block", "start", "leat-backup.service"]
+    assert oct((backups.state / "key").stat().st_mode & 0o777) == "0o600"
+    (backups.target / "Leat backup").mkdir()
+    (backups.target / "Leat backup/config").write_text("")
+    backups.ran.clear()
+    assert backup.handle({"backup": {"disk": "1234-ABCD"}}) == {"found": True}
+    assert backup.handle({"backup": {"disk": "1234-ABCD", "key": made["key"].lower()}}) == {}
+    assert backups.restic[-1][1:] == (made["key"], ("cat", "config")) and backups.ran == []
+
+    def wrong(args):
+        raise system.Refused("that recovery key is not this backup's")
+
+    backups.answers["cat"] = wrong
+    assert backup.handle({"backup": {"disk": "1234-ABCD", "key": backup.new_key()}}) == {
+        "error": "that recovery key is not this backup's"}  # fmt: skip
+    status = backup.handle({"backup": "status"})
+    assert status["target"] == {"disk": "1234-ABCD", "label": "BACKUP"} and not status["running"]
+    assert backup.handle({"backup": "off"}) == {}
+    assert backup.handle({"backup": "status"})["target"] is None
+    assert not (backups.state / "key").exists()
+
+
+def test_backup_share_password(backups):
+    # a share's password kept for the backups, never shown
+    backup.handle({"backup": {"share": r"\\nas\b", "user": "office", "password": "secret"}})
+    assert backup.handle({"backup": "status"})["target"] == {"share": "//nas/b", "user": "office"}
+
+
+def test_backup_run(backups):
+    # the databases copied consistently, as they are written to, and backed up beside the files,
+    # tagged with the box's name; backups past keeping forgotten; its status kept, anyone's to
+    # read; one that failed said, and of a box that backs up nowhere, none tried
+    backup.run()
+    assert backups.restic == [] and not backup.STATUS.exists()
+    backup.handle({"backup": {"disk": "1234-ABCD"}})
+    backups.restic.clear()
+    db = sqlite3.connect(backups.data / "leat.db")
+    db.execute("PRAGMA journal_mode=WAL")
+    db.execute("CREATE TABLE t (x)")
+    db.execute("INSERT INTO t VALUES (42)")
+    db.commit()  # in its write-ahead log, not yet in the database's file
+    (backups.data / "workspace/people/1/notes.txt").write_text("hello")
+    copied = []
+
+    def backed_up(args):
+        made = backups.data / ".backup/leat.db"
+        copied.append(sqlite3.connect(made).execute("SELECT x FROM t").fetchall())
+        return '{"message_type":"status"}\n{"message_type":"summary","total_bytes_processed":9,' \
+               '"data_added":3}\n'  # fmt: skip
+
+    backups.answers["backup"] = backed_up
+    backup.run()
+    assert copied == [[(42,)]] and not (backups.data / ".backup").exists()
+    (_, key, args), (_, _, forgot) = backups.restic
+    assert args[:6] == ("backup", "--json", "--host", "leat-box", "--tag",
+                        "box=k7x2qm.leatbox.net") and args[-1] == str(backups.data)  # fmt: skip
+    assert "--exclude" in args and str(backups.data / "*.db") in args
+    assert forgot[0] == "forget" and "--prune" in forgot
+    status = json.loads(backup.STATUS.read_text())
+    assert status["size"] == 9 and status["added"] == 3 and "error" not in status
+    assert oct(backup.STATUS.stat().st_mode & 0o777) == "0o644"
+
+    def failed(args):
+        raise system.Refused("the backup's target is out of reach: no such device")
+
+    backups.answers["backup"] = failed
+    with pytest.raises(SystemExit):
+        backup.run()
+    assert json.loads(backup.STATUS.read_text())["error"].startswith("the backup's target")
+
+
+def test_backup_restore(backups):
+    # a backup restored apart, then swapped for the data, leat agent stopped meanwhile, and the
+    # device that asked kept beside it; the data before deleted; a backup of no conversations
+    # refused, the data as it was
+    backup.handle({"backup": {"disk": "1234-ABCD"}})
+    (backups.data / "leat.db").write_text("now")
+    snapshot = {"id": "ab" * 32, "time": "2026-10-12T01:40:00Z", "tags": ["box=old.leatbox.net"]}
+    backups.answers["snapshots"] = json.dumps([snapshot])
+
+    def restored(args):
+        made = Path(args[args.index("--target") + 1]) / backups.data.relative_to("/")
+        (made / ".backup").mkdir(parents=True)
+        (made / ".backup/leat.db").write_text("then")
+        (made / "workspace").mkdir()
+
+    backups.answers["restore"] = restored
+    device = {"token": "f" * 64, "name": "Firefox", "person": "Alkın"}
+    assert backup.handle({"restore": {"snapshot": "latest", "device": device}}) == {}
+    assert backups.ran[-1] == ["systemctl", "--no-block", "start", "leat-restore.service"]
+    backups.ran.clear()
+    backup.restore()
+    assert (backups.data / "leat.db").read_text() == "then"
+    assert not (backups.data / ".backup").exists()
+    assert json.loads((backups.data / "restored.json").read_text()) == {
+        "box": "old.leatbox.net", "device": device}  # fmt: skip
+    stopped = backups.ran.index(["systemctl", "stop", "leat-agent.service"])
+    assert backups.ran[stopped + 2] == ["systemctl", "start", "leat-agent.service"]
+    assert not (backups.state / "before").exists() and not (backups.state / "asked.json").exists()
+    assert "ok" in json.loads((backups.state / "restore.json").read_text())
+    backups.answers["restore"] = lambda args: None  # nothing of Leat's
+    backup.handle({"restore": {"snapshot": "latest", "device": device}})
+    with pytest.raises(SystemExit):
+        backup.restore()
+    assert (backups.data / "leat.db").read_text() == "then"
+    assert "conversations" in backup.handle({"backup": "status"})["restore"]["error"]
+
+
+def test_watch_backups(tmp_path, monkeypatch):
+    # a box that backs up: told of a backup that failed, or of none for three days
+    monkeypatch.setattr(watch.backup, "STATUS", status := tmp_path / "status.json")
+    assert watch._unsaved() is None
+    status.write_text(json.dumps({"time": 1, "error": "out of reach"}))
+    assert watch._unsaved() == "The last backup failed"
+    status.write_text(json.dumps({"time": 1, "ok": time.time() - 86400}))
+    assert watch._unsaved() is None
+    status.write_text(json.dumps({"time": 1, "ok": time.time() - 3 * 86400}))
+    assert watch._unsaved() == "No backup for 3 days"

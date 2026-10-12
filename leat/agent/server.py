@@ -46,7 +46,7 @@ from leat.agent.agent import NAME, Agent, Busy, NotFound, Refused
 from leat.agent.client import EngineError
 from leat.agent.store import Store
 from leat.agent.workspace import Workspace
-from leat.box import system
+from leat.box import backup, system
 from leat.box.watch import Watch
 from leat.defaults import EFFORTS
 
@@ -198,6 +198,16 @@ class _Handler(BaseHTTPRequestHandler):
             elif path == "/api/update":  # the box's version, and an update ready, if one is
                 _admin(me)
                 self._json(200, system.asked({"update": "status"}))
+            elif path == "/api/backup":  # where the box backs up to, and its last backup and
+                _admin(me)  # restore, of an error in the box's language if either failed
+                state = _backups({"backup": "status"})
+                for done in (state.get("last"), state.get("restore")):
+                    if done and done.get("error"):
+                        done["error"] = locales.translated(done["error"], self._language())
+                self._json(200, state)
+            elif path == "/api/backup/snapshots":  # the backups to restore, newest first
+                _admin(me)
+                self._json(200, _backups({"backup": "snapshots"}))
             elif path == "/api/diagnostics":  # the box's system, as a file an admin sends us
                 _admin(me)
                 text = system.asked({"diagnostics": True})["text"].encode()
@@ -325,6 +335,21 @@ class _Handler(BaseHTTPRequestHandler):
             elif path == "/api/update":  # an update looked for now, an admin's to ask
                 _admin(me)
                 self._json(200, system.asked({"update": "check"}))
+            elif path == "/api/backup":  # backups to a USB disk or a network share, from now on:
+                _admin(me)  # answered the recovery key of a new one, shown once
+                made = _backups({"backup": body})
+                where = body.get("share") or (body.get("disk") and "a USB disk")
+                if not made.get("found"):
+                    agent.note(person, "set up backups", detail=where)
+                self._json(200, made)
+            elif path == "/api/backup/now":
+                _admin(me)
+                self._json(200, _backups({"backup": "now"}))
+            elif path == "/api/restore":  # a backup restored, its device paired again after
+                _admin(me)
+                device = accounts.restoring(self._secret() or "")
+                self._json(200, _backups({"restore": {"snapshot": body.get("snapshot"),
+                                                      "device": device}}))  # fmt: skip
             elif path == "/api/power":  # the box restarted, or switched off, an admin's to do
                 _admin(me)
                 if (power := body.get("power")) not in ("restart", "off"):
@@ -391,6 +416,10 @@ class _Handler(BaseHTTPRequestHandler):
             elif (match := _REQUEST.fullmatch(path)) and not match[2]:
                 _admin(me)
                 accounts.refuse(match[1])
+            elif path == "/api/backup":  # no more backups; those made are left
+                _admin(me)
+                _backups({"backup": "off"})
+                agent.note(person, "turned backups off")
             elif path == "/api/recovery":  # the recovery code the box's screen shows, voided
                 _admin(me)
                 if accounts.cancel_recovery():
@@ -580,12 +609,15 @@ class _Handler(BaseHTTPRequestHandler):
     def _device(self) -> dict[str, Any]:
         # the paired device the request comes from, by its cookie's secret. Raises _Unpaired
         # if it comes from none.
-        cookies = http.cookies.SimpleCookie(self.headers.get("Cookie", ""))
-        name = self.server.cookie
-        secret = cookies[name].value if name in cookies else None
-        if (device := self.server.accounts.device(secret)) is None:
+        if (device := self.server.accounts.device(self._secret())) is None:
             raise _Unpaired
         return device
+
+    def _secret(self) -> str | None:
+        # the secret the request's cookie holds, if it holds one
+        cookies = http.cookies.SimpleCookie(self.headers.get("Cookie", ""))
+        name = self.server.cookie
+        return cookies[name].value if name in cookies else None
 
     def _still(self, person: int | None) -> dict[str, Any] | None:
         # the request's device, if it is still paired, as the person's: unpaired, or its person
@@ -781,6 +813,11 @@ class _Handler(BaseHTTPRequestHandler):
 def _drive(path: str) -> bool:
     # whether a path is the network drive's
     return path == dav.PREFIX or path.startswith(f"{dav.PREFIX}/")
+
+
+def _backups(request: dict[str, Any]) -> dict[str, Any]:
+    # the box's backups' answer, of leat.box.backup. Raises ValueError of a refusal, saying why
+    return system.asked(request, backup.SOCKET, backup.WAIT)
 
 
 def _admin(device: dict[str, Any]) -> None:

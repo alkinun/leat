@@ -106,10 +106,15 @@ auf einer Box im Büro läuft (Leat).
 - **Selbstüberwachung:** Die Box meldet auf ihrem Bildschirm und den Admins in der App, wenn etwas
   Aufmerksamkeit braucht: fast volle Festplatte, KI-Modell nicht erreichbar, kein Internet,
   ablaufendes Zertifikat, Name im Büronetz nicht auffindbar, fehlgeschlagenes Update.
-- **Datensicherung:** Leat erstellt derzeit **keine eigene Sicherung** außerhalb der Box. Die Box ist
-  für die Dateien, die Leat erstellt, und für die Chats die einzige Ablage. Das Büro sichert, was es
-  aufbewahren muss, in seiner eigenen Ablage, etwa indem es von Leat erstellte Dokumente über das
-  Netzlaufwerk der Box (im Explorer oder Finder) dorthin kopiert. ⟨Maßnahme des Büros eintragen.⟩
+- **Datensicherung:** Ist sie eingerichtet (Einstellungen › Wartung › Datensicherung), sichert die
+  Box jede Nacht Chats, Personen, Dateien samt früheren Versionen und den Suchindex auf eine
+  USB-Festplatte an der Box oder eine Netzwerkfreigabe des Büros (SMB, etwa ein NAS). Die Sicherung
+  ist mit restic verschlüsselt (AES-256), mit einem Wiederherstellungsschlüssel, den die Box einmal
+  anzeigt und das Büro getrennt von der Box aufbewahrt; ohne ihn kann niemand die Sicherung lesen,
+  auch der Anbieter nicht. Aufbewahrt werden die Sicherungen der letzten 7 Tage, 5 Wochen und 12
+  Monate. Eine fehlgeschlagene Sicherung meldet die Box auf ihrem Bildschirm und den Admins. Ein
+  Admin stellt eine Sicherung wieder her, auf dieser oder einer neuen Box. Das Sicherungsziel liegt
+  beim Büro: ⟨USB-Festplatte oder Netzwerkfreigabe, Ort, wer Zugang hat, wo der Schlüssel liegt⟩.
 - **Stromausfall:** Die Datenbank der Chats (SQLite mit Write-Ahead-Log) und die Einstellungen der Box
   übersteht einen Stromausfall; eine Datei, die gerade hochgeladen wurde, muss gegebenenfalls erneut
   hochgeladen werden. Nach dem Wiedereinschalten startet Leat von selbst.
@@ -123,6 +128,9 @@ auf einer Box im Büro läuft (Leat).
 - **Alles löschen** (Werkseinstellung) löscht die verschlüsselte Datenpartition und legt sie mit
   einem neuen Schlüssel neu an. Die alten Daten sind damit nicht mehr lesbar (kryptografische
   Löschung). So muss eine Box weitergegeben oder entsorgt werden.
+- **Sicherungen:** Gelöschtes bleibt in den Sicherungen, bis die letzte, die es enthält, nicht mehr
+  aufbewahrt wird, längstens 12 Monate. „Alles löschen“ erreicht die Sicherungen nicht: Das Büro
+  löscht dazu den Ordner „Leat backup“ auf der USB-Festplatte oder der Netzwerkfreigabe.
 
 ## 5. Verfahren zur regelmäßigen Überprüfung
 

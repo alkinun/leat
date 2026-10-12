@@ -11,7 +11,7 @@ from leat.box import watch
 ROOT = Path(__file__).parent.parent / "leat"
 APP = ROOT / "agent" / "app"
 # what is the same in every language: names, and examples of what to type
-SAME = {"Leat", "K7X 2QM", "Kanzlei Weber"}
+SAME = {"Leat", "K7X 2QM", "Kanzlei Weber", "XXXX-XXXX-XXXX-XXXX-XXXX-XXXX"}
 # the screen's words it says of values it is told, as a model's status
 SCREEN = {"ready", "loading", "Network", "{size} GB free", "Setup code",
           "or type {local}.local",
@@ -35,11 +35,24 @@ WARNINGS = {
     "Chats get no answer until it is back. Restart the box.",
     "An update failed",
     "The box went back to the version before, as {version} did not start. Leat works as it did.",
+    "The last backup failed",
+    "No backup for {days} days",
+    "Check that its USB disk is plugged into the box, or its network share is reachable. Settings "
+    "shows why.",
 }
 
 # the agent's errors a person may see, as the app shows them, of their values
 ERRORS = {
     "a person needs a name",
+    "a recovery key is 6 groups of 4 letters and digits",
+    "that recovery key is not this backup's",
+    "that USB disk is not plugged into the box",
+    "that user or password is none a share takes",
+    "the backup's target is out of reach: {why}",
+    "the box backs up nowhere",
+    "there is no backup there",
+    "{share} is no network share: it is \\\\server\\share, as Windows writes it",
+    "not restored: {why}",
     "a reply is already running",
     "a file may be {size} MB at most",
     "a file's name is {size} bytes at most",
@@ -173,7 +186,7 @@ def _actions() -> set[str]:
     # what the agent notes was done, as the activity says it: each note()'s action, and those of
     # the dicts and ternaries the server picks them of
     found = set()
-    for path in (ROOT / "agent" / "server.py", ROOT / "agent" / "agent.py"):
+    for path in (ROOT / "agent" / "server.py", ROOT / "agent" / "agent.py", ROOT / "cli.py"):
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
             if isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "note":
@@ -228,6 +241,8 @@ def test_warnings_translated(tmp_path, monkeypatch):
         watch.shutil, "disk_usage", lambda path: SimpleNamespace(total=100e9, free=5e9)
     )
     monkeypatch.setattr(watch.system, "ask", lambda r: {"failed": "2026.10.12.0300-abc1234"})
+    monkeypatch.setattr(watch.backup, "STATUS", status := tmp_path / "status.json")
+    status.write_text('{"time": 1, "error": "out of reach"}')
     seen = watch.Watch("k7x2qm.leatbox.net", tmp_path, lambda: "down", clock=lambda: now[0])
     seen.look()
     now[0] = watch.HELD
@@ -239,6 +254,7 @@ def test_warnings_translated(tmp_path, monkeypatch):
         "disk",
         "model",
         "update",
+        "backup",
     }
     for w in warned:
         for text in (w["title"], w["said"]):
