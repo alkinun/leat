@@ -114,6 +114,17 @@ def test_search(site):
         web.search("http://127.0.0.1:9", "strix halo")
 
 
+def test_search_kept(site):
+    # a query holding what must not leave the box is not searched, the model told why
+    before = len(_Site.queries)
+    context = Context("c", private=lambda query: ["Hofmann"] if "Hofmann" in query else [])
+    result = web.search(site, "Hofmann Textil Kündigung", context)
+    assert len(_Site.queries) == before
+    assert result.content.startswith('Not searched: "Hofmann" must not leave the office')
+    assert result.info == {"query": "Hofmann Textil Kündigung", "results": [], "kept": ["Hofmann"]}
+    assert web.search(site, "Kündigungsfrist Probezeit", context).info["results"]
+
+
 def test_fetch(site, monkeypatch):
     # a page's title and text, without its menus and code, a line to each block
     allow(monkeypatch, site)

@@ -1709,6 +1709,7 @@ function message(m, index) {
     else markdown(text, m.content ?? "");
     item.querySelectorAll(":not(.code) > pre").forEach(codeBar); // the blocks new since
     cite(item);
+    if (answer) checkQuotes(text, m.info?.quotes);
     if (answer) pages.replaceChildren(...chips(sources(m)));
     const names = m.role === "user" ? (m.info?.files ?? []) : answer ? made(m) : [];
     cards.replaceChildren(...names.map(card));
@@ -1750,8 +1751,8 @@ const LINES = {
   ask_files: (a, i) => [i.total ? `Reading ${i.done ?? 0} of ${i.total} files…` : "Reading the files…",
     i.done < i.total ? `Read ${i.done} of ${i.total} files` : `Read ${i.total === 1 ? "1 file" : `${i.total ?? 0} files`}`,
     "Couldn't read the files"],
-  search_web: (a) => [`Searching for “${a.query}”…`, `Searched for “${a.query}”`,
-    `Couldn't search for “${a.query}”`],
+  search_web: (a, i) => [`Searching for “${a.query}”…`, i.kept ? `Kept ${i.kept.join(", ")} out of a web search`
+    : `Searched for “${a.query}”`, `Couldn't search for “${a.query}”`],
   search_files: (a) => [`Searching the files for “${a.query}”…`, `Searched the files for “${a.query}”`,
     `Couldn't search the files for “${a.query}”`],
   fetch: (a, i) => [`Reading ${host(a.url)}…`, `Read ${i.title || host(i.url ?? a.url)}`,
@@ -1902,6 +1903,27 @@ function cite(element) {
     if (!s) continue;
     sup.replaceChildren(Object.assign(sourceLink(s, sup.textContent), { title: s.title || s.url }));
     sup.classList.add("linked");
+  }
+}
+
+// marks a reply's quotes as Leat checked them against the sources they cite: each found there word
+// for word, or flagged, not found, for the user to check
+function checkQuotes(root, checked) {
+  for (const q of checked ?? []) {
+    const texts = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    for (let node = texts.nextNode(); node; node = texts.nextNode()) {
+      const at = node.data.indexOf(q.quote);
+      if (at < 0 || node.parentElement.closest(".quote")) continue;
+      const quote = node.splitText(at);
+      quote.splitText(q.quote.length);
+      const cited = q.cited.map((n) => `[${n}]`).join("");
+      const mark = element("span", q.found ? "quote found" : "quote unfound");
+      mark.title = q.found ? `Found word for word in ${cited}`
+        : `Leat couldn't find this in ${cited}: check it there before you rely on it`;
+      quote.replaceWith(mark);
+      mark.append(quote);
+      break;
+    }
   }
 }
 

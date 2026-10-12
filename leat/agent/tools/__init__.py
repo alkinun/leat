@@ -22,8 +22,8 @@ if TYPE_CHECKING:
 @dataclass(frozen=True)
 class Context:
     """What a call is made in: its conversation, the numbering of the sources read in it, whose
-    the conversation is, the files it works among, how a long call tells how far it is, and
-    whether the turn is stopped, at which a long call ends."""
+    the conversation is, the files it works among, how a long call tells how far it is, whether
+    the turn is stopped, at which a long call ends, and what must not leave the box."""
 
     conversation: str  # the id of the conversation
     # a source's number, of its address and title, the same each time it is read, for the model to
@@ -34,6 +34,9 @@ class Context:
     # tells the apps how far the call is, as info its message shows while it runs
     progress: Callable[[dict[str, Any]], None] = lambda info: None
     stopped: threading.Event = field(default_factory=threading.Event)  # set once the turn stops
+    # what of a text must not leave the box, as a web search's query: the names of the office's
+    # work it holds, as leat.agent.private finds them
+    private: Callable[[str], list[str]] = lambda text: []
 
     def space(self) -> Workspace:
         """The conversation's workspace. Raises ValueError if it has none."""

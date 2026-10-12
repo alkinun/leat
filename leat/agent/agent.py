@@ -29,7 +29,7 @@ from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
-from leat.agent import context, schedule
+from leat.agent import context, documents, private, quotes, schedule
 from leat.agent.background import Background
 from leat.agent.client import Client, Completion, EngineError, merge, whole
 from leat.agent.index import Index
@@ -69,7 +69,9 @@ in the file."""
 CITE = """\
 ## Sources
 Cite each source you use, a page or a passage of a file, by the number its tool gave it, as [1] or \
-[2][3], after the words it supports."""
+[2][3], after the words it supports. Quote a source word for word, in quotation marks, its number \
+right after, as "…" [1]: each quote is checked against its source, and one not found there is \
+flagged to the user."""
 # of the system prompt, of a conversation in a project
 PROJECT = """\
 ## This project
@@ -421,6 +423,18 @@ class Agent:
         and of what, as store.note keeps it."""
         held = self.store.project(project) if project else None
         self.store.note(person, action, held["name"] if held else None, detail, leat)
+
+    def private(self, conversation: str, space: Workspace | None, text: str) -> list[str]:
+        """What of a text must not leave the box, as leat.agent.private finds it: the names a
+        conversation's files give, of the passages that hold the text's words, and its person's
+        messages; the box's people's names, and its office's."""
+        texts = [m["content"] for m in self.store.messages(conversation)
+                 if m["role"] == "user" and isinstance(m.get("content"), str)]  # fmt: skip
+        if self.index is not None and space is not None:
+            texts += [t for word in private.asked(text) for t in self.index.holding(space, word)]
+        wholes = [p["name"] for p in self.store.people()]
+        wholes += [office] if (office := self.store.setting("office")) else []
+        return private.held(text, private.names("\n".join(texts)), wholes)
 
     def forget(self) -> None:
         """Forgets the files' earlier versions kept longer than they are kept, once a day."""
@@ -847,6 +861,8 @@ class _Turn:
                 self.live.remove(reply)
             return self._reply(last)
         self.empty = 0
+        answer = reply["content"] and (last or not reply.get("tool_calls"))
+        checked = self._checked(reply["content"]) if answer else []  # its quotes, of an answer
         with a._lock:
             if last:  # of a server that calls tools all the same, none answered
                 reply.pop("tool_calls", None)
@@ -854,6 +870,8 @@ class _Turn:
                 info["stopped"] = True
             if finish == "length":
                 info["cut"] = True
+            if checked:
+                info["quotes"] = checked
         if info.get("read") is not None:  # the engine's count, of which the next is estimated
             used = (info["cached"] or 0) + info["read"] + info["tokens"]
             a.store.set_context(self.id, state | {"used": used, "at": index + 1})
@@ -996,8 +1014,9 @@ class _Turn:
             called = arguments(message["info"]["arguments"])
             progress = functools.partial(self._progress, message, index)
             context = Context(
-                self.id, self._cite, self.person, self.workspace, progress, self.stopped
-            )
+                self.id, self._cite, self.person, self.workspace, progress, self.stopped,
+                functools.partial(a.private, self.id, self.workspace),
+            )  # fmt: skip
             result = tool.run(context, **called)
             for action, detail in _did(message["name"], called, result.info):
                 a.note(self.person, action, self.project, detail, leat=True)
@@ -1016,6 +1035,40 @@ class _Turn:
             if not message["content"]:
                 message["info"] |= info
                 self.agent._publish_message(self.id, self.person, index, message)
+
+    def _checked(self, content: str) -> list[dict[str, Any]]:
+        # a reply's quotes, each checked against the sources it cites, as leat.agent.quotes checks
+        # them: its text, whether it was found in one, and the numbers of those, of the sources
+        # the conversation numbered alone
+        urls = {n: url for url, n in self.sources.items()}
+        messages = self.agent.store.messages(self.id)
+        checked = []
+        for quote, cited in quotes.quoted(content):
+            if known := [n for n in cited if n in urls]:
+                texts = (t for n in known for t in self._texts(urls[n], messages))
+                found = any(quotes.found(quote, t) for t in texts)
+                checked.append({"quote": quote, "cited": known, "found": found})
+        return checked
+
+    def _texts(self, url: str, messages: list[dict[str, Any]]) -> list[str]:
+        # what a source says: of a passage of a file, the file's whole text; of a page of the web,
+        # its text as it was saved, and what its tools' messages said of it, as a search's snippet
+        space, a = self.workspace, self.agent
+        if url.startswith("file:"):
+            name = url.removeprefix("file:").split("#")[0]
+            with contextlib.suppress(Exception):  # a file gone, or one that can't be read
+                if space is not None:
+                    return [a.index.text(space, name) if a.index else documents.text(space, name)]
+            return []
+        texts = []
+        for m in messages:
+            info = (m.get("info") or {}) if m["role"] == "tool" else {}
+            if info.get("url") == url or any(r.get("url") == url for r in info.get("results", [])):
+                texts.append(m.get("content") or "")
+                if info.get("saved") and space is not None:
+                    with contextlib.suppress(OSError, ValueError):
+                        texts.append(space.path(info["saved"]).read_text(encoding="utf-8"))
+        return texts
 
     def _cite(self, url: str, title: str) -> int:
         # a source's number in the conversation: its own, if it was read before, or the next
@@ -1135,7 +1188,7 @@ def _did(
         did.append(("read", f"{info['done']} files"))
     elif name == "search_files":
         did.append(("searched the files", None))
-    elif name == "search_web":
+    elif name == "search_web" and not info.get("kept"):
         did.append(("searched the web", None))
     elif name == "fetch" and info.get("url"):
         did.append(("read a page of", urllib.parse.urlsplit(info["url"]).hostname))

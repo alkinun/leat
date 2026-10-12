@@ -2,6 +2,7 @@
 they change, and searching them, through search_files as the model does. Reading PDFs needs
 LEAT_SANDBOX, as tests/test_files.py's documents do."""
 
+import functools
 import os
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from leat.agent.index import COMMON, PASSAGE, Index, _match, fold, passages
 from leat.agent.store import Store
 from leat.agent.tools import Context, files
 from leat.agent.workspace import Workspace
+from tests.test_agent import call, ended, until
 from tests.test_files import documents as needs_sandbox
 
 SANDBOX = os.environ.get("LEAT_SANDBOX")
@@ -195,6 +197,53 @@ pdf.output("lease.pdf")
     index.update("people/1")
     found = index.search(space, "deposit")
     assert [(f["name"], f["place"]) for f in found] == [("lease.pdf", "page 2")]
+
+
+def test_private(workspace, index, tmp_path):
+    # what of a web search's query must not leave the box: the names the conversation's files
+    # give, of their passages that hold the query's words, and what its person wrote; the box's
+    # people's names, and its office's
+    agent = Agent(Store(tmp_path / "leat.db"), Client("http://127.0.0.1:9"), [], workspace, index)
+    agent.store.add_person("Alkın Ünlü")
+    agent.change(office="Kanzlei Weber")
+    project = agent.add_project("Hofmann", 1)["id"]
+    space = agent.space(project, 1)
+    files.write(space, "letter.md", "Sehr geehrter Herr Hofmann,\n\nIhre Kündigung der Hofmann "
+                "Textil GmbH ist eingegangen. Die Kündigung gilt zum 31. März.")  # fmt: skip
+    files.write(workspace.space("people/1"), "other.md", "Herr Schulz kündigt.")
+    index.update(f"projects/{project}")
+    index.update("people/1")
+    said = {"role": "user", "content": "Meine Mandantin Frau Yılmaz fragt nach der Frist."}
+    id = agent.store.create("Frist", [said], 1, project)["id"]
+    private = functools.partial(agent.private, id, space)
+    assert private("Hofmann Textil Kündigung Frist") == ["Hofmann", "Textil"]
+    assert private("Kündigung Frist Arbeitsvertrag") == []  # a noun, as "die Kündigung" has it
+    assert private("Yılmaz Erbrecht") == ["Yılmaz"]
+    assert private("Schulz Kündigung") == []  # of another space's files
+    assert private("Kanzlei Weber Bewertungen") == ["Kanzlei Weber"]
+    assert private("Alkın Ünlü Rechtsanwalt") == ["Alkın Ünlü"]
+
+
+def test_quotes_checked(engine, workspace, index, tmp_path):
+    # an answer's quotes checked against the sources they cite, by code: of a passage, its file's
+    # whole text; each found there, or not, in its info
+    agent = Agent(Store(tmp_path / "leat.db"), Client(engine.url), files.tools(index), workspace,
+                  index)  # fmt: skip
+    files.write(agent.space(), "lease.md", "# Kündigung\n\nDie Kündigungsfrist beträgt drei "
+                "Monate zum Quartalsende.\n\n# Miete\n\nDie Miete beträgt 900 EUR.")  # fmt: skip
+    index.update("people/0")
+    engine.replies.put([{"tool_calls": [call("search_files", {"query": "Kündigungsfrist"})]}])
+    answer = ("„Die Kündigungsfrist beträgt drei Monate zum Quartalsende.“ [1] Und “Die Miete "
+              "beträgt fünf Euro im Jahr” [1].")  # fmt: skip
+    engine.replies.put([{"content": answer}])
+    with agent.events.watch() as events:
+        id = agent.send(None, "Wie lang ist die Kündigungsfrist?")
+        until(events, ended)
+    assert agent.store.messages(id)[-1]["info"]["quotes"] == [
+        {"quote": "Die Kündigungsfrist beträgt drei Monate zum Quartalsende.", "cited": [1],
+         "found": True},
+        {"quote": "Die Miete beträgt fünf Euro im Jahr", "cited": [1], "found": False},
+    ]  # fmt: skip
 
 
 def test_agent(engine, workspace, index, tmp_path):

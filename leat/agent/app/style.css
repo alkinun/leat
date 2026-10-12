@@ -312,6 +312,11 @@ details summary { cursor: pointer; color: var(--muted); font-size: 0.875rem; }
 .message.tool .cards { margin-top: 0; }
 /* a citation, [1], linked to its source */
 sup.cite { margin: 0 1px; color: var(--muted); font-size: 0.6875rem; line-height: 0; }
+/* a quote checked against its source: found there word for word, or not, for the user to check */
+.quote { text-decoration-line: underline; text-underline-offset: 3px; cursor: help; }
+.quote.found { text-decoration-style: dotted; text-decoration-color: var(--string); }
+.quote.unfound { text-decoration-style: wavy; text-decoration-color: #f5a524; }
+.quote.unfound::after { content: " ⚠"; color: #f5a524; font-size: 0.8em; }
 .message sup.cite a {
   padding: 1px 5px; border-radius: calc(var(--round) * 0.6); background: var(--bubble); color: var(--muted);
   text-decoration: none;

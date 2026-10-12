@@ -47,6 +47,7 @@ VERSION = 6  # of the index's tables, and of the text it keeps: one of another i
 PASSAGE = 1200  # characters of a passage at most
 FOUND = 8  # passages a search finds at most
 EACH = 3  # of one file at most
+HOLDING = 20  # passages that hold a word, found at most, as whether it is a name is told of them
 STEM = 5  # letters of a word's beginning that a query's word finds at least
 # the words of every sentence, English's and German's, as fold() has them, which a search leaves
 # out
@@ -176,6 +177,14 @@ class Index:
             if (file or sum(f["name"] == name for f in found) < EACH) and len(found) < n:
                 found.append({"name": name, "place": place, "start": start, "text": text})
         return found
+
+    def holding(self, space: Workspace, word: str, n: int = HOLDING) -> list[str]:
+        """The texts of a space's passages that hold a word as it is written, its accents and case
+        aside, n at most."""
+        with self._lock:
+            return [text for (text,) in self._db.execute(
+                "SELECT text FROM passages WHERE passages MATCH ?1 AND folder = ?2 LIMIT ?3",
+                ('"' + word.replace('"', '""') + '"', self._folder(space), n))]  # fmt: skip
 
     def common(self, query: str) -> frozenset[str]:
         """The words of a query that are in every sentence: English's and German's, and those in

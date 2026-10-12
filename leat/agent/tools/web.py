@@ -80,6 +80,14 @@ RULES = (
     "should answer. Fetch more only if they fall short.",
     "When the user asks you to research something, search in several ways, read the pages that "
     "matter, ten or so, and answer with a report in sections that ends with what stays unsure.",
+    "A search leaves the office: search for the general question, as the law or the facts it "
+    "turns on, never for names, amounts, addresses or other details of the user's files or of "
+    "this conversation.",
+)
+# what the model is told of a query not searched, of what of it must not leave the box
+UNSEARCHED = (
+    "Not searched: {} must not leave the office, of the user's files or this conversation. Search "
+    "for the general question instead, without names or details of the user's work."
 )
 # a reader's instructions, of a page and a question
 READING = """\
@@ -123,6 +131,9 @@ def tools(searxng: str, reader: Client | None = None) -> list[Tool]:
 
 
 def search(searxng: str, query: str, context: Context | None = None) -> Result:
+    if context is not None and (kept := context.private(query)):
+        return Result(UNSEARCHED.format(", ".join(f'"{k}"' for k in kept)),
+                      {"query": query, "results": [], "kept": kept})  # fmt: skip
     url = f"{searxng}/search?" + urllib.parse.urlencode(
         {"q": query, "format": "json", "language": LANGUAGE}
     )
