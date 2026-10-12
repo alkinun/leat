@@ -1,6 +1,8 @@
 import base64
 import http.client
 import json
+import os
+import socket
 import urllib.parse
 import xml.etree.ElementTree as ET
 from collections.abc import Callable, Iterator
@@ -126,7 +128,7 @@ def test_files(server, agent):
 
 def test_projects(server, agent):
     # each project the person sees, and none other; a folder made there a project of theirs; a
-    # project neither deleted nor renamed by the drive
+    # project renamed by the drive, but neither deleted nor moved
     ask, _ = connected(server)
     agent.add_project("Müller Erbschaft", 1)
     ada = agent.store.add_person("Ada")["id"]
@@ -141,7 +143,10 @@ def test_projects(server, agent):
     assert ask("MKCOL", "/dav/Projects/Weber GmbH")[0] == 201
     assert {p["name"] for p in agent.projects(1)} == {"Müller Erbschaft", "Weber GmbH"}
     assert ask("DELETE", "/dav/Projects/Weber GmbH")[0] == 403
-    assert ask("MOVE", "/dav/Projects/Weber GmbH", Destination=f"{server}/dav/Projects/X")[0] == 403
+    renamed = {"Destination": f"{server}/dav/Projects/Weber KG"}
+    assert ask("MOVE", "/dav/Projects/Weber GmbH", **renamed)[0] == 201  # renamed, as its maker's
+    out = {"Destination": f"{server}/dav/My files/Weber KG"}
+    assert ask("MOVE", "/dav/Projects/Weber KG", **out)[0] == 403  # but moved, never
     assert ask("PUT", "/dav/Projects/x.txt", b"x")[0] == 404  # no project of that name
 
 
@@ -186,3 +191,89 @@ def test_german(server, agent):
         "/dav/", "/dav/Meine Dateien/", "/dav/Projekte/"}  # fmt: skip
     assert ask("PUT", "/dav/Meine Dateien/Notiz.txt", b"x")[0] == 201
     assert Path(agent.space(None, 1).path("Notiz.txt")).read_bytes() == b"x"
+
+
+def test_broken_off(server, agent):
+    # a body cut short, as of a laptop gone to sleep while it saved, writes nothing over the file
+    ask, password = connected(server)
+    assert ask("PUT", "/dav/My files/Brief.txt", b"hello world")[0] == 201
+    host, port = urllib.parse.urlsplit(server).netloc.split(":")
+    basic = base64.b64encode(f"Alkın:{password}".encode()).decode()
+    with socket.create_connection((host, int(port))) as s:
+        s.sendall(
+            b"PUT /dav/My%20files/Brief.txt HTTP/1.1\r\nHost: "
+            + host.encode()
+            + b"\r\nAuthorization: Basic "
+            + basic.encode()
+            + b"\r\nContent-Length: 11\r\n\r\nhel"
+        )
+        s.shutdown(socket.SHUT_WR)
+        s.recv(1024)
+    assert agent.space(None, 1).path("Brief.txt").read_bytes() == b"hello world"
+    assert [n for n in agent.space(None, 1).path("").iterdir() if n.name.startswith(".dav")] == []
+
+
+def test_locked_then_put(server, agent):
+    # a file a lock made, empty, and then put, as Finder copies one: uploaded, no empty version
+    ask, _ = connected(server)
+    assert ask("LOCK", "/dav/My files/Neu.txt", b"<lockinfo/>")[0] == 201
+    assert ask("PUT", "/dav/My files/Neu.txt", b"content")[0] == 201
+    assert ask("PUT", "/dav/My files/Leer.txt", b"")[0] == 201  # as Windows puts first
+    assert ask("PUT", "/dav/My files/Leer.txt", b"full")[0] == 201
+    assert agent.space(None, 1).versions() == []
+    done = [(a["action"], a["detail"]) for a in agent.store.activity()]
+    assert ("uploaded by the network drive", "Neu.txt") in done
+    assert ("uploaded by the network drive", "Leer.txt") in done
+    assert not any(a == "changed by the network drive" for a, _ in done)
+
+
+def test_word_saves_by_renames(server, agent):
+    # Word's save of a document on a network drive: its new content put as a temporary file, the
+    # document moved aside, the temporary file named as it, the aside one deleted: the document
+    # changed, its earlier content kept by its own name, nothing new arrived
+    ask, _ = connected(server)
+    assert ask("PUT", "/dav/My files/Vertrag.docx", b"v1")[0] == 201
+    arrived = []
+    agent.arrived = lambda project, person, names: arrived.extend(names)
+    assert ask("PUT", "/dav/My files/~WRD0000.tmp", b"v2")[0] == 201
+    assert ask("MOVE", "/dav/My files/Vertrag.docx",
+               Destination=f"{server}/dav/My files/~WRL0001.tmp")[0] == 201  # fmt: skip
+    assert ask("MOVE", "/dav/My files/~WRD0000.tmp",
+               Destination=f"{server}/dav/My files/Vertrag.docx")[0] == 201  # fmt: skip
+    assert ask("DELETE", "/dav/My files/~WRL0001.tmp")[0] == 204
+    space = agent.space(None, 1)
+    assert space.path("Vertrag.docx").read_bytes() == b"v2" and arrived == []
+    assert "Vertrag.docx" in {v["name"] for v in space.versions()}
+    assert agent.store.activity()[0]["action"] == "changed by the network drive"
+
+
+def test_drive_edges(server, agent):
+    # two projects of one name: the older keeps its folder; a link out of a space listed not; a
+    # file served as no page of the app's; a name of another encoding; a move onto itself, or into
+    # itself, refused; XML not well formed refused; a project renamed among the projects
+    ask, password = connected(server)
+    older = agent.add_project("Akte", 1)["id"]
+    agent.store._db.execute("UPDATE projects SET created = 1 WHERE id = ?", (older,))
+    for _ in range(3):
+        agent.add_project("Akte", 1)
+        assert ask("PUT", "/dav/Projects/Akte/x.txt", b"x")[0] in (201, 204)
+        assert agent.space(older, 1).path("x.txt").exists()
+    os.symlink("/etc", agent.space(None, 1).path("etc"))
+    assert ask("PUT", "/dav/My files/Seite.html", b"<script>alert(1)</script>")[0] == 201
+    assert set(listed(ask("PROPFIND", "/dav/My files", Depth="1"))) == {
+        "/dav/My files/", "/dav/My files/Seite.html"}  # fmt: skip
+    _, headers, _ = ask("GET", "/dav/My files/Seite.html")
+    assert headers["Content-Security-Policy"] == "sandbox"
+    assert headers["Content-Disposition"].startswith("attachment")
+    latin = drive(server)
+    basic = base64.b64encode("Jürgen:".encode("latin-1") + password.encode()).decode()
+    assert latin("PROPFIND", "/dav/", Depth="0", Authorization=f"Basic {basic}")[0] == 207
+    assert ask("MKCOL", "/dav/My files/A")[0] == 201
+    assert ask("MOVE", "/dav/My files/A", Destination=f"{server}/dav/My files/A/B")[0] == 403
+    assert ask("MOVE", "/dav/My files/Seite.html",
+               Destination=f"{server}/dav/My files/Seite.html")[0] == 403  # fmt: skip
+    assert ask("PROPPATCH", "/dav/My files/Seite.html", b"<not xml")[0] == 400
+    assert ask("MKCOL", "/dav/Projects/Neuer Ordner")[0] == 201
+    assert ask("MOVE", "/dav/Projects/Neuer Ordner",
+               Destination=f"{server}/dav/Projects/Weber GmbH")[0] == 201  # fmt: skip
+    assert "Weber GmbH" in {p["name"] for p in agent.projects(1)}

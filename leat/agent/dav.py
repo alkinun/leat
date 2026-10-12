@@ -47,6 +47,9 @@ CHUNK = 1 << 16  # bytes read and written at a time
 # the drive's two folders at its top, in the box's language
 OWN = {"en": "My files", "de": "Meine Dateien"}
 PROJECTS = {"en": "Projects", "de": "Projekte"}
+AWAY = 60  # seconds a document moved aside, as Word saves one, is to be named so again
+# the documents moved aside, by their spaces' folders and names, and when
+_AWAY: dict[tuple[str, str], float] = {}
 METHODS = "OPTIONS, PROPFIND, PROPPATCH, GET, HEAD, PUT, DELETE, MKCOL, MOVE, COPY, LOCK, UNLOCK"
 ET.register_namespace("D", DAV)
 
@@ -83,8 +86,13 @@ class Drive:
             self.agent.add_project(parts[1][:80], self.person)
             self.agent.note(self.person, "made the project by the network drive", detail=parts[1])
             return self._send(201, b"")
+        if method == "MOVE" and len(parts) == 2 and parts[0] == self.projects:  # a project renamed
+            return self._rename(parts[1])
         place = self.place(path)
-        getattr(self, f"_{method.lower()}")(place, path)
+        try:
+            getattr(self, f"_{method.lower()}")(place, path)
+        except (shutil.Error, ET.ParseError) as e:  # a folder moved into itself; XML that is not
+            raise ValueError(str(e)) from e
 
     def place(self, path: str) -> Place:
         """The place of a path of the drive's. Raises NotFound of a project the person sees not."""
@@ -152,6 +160,10 @@ class Drive:
             "Content-Type": mimetypes.guess_type(file.name)[0] or "application/octet-stream",
             "Content-Length": str(stat.st_size), "Last-Modified": _modified(stat.st_mtime),
             "ETag": _etag(stat),
+            # a page or an image of script, a browser asked for of a drive's password it keeps,
+            # run in no origin, the app's least, nor shown: kept, as a file of the app's is
+            "Content-Security-Policy": "sandbox",
+            "Content-Disposition": f"attachment; filename*=UTF-8''{urllib.parse.quote(file.name)}",
         }  # fmt: skip
         self.handler.send_response(200)
         for key, value in headers.items():
@@ -178,12 +190,15 @@ class Drive:
             with partial.open("wb") as f:
                 for chunk in self._chunks():
                     f.write(chunk)
-            new = not target.exists()
-            if not new:
-                space.keep(name)
+            # new, of one there is not, or empty, as a lock, or Windows, makes one before it puts
+            # it, and a document just moved aside, as Word saves one, is changed, not new
+            new = (not target.exists() or not target.stat().st_size) and not _away(space, name)
+            space.keep(name)  # if there is one, of content, as an empty one is kept not
             os.replace(partial, target)
         finally:
             partial.unlink(missing_ok=True)
+        if not target.stat().st_size:  # an empty file, as Windows puts first, is no file yet
+            return self._send(201, b"")
         action = "uploaded by the network drive" if new else "changed by the network drive"
         self._changed(place.project, action, name, new)
         self._send(201 if new else 204, b"")
@@ -226,24 +241,50 @@ class Drive:
         target = into.path(renamed)
         if not target.parent.is_dir():
             return self._send(409, b"")
+        if target == source or target.is_relative_to(source):
+            raise Refused("a file moves onto itself, or a folder into itself, never")
         existed = target.exists()
         if existed and self.handler.headers.get("Overwrite", "T").upper() == "F":
             return self._send(412, b"")
         if existed:
             into.delete(renamed)  # kept, as any file written over is
+        if not copy and _passing(renamed) and not _passing(name):
+            # a document moved aside, as Word saves one: kept as it was, by its own name, which it
+            # is to be named again
+            space.keep(name)
+            _AWAY[(str(space.root), name)] = time.monotonic()
         if copy:
             (shutil.copytree if source.is_dir() else shutil.copy2)(source, target)
         else:
             shutil.move(source, target)
             self.agent.files_changed(place.project, self.person)
+        new = not existed and not _away(into, renamed)
         if copy:
             action, detail = "copied by the network drive", f"{name} → {renamed}"
         elif _passing(name) and not _passing(renamed):  # as Word saves a document: its temporary
             action, detail = "changed by the network drive", renamed  # file named as it
+            new = new and target.stat().st_size > 0
         else:
             action, detail = "moved by the network drive", f"{name} → {renamed}"
-        self._changed(there.project, action, renamed, not existed, detail)
+        self._changed(there.project, action, renamed, new, detail)
         self._send(204 if existed else 201, b"")
+
+    def _rename(self, folder: str) -> None:
+        # a project of the person's renamed, as Explorer and Finder name a new folder they made in
+        # the projects: its name the Destination's folder's
+        if (project := self._folders().get(folder)) is None:
+            raise NotFound(f"there is no project {folder}")
+        destination = urllib.parse.unquote(
+            urllib.parse.urlsplit(self.handler.headers.get("Destination", "")).path
+        )
+        parts = [p for p in destination.removeprefix(PREFIX).split("/") if p]
+        if len(parts) != 2 or parts[0] != self.projects:
+            raise Refused("a project is renamed among the projects, never moved")
+        if parts[1] in self._folders():
+            return self._send(412, b"")
+        self.agent.change_project(project, self.person, name=parts[1][:80])  # theirs, or Refused
+        self.agent.note(self.person, "renamed the project by the network drive", project)
+        self._send(201, b"")
 
     def _copy(self, place: Place, path: str) -> None:
         self._move(place, path, copy=True)
@@ -303,14 +344,21 @@ class Drive:
             return [self.own, self.projects]
         if place.kind == "projects":
             return sorted(self._folders())
-        folder = self._space(place)[0].path(place.name)
-        return sorted(p.name for p in folder.iterdir() if not hidden(p.name))
+        space = self._space(place)[0]
+        folder, found = space.path(place.name), []
+        for p in folder.iterdir():  # but a link out of the space, or to nothing, as code may make
+            if not hidden(p.name) and p.resolve().is_relative_to(space.root) and (
+                    p.is_file() or p.is_dir()):  # fmt: skip
+                found.append(p.name)
+        return sorted(found)
 
     def _folders(self) -> dict[str, str]:
         # the projects the person sees, by their folders' names: each its name, made a folder's,
-        # and of two of one name, the later's its id's too
+        # and of two of one name, the one made later's its id's too, as a folder's path is never
+        # another project's than it was, a project made or shared since
         found: dict[str, str] = {}
-        for p in sorted(self.agent.projects(self.person), key=lambda p: p["id"]):
+        seen = self.agent.store.projects(self.person)
+        for p in sorted(seen, key=lambda p: (p["created"], p["id"])):
             named = re.sub(r'[\\/:*?"<>|]+', "-", p["name"]).strip(" .") or p["id"]
             found[named if named not in found else f"{named} ({p['id'][:6]})"] = p["id"]
         return found
@@ -346,21 +394,27 @@ class Drive:
         # a file of unknown length. Raises ValueError of one past UPLOAD
         read, total = self.handler.rfile, 0
         if self.handler.headers.get("Transfer-Encoding", "").lower() == "chunked":
-            while size := int(read.readline().split(b";")[0].strip() or b"0", 16):
-                if (total := total + size) > UPLOAD:
+            while True:
+                line = read.readline()
+                if not line:  # the connection gone before the last chunk
+                    raise ConnectionError("the body broke off")
+                if not (size := int(line.split(b";")[0].strip() or b"0", 16)):
+                    break
+                if size < 0 or (total := total + size) > UPLOAD:
                     raise ValueError(f"a file may be {UPLOAD >> 20} MB at most")
-                yield read.read(size)
+                if len(chunk := read.read(size)) < size:
+                    raise ConnectionError("the body broke off")
+                yield chunk
                 read.readline()
             while read.readline().strip():  # the trailer, to its empty line
                 pass
             return
         left = int(self.handler.headers.get("Content-Length") or 0)
-        if left > UPLOAD:
+        if left > UPLOAD or left < 0:
             raise ValueError(f"a file may be {UPLOAD >> 20} MB at most")
         while left > 0:
-            chunk = read.read(min(CHUNK, left))
-            if not chunk:
-                break
+            if not (chunk := read.read(min(CHUNK, left))):  # gone before its length: no file
+                raise ConnectionError("the body broke off")
             left -= len(chunk)
             yield chunk
 
@@ -379,6 +433,11 @@ class Drive:
         self.handler.send_header("Content-Length", str(len(data)))
         self.handler.end_headers()
         self.handler.wfile.write(data)
+
+
+def _away(space: Workspace, name: str) -> bool:
+    # whether a document was moved aside just now, as Word saves one, to be named so again
+    return time.monotonic() - _AWAY.pop((str(space.root), name), -AWAY) < AWAY
 
 
 def _sub(parent: ET.Element, *names: str) -> ET.Element:

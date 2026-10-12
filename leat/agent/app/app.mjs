@@ -756,7 +756,7 @@ function renderAccounts() {
     as.append(new Option(t("as you, {name}", { name: me.name }), me.person));
     if (me.admin) {
       as.append(new Option(t("as someone new, {name}", { name: r.name }), ""), ...accounts.people
-        .filter((p) => p.id !== me.person && !p.devices.length)
+        .filter((p) => p.id !== me.person && !p.devices.some((d) => d.kind !== "drive")) // a drive no device to join from
         .map((p) => new Option(t("as {name}, who has no device", { name: p.name }), p.id)));
       as.value = r.name === me.name ? me.person : "";
     }

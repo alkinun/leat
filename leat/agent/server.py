@@ -547,7 +547,7 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("WWW-Authenticate", 'Basic realm="Leat", charset="UTF-8"')
             self.send_header("Content-Length", "0")
             return self.end_headers()
-        with self._answering():
+        with self._answering(), contextlib.suppress(ConnectionError):  # a body cut short: no file
             dav.Drive(self, self.server.agent, device["person"], self._language()).answer(method)
 
     def _driven(self) -> dict[str, Any] | None:
@@ -555,8 +555,9 @@ class _Handler(BaseHTTPRequestHandler):
         given = self.headers.get("Authorization", "")
         if not given.lower().startswith("basic "):
             return None
-        try:
-            password = base64.b64decode(given[6:]).decode().partition(":")[2]
+        try:  # of the password alone, after the name's last ":", as a client may send a name
+            # of an encoding of its own, as Latin-1, and a password holds no ":"
+            password = base64.b64decode(given[6:]).rpartition(b":")[2].decode("ascii")
         except (ValueError, UnicodeDecodeError):
             return None
         return self.server.accounts.device(password, kind="drive")

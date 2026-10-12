@@ -124,7 +124,8 @@ class Workspace:
     def keep(self, name: str, move: bool = False) -> None:
         """Keeps a file as it is now as an earlier version, or each of a folder's, moved there if
         `move`, as a file deleted is; then forgets the file's oldest past HISTORY or KEPT. Hidden
-        files are not kept, as a page saved to read on, which is no one's work."""
+        files are not kept, as a page saved to read on, which is no one's work, nor empty ones, as a
+        network drive puts before a file's content."""
         path = self.path(name)
         if path.is_dir():
             for inside in sorted(path.rglob("*")):
@@ -132,7 +133,7 @@ class Workspace:
                     self.keep(inside.relative_to(self.root).as_posix(), move)
             return
         relative = path.relative_to(self.root).as_posix()
-        if not path.is_file() or hidden(relative):
+        if not path.is_file() or hidden(relative) or not path.stat().st_size:  # nothing to keep
             return
         versions = self.history / relative
         versions.mkdir(parents=True, exist_ok=True)

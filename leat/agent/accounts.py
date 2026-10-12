@@ -199,7 +199,7 @@ class Accounts:
                     raise LookupError(f"there is no person {person}")
                 if not by["admin"]:
                     raise Refused("a device joins as you alone, of yours")
-                if any(d["person"] == person for d in self.store.devices()):
+                if any(d["person"] == person and d["kind"] == "app" for d in self.store.devices()):
                     raise Refused("a device joins as someone with a device of theirs from one of "
                                   "theirs alone")  # fmt: skip
             request.secret = self._pair(person, request.device)
