@@ -9,9 +9,10 @@ const $ = (id) => document.getElementById(id);
 let conversations = []; // the latest updated first: {id, title, updated, project, running}
 let shown = null; // the conversation shown, with its messages; null for a new one
 // the projects this person sees, the latest updated first, once told: {id, name, instructions,
-// person, shared, updated}
+// person, members, shared, updated}, whoever made it and the people it is shared with by their ids
 let projects = null;
 let viewing = null; // the project whose page is shown
+let choosingFor = null; // the project whose people to share with are being chosen, before one is
 // the files of each space, the latest changed first, by its project's id, "" for the person's own:
 // {name, size, modified}
 const spaces = {};
@@ -410,6 +411,7 @@ function handle(event) {
       accounts = event;
       renderAccounts();
       renderRecovering();
+      renderProjects(); // as they name those they are shared with
       return;
     case "settings":
       settings = { offline: event.offline, office: event.office, address: event.address,
@@ -748,7 +750,8 @@ function renderAccounts() {
       making.onclick = () => patchPerson(p.id, { admin: !p.admin });
       const remover = element("button", "", "Remove");
       remover.onclick = () => confirm(`Remove ${p.name}, with their own chats, projects and files? ` +
-        "The projects they shared stay, as yours.") && del(`/api/people/${p.id}`);
+        "The projects they shared with everyone stay, as yours; those they shared with chosen people, " +
+        "as the first of those's.") && del(`/api/people/${p.id}`);
       item.append(about, making, renaming(p), remover);
       return item;
     }));
@@ -1294,7 +1297,7 @@ function renderProjects() {
       showProject(p.id);
     };
     const n = filesOf(p.id).length;
-    const about = [p.shared ? "Shared" : "Only you", `${n} ${n === 1 ? "file" : "files"}`, day(p.updated)];
+    const about = [sharedWith(p), `${n} ${n === 1 ? "file" : "files"}`, day(p.updated)];
     item.append(a, element("span", "meta", about.join(" · ")));
     return item;
   }));
@@ -1309,13 +1312,34 @@ function renderProject() {
   if (document.activeElement !== $("title")) $("title").value = p.name;
   if (document.activeElement !== $("instructions")) $("instructions").value = p.instructions;
   const mine = p.person === me?.person;
-  $("sharing").replaceChildren(...[[false, "Only me"], [true, "Everyone"]].map(([shared, said]) => {
-    const button = element("button", shared === p.shared ? "on" : "", said);
+  const mode = p.shared ? "everyone" : p.members.length || choosingFor === p.id ? "chosen" : "me";
+  const modes = [["me", "Only me"], ["chosen", "Chosen people"], ["everyone", "Everyone"]];
+  const unchangeable = "Only whoever made the project can change whom it is shared with";
+  $("sharing").replaceChildren(...modes.map(([m, said]) => {
+    const button = element("button", m === mode ? "on" : "", said);
     button.disabled = !mine;
-    button.title = mine ? "" : "Only whoever made the project can change whom it is shared with";
-    button.onclick = () => shared !== p.shared && change(p.id, { shared });
+    button.title = mine ? "" : unchangeable;
+    button.onclick = () => {
+      if (m === mode) return;
+      choosingFor = m === "chosen" ? p.id : null;
+      if (m === "chosen") renderProject(); // shared once someone is chosen
+      else change(p.id, m === "everyone" ? { shared: true } : { shared: false, members: [] });
+    };
     return button;
   }));
+  // the people it is shared with, chosen of the box's others, and whose it is, if not this person's
+  const others = (accounts?.people ?? []).filter((q) => q.id !== p.person);
+  const chips = mode !== "chosen" ? [] : others.map((q) => {
+    const chosen = p.members.includes(q.id);
+    const button = element("button", chosen ? "on" : "", q.id === me?.person ? "You" : q.name);
+    button.disabled = !mine;
+    button.title = mine ? "" : unchangeable;
+    button.onclick = () => change(p.id, { members: chosen ? p.members.filter((id) => id !== q.id) : [...p.members, q.id] });
+    return button;
+  });
+  if (mode === "chosen" && !others.length) chips.push(element("span", "meta", "No one else uses this Leat yet."));
+  if (!mine) chips.unshift(element("span", "meta", `${nameOf(p.person)}'s project`));
+  $("members").replaceChildren(...chips);
   $("discard").hidden = !mine && !me?.admin;
   renderSyncing(p);
   $("chats").replaceChildren(...conversations.filter((c) => c.project === p.id).map((c) => {
@@ -1328,6 +1352,19 @@ function renderProject() {
     item.append(a, element("span", "meta", day(c.updated)));
     return item;
   }));
+}
+
+// whom else a project is shared with, as its line in the list says: everyone, those who see it
+// beside this person by name, or no one
+function sharedWith(p) {
+  if (p.shared) return "Everyone";
+  const names = [p.person, ...p.members].filter((id) => id !== me?.person).map(nameOf);
+  return names.length ? `With ${names.length > 1 ? `${names.slice(0, -1).join(", ")} and ` : ""}${names.at(-1)}` : "Only you";
+}
+
+// the name of one of the box's people, by their id
+function nameOf(id) {
+  return accounts?.people.find((p) => p.id === id)?.name ?? "Someone";
 }
 
 // asks the user for files, or a `folder`, and hands them to `take`: {file, path}, each by its path

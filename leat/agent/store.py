@@ -14,8 +14,9 @@ person. A conversation is a person's. Before the box has its first person, every
 no one's, and becomes theirs.
 
 A project is a client's or a matter's: its files, instructions for the model, and the conversations
-held in it. It is a person's own, or shared with everyone on the box; a conversation in it is still
-its person's alone, and seen only while they see the project.
+held in it. It is the person's who made it, and seen by them alone, or by the people they chose, its
+members, too, or shared with everyone on the box; a conversation in it is still its person's alone,
+and seen only while they see the project.
 
 A workflow is a request saved to make again, by its name: a project's, seen by those who see the
 project, or a person's own. One may run by itself on a schedule, as leat.agent.schedule says, as
@@ -275,12 +276,24 @@ _MIGRATIONS = [
     """
     ALTER TABLE people RENAME COLUMN owner TO admin
     """,
+    # the people a project is shared with, besides whoever made it, if it is not with everyone
+    """
+    CREATE TABLE members (
+      project TEXT NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
+      person INTEGER NOT NULL REFERENCES people (id) ON DELETE CASCADE,
+      PRIMARY KEY (project, person)
+    )
+    """,
 ]
 KEPT = 365 * 86400  # seconds the activity is kept
 # a conversation's columns as the apps list it
 _SUMMARY = "id, title, created, updated, person, project"
-# the projects a person sees: their own, and those shared
-_SEEN = "(shared OR person IS ?)"
+# the projects a person, :me, sees: their own, those they are a member of, and those shared
+_SEEN = "(shared OR person IS :me OR id IN (SELECT project FROM members WHERE person IS :me))"
+# a project's columns, with its members' ids
+_PROJECT = "*, (SELECT json_group_array(person) FROM members WHERE project = projects.id) members"
+# the projects of whoever made them alone, shared with no one
+_OWN = "NOT shared AND id NOT IN (SELECT project FROM members)"
 
 
 class Store:
@@ -307,10 +320,10 @@ class Store:
         """A person's conversations, without their messages, the latest updated first: those of
         no project, and of the projects they see."""
         sql = (
-            f"SELECT {_SUMMARY} FROM conversations WHERE person IS ? AND (project IS NULL OR"
+            f"SELECT {_SUMMARY} FROM conversations WHERE person IS :me AND (project IS NULL OR"
             f" project IN (SELECT id FROM projects WHERE {_SEEN})) ORDER BY updated DESC"
         )
-        return [dict(row) for row in self._query(sql, person, person)]
+        return [dict(row) for row in self._query(sql, me=person)]
 
     def conversations_in(self, project: str) -> list[dict[str, Any]]:
         """The conversations held in a project, whoever's."""
@@ -387,36 +400,51 @@ class Store:
 
     def projects(self, person: int | None = None) -> list[dict[str, Any]]:
         """The projects a person sees, the latest updated first."""
-        sql = f"SELECT * FROM projects WHERE {_SEEN} ORDER BY updated DESC"
-        return [dict(row) for row in self._query(sql, person)]
+        sql = f"SELECT {_PROJECT} FROM projects WHERE {_SEEN} ORDER BY updated DESC"
+        return [_project(row) for row in self._query(sql, me=person)]
 
     def synced_projects(self) -> list[dict[str, Any]]:
         """The projects whose files are synced with a folder, whoever's."""
-        return [dict(row) for row in self._query("SELECT * FROM projects WHERE source IS NOT NULL")]
+        sql = f"SELECT {_PROJECT} FROM projects WHERE source IS NOT NULL"
+        return [_project(row) for row in self._query(sql)]
 
     def project(self, id: str) -> dict[str, Any] | None:
-        rows = self._query("SELECT * FROM projects WHERE id = ?", id)
-        return dict(rows[0]) if rows else None
+        """A project, with its members' ids, `members`, the first first."""
+        rows = self._query(f"SELECT {_PROJECT} FROM projects WHERE id = ?", id)
+        return _project(rows[0]) if rows else None
 
     def add_project(
         self, name: str, person: int | None = None, instructions: str = "", shared: bool = False
     ) -> dict[str, Any]:
         """A new project of a person's."""
-        rows = self._query(
+        self._query(
             "INSERT INTO projects (id, name, instructions, person, shared, created, updated)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *",
-            uuid.uuid4().hex[:12], name, instructions, person, int(shared), now := time.time(), now,
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            id := uuid.uuid4().hex[:12], name, instructions, person, int(shared),
+            now := time.time(), now,
         )  # fmt: skip
-        return dict(rows[0])
+        project = self.project(id)
+        assert project is not None
+        return project
 
     def change_project(self, id: str, **changes: Any) -> dict[str, Any] | None:
-        """Changes a project's name, instructions or whether it is shared, as `changes` give them;
-        returns it as it now is, or None if there is none."""
-        assert set(changes) <= {"name", "instructions", "shared", "source", "synced", "unsynced"}
-        sets = "".join(f"{key} = ?, " for key in changes)
-        sql = f"UPDATE projects SET {sets}updated = ? WHERE id = ? RETURNING *"
-        rows = self._query(sql, *changes.values(), time.time(), id)
-        return dict(rows[0]) if rows else None
+        """Changes a project's name, instructions, whether it is shared with everyone, or its
+        members, by their ids, as `changes` give them; returns it as it now is, or None if there
+        is none."""
+        assert set(changes) <= {"name", "instructions", "shared", "members", "source", "synced",
+                                "unsynced"}  # fmt: skip
+        members = changes.pop("members", None)
+        with self._lock, self._db:
+            self._db.execute("BEGIN")
+            sets = "".join(f"{key} = ?, " for key in changes)
+            sql = f"UPDATE projects SET {sets}updated = ? WHERE id = ? RETURNING person"
+            if (made := self._row(sql, *changes.values(), time.time(), id)) is None:
+                return None
+            if members is not None:
+                self._db.execute("DELETE FROM members WHERE project = ?", (id,))
+                rows = [(id, m) for m in set(members) - {made["person"]}]
+                self._db.executemany("INSERT INTO members VALUES (?, ?)", rows)
+        return self.project(id)
 
     def delete_project(self, id: str) -> None:
         """Deletes a project, with every conversation in it, whoever's."""
@@ -429,10 +457,10 @@ class Store:
     def workflows(self, person: int | None = None) -> list[dict[str, Any]]:
         """The workflows a person sees, their own and those of the projects they see, by name."""
         sql = (
-            "SELECT * FROM workflows WHERE (project IS NULL AND person IS ?) OR project IN"
+            "SELECT * FROM workflows WHERE (project IS NULL AND person IS :me) OR project IN"
             f" (SELECT id FROM projects WHERE {_SEEN}) ORDER BY name COLLATE NOCASE"
         )
-        return [dict(row) for row in self._query(sql, person, person)]
+        return [dict(row) for row in self._query(sql, me=person)]
 
     def workflow(self, id: int) -> dict[str, Any] | None:
         rows = self._query("SELECT * FROM workflows WHERE id = ?", id)
@@ -558,14 +586,20 @@ class Store:
 
     def remove_person(self, id: int, heir: int) -> None:
         """Removes a person, and all that is theirs: their conversations, devices and own projects,
-        with the conversations in those. The projects they shared become their heir's. Raises
-        ValueError of the last admin, as the box has one always."""
+        shared with no one, with the conversations in those. A project they shared with chosen
+        people becomes its first member's, so that no one else sees it; one shared with everyone,
+        their heir's. Raises ValueError of the last admin, as the box has one always."""
         with self._lock, self._db:
             self._db.execute("BEGIN")
-            own = "SELECT id FROM projects WHERE person = ? AND NOT shared"
+            own = f"SELECT id FROM projects WHERE person = ? AND {_OWN}"
             for table in ("conversations", "workflows"):
                 self._db.execute(f"DELETE FROM {table} WHERE project IN ({own})", (id,))
-            self._db.execute("DELETE FROM projects WHERE person = ? AND NOT shared", (id,))
+            self._db.execute(f"DELETE FROM projects WHERE person = ? AND {_OWN}", (id,))
+            first = "(SELECT min(person) FROM members WHERE project = projects.id)"
+            sql = f"UPDATE projects SET person = {first} WHERE person = ? AND NOT shared"
+            self._db.execute(sql, (id,))
+            made = "(SELECT person FROM projects WHERE id = project)"
+            self._db.execute(f"DELETE FROM members WHERE person = {made}")
             self._db.execute("UPDATE projects SET person = ? WHERE person = ?", (heir, id))
             for table in ("conversations", "devices", "workflows"):
                 self._db.execute(f"DELETE FROM {table} WHERE person = ?", (id,))
@@ -609,8 +643,14 @@ class Store:
         rows = [(id, start + i, json.dumps(m, ensure_ascii=False)) for i, m in enumerate(messages)]
         self._db.executemany("INSERT INTO messages VALUES (?, ?, ?)", rows)
 
-    def _query(self, sql: str, *parameters: Any) -> list[sqlite3.Row]:
+    def _query(self, sql: str, *parameters: Any, **named: Any) -> list[sqlite3.Row]:
+        # the rows of sql, of its parameters, by their places or their names
         with self._lock:
-            cursor = self._db.execute(sql, parameters)
+            cursor = self._db.execute(sql, named or parameters)
             cursor.row_factory = sqlite3.Row
             return cursor.fetchall()
+
+
+def _project(row: sqlite3.Row) -> dict[str, Any]:
+    # a project as a dict, its members' ids a list, the first first
+    return dict(row) | {"members": sorted(json.loads(row["members"]))}

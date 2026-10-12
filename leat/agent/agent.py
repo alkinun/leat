@@ -131,8 +131,9 @@ class Agent:
     and kept by `index`, if one, as they change.
 
     Each conversation is a person's of the box's, `person` by its id, and an event that tells of
-    one is to that person's apps alone: "to" says whose. Before the box
-    has its first person, all is no one's, None's."""
+    one is to that person's apps alone: "to" says whose, or a list whose, as of a project's files,
+    to those who see it, and an event of no "to" is to everyone's. Before the box has its first
+    person, all is no one's, None's."""
 
     def __init__(
         self, store: Store, engine: Client, tools: list[Tool] | None = None,
@@ -262,16 +263,24 @@ class Agent:
         return _project(project)
 
     def change_project(self, id: str, person: int | None = None, **changes: Any) -> None:
-        """Changes a project a person sees: its name, instructions, or whether it is shared, which
-        its own person alone may change, as a project shared is seen by everyone. Raises
-        NotFound if they see no such project, Refused if it is shared and not theirs."""
+        """Changes a project a person sees: its name, instructions, whether it is shared with
+        everyone, or its members, the people of the box's it is shared with, by their ids, which
+        its own person alone may change; shared with everyone, it has no members. Raises NotFound
+        if they see no such project, Refused if they change whom it is shared with and it is not
+        theirs, ValueError of a member who is not one of the box's people."""
+        sharing = {"shared", "members"} & set(changes)
         with self._lock:
             project = self._project(id, person)
-            if "shared" in changes and project["person"] != person:
+            if sharing and project["person"] != person:
                 raise Refused("only whoever made a project may change whom it is shared with")
+            people = {p["id"] for p in self.store.people()}
+            if unknown := set(changes.get("members", ())) - people:
+                raise ValueError(f"there is no person {min(unknown)}")
+            if changes.get("shared"):
+                changes["members"] = []
             self.store.change_project(id, **changes)
             self._publish_projects()
-            if "shared" in changes:  # the conversations in it, and its files, seen or no longer
+            if sharing:  # the conversations in it, and its files, seen or no longer
                 self._publish_conversations()
                 if self.workspace is not None:
                     self._publish_files(id, person)
@@ -672,7 +681,7 @@ class Agent:
         if project is None:
             event["to"] = person
         elif not (held := self.store.project(project) or {}).get("shared"):
-            event["to"] = held.get("person")
+            event["to"] = [held.get("person"), *held.get("members", [])]
         self.events.publish(event)
 
     def _project(self, id: str, person: int | None) -> dict[str, Any]:
@@ -1139,8 +1148,10 @@ def _folder(project: str | None, person: int | None) -> str:
 
 
 def _sees(project: dict[str, Any] | None, person: int | None) -> bool:
-    # whether a person sees a project: their own, or one shared
-    return project is not None and (bool(project["shared"]) or project["person"] == person)
+    # whether a person sees a project: their own, one they are a member of, or one shared
+    return project is not None and (
+        bool(project["shared"]) or project["person"] == person or person in project["members"]
+    )
 
 
 def _workflow(w: dict[str, Any]) -> dict[str, Any]:
@@ -1149,9 +1160,10 @@ def _workflow(w: dict[str, Any]) -> dict[str, Any]:
 
 
 def _project(p: dict[str, Any]) -> dict[str, Any]:
-    # a project as the apps show it: the folder its files are synced with too, if any, when they
-    # last were, and why not, if not
-    keys = ("id", "name", "instructions", "person", "updated", "source", "synced", "unsynced")
+    # a project as the apps show it: whoever made it, and its members, by their ids; the folder its
+    # files are synced with too, if any, when they last were, and why not, if not
+    keys = ("id", "name", "instructions", "person", "members", "updated", "source", "synced",
+            "unsynced")  # fmt: skip
     return {k: p[k] for k in keys} | {"shared": bool(p["shared"])}
 
 

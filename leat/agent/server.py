@@ -13,9 +13,9 @@ and images alone, framed by none, and a link followed tells no site the box's na
 
 Every request but for the app's own files, the box's setup and a device's request to join comes
 from a device paired to one of the box's people, by the secret its cookie holds. A person sees and
-changes their own conversations and files, and their own projects and those shared, with their
-files, and lets in their own new devices; an admin looks after the box: its people and devices,
-its settings and the engine's model, never another's own conversations or files.
+changes their own conversations and files, and their own projects and those shared with them, with
+their files, and lets in their own new devices; an admin looks after the box: its people and
+devices, its settings and the engine's model, never another's own conversations or files.
 
 What people do is noted here, as each request asks it, for the admins to look back on: who did what,
 where, and of what, never what anyone asked; what Leat does for them, the agent notes.
@@ -39,6 +39,7 @@ from typing import Any
 from leat.agent.accounts import Accounts
 from leat.agent.agent import Agent, Busy, NotFound, Refused
 from leat.agent.client import EngineError
+from leat.agent.store import Store
 from leat.agent.workspace import Workspace
 from leat.box import system
 from leat.box.watch import Watch
@@ -435,15 +436,13 @@ class _Handler(BaseHTTPRequestHandler):
                 agent.note(me["person"], done, workflow["project"], workflow["name"])
                 return self._json(200, workflow)
             assert match is not None
-            changes = _project(body)
+            changes, was = _project(body), agent.store.project(match[1]) or {}
             agent.change_project(match[1], me["person"], **changes)
-            for key, value in changes.items():  # each change noted
-                said = {
-                    "name": "renamed the project",
-                    "instructions": "changed the instructions of",
-                    "shared": "shared the project" if value else "stopped sharing the project",
-                }
-                agent.note(me["person"], said[key], match[1])  # fmt: skip
+            said = {"name": "renamed the project", "instructions": "changed the instructions of"}
+            for key in said.keys() & changes.keys():  # each change noted, and whom it is shared
+                agent.note(me["person"], said[key], match[1])  # with, as it changed
+            for done, whom in _sharing(was, agent.store.project(match[1]) or was, agent.store):
+                agent.note(me["person"], done, match[1], whom)
             self._json(200, {})
 
     def do_PUT(self) -> None:
@@ -607,7 +606,8 @@ class _Handler(BaseHTTPRequestHandler):
                 to = event.get("to", person)
                 if event["type"] == "accounts":
                     self._event(self.server.accounts.state(me))
-                elif to == person or to == "admins" and me["admin"]:
+                elif to == person or isinstance(to, list) and person in to or (
+                        to == "admins" and me["admin"]):  # fmt: skip
                     self._event(event)
 
     def _trusted(self, write: bool = False) -> bool:
@@ -742,9 +742,16 @@ def _held(body: dict[str, Any]) -> str | None:
 
 
 def _project(body: dict[str, Any], new: bool = False) -> dict[str, Any]:
-    # a project's fields a body gives, its name, instructions and whether it is shared; a `new`
-    # one's name must be given. Raises ValueError for one that is not as it must be
-    fields: dict[str, Any] = {k: body[k] for k in ("name", "instructions", "shared") if k in body}
+    # a project's fields a body gives, its name, instructions, whether it is shared with everyone,
+    # and its members, by their ids, whom it is shared with once made; a `new` one's name must be
+    # given. Raises ValueError for one that is not as it must be
+    keys = ("name", "instructions", "shared", "members")
+    fields: dict[str, Any] = {k: body[k] for k in keys if k in body}
+    if new and "members" in fields:
+        raise ValueError("a project is shared with chosen people once it is made")
+    members = fields.get("members", [])
+    if not isinstance(members, list) or not all(type(m) is int for m in members):
+        raise ValueError("members must be a list of people's ids")
     if new or "name" in fields:
         name = _text(body, "name").strip()
         if len(name) > PROJECT_NAME:
@@ -757,6 +764,30 @@ def _project(body: dict[str, Any], new: bool = False) -> dict[str, Any]:
     if not isinstance(fields.get("shared", False), bool):
         raise ValueError("shared must be true or false")
     return fields
+
+
+def _sharing(
+    was: dict[str, Any], now: dict[str, Any], store: Store
+) -> list[tuple[str, str]]:  # fmt: skip
+    # what changed of whom a project is shared with, as the activity notes it: each what was done,
+    # and with whom, by their names
+    names = {p["id"]: p["name"] for p in store.people()}
+    before, after = set(was.get("members", [])), set(now["members"])
+    done = []
+    if now["shared"] != was.get("shared", now["shared"]):
+        done.append(("shared the project with" if now["shared"] else
+                     "stopped sharing the project with", "everyone"))  # fmt: skip
+    if added := sorted(after - before):
+        done.append(("shared the project with", _listed([names.get(m, "someone") for m in added])))
+    if (taken := sorted(before - after)) and not now["shared"]:
+        whom = _listed([names.get(m, "someone") for m in taken])
+        done.append(("stopped sharing the project with", whom))
+    return done
+
+
+def _listed(names: list[str]) -> str:
+    # names as a sentence says them: "Anna", "Anna and Ben", "Anna, Ben and Clara"
+    return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
 
 
 def _system(request: dict[str, Any]) -> dict[str, Any]:

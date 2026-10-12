@@ -2,6 +2,7 @@
 documents it reads LEAT_SANDBOX, an environment made of leat/agent/sandbox.txt."""
 
 import datetime
+import http.client
 import json
 import os
 import shutil
@@ -21,7 +22,7 @@ from leat.agent.store import Store
 from leat.agent.tools import files
 from leat.agent.workspace import Workspace
 from tests.test_agent import call as calling
-from tests.test_agent import ended, serving, until
+from tests.test_agent import cookie, ended, serving, until
 
 
 def _sandboxes() -> bool:
@@ -410,6 +411,38 @@ def test_api_project_files(server, agent):
     assert agent.space(project, 1).files() == []
 
 
+def test_api_project_files_of_members(server, agent):
+    # a project's files, of one shared with chosen people, seen by those, and by its maker alone,
+    # each told of them: uploaded, downloaded, deleted and their earlier versions
+    ada, ben = agent.store.add_person("Ada")["id"], agent.store.add_person("Ben")["id"]
+    project = agent.add_project("Hers", ada)["id"]
+    agent.files_changed(project, ada)
+    base = f"{server}/api/projects/{project}"
+    tried = [(f"{base}/files/notes.txt", "PUT", b"x"), (f"{server}/projects/{project}/files/"
+             "notes.txt", "GET", None), (f"{base}/history", "GET", None),
+             (f"{base}/files/notes.txt", "DELETE", None)]  # fmt: skip
+    assert [call(url, method, data)[0] for url, method, data in tried] == [404] * 4
+    agent.change_project(project, ada, members=[1, ben])
+    connection = http.client.HTTPConnection(server.replace("http://", ""), timeout=5)
+    connection.request("GET", "/api/events", headers={"Cookie": cookie()})
+    stream = connection.getresponse()
+    while not stream.readline().startswith(b'data: {"type": "settings"'):  # all there was, told
+        pass
+    assert [call(url, method, data)[0] for url, method, data in tried] == [200] * 4
+    told: list[dict] = []
+    while not told or told[-1]["files"]:  # told of it uploaded, then deleted
+        if (line := stream.readline()).startswith(b"data: "):
+            told.append(json.loads(line[6:]))
+    assert [e["files"][0]["name"] for e in told[:-1]] == ["notes.txt"]
+    assert {e["project"] for e in told} == {project}
+    connection.close()
+    agent.change_project(project, ada, members=[ben])
+    assert [call(url, method, data)[0] for url, method, data in tried] == [404] * 4
+    with agent.events.watch() as events:
+        agent._publish_files(project, None)
+        assert events.get()["to"] == [ada, ben]
+
+
 @sandboxed
 def test_history(workspace, monkeypatch):
     # a file written over, edited or deleted kept first as an earlier version, apart from the
@@ -599,7 +632,7 @@ def test_activity(server, agent, engine, tmp_path):
             for a in json.loads(body)["activity"]]  # fmt: skip
     assert status == 200 and seen == [
         ("Alkın", 0, "turned the internet off", None, None),
-        ("Alkın", 0, "shared the project", "Yılmaz Ltd", None),
+        ("Alkın", 0, "shared the project with", "Yılmaz Ltd", "everyone"),
         ("Alkın", 1, "read", "Yılmaz Ltd", "Lease.txt"),
         ("Alkın", 0, "began a chat", "Yılmaz Ltd", None),
         ("Alkın", 0, "uploaded", "Yılmaz Ltd", "Lease.txt"),
@@ -609,7 +642,7 @@ def test_activity(server, agent, engine, tmp_path):
     assert "Secret" not in body.decode() and "rent" not in body.decode().lower()
     newest = json.loads(body)["activity"][0]["id"]
     _, older = request(f"{server}/api/activity?before={newest}")
-    assert json.loads(older)["activity"][0]["action"] == "shared the project"
+    assert json.loads(older)["activity"][0]["action"] == "shared the project with"
     assert request(f"{server}/api/activity?before=x")[0] == 400
     request(f"{server}/api/projects/{project}", "DELETE")
     _, body = request(f"{server}/api/activity")

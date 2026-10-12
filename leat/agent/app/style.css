@@ -560,3 +560,13 @@ body.gated #gate { display: grid; flex: 1; place-items: center; min-height: 100v
 :is(#modes, .choice) button.on { background: var(--bubble); color: var(--text); }
 .choice button:disabled { opacity: 1; }
 .choice button:disabled:not(.on) { opacity: 0.5; }
+/* the people a project is shared with, each chosen or not */
+#members { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 0 8px; }
+#members:empty { display: none; }
+#members button {
+  padding: 3px 12px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted);
+  font-size: 0.8125rem;
+}
+#members button.on { border-color: transparent; background: var(--bubble); color: var(--text); }
+#members button.on::before { content: "✓ "; }
+#members button:disabled { opacity: 1; }

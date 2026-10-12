@@ -461,15 +461,59 @@ def test_projects(agent, engine, events):
     assert agent.projects(me) == [] and agent.conversations(me) == agent.conversations(her) == []
 
 
+def test_project_members(agent, engine, events):
+    # a project shared with chosen people, its members, is seen by them as by whoever made it, and
+    # by no one else, its conversations and workflows, as its files, as test_files tries; whom it
+    # is shared with is its maker's alone to change
+    me, ada, ben = (agent.store.add_person(name)["id"] for name in ("Alkın", "Ada", "Ben"))
+    project = agent.add_project("Yılmaz Ltd", me)["id"]
+    agent.add_workflow("Reconcile", "Reconcile the bank.", me, project)
+    agent.change_project(project, me, members=[ada, me])  # its maker no member of their own
+    assert agent.projects(me)[0]["members"] == [ada] and agent.projects(ada)[0]["id"] == project
+    assert agent.projects(ben) == [] and agent.workflows(ben) == []
+    assert [w["name"] for w in agent.workflows(ada)] == ["Reconcile"]
+    engine.replies.put(REPLY)
+    hers = agent.send(None, "Hi", person=ada, project=project)
+    until(events, ended)
+    agent.change_project(project, ada, instructions="Be brief.")  # a member changes the rest
+    for change in ({"members": [ada, ben]}, {"shared": True}):
+        with pytest.raises(Refused):
+            agent.change_project(project, ada, **change)
+    for doing in (lambda: agent.send(None, "Hi", person=ben, project=project),
+                  lambda: agent.change_project(project, ben, name="Mine"),
+                  lambda: agent.add_workflow("Mine", "x", ben, project)):  # fmt: skip
+        with pytest.raises(NotFound):
+            doing()
+    with pytest.raises(ValueError, match="no person 9"):
+        agent.change_project(project, me, members=[ada, 9])
+    # no longer a member, her conversation in it is hers still, unseen till she is again
+    agent.change_project(project, me, members=[ben])
+    assert agent.projects(ada) == [] and agent.conversation(hers, ada) is None
+    assert agent.projects(ben)[0]["instructions"] == "Be brief."
+    agent.change_project(project, me, members=[ada])
+    assert [c["id"] for c in agent.conversations(ada)] == [hers]
+    # shared with everyone, it has no members
+    agent.change_project(project, me, shared=True)
+    assert agent.projects(ben)[0]["members"] == [] and agent.projects(ben)[0]["shared"]
+
+
 def test_projects_of_one_removed(server, agent):
-    # a person removed takes their own projects with them; those they shared become the owner's
-    ada = agent.store.add_person("Ada")["id"]
+    # a person removed takes their own projects with them; those they shared with everyone become
+    # the admin's who removed them, and those they shared with chosen people the first's of those,
+    # so that no one else sees it
+    ada, ben, eve = (agent.store.add_person(name)["id"] for name in ("Ada", "Ben", "Eve"))
     own, shared = agent.add_project("Own", ada), agent.add_project("Shared", ada, shared=True)
+    chosen = agent.add_project("Chosen", ada)
+    agent.change_project(chosen["id"], ada, members=[eve, ben])
     agent.store.create("Hi", [], 1, shared["id"])
+    agent.store.create("Hi", [], ben, chosen["id"])
     assert request(f"{server}/api/people/{ada}", "DELETE")[0] == 200
     assert agent.store.project(own["id"]) is None
     assert agent.store.project(shared["id"])["person"] == 1
     assert len(agent.conversations(1)) == 1
+    held = agent.store.project(chosen["id"])
+    assert (held["person"], held["members"], len(agent.conversations(ben))) == (ben, [eve], 1)
+    assert [p["name"] for p in agent.projects(1)] == ["Shared"]  # the admin no member of it
 
 
 def test_api_projects(server, engine, agent, events):
@@ -493,6 +537,23 @@ def test_api_projects(server, engine, agent, events):
     assert request(f"{server}/api/conversations", "POST", asked)[0] == 404
     assert request(url, "DELETE")[0] == 200 and agent.conversations(1) == []
     assert request(url, "DELETE")[0] == 404
+
+
+def test_api_project_members(server, agent):
+    # whom a project is shared with, its members, set by its maker, each change noted
+    ada, ben = agent.store.add_person("Ada")["id"], agent.store.add_person("Ben")["id"]
+    _, body = request(f"{server}/api/projects", "POST", {"name": "Payroll"})
+    url = f"{server}/api/projects/{json.loads(body)['id']}"
+    assert request(url, "PATCH", {"members": [ada, ben]})[0] == 200
+    assert request(url, "PATCH", {"members": [ben]})[0] == 200
+    assert request(url, "PATCH", {"shared": True})[0] == 200
+    for wrong in ({"members": ada}, {"members": ["2"]}, {"members": [True]}, {"members": [9]}):
+        assert request(url, "PATCH", wrong)[0] == 400
+    assert request(f"{server}/api/projects", "POST", {"name": "x", "members": [ada]})[0] == 400
+    noted = [(a["action"], a["detail"]) for a in agent.store.activity()][::-1]
+    assert noted[-3:] == [("shared the project with", "Ada and Ben"),
+                         ("stopped sharing the project with", "Ada"),
+                         ("shared the project with", "everyone")]  # fmt: skip
 
 
 def test_workflows(agent):
@@ -1006,7 +1067,7 @@ def test_migration(tmp_path):
     }
     assert {t for t in tables if not t.startswith("sqlite_")} == {
         "conversations", "messages", "people", "devices", "projects", "workflows", "settings",
-        "activity",
+        "activity", "members",
     }  # fmt: skip
     columns = [row[1] for row in store._db.execute("PRAGMA table_info(conversations)")]
     assert columns == ["id", "title", "created", "updated", "context", "named", "person", "project"]

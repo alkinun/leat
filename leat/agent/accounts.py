@@ -229,21 +229,22 @@ class Accounts:
         self._publish()
 
     def remove(self, id: int, heir: int) -> None:
-        """Removes a person, with all that is theirs, the projects they shared becoming their
-        heir's. Raises LookupError if there is no such person, ValueError of the heir themselves or
-        of the last admin."""
+        """Removes a person, with all that is theirs, as store.remove_person: the projects they
+        shared with chosen people becoming their first member's, those shared with everyone their
+        heir's. Raises LookupError if there is no such person, ValueError of the heir themselves
+        or of the last admin."""
         if self.store.person(id) is None:
             raise LookupError(f"there is no person {id}")
         if id == heir:
             raise ValueError("you cannot remove yourself: ask another admin")
         for c in self.store.conversations(id):
             self.agent.delete(c["id"], id)
-        for project in self.store.projects(id):  # their own, with others' conversations in them
-            if project["person"] == id and not project["shared"]:
+        for project in self.store.projects(id):  # their own, with any others' conversations in them
+            if project["person"] == id and not project["shared"] and not project["members"]:
                 self.agent.delete_project(project["id"], id)
         self.store.remove_person(id, heir)
         self.agent.clear(id)  # and their own files
-        self.agent.projects_changed()  # those they shared, now their heir's
+        self.agent.projects_changed()  # those they shared, now another's
         self._publish()
 
     def state(self, device: dict[str, Any]) -> dict[str, Any]:
