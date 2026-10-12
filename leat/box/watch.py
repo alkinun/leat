@@ -66,8 +66,8 @@ class Watch:
         if self._held("internet", not _reached()):
             found.append(_warning("internet", "The box can't reach the internet",
                                   "Leat works in the office, but web searches, updates and its "
-                                  "certificate wait. Check the box's cable or Wi-Fi, and the "
-                                  "office's firewall."))  # fmt: skip
+                                  "certificate wait. Check the box's cable, and the office's "
+                                  "firewall."))  # fmt: skip
         left = _days_left(self.name)
         if left is not None and left <= EXPIRING:
             title = (f"Leat's certificate expires in {left} days" if left > 1 else

@@ -46,23 +46,6 @@ ten seconds.
 None of it carries anything of the office's work. Its name and address, as every certificate's
 name, are public: a name points at a private address, reachable inside its office alone.
 
-## Set up without a cable
-
-A box that has gone a minute without a network, or five if it knows a Wi-Fi network that may come
-back, opens a hotspot of its own (`leat-hotspot.service`, `python -m leat.box.hotspot`): its radio
-becomes iwd's access point, `Leat-` and four of its ID's letters, with a passphrase the screen
-shows beside a QR code that joins it. systemd-networkd gives the hotspot `10.42.0.1` and its devices
-addresses by DHCP (`82-hotspot.network`). Every name a phone on it asks for is the box's, as the
-hotspot answers its DNS, and Caddy sends every request made to the hotspot's address to its page,
-which the phone shows as a captive portal: the networks in reach and a passphrase. A network chosen, the
-hotspot closes and the box joins it. One it can't join in half a minute is forgotten and the hotspot
-opens again, saying so. It closes, too, once the box has a network of its own: a cable, or a known
-network back in reach, as it scans every minute.
-
-Tried in a VM, of `modprobe mac80211_hwsim radios=3`: the box's radio, a phone's and an office's
-access point (iwd's `DriverQuirks` `DefaultInterface=*` there, as hwsim's radios refused iwd's own
-interfaces).
-
 ## A fixed address
 
 An office whose IT gives the box its own address sets it in Settings, The box, Network: an address
@@ -83,7 +66,7 @@ makes the last two, of the rest of its disk.
 | `leat_<version>` | 8 GB | the system, A, of the image, replaced whole by an update |
 | `_empty` | 8 GB | the system, B, which an update writes, the two taking turns |
 | `leat-identity` | 64 MB | `/etc/leat`: the box's name, registration, and its certificate and account, Caddy's |
-| `leat-data` | the rest | `/var`: the office's data, and the system's own state, Wi-Fi, certificates, journal |
+| `leat-data` | the rest | `/var`: the office's data, and the system's own state, certificates, journal |
 
 The last two are encrypted, sealed to the TPM by a signed PCR policy: they unlock for a UKI of
 ours alone, of any version, and a disk taken out of a box gives nothing away. The identity outlives

@@ -12,8 +12,8 @@ ROOT = Path(__file__).parent.parent / "leat"
 APP = ROOT / "agent" / "app"
 # what is the same in every language: names, and examples of what to type
 SAME = {"Leat", "K7X 2QM", "Kanzlei Weber"}
-# the screen's words it says of values it is told, as a model's status, and of its link
-SCREEN = {"ready", "loading", "Network", "Wired", "Wi-Fi", "{size} GB free", "Setup code",
+# the screen's words it says of values it is told, as a model's status
+SCREEN = {"ready", "loading", "Network", "{size} GB free", "Setup code",
           "or type {local}.local",
           "Recovery code, for {minutes} more minutes"}  # fmt: skip
 # the box's warnings, as leat.box.watch says them, of their values
@@ -23,7 +23,7 @@ WARNINGS = {
     "leatbox.net under {where}.",
     "The box can't reach the internet",
     "Leat works in the office, but web searches, updates and its certificate wait. Check the box's "
-    "cable or Wi-Fi, and the office's firewall.",
+    "cable, and the office's firewall.",
     "Leat's certificate expires in {days} days",
     "Leat's certificate has expired",
     "Leat's certificate expires within a day",
@@ -84,9 +84,6 @@ ERRORS = {
     "too many devices ask to join now: try again in a few minutes",
     "you cannot remove yourself: ask another admin",
     "type {word} to erase everything on this Leat",
-    "a passphrase is 8 to 63 letters, digits and signs",
-    "a Wi-Fi network's name is 1 to 32 bytes",
-    "the box's hotspot is closed",
 }
 
 
@@ -151,10 +148,8 @@ def _page() -> set[str]:
 
 
 def _said() -> set[str]:
-    # the screen's words: what said() returns, holds() and every t() of a text; and the hotspot
-    # page's, of its every t()
-    tree = ast.parse((ROOT / "box" / "screen.py").read_text() + "\n"
-                     + (ROOT / "box" / "hotspot.py").read_text())  # fmt: skip
+    # the screen's words: what said() returns, holds() and every t() of a text
+    tree = ast.parse((ROOT / "box" / "screen.py").read_text())
     found = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name in ("said", "holds"):

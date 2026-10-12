@@ -1,5 +1,5 @@
-# every wired link, by DHCP, the box answering at leat.local; its way out, before Wi-Fi. Its address
-# asked for by its link's own, the same whatever system an update brings, of a machine ID anew
+# every wired link, by DHCP, the box answering at leat.local; its address asked for by its link's
+# own, the same whatever system an update brings, of a machine ID anew
 [Match]
 Type=ether
 

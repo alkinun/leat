@@ -1103,7 +1103,6 @@ function renderBox() {
   zone.replaceChildren(...zones.map((z) => Object.assign(element("option", "", z.replaceAll("_", " ")), { value: z })));
   zone.value = settings.timezone ?? "";
   zone.onchange = () => changeSettings({ timezone: zone.value });
-  if (!$("wifi").childElementCount) renderWifi();
   if (!$("network").childElementCount) renderNetwork();
   if (!$("power").childElementCount) renderPower();
   if (!$("software").childElementCount) renderSoftware();
@@ -1167,52 +1166,13 @@ function renderPower() {
   reset.type = "button";
   reset.onclick = () => {
     const word = settings.office || "reset";
-    const typed = prompt(t("Erase everything on this Leat? Everyone's chats, files and projects, its people and devices, its settings and Wi-Fi networks are erased for good, and it starts again at “{start}”, its address the same. Type {word} to go on.",
+    const typed = prompt(t("Erase everything on this Leat? Everyone's chats, files and projects, its people and devices and its settings are erased for good, and it starts again at “{start}”, its address the same. Type {word} to go on.",
       { start: t("Set up your Leat"), word }));
     if (typed !== null) post("/api/reset", { confirm: typed })
       .then(() => status(t("The box is erasing everything, and restarting.")))
       .catch((error) => status(error.message, true));
   };
   $("power").replaceChildren(...buttons, reset);
-}
-
-// the box's Wi-Fi, an admin's to set: the networks in reach, found as asked, each joined of its
-// passphrase, the one the box is on forgotten; a cable stays its way out while it has one
-function renderWifi(found = null, error = "") {
-  const parts = [element("h3", "", t("Wi-Fi"))];
-  if (!found) {
-    const find = element("button", "quiet", t("Find Wi-Fi networks"));
-    find.type = "button";
-    find.onclick = () => scanWifi();
-    parts.push(find);
-  } else if (!found.radio) {
-    parts.push(element("p", "about", t("This box has no Wi-Fi: it is on its network by cable.")));
-  } else {
-    const list = element("ul");
-    for (const network of found.networks) {
-      const row = element("li");
-      const name = element("span", "", network.name);
-      const about = [["", "▂", "▂▄", "▂▄▆", "▂▄▆█"][network.strength], network.secure ? t("secured") : t("open")];
-      if (network.connected) about.push(t("connected"));
-      row.append(name, element("span", "meta", about.filter(Boolean).join(" · ")));
-      if (network.connected) {
-        const forget = element("button", "quiet", t("Forget"));
-        forget.type = "button";
-        forget.onclick = () => del(`/api/wifi/${encodeURIComponent(network.name)}`).then(() => scanWifi());
-        row.append(forget);
-      } else {
-        row.onclick = () => joinWifi(row, network);
-      }
-      list.append(row);
-    }
-    if (!found.networks.length) list.append(element("li", "meta", t("No Wi-Fi network is in reach.")));
-    const again = element("button", "quiet", t("Look again"));
-    again.type = "button";
-    again.onclick = () => scanWifi();
-    parts.push(list, again);
-  }
-  if (error) parts.push(element("p", "error", error));
-  $("wifi").replaceChildren(...parts);
 }
 
 // the box's wired address, an admin's to set: DHCP's, or a fixed one, as an office's IT gives, from
@@ -1260,44 +1220,6 @@ async function renderNetwork(fixing = false, said = "") {
   }
   parts.push(element("p", "about", said || t("Automatic takes an address of the office's network, as most offices have it. A fixed one is for networks whose IT gives the box its own.")));
   $("network").replaceChildren(...parts);
-}
-
-// the Wi-Fi networks in reach, as the box finds them
-async function scanWifi() {
-  $("wifi").querySelector("button")?.setAttribute("disabled", "");
-  try {
-    const response = await fetch("/api/wifi");
-    const found = await response.json();
-    if (!response.ok) throw new Error(found.error.message);
-    renderWifi(found);
-  } catch (error) {
-    renderWifi(null, error.message);
-  }
-}
-
-// a Wi-Fi network joined, of its passphrase if it asks for one, the box on it a few seconds after
-function joinWifi(row, network) {
-  if (row.querySelector("form")) return;
-  const form = element("form", "join");
-  const passphrase = Object.assign(element("input"), { type: "password", placeholder: t("Passphrase"),
-    autocomplete: "off", minLength: 8, maxLength: 63, required: true });
-  const join = element("button", "", t("Join"));
-  if (network.secure) form.append(passphrase);
-  form.append(join);
-  form.onsubmit = async (event) => {
-    event.preventDefault();
-    join.disabled = true;
-    try {
-      await post("/api/wifi", { name: network.name, passphrase: network.secure ? passphrase.value : null });
-      renderWifi({ radio: true, networks: [] }, "");
-      $("wifi").querySelector("ul").replaceChildren(element("li", "meta", t("Joining {name}…", { name: network.name })));
-      setTimeout(scanWifi, 6000);
-    } catch (error) {
-      renderWifi(null, error.message);
-    }
-  };
-  row.append(form);
-  (network.secure ? passphrase : join).focus();
 }
 
 // changes the box's settings, which every app is told of as they change

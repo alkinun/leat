@@ -2,8 +2,8 @@
 Description=Point the box's name at its address, as soon as it changes
 
 # every 30 s, as the address is checked on the box alone, the registry told only once it changed,
-# or a day went by: a box moved from its cable to Wi-Fi is found at its new address within a minute,
-# but for what resolvers cached of the old one
+# or a day went by: a box given a new address is found at it within a minute, but for what
+# resolvers cached of the old one
 [Timer]
 OnBootSec=30s
 OnUnitActiveSec=30s

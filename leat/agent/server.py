@@ -103,7 +103,6 @@ _HISTORY = re.compile(r"/api/(?:projects/([0-9a-f]{12})/)?history")
 _PROJECT_PAGE = re.compile(r"/projects/[0-9a-f]{12}")
 _REQUEST = re.compile(r"/api/pairings/([0-9a-f]{16})(/allow)?")
 _DEVICE = re.compile(r"/api/devices/([0-9]+)")
-_WIFI = re.compile(r"/api/wifi/(.+)")
 _PERSON = re.compile(r"/api/people/([0-9]+)")
 _FILE = re.compile(r"/(?:api/)?(?:projects/([0-9a-f]{12})/)?files/(.+)")
 
@@ -189,9 +188,6 @@ class _Handler(BaseHTTPRequestHandler):
             elif path == "/api/overview":  # the box, as its admins look after it
                 _admin(me)
                 self._json(200, agent.overview())
-            elif path == "/api/wifi":  # the Wi-Fi networks in reach, the admins' to see
-                _admin(me)
-                self._json(200, _system({"wifi": "scan"}))
             elif path == "/api/network":  # the wired link's address, fixed or DHCP's, an admin's
                 _admin(me)
                 self._json(200, _system({"network": "status"}))
@@ -319,12 +315,6 @@ class _Handler(BaseHTTPRequestHandler):
                 allowed = accounts.allow(match[1], me, to, name)
                 agent.note(person, "let in", detail=f"{allowed['name']} ({allowed['device']})")
                 self._json(200, allowed)
-            elif path == "/api/wifi":  # a Wi-Fi network joined, an admin's to choose
-                _admin(me)
-                name, passphrase = _text(body, "name"), body.get("passphrase")
-                _system({"wifi": "join", "name": name, "passphrase": passphrase})
-                agent.note(person, "joined the Wi-Fi network", detail=name)
-                self._json(200, {})
             elif path == "/api/network":  # a fixed address of the wired link's, or DHCP's again
                 _admin(me)
                 fixed = body.get("fixed")
@@ -375,12 +365,6 @@ class _Handler(BaseHTTPRequestHandler):
         with self._answering():
             me = self._device()
             person, store = me["person"], agent.store
-            if wifi := _WIFI.fullmatch(path):  # a Wi-Fi network forgotten, an admin's
-                _admin(me)
-                name = urllib.parse.unquote(wifi[1])
-                _system({"wifi": "forget", "name": name})
-                agent.note(person, "forgot the Wi-Fi network", detail=name)
-                return self._json(200, {})
             if (match := _CONVERSATION.fullmatch(path)) and not match[2]:
                 held = (store.conversation(match[1]) or {}).get("project")
                 agent.delete(match[1], person)

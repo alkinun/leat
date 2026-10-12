@@ -10,7 +10,6 @@ enable leat-proxy.service
 enable leat-address.service
 enable leat-address.timer
 enable leat-screen.service
-enable leat-hotspot.service
 enable leat-system.socket
 enable leat-system-restore.service
 # updates: looked for every few hours, booted at night, kept once Leat answers
@@ -18,6 +17,5 @@ enable systemd-sysupdate.timer
 enable systemd-sysupdate-reboot.timer
 enable leat-health.service
 enable leat-fallback.service
-enable iwd.service
 # no login on the box's display, whose screen leat-screen.service draws, nor on any other
 disable getty@.service

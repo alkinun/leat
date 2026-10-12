@@ -530,27 +530,13 @@ body.gated #gate { display: grid; flex: 1; place-items: center; min-height: 100v
   border-radius: var(--round); background: var(--card); font: inherit; color: inherit;
 }
 #box h3 { margin: 20px 0 0; font-size: 0.9375rem; font-weight: 600; }
-#wifi ul { margin: 0 0 8px; padding: 0; list-style: none; }
-#wifi li {
-  display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; padding: 10px 0;
-  border-bottom: 1px solid var(--line); cursor: pointer;
-}
-#wifi li > span:first-child { flex: 1; }
-#wifi .meta { color: var(--muted); font-size: 0.875rem; }
-#wifi form.join { display: flex; flex-basis: 100%; gap: 8px; }
-#wifi form.join input {
-  flex: 1; padding: 6px 10px; border: 1px solid var(--line); border-radius: var(--round);
-  background: var(--card); font: inherit; color: inherit;
-}
-#wifi button, #power button, #software button { padding: 6px 14px; border: 1px solid var(--line); border-radius: var(--round); font-size: 0.875rem; }
+#power button, #software button { padding: 6px 14px; border: 1px solid var(--line); border-radius: var(--round); font-size: 0.875rem; }
 #power { display: flex; gap: 8px; margin-top: 8px; }
 #software > p { margin: 8px 0 0; }
 #software > p.about { margin: 2px 0 8px; }
 #software a.diagnostics { margin-left: 12px; color: var(--muted); font-size: 0.875rem; }
 #power button:hover { background: var(--bubble); }
 #power button.danger { margin-left: auto; border-color: var(--error); color: var(--error); }
-#wifi form.join button { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
-#wifi .error { color: var(--error); font-size: 0.875rem; }
 /* a choice of a few, as the mode Leat's look is in, and whom a project is shared with */
 #modes, .choice {
   display: inline-flex; gap: 2px; margin: 8px 0; padding: 3px;

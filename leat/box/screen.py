@@ -46,7 +46,7 @@ from pathlib import Path
 from PIL import Image, ImageColor, ImageDraw, ImageFont
 
 from leat import locales
-from leat.box import hotspot, system
+from leat.box import system
 from leat.box.address import ipv4
 from leat.box.provision import ROOT
 
@@ -86,9 +86,8 @@ class State:
     office's name, whether to show the address, the model, its id and whether it is "loaded" or
     "loading", whether the box is kept from the internet, the code that sets it up, while it is
     to be, and a recovery code, while one holds; whether the power button was pressed just now,
-    once, so that a press again switches the box off; and its link, "Wired" or "Wi-Fi", the bytes
-    left on its data's partition, and its image's version; the language it speaks, of
-    leat.locales's; and its hotspot, while it opens one, as leat.box.hotspot does."""
+    once, so that a press again switches the box off; the bytes left on its data's partition, and
+    its image's version; and the language it speaks, of leat.locales's."""
 
     name: str | None
     address: str | None
@@ -100,7 +99,6 @@ class State:
     show_address: bool = True
     model: tuple[str, str] | None = None
     offline: bool = False
-    link: str | None = None
     free: int | None = None
     version: str | None = None
     setup: str | None = None
@@ -110,8 +108,6 @@ class State:
     # what needs attention: each its title, and what to do
     warnings: tuple[tuple[str, str], ...] = ()
     language: str = "en"
-    # the box's own Wi-Fi, while it is open for want of a network: its name and passphrase
-    hotspot: tuple[str, str] | None = None
     # its name on the office's network, of multicast DNS: leat, or leat2 of a second box there, as
     # systemd-resolved names one whose name another has
     local: str = "leat"
@@ -121,17 +117,8 @@ def look(root: Path = ROOT) -> State:
     """The box's state, as it is now."""
     name, address = _name(root), _address()
     booting = time.clock_gettime(time.CLOCK_BOOTTIME) < BOOTING
-    state = State(name, address, booting=booting, link=_link(), free=_free(), version=_version(),
+    state = State(name, address, booting=booting, free=_free(), version=_version(),
                   language=LANGUAGE, local=_local())  # fmt: skip
-    if address is None:  # and its hotspot, if it opened one, and the network it could not join
-        with contextlib.suppress(OSError, ValueError, KeyError):
-            spot = json.loads(hotspot.STATE.read_text())
-            t = functools.partial(locales.t, language=(box() or {}).get("language") or LANGUAGE)
-            failed = (t("The box couldn't join {name}", name=spot["failed"]),
-                      t("Check its password, and choose it again."))  # fmt: skip
-            warned = (failed,) if spot["failed"] else ()
-            state = dataclasses.replace(state, hotspot=(spot["name"], spot["passphrase"]),
-                                        warnings=warned)  # fmt: skip
     if name is None or address is None:
         return state
     told = box()
@@ -157,9 +144,6 @@ def said(state: State) -> tuple[str, str, str | None]:
     off = "Press the power button again to switch the box off."
     if state.switching and not state.recovery:
         return "Switch off?", off, None
-    if state.address is None and state.hotspot:  # its own Wi-Fi, which a phone joins of its code
-        return ("Set up over Wi-Fi", "Scan the code with a phone to join the box's Wi-Fi, then "
-                "choose the office's network on the page it opens.", None)  # fmt: skip
     if state.address is None and state.booting:
         return "Starting", "This takes a minute.", None
     if state.address is None:
@@ -194,15 +178,6 @@ def scanned(state: State, url: str) -> str:
     return f"{url}/#setup={state.setup}" if state.empty and state.setup else url
 
 
-def wifi(state: State) -> str | None:
-    """What the QR code of the box's hotspot holds, which a phone joins of it, as Android and
-    iOS read one; None while it has none."""
-    if state.address is not None or state.hotspot is None:
-        return None
-    escaped = [re.sub(r'([\\;,:"])', r"\\\1", part) for part in state.hotspot]
-    return f"WIFI:T:WPA;S:{escaped[0]};P:{escaped[1]};;"
-
-
 def holds(state: State) -> str:
     """What the recovery code is said to be, and for how long it holds: "Recovery code, for 4 more
     minutes", by the minute begun."""
@@ -235,7 +210,7 @@ def footer(state: State) -> list[str]:
             model, status = state.model
             items.append(f"{_model(model)} · {t('ready' if status == 'loaded' else status)}")
     if state.address:
-        items.append(f"{t(state.link or 'Network')} · {state.address}")
+        items.append(f"{t('Network')} · {state.address}")
     if state.answering:
         items.append(t("Internet off" if state.offline else "Internet on"))
     if state.free is not None:
@@ -265,8 +240,7 @@ def paint(state: State, size: tuple[int, int], now: datetime.datetime) -> Image.
     # the middle: what the box says, and the address to open, with its QR code on a card
     headline, sentence, url = said(state)
     headline, sentence = t(headline), t(sentence)
-    joined = scanned(state, url) if url else wifi(state)  # an address, or the hotspot to join
-    card = qr_card(joined, round(min(40 * u, width * 0.28))) if joined else None
+    card = qr_card(scanned(state, url), round(min(40 * u, width * 0.28))) if url else None
     right = width - margin - (card.width + round(8 * u) if card else 0)
     lines: list[tuple[str, ImageFont.FreeTypeFont | ImageFont.ImageFont, str, float]] = [
         (headline, font(round(6.4 * u), "SemiBold"), TEXT, 2.4 * u),
@@ -296,12 +270,6 @@ def paint(state: State, size: tuple[int, int], now: datetime.datetime) -> Image.
             lines[-1] = (*lines[-1][:3], 3.0 * u)
             lines.append((t("Press the power button again to switch the box off."),
                           font(round(2.4 * u)), MUTED, 0.0))  # fmt: skip
-    elif wifi(state) and state.hotspot:  # its hotspot's name and passphrase, to type if need be
-        lines[-1] = (*lines[-1][:3], 4.0 * u)
-        code, label = font(round(4.4 * u), "SemiBold"), font(round(2.4 * u))
-        name, key = state.hotspot
-        lines += [(t("Wi-Fi"), label, MUTED, 0.6 * u), (name, code, TEXT, 3.0 * u),
-                  (t("Password"), label, MUTED, 0.6 * u), (key, code, TEXT, 0.0)]  # fmt: skip
     tall = sum(_height(pen, f) + gap for _, f, _, gap in lines)
     y = height / 2 - tall / 2
     for line, f, colour, gap in lines:
@@ -339,9 +307,6 @@ def written(state: State, qr: str = "") -> list[str]:
                   t("Press the power button again to switch the box off.")]  # fmt: skip
     elif url and state.empty and state.setup:
         lines += ["", f"{t('Setup code')}: {BOLD}{spaced(state.setup)}{PLAIN}"]
-    elif wifi(state) and state.hotspot:
-        lines += ["", *qr.splitlines(), "", f"{t('Wi-Fi')}: {BOLD}{state.hotspot[0]}{PLAIN}",
-                  f"{t('Password')}: {BOLD}{state.hotspot[1]}{PLAIN}"]  # fmt: skip
     return lines
 
 
@@ -495,16 +460,6 @@ def _address() -> str | None:
     return None
 
 
-def _link() -> str | None:
-    # how the box is on its network: "Wi-Fi" or "Wired", of its default route's interface
-    with contextlib.suppress(OSError, IndexError):
-        for line in Path("/proc/net/route").read_text().splitlines()[1:]:
-            fields = line.split()
-            if fields[1] == "00000000":
-                return "Wi-Fi" if Path(f"/sys/class/net/{fields[0]}/wireless").exists() else "Wired"
-    return None
-
-
 def _local() -> str:
     # the box's name of multicast DNS, as systemd-resolved publishes it: its hostname, numbered
     # once another on the network had it; leat, of none told
@@ -643,8 +598,7 @@ def main() -> None:
                 display.show(painted.point(lambda v: v * DIM) if dimmed(state, now) else painted)
             else:
                 url = said(state)[2]
-                joined = scanned(state, url) if url else wifi(state)
-                lines = written(state, _text_qr(joined) if joined else "")
+                lines = written(state, _text_qr(scanned(state, url)) if url else "")
                 sys.stdout.write(draw(lines, *shutil.get_terminal_size((80, 25))))
                 sys.stdout.flush()
             shown, drawn = seen, time.monotonic()

@@ -755,37 +755,9 @@ def test_timezone(server, agent, monkeypatch):
     assert status == 400 and b"cannot set its time zone" in body and b"Errno" not in body
 
 
-def test_wifi(server, agent, monkeypatch):
-    # the Wi-Fi networks in reach, joined and forgotten, an admin's, each noted but for its
-    # passphrase; off a box, said
-    asked = []
-    scanned = {"radio": True, "networks": [], "connected": None}
-    monkeypatch.setattr(
-        system, "ask", lambda r: asked.append(r) or (scanned if r["wifi"] == "scan" else {})
-    )
-    status, body = request(f"{server}/api/wifi")
-    assert status == 200 and json.loads(body) == scanned
-    join = {"name": "Office", "passphrase": "s3cret pass"}
-    assert request(f"{server}/api/wifi", "POST", join)[0] == 200
-    assert request(f"{server}/api/wifi/Caf%C3%A9", "DELETE")[0] == 200
-    assert asked[1:] == [{"wifi": "join", "name": "Office", "passphrase": "s3cret pass"},
-                         {"wifi": "forget", "name": "Café"}]  # fmt: skip
-    noted = [(a["action"], a["detail"]) for a in agent.store.activity()]
-    assert ("joined the Wi-Fi network", "Office") in noted
-    assert ("forgot the Wi-Fi network", "Café") in noted
-    assert "s3cret" not in json.dumps(agent.store.activity())
-
-    def away(request):
-        raise ConnectionRefusedError("no helper")
-
-    monkeypatch.setattr(system, "ask", away)
-    status, body = request(f"{server}/api/wifi")
-    assert status == 400 and b"no box" in body and b"Errno" not in body
-
-
 def test_network(server, agent, monkeypatch):
     # the wired link's address, fixed or DHCP's, an admin's to set, as the box's helper sets it,
-    # each noted
+    # each noted; off a box, said
     asked = []
     status = {"fixed": None, "fell_back": True}
     monkeypatch.setattr(system, "ask", lambda r: asked.append(r) or (
@@ -798,6 +770,13 @@ def test_network(server, agent, monkeypatch):
     noted = [(a["action"], a["detail"]) for a in agent.store.activity()][:2]
     assert noted == [("set the address to automatic", None),
                      ("set a fixed address", "192.168.1.50/24")]  # fmt: skip
+
+    def away(request):
+        raise ConnectionRefusedError("no helper")
+
+    monkeypatch.setattr(system, "ask", away)
+    status, body = request(f"{server}/api/network")
+    assert status == 400 and b"no box" in body and b"Errno" not in body
 
 
 def test_power(server, agent, monkeypatch):
