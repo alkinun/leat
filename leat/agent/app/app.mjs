@@ -755,7 +755,7 @@ function day(seconds) {
 
 // a time, in seconds, as a clock reads it
 function clock(seconds) {
-  return new Date(seconds * 1000).toLocaleTimeString(locale(), { hour: "2-digit", minute: "2-digit" });
+  return new Date(seconds * 1000).toLocaleTimeString(locale(), { hour: "numeric", minute: "2-digit" });
 }
 
 // a code to compare, as the screen and a device show it, in two halves: "K7X 2QM"

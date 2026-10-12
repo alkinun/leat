@@ -239,8 +239,8 @@ details.history { margin-top: 16px; }
 details summary { cursor: pointer; color: var(--muted); font-size: 0.875rem; }
 
 /* Files and Projects: what they are, and their main action, above their lists */
-#files .actions, #projects form { margin-bottom: 8px; }
-#files .actions { display: flex; gap: 8px; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+#projects form { margin-bottom: 8px; }
 
 /* a project's page: back to the projects, its name, in place, whom it is shared with, and below
    its chats, workflows, files and instructions */
@@ -519,8 +519,10 @@ main.empty #shortcuts { display: flex; }
 /* the gate of a device not yet paired: setting the box up, or asking to join it */
 #gate { display: none; }
 body.gated > nav, body.gated > main { display: none; }
-body.gated #gate { display: grid; flex: 1; place-items: center; min-height: 100vh; padding: 24px; }
-#join { width: min(420px, 100%); }
+body.gated #gate {
+  display: grid; flex: 1; grid-template-columns: minmax(0, 420px); place-content: center;
+  min-width: 0; min-height: 100vh; padding: 24px;
+}
 #join h1 { margin: 0 0 8px; font: var(--title); }
 #join p { color: var(--muted); line-height: 1.5; }
 #join .row { display: flex; gap: 8px; }
