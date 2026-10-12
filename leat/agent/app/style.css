@@ -3,10 +3,9 @@
      shadows; dark as the system is, or as the mode chosen in Settings says */
   color-scheme: light dark;
   --font: "Geist", "Inter", system-ui, sans-serif;
-  --font-display: "Geist", "Inter", system-ui, sans-serif; --display-weight: 600;
-  --font-mono: "Geist Mono", ui-monospace, monospace; --size: 16px;
+  --font-mono: "Geist Mono", ui-monospace, monospace;
+  --display: 600 1.875rem/1.3 var(--font); /* a page's title */
   --round: 6px; --round-large: 12px; /* controls and code; bubbles, the composer, round buttons */
-  --density: 1; /* the room around things */
   --page: light-dark(#fff, #0a0a0a); --side: light-dark(#fafafa, #000);
   --card: light-dark(#fff, #111); --bubble: light-dark(#f2f2f2, #1a1a1a);
   --line: light-dark(#e6e6e6, #262626); --text: light-dark(#0a0a0a, #ededed);
@@ -14,12 +13,12 @@
   --on-accent: light-dark(#fff, #0a0a0a); --error: light-dark(#d92d20, #ff6369);
   --keyword: light-dark(#7c3aed, #c4a1ff); --string: light-dark(#15803d, #86efac);
   --number: light-dark(#b45309, #fdba74);
-  --shadow: none;
 }
 :root[data-mode="light"] { color-scheme: light; }
 :root[data-mode="dark"] { color-scheme: dark; }
 * { box-sizing: border-box; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
-html { font-size: var(--size); }
+[hidden] { display: none !important; }
+html { font-size: 16px; }
 body {
   margin: 0; height: 100dvh; display: flex;
   background: var(--page); color: var(--text); font: 1rem/1.65 var(--font);
@@ -37,23 +36,23 @@ svg {
 }
 
 nav {
-  width: 272px; flex: none; display: flex; flex-direction: column; gap: 2px; padding: calc(12px * var(--density));
+  width: 272px; flex: none; display: flex; flex-direction: column; gap: 2px; padding: 12px;
   background: var(--side); border-right: 1px solid var(--line); font-size: 0.875rem;
 }
 body.menu nav { display: none; } /* on a narrow screen, the menu shows it instead */
 #new {
-  display: flex; gap: 10px; align-items: center; padding: calc(8px * var(--density)) 10px;
+  display: flex; gap: 10px; align-items: center; padding: 8px 10px;
   border-radius: var(--round);
 }
 #new:hover { background: var(--bubble); }
-#conversations { flex: 1; overflow-y: auto; margin-top: calc(12px * var(--density)); }
+#conversations { flex: 1; overflow-y: auto; margin-top: 12px; }
 /* the pages beside the conversations, at the sidebar's foot */
-.place { display: flex; gap: 10px; align-items: center; padding: calc(8px * var(--density)) 10px; border-radius: var(--round); }
+.place { display: flex; gap: 10px; align-items: center; padding: 8px 10px; border-radius: var(--round); }
 .place:hover, body.files #filed, body:is(.settings, .activity) #set, body:is(.projects, .project) #held {
   background: var(--bubble);
 }
 .conversation {
-  display: flex; align-items: center; gap: 8px; padding: calc(6px * var(--density)) 4px calc(6px * var(--density)) 10px;
+  display: flex; align-items: center; gap: 8px; padding: 6px 4px 6px 10px;
   border-radius: var(--round); cursor: pointer;
 }
 .conversation span { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
@@ -74,7 +73,7 @@ body.menu nav { display: none; } /* on a narrow screen, the menu shows it instea
 @keyframes pulse { from { opacity: 1; } to { opacity: 0.25; } }
 
 main { position: relative; flex: 1; display: flex; flex-direction: column; min-width: 0; }
-header { display: flex; align-items: center; gap: 8px; padding: calc(10px * var(--density)) 12px; }
+header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; }
 select {
   field-sizing: content; max-width: 60vw; padding: 6px 8px;
   border: none; border-radius: var(--round); background: none; font-weight: 600; cursor: pointer;
@@ -91,7 +90,6 @@ select {
   display: flex; gap: 12px; align-items: center; margin: 8px 16px 16px; padding: 10px 14px;
   border: 1px solid var(--error); border-radius: var(--round); font-size: 0.875rem;
 }
-#recovering[hidden] { display: none; }
 #recovering span { flex: 1; }
 #recovering button {
   padding: 4px 12px; border-radius: var(--round); background: var(--error); color: #fff; font-size: 0.875rem;
@@ -105,16 +103,15 @@ select {
 #crumb span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 #crumb svg { width: 16px; height: 16px; flex: none; }
 #crumb:hover { color: var(--text); background: var(--bubble); }
-#crumb[hidden] { display: none; }
 #status.error { color: var(--error); }
 #composer, #greeting { width: 100%; max-width: 784px; margin: 0 auto; padding: 0 24px; }
 /* the log scrolls at the window's edge, its column centered by its padding */
-#log { flex: 1; overflow-y: auto; padding: calc(16px * var(--density)) max(24px, calc(50% - 368px)); }
-#greeting { display: none; font: var(--display-weight) 1.875rem/1.3 var(--font-display); text-align: center; }
+#log { flex: 1; overflow-y: auto; padding: 16px max(24px, calc(50% - 368px)); }
+#greeting { display: none; font: var(--display); text-align: center; }
 main.empty { justify-content: center; padding-bottom: 12vh; }
 main.empty header { position: absolute; top: 0; }
 main.empty #log { display: none; }
-main.empty #greeting { display: block; margin-bottom: calc(28px * var(--density)); }
+main.empty #greeting { display: block; margin-bottom: 28px; }
 /* leat's mark, over the greeting and the gate's welcome, in the text's color */
 #greeting::before, #join h1::before {
   content: ""; display: block; width: 32px; height: 32px; margin: 0 auto 20px;
@@ -123,7 +120,7 @@ main.empty #greeting { display: block; margin-bottom: calc(28px * var(--density)
 #join h1::before { margin-left: 0; }
 
 /* a page, as the files', in place of a conversation */
-.page { display: none; flex: 1; overflow-y: auto; padding: calc(16px * var(--density)) max(24px, calc(50% - 368px)); }
+.page { display: none; flex: 1; overflow-y: auto; padding: 16px max(24px, calc(50% - 368px)); }
 body.files #files, body.settings #settings, body.projects #projects, body.project #project,
 body.activity #activity {
   display: block;
@@ -132,8 +129,8 @@ body:is(.files, .settings, .projects, .activity) :is(#log, #composer, #greeting)
 body.project :is(#log, #greeting) {
   display: none;
 }
-.page h1 { margin: calc(24px * var(--density)) 0 calc(8px * var(--density)); font: var(--display-weight) 1.875rem/1.3 var(--font-display); }
-.page > p { margin: 0 0 calc(24px * var(--density)); color: var(--muted); }
+.page h1 { margin: 24px 0 8px; font: var(--display); }
+.page > p { margin: 0 0 24px; color: var(--muted); }
 .page form { display: flex; gap: 8px; margin-bottom: 16px; }
 .page input {
   flex: 1; min-width: 0; padding: 10px 16px; border: 1px solid var(--line); border-radius: var(--round-large);
@@ -160,14 +157,10 @@ body.project :is(#log, #greeting) {
 .page details.history li button { padding: 4px 12px; border: 1px solid var(--line); border-radius: var(--round-large); font-size: 0.8125rem; color: var(--text); }
 /* a list of nothing yet: what its data-empty says, in the app's language */
 ul[data-empty]:empty::before { content: attr(data-empty); color: var(--muted); }
-:is(#listed, #chats, #kept):empty { padding: calc(12px * var(--density)) 4px; }
-.page h2 { margin: calc(28px * var(--density)) 0 4px; font-size: 0.875rem; color: var(--muted); font-weight: 600; }
-.page form select {
-  padding: 0 12px; border: 1px solid var(--line); border-radius: var(--round-large);
-  background: var(--card); font-weight: 400;
-}
+:is(#listed, #chats, #kept, #flows):empty { padding: 12px 4px; }
+.page h2 { margin: 28px 0 4px; font-size: 0.875rem; color: var(--muted); font-weight: 600; }
 .page li {
-  display: flex; align-items: center; gap: 12px; padding: calc(12px * var(--density)) 4px;
+  display: flex; align-items: center; gap: 12px; padding: 12px 4px;
   border-bottom: 1px solid var(--line);
 }
 .page li > :first-child { flex: 1; overflow-wrap: anywhere; }
@@ -180,15 +173,15 @@ ul[data-empty]:empty::before { content: attr(data-empty); color: var(--muted); }
 /* a project's page: back to the projects, its name, in place, whom it is shared with, and below
    its chats, files and instructions */
 .back {
-  display: inline-flex; align-items: center; gap: 2px; margin-top: calc(16px * var(--density));
+  display: inline-flex; align-items: center; gap: 2px; margin-top: 16px;
   color: var(--muted); font-size: 0.875rem; text-decoration: none;
 }
 .back:hover { color: var(--text); }
 .back svg { width: 16px; height: 16px; }
 .page #title {
-  display: block; width: 100%; margin: 4px 0 calc(8px * var(--density)); padding: 0;
+  display: block; width: 100%; margin: 4px 0 8px; padding: 0;
   border: none; border-radius: 0; background: none; outline: none;
-  font: var(--display-weight) 1.875rem/1.3 var(--font-display);
+  font: var(--display);
 }
 .page #title:focus { box-shadow: 0 1px 0 var(--line); }
 .page h2:has(button) { display: flex; justify-content: space-between; align-items: center; }
@@ -205,7 +198,6 @@ ul[data-empty]:empty::before { content: attr(data-empty); color: var(--muted); }
 /* whether a project's files are synced with a folder, and an admin's controls of it */
 #syncing { display: flex; align-items: center; gap: 12px; margin: 4px 0 6px; font-size: 0.8125rem; }
 #syncing:empty { display: none; }
-#syncing .meta { color: var(--muted); }
 #syncing .warning { color: var(--error); }
 #syncing button { padding: 2px 8px; border-radius: var(--round); background: none; color: var(--muted); }
 #syncing button:hover { background: var(--bubble); color: var(--text); }
@@ -215,21 +207,20 @@ ul[data-empty]:empty::before { content: attr(data-empty); color: var(--muted); }
   background: var(--card); font: inherit; color: var(--text); outline: none;
 }
 #discard {
-  margin: calc(40px * var(--density)) 0 calc(24px * var(--density)); padding: 6px 12px;
+  margin: 40px 0 24px; padding: 6px 12px;
   border: 1px solid var(--line); border-radius: var(--round); color: var(--error); font-size: 0.875rem;
 }
 #discard:hover { background: var(--bubble); }
-#discard[hidden] { display: none; }
 
-.message { margin-bottom: calc(28px * var(--density)); white-space: pre-wrap; overflow-wrap: anywhere; }
+.message { margin-bottom: 28px; white-space: pre-wrap; overflow-wrap: anywhere; }
 /* where the messages the model reads begin again, those before summarized */
 .turn.summarized::before {
-  content: var(--summarized); display: block; margin: 0 0 calc(28px * var(--density));
+  content: var(--summarized); display: block; margin: 0 0 28px;
   padding-top: 8px; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.75rem;
   text-align: center;
 }
 .user {
-  width: fit-content; max-width: 80%; margin-left: auto; padding: calc(10px * var(--density)) 16px;
+  width: fit-content; max-width: 80%; margin-left: auto; padding: 10px 16px;
   border-radius: var(--round-large); background: var(--bubble);
 }
 details summary { cursor: pointer; color: var(--muted); font-size: 0.875rem; }
@@ -238,7 +229,7 @@ details summary { cursor: pointer; color: var(--muted); font-size: 0.875rem; }
   margin-top: 8px; padding-left: 14px; border-left: 2px solid var(--line);
   color: var(--muted); font-size: 0.875rem;
 }
-.message :is(p, ul, ol) { margin: 0 0 calc(12px * var(--density)); }
+.message :is(p, ul, ol) { margin: 0 0 12px; }
 .message :is(ul, ol) { padding-left: 24px; }
 .message li + li, .message li > :is(ul, ol) { margin-top: 4px; }
 .message :is(h1, h2, h3, h4, h5, h6) { margin: 24px 0 8px; font-size: 1em; line-height: 1.4; }
@@ -352,7 +343,7 @@ pre code { padding: 0; background: none; }
 .bar button { padding: 2px 8px; border-radius: calc(var(--round) * 0.6); }
 .bar button:hover { background: var(--bubble); color: var(--text); }
 
-#composer { padding-bottom: calc(20px * var(--density)); }
+#composer { padding-bottom: 20px; }
 /* the person's workflows, below the composer of a new chat, each putting its request in it */
 #shortcuts { display: none; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 16px; }
 main.empty #shortcuts { display: flex; }
@@ -369,7 +360,7 @@ main.empty #shortcuts { display: flex; }
 }
 /* below a message the user sent, an action that saves it as a workflow */
 .actions {
-  display: flex; justify-content: flex-end; margin: calc(-22px * var(--density)) 0 calc(16px * var(--density));
+  display: flex; justify-content: flex-end; margin: -22px 0 16px;
   color: var(--muted); font-size: 0.8125rem;
 }
 .actions > button, .actions form button { padding: 2px 8px; border-radius: var(--round); color: var(--muted); }
@@ -389,11 +380,10 @@ main.empty #shortcuts { display: flex; }
   color: var(--text); font-size: 1rem; text-align: left;
 }
 .page li .use .meta { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
-#flows:empty { padding: calc(12px * var(--density)) 4px; }
 #flows select, #flows input { flex: none; padding: 4px 8px; border: 1px solid var(--line); border-radius: var(--round-large); background: var(--card); color: inherit; font: inherit; font-size: 0.8125rem; }
 #composer .box {
-  padding: calc(8px * var(--density)); background: var(--card); border: 1px solid var(--line);
-  border-radius: var(--round-large); box-shadow: var(--shadow);
+  padding: 8px; background: var(--card); border: 1px solid var(--line);
+  border-radius: var(--round-large);
 }
 #composer .row { display: flex; align-items: flex-end; gap: 8px; }
 #attach { color: var(--muted); border-radius: var(--round-large); padding: 10px; }
@@ -423,13 +413,12 @@ main.empty #shortcuts { display: flex; }
   display: flex; gap: 4px; align-items: center; height: 38px; padding: 0 8px 0 10px;
   border-radius: var(--round-large); color: var(--muted); font-size: 0.875rem; cursor: pointer;
 }
-#reasoning[hidden] { display: none; }
 #reasoning:hover { background: var(--bubble); }
 #reasoning:has(:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
 #reasoning.on { color: var(--text); }
 #reasoning svg { width: 16px; height: 16px; flex: none; }
 #reasoning svg.chevron { width: 14px; height: 14px; }
-#effort, #effort:hover {
+#effort {
   appearance: none; padding: 0 2px 0 0; border: none; background: none; color: inherit;
   font: inherit; line-height: 1; cursor: pointer; outline: none;
 }
@@ -457,10 +446,9 @@ main.empty #shortcuts { display: flex; }
 body.gated > nav, body.gated > main { display: none; }
 body.gated #gate { display: grid; flex: 1; place-items: center; min-height: 100vh; padding: 24px; }
 #join { width: min(420px, 100%); }
-#join h1 { margin: 0 0 8px; font: var(--display-weight) 1.875rem/1.3 var(--font-display); }
+#join h1 { margin: 0 0 8px; font: var(--display); }
 #join p { color: var(--muted); line-height: 1.5; }
 #join .row { display: flex; gap: 8px; }
-#join .row[hidden] { display: none; }
 #join input {
   flex: 1; padding: 10px 16px; border: 1px solid var(--line); border-radius: var(--round-large);
   background: var(--card); font: inherit; color: inherit;
@@ -470,7 +458,7 @@ body.gated #gate { display: grid; flex: 1; place-items: center; min-height: 100v
   white-space: nowrap;
 }
 #code b { display: block; margin-top: 8px; font-size: 2rem; letter-spacing: 4px; color: var(--text); }
-#join .error { color: var(--error, #b3261e); }
+#join .error, #network .error { color: var(--error); }
 /* the box set up by its first person, a step at a time */
 #join > input { display: block; width: 100%; margin: 8px 0 0; }
 #join > input.code { text-transform: uppercase; letter-spacing: 2px; font-family: var(--font-mono); }
@@ -481,10 +469,9 @@ body.gated #gate { display: grid; flex: 1; place-items: center; min-height: 100v
 #join .actions .steps { flex: 1; margin: 0; color: var(--muted); font-size: 0.8125rem; }
 #join .actions button.previous { background: none; color: var(--muted); }
 /* the box's people and devices: each person's own, and an admin's to manage */
-#accounts h3 { margin: 20px 0 0; font-size: 0.9375rem; font-weight: 600; }
+#settings h3 { margin: 20px 0 0; font-size: 0.9375rem; font-weight: 600; }
 #accounts > p { margin: 8px 0 0; }
-#accounts > p.meta { margin-top: 12px; white-space: normal; }
-#accounts ul { margin: 0; padding: 0; list-style: none; }
+#accounts > p.meta { margin-top: 12px; }
 #accounts li button { font-size: 0.8125rem; }
 #accounts > p button { padding: 0 8px; color: var(--muted); font-size: 0.8125rem; }
 #accounts > p button:hover, #accounts li button:hover { color: var(--text); }
@@ -492,9 +479,7 @@ body.gated #gate { display: grid; flex: 1; place-items: center; min-height: 100v
 #accounts .people li li { padding: 2px 0; border: none; font-size: 0.875rem; }
 #accounts .people li li > div { flex-direction: row; gap: 8px; align-items: baseline; }
 #accounts .people li li .meta { font-size: 0.75rem; }
-#accounts select[hidden] { display: none; }
 #accounts li > div { display: flex; flex-direction: column; gap: 2px; }
-#accounts h3 button { font-size: 0.8125rem; color: var(--muted); }
 #accounts .meta b { color: var(--text); letter-spacing: 1px; }
 #accounts select { border: 1px solid var(--line); border-radius: var(--round); background: var(--card); }
 #accounts li :is(button.allow, select) { visibility: visible; }
@@ -512,24 +497,15 @@ body.gated #gate { display: grid; flex: 1; place-items: center; min-height: 100v
 #activity li { font-size: 0.9375rem; }
 #older { margin: 16px 0 24px; padding: 6px 14px; border: 1px solid var(--line); border-radius: var(--round); }
 #older:hover { background: var(--bubble); }
-#older[hidden] { display: none; }
-#overview[hidden] { display: none; }
 #room { margin: 4px 0 4px; font-size: 0.875rem; white-space: normal; }
-#room.meta { color: var(--muted); }
 #room.warning { color: var(--error); }
 /* the box, and whether Leat may reach the internet, an admin's to choose */
-:is(#box, #internet)[hidden] { display: none; }
 :is(#box, #internet) .about { margin: 4px 0 12px; color: var(--muted); font-size: 0.875rem; }
-#office {
+#office, #zone {
   display: block; width: min(360px, 100%); margin-top: 8px; padding: 8px 12px; border: 1px solid var(--line);
   border-radius: var(--round); background: var(--card); font: inherit; color: inherit;
 }
 #office:focus { border-color: var(--muted); outline: none; }
-#zone {
-  display: block; width: min(360px, 100%); margin-top: 8px; padding: 8px 12px; border: 1px solid var(--line);
-  border-radius: var(--round); background: var(--card); font: inherit; color: inherit;
-}
-#box h3 { margin: 20px 0 0; font-size: 0.9375rem; font-weight: 600; }
 #power button, #software button { padding: 6px 14px; border: 1px solid var(--line); border-radius: var(--round); font-size: 0.875rem; }
 #power { display: flex; gap: 8px; margin-top: 8px; }
 #software > p { margin: 8px 0 0; }
@@ -537,16 +513,16 @@ body.gated #gate { display: grid; flex: 1; place-items: center; min-height: 100v
 #software a.diagnostics { margin-left: 12px; color: var(--muted); font-size: 0.875rem; }
 #power button:hover { background: var(--bubble); }
 #power button.danger { margin-left: auto; border-color: var(--error); color: var(--error); }
-/* a choice of a few, as the mode Leat's look is in, and whom a project is shared with */
-#modes, .choice {
+/* a choice of a few, as the mode Leat's look is in, the internet's, or whom a project is shared with */
+.choice {
   display: inline-flex; gap: 2px; margin: 8px 0; padding: 3px;
   border: 1px solid var(--line); border-radius: var(--round); background: var(--card);
 }
-:is(#modes, .choice) button {
+.choice button {
   padding: 4px 14px; border-radius: calc(var(--round) * 0.7); color: var(--muted);
   font-size: 0.875rem;
 }
-:is(#modes, .choice) button.on { background: var(--bubble); color: var(--text); }
+.choice button.on { background: var(--bubble); color: var(--text); }
 .choice button:disabled { opacity: 1; }
 .choice button:disabled:not(.on) { opacity: 0.5; }
 /* the people a project is shared with, each chosen or not */
