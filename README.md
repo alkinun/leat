@@ -147,6 +147,8 @@ Language: Leat speaks German or English, the app, the agent's errors and what th
 
 Internet: the owner turns it off in Settings, and the model is offered no tool that reaches it, searching or reading pages, and told so, from each turn begun then on: nothing Leat does leaves the office. On, what it searches for leaves through the SearXNG; the files never do, and the model is told to search for the general question, never a name or a detail of the user's work. A query that names a client all the same is not searched, the model told why and the app saying what it kept out: a name the conversation's files give as offices write one, after a title or a role, as "Herr Hofmann" or "Mandantin Yılmaz", or before a company's form, as "Hofmann Textil GmbH", of their passages that hold the query's words, or that its person wrote; the box's people's names and its office's; and any e-mail address or IBAN.
 
+Data protection: `docs/datenschutz/` holds, in German, the papers an office's data-protection officer or chamber asks for: what leaves the box and what never does, the box's technical and organisational measures (Art. 32 GDPR), a data-protection impact assessment filled in for Leat (Art. 35), and notes on § 203 StGB, § 43e BRAO and the AI Act's AI literacy (Art. 4). Drafts, to be reviewed by a lawyer before they go to customers, and kept true to what the box does as it changes.
+
 Look: the app's is Leat's own, black on white and white on black, sharp, with lines rather than shadows, light, dark or as the system is, as Settings chooses on each device.
 
 ## Measurements
