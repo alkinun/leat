@@ -542,8 +542,11 @@ body.gated #gate { display: grid; flex: 1; place-items: center; min-height: 100v
   }
   body.menu > nav { display: flex; }
   #log, #composer, #greeting, .page { padding-left: 16px; padding-right: 16px; }
+  header { flex-wrap: wrap; }
   #model { max-width: 55vw; }
-  #crumb { max-width: 30vw; }
+  #crumb { max-width: 40vw; }
+  #status { order: 1; flex-basis: 100%; padding: 0 10px; } /* a line of its own, below */
+  #status:empty { display: none; }
   .page li { flex-wrap: wrap; }
   #flows li .use { flex-basis: 100%; } /* its schedule below its name */
 }

@@ -1194,6 +1194,8 @@ def _did(
     did: list[tuple[str, str | None]] = []
     if name == "read" and info.get("file") and not str(info["file"]).startswith("skills/"):
         did.append(("read", info["file"]))
+    elif name == "read" and info.get("folder") is not None:  # of the space's top, of no name
+        did.append(("listed the files", None if info["folder"] in (".", "") else info["folder"]))
     elif name in ("fill_template", "suggest_edits"):
         did.append(("read", arguments.get("path")))
     elif name == "make_document" and arguments.get("template"):

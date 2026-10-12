@@ -612,6 +612,7 @@ def test_activity(server, agent, engine, tmp_path):
     _, body = request(f"{server}/api/projects", "POST", {"name": "Yılmaz Ltd"})
     project = json.loads(body)["id"]
     call(f"{server}/api/projects/{project}/files/Lease.txt", "PUT", b"Rent: 900.")
+    engine.replies.put([{"tool_calls": [calling("read", {"path": "."}, "call_0")]}])
     engine.replies.put([{"tool_calls": [calling("read", {"path": "Lease.txt"})]}])
     engine.replies.put([{"content": "Rent is 900."}])
     with agent.events.watch() as events:
@@ -627,6 +628,7 @@ def test_activity(server, agent, engine, tmp_path):
         ("Alkın", 0, "turned the internet off", None, None),
         ("Alkın", 0, "shared the project with everyone", "Yılmaz Ltd", None),
         ("Alkın", 1, "read", "Yılmaz Ltd", "Lease.txt"),
+        ("Alkın", 1, "listed the files", "Yılmaz Ltd", None),  # of its top, not "read ."
         ("Alkın", 0, "began a chat", "Yılmaz Ltd", None),
         ("Alkın", 0, "uploaded", "Yılmaz Ltd", "Lease.txt"),
         ("Alkın", 0, "made the project", "Yılmaz Ltd", None),

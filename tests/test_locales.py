@@ -187,7 +187,8 @@ def _actions() -> set[str]:
         "shared the project with everyone",
         "stopped sharing the project with everyone",
     }
-    did = {"read", "searched the files", "searched the web", "read a page of", "made"}
+    did = {"read", "listed the files", "searched the files", "searched the web", "read a page of",
+           "made"}  # fmt: skip
     drive = {f"{done} by the network drive" for done in (
         "uploaded", "changed", "deleted", "moved", "copied", "made the project",
         "renamed the project")}  # fmt: skip

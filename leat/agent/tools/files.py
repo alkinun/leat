@@ -92,7 +92,7 @@ def read(
     if file.is_dir():  # each file with its size and when it changed, as a version's tell
         shown = sorted(p for p in file.iterdir() if not p.name.startswith("."))
         listed = "\n".join(f"{p.name}/" if p.is_dir() else _listed(p) for p in shown)
-        return Result(listed or "The folder is empty.", {"file": path})
+        return Result(listed or "The folder is empty.", {"folder": path})
     if not file.is_file():
         raise workspace.missing(path)
     if picture(path):  # which the agent shows the model, if it sees images

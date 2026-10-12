@@ -1540,6 +1540,7 @@ function render() {
 
 function renderList() {
   renderProject(); // its chats
+  $("chatsHeading").hidden = !conversations.length;
   $("conversations").replaceChildren(...conversations.map((c) => {
     const item = element("div", "conversation");
     item.classList.toggle("shown", c.id === shown?.id);
@@ -1551,7 +1552,10 @@ function renderList() {
       event.stopPropagation();
       remove(c);
     };
-    item.append(element("span", "", c.title), deleteButton);
+    const about = element("div");
+    about.append(element("span", "", c.title));
+    if (c.project) about.append(element("span", "in", project(c.project)?.name ?? ""));
+    item.append(about, deleteButton);
     item.onclick = () => open(c.id);
     return item;
   }));
@@ -1560,8 +1564,17 @@ function renderList() {
 function renderModels() {
   const none = new Option(models.length ? t("Choose a model") : t("No models"), "");
   none.disabled = true;
-  $("model").replaceChildren(none, ...models.map((m) => new Option(m.id)));
+  $("model").replaceChildren(none, ...models.map((m) => Object.assign(new Option(modelName(m.id), m.id), { title: m.id })));
   renderEffort();
+}
+
+// a model's id as people read it: "Qwen_Qwen3.6-35B-A3B-Q4_K_M" as "Qwen3.6 35B A3B", as the box's
+// screen names it too
+function modelName(id) {
+  const name = id.split("-")[0].includes("_") ? id.slice(id.indexOf("_") + 1) : id;
+  const parts = name.split("-");
+  while (parts.length && (/^[QF].*\d/.test(parts.at(-1)) || ["MXFP4", "BF16", "it", "Instruct"].includes(parts.at(-1)))) parts.pop();
+  return parts.join(" ").replaceAll("_", " ") || id;
 }
 
 // the efforts the model reasons at, as the composer names them: of two, the first none, off and on
@@ -1572,8 +1585,8 @@ const EFFORTS = { none: "Off", minimal: "Minimal", low: "Low", medium: "Medium",
 function renderEffort() {
   const model = models.find((m) => m.id === ready()), efforts = model?.reasoning?.efforts ?? [];
   const toggle = efforts.length === 2 && efforts[0] === "none";
-  $("effort").replaceChildren(...efforts.map((e) =>
-    new Option(toggle ? (e === "none" ? t("Off") : t("On")) : (EFFORTS[e] ? t(EFFORTS[e]) : e), e)));
+  $("effort").replaceChildren(...efforts.map((e) => new Option(e === "none" ? t("Thinking off")
+    : toggle ? t("Thinking on") : t("Thinking: {level}", { level: EFFORTS[e] ? t(EFFORTS[e]) : e }), e)));
   $("effort").value = chosen(model) ?? "";
   $("reasoning").hidden = efforts.length < 2;
   $("reasoning").classList.toggle("on", (chosen(model) ?? "none") !== "none");
@@ -1670,7 +1683,8 @@ function fold(start, indexes, unanswered) {
 
 // what each tool's calls did, in a few words: one call, and n
 const DID = {
-  ask_files: ["read the files", "read the files {n} times"],
+  ask_files: ["went through the files", "went through the files {n} times"],
+  list: ["listed the files", "listed the files {n} times"],
   make_document: ["made a document", "made {n} documents"],
   compare_documents: ["compared documents", "compared documents {n} times"],
   fill_template: ["filled a template", "filled {n} templates"],
@@ -1688,8 +1702,9 @@ const DID = {
 // a search not made or a page not read, of what must not leave the box, but that names were kept
 function summary(all) {
   const calls = all.filter((m) => !m.info?.error && !m.info?.kept);
-  const parts = [...new Set(calls.map((m) => m.name))].map((name) => {
-    const n = calls.filter((m) => m.name === name).length;
+  const kind = (m) => (m.name === "read" && listing(m.info?.arguments?.path) ? "list" : m.name);
+  const parts = [...new Set(calls.map(kind))].map((name) => {
+    const n = calls.filter((m) => kind(m) === name).length;
     const [one, many] = own(DID, name) ?? ["used {name}", "used {name}"];
     return n > 1 ? t(many, { n, name }) : t(one, { name });
   });
@@ -1714,8 +1729,7 @@ function controls() {
   $("crumb").hidden = !shown || !held; // the project the conversation is in
   $("crumb").lastElementChild.textContent = held?.name ?? "";
   $("crumb").href = held ? `/projects/${held.id}` : "";
-  $("greeting").textContent = unreachable ? t("The engine is not reachable")
-    : loading ? t("Loading…") : !model ? t("Choose a model") : t("How can I help?");
+  $("greeting").textContent = loading ? t("Loading…") : !model && !unreachable ? t("Choose a model") : t("How can I help?");
   $("send").classList.toggle("stop", running);
   $("send").title = running ? t("Stop") : t("Send");
   const uploading = attached.some((a) => a.uploading);
@@ -1753,11 +1767,12 @@ function message(m, index) {
     else markdown(text, m.content ?? "");
     item.querySelectorAll(":not(.code) > pre").forEach(codeBar); // the blocks new since
     cite(item);
+    foldCitations(text);
     if (answer) checkQuotes(text, m.info?.quotes);
     if (answer) pages.replaceChildren(...chips(sources(m)));
     const names = m.role === "user" ? (m.info?.files ?? []) : answer ? made(m) : [];
     cards.replaceChildren(...names.map(card));
-    if (m.role !== "user") note.textContent = answer ? describe(m.info ?? {}) : "";
+    if (m.role !== "user") note.replaceChildren(...(answer ? describe(m.info ?? {}) : []));
     const { cached, read } = m.info ?? {};
     note.title = read === undefined ? "" : t("the prompt's tokens: {cached} cached, {read} read", { cached, read });
   };
@@ -1801,8 +1816,9 @@ const LINES = {
     t("Couldn't search the files for “{query}”", a)],
   fetch: (a, i) => [t("Reading {name}…", { name: host(a.url) }), i.kept ? t("Kept {names} out of a page's address", { names: i.kept.join(", ") })
     : t("Read {name}", { name: i.title || host(i.url ?? a.url) }), t("Couldn't read {name}", { name: host(a.url) })],
-  read: (a) => [t("Reading {name}…", { name: named(a.path) }), t("Read {name}", { name: named(a.path) }),
-    t("Couldn't read {name}", { name: named(a.path) })],
+  read: (a) => listing(a.path) ? [t("Listing the files…"), t("Listed the files"), t("Couldn't list the files")]
+    : [t("Reading {name}…", { name: named(a.path) }), t("Read {name}", { name: named(a.path) }),
+      t("Couldn't read {name}", { name: named(a.path) })],
   write: (a) => [t("Writing {path}…", a), t("Wrote {path}", a), t("Couldn't write {path}", a)],
   make_document: (a, i) => [t("Making {name}…", a), t("Made {name}", { name: i.files?.[0] ?? a.name }), t("Couldn't make {name}", a)],
   compare_documents: (a, i) => [t("Comparing {original} and {revised}…", a),
@@ -1862,6 +1878,11 @@ function what(m) {
   }
   const text = m.content.length > 600 ? `${m.content.slice(0, 600)}…` : m.content;
   return [element("p", "", text)];
+}
+
+// whether a path the model read is the workspace's top, which it lists
+function listing(path) {
+  return [".", "./", "", "/"].includes(path ?? "");
 }
 
 // a file's name, or a skill's, as people say it
@@ -1952,6 +1973,27 @@ function cite(element) {
   }
 }
 
+// a run of many citations side by side, as [9][10]…[20]: the first FOLDED, then a button that
+// shows the rest
+const FOLDED = 2;
+function foldCitations(root) {
+  const runs = [];
+  for (const sup of root.querySelectorAll("sup.cite")) {
+    let before = sup.previousSibling;
+    while (before?.nodeType === Node.TEXT_NODE && !before.data.trim()) before = before.previousSibling;
+    if (before?.matches?.("sup.cite") && runs.at(-1)?.includes(before)) runs.at(-1).push(sup);
+    else runs.push([sup]);
+  }
+  for (const run of runs.filter((r) => r.length > FOLDED + 1)) {
+    const rest = run.slice(FOLDED), more = element("sup", "cite"), button = element("button", "", `+${rest.length}`);
+    button.title = t("{n} more sources", { n: rest.length });
+    button.onclick = () => (rest.forEach((sup) => (sup.hidden = false)), more.remove());
+    rest.forEach((sup) => (sup.hidden = true));
+    more.append(button);
+    run[FOLDED - 1].after(more);
+  }
+}
+
 // marks a reply's quotes as Leat checked them against the sources they cite: each found there word
 // for word, or flagged, not found, for the user to check
 function checkQuotes(root, checked) {
@@ -1976,7 +2018,7 @@ function checkQuotes(root, checked) {
     // that holds it, marked whole
     const words = (text) => text.replace(/[\s"“”„«»*]+/g, " ").trim();
     const holder = !marked && [...root.querySelectorAll("blockquote, p, li")]
-      .find((e) => !e.closest(".quote") && words(e.textContent).includes(words(q.quote)));
+      .find((e) => !e.closest(".quote") && !e.querySelector(".quote") && words(e.textContent).includes(words(q.quote)));
     if (holder) Object.assign(holder, { title }).classList.add("quote", kind);
   }
 }
@@ -2085,15 +2127,16 @@ function icon(name) {
   return svg;
 }
 
-// what a reply's info tells people: its model, its tokens, how fast they came, and whether it
-// was stopped, or cut off
+// what a reply's info tells people: whether it was stopped, or cut off, always; and its model,
+// its tokens and how fast they came, as it is pointed at
 function describe({ model, tokens, rate, first, stopped, cut }) {
   const number = (n) => n.toLocaleString(locale(), { minimumFractionDigits: 1, maximumFractionDigits: 1 });
   let speed = tokens ? count(tokens, "1 token", "{n} tokens") : "";
   if (rate) speed += `, ${number(rate)} tok/s`;
   if (speed && first !== undefined) speed += `, ${t("the first after {s} s", { s: number(first) })}`;
-  const out = cut && t("cut off: the conversation is out of room");
-  return [model, speed, stopped && t("stopped"), out].filter(Boolean).join(" · ");
+  const said = [stopped && t("stopped"), cut && t("cut off: the conversation is out of room")].filter(Boolean).join(" · ");
+  const stats = [model && modelName(model), speed].filter(Boolean).join(" · ");
+  return [said && element("span", "", said), stats && element("span", "stats", said ? ` · ${stats}` : stats)].filter(Boolean);
 }
 
 // a count in words, of `one` if it is one, else of `many`, its {n} the count
