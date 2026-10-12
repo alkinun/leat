@@ -541,6 +541,8 @@ body.gated #gate { display: grid; flex: 1; place-items: center; min-height: 100v
 }
 #wifi button, #power button, #software button { padding: 6px 14px; border: 1px solid var(--line); border-radius: var(--round); font-size: 0.875rem; }
 #power { display: flex; gap: 8px; margin-top: 8px; }
+#software > p { margin: 8px 0 0; }
+#software > p.about { margin: 2px 0 8px; }
 #power button:hover { background: var(--bubble); }
 #power button.danger { margin-left: auto; border-color: var(--error); color: var(--error); }
 #wifi form.join button { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }

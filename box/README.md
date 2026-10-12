@@ -56,7 +56,7 @@ makes the last two, of the rest of its disk.
 | ESP | 512 MB | systemd-boot, and a UKI of each system, `leat_<version>.efi` |
 | `leat_<version>` | 8 GB | the system, A, of the image, replaced whole by an update |
 | `_empty` | 8 GB | the system, B, which an update writes, the two taking turns |
-| `leat-identity` | 64 MB | `/etc/leat`: the box's name, registration and certificate account |
+| `leat-identity` | 64 MB | `/etc/leat`: the box's name, registration, and its certificate and account, Caddy's |
 | `leat-data` | the rest | `/var`: the office's data, and the system's own state, Wi-Fi, certificates, journal |
 
 The last two are encrypted, sealed to the TPM by a signed PCR policy: they unlock for a UKI of
