@@ -138,7 +138,8 @@ def _page() -> set[str]:
 
     class Page(HTMLParser):
         def handle_starttag(self, tag, attrs):
-            found.update(v for k, v in attrs if k in ("placeholder", "title", "aria-label") and v)
+            named = ("placeholder", "title", "aria-label", "data-empty")
+            found.update(v for k, v in attrs if k in named and v)
 
         def handle_data(self, data):
             if data.strip() and self.lasttag not in ("script", "style", "title"):

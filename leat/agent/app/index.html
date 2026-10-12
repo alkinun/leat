@@ -102,7 +102,7 @@
     <h1>Files</h1>
     <p>Your own files, which Leat reads and makes, and only you see. Attach them to a message, or drop files and folders here; a zip is unpacked into a folder. A project's files are on its page.</p>
     <form><button type="button" id="upload">Upload files</button><button type="button" id="uploadFolder" class="quiet">Upload a folder</button></form>
-    <ul id="workspace"></ul>
+    <ul id="workspace" data-empty="Nothing yet."></ul>
     <details id="workspaceHistory" class="history"><summary>Earlier versions</summary><ul></ul></details>
   </section>
   <section id="projects" class="page">
@@ -112,7 +112,7 @@
       <input id="naming" placeholder="A new project's name" maxlength="80" autocomplete="off">
       <button>Create</button>
     </form>
-    <ul id="listed"></ul>
+    <ul id="listed" data-empty="No projects yet: name one above."></ul>
   </section>
   <section id="activity" class="page">
     <a id="toSettings" class="back" href="/settings">
@@ -131,12 +131,12 @@
     <div id="sharing" class="choice"></div>
     <div id="members"></div>
     <h2>Chats</h2>
-    <ul id="chats"></ul>
+    <ul id="chats" data-empty="No chats yet: write below to begin one."></ul>
     <h2>Workflows</h2>
-    <ul id="flows"></ul>
+    <ul id="flows" data-empty="None yet. Save a request you sent in a chat here with Save as workflow, below it."></ul>
     <h2>Files <span><button id="adding" type="button">Upload files</button><button id="addingFolder" type="button">Upload a folder</button></span></h2>
     <div id="syncing"></div>
-    <ul id="kept"></ul>
+    <ul id="kept" data-empty="No files yet: upload them, or drop them here."></ul>
     <details id="keptHistory" class="history"><summary>Earlier versions</summary><ul></ul></details>
     <h2>Instructions</h2>
     <textarea id="instructions" rows="4" placeholder="What Leat should know and do in this project: who the client is, what to watch for, how to write."></textarea>

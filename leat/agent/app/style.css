@@ -136,7 +136,7 @@ body.project :is(#log, #greeting) {
 .page > p { margin: 0 0 calc(24px * var(--density)); color: var(--muted); }
 .page form { display: flex; gap: 8px; margin-bottom: 16px; }
 .page input {
-  flex: 1; padding: 10px 16px; border: 1px solid var(--line); border-radius: var(--round-large);
+  flex: 1; min-width: 0; padding: 10px 16px; border: 1px solid var(--line); border-radius: var(--round-large);
   background: var(--card); font: inherit; color: inherit;
 }
 .page form button {
@@ -158,10 +158,8 @@ body.project :is(#log, #greeting) {
 /* a space's files' earlier versions, under its files */
 .page details.history { margin-top: 16px; }
 .page details.history li button { padding: 4px 12px; border: 1px solid var(--line); border-radius: var(--round-large); font-size: 0.8125rem; color: var(--text); }
-#workspace:empty::before { content: "Nothing yet."; color: var(--muted); }
-#listed:empty::before { content: "No projects yet: name one above."; color: var(--muted); }
-#chats:empty::before { content: "No chats yet: write below to begin one."; color: var(--muted); }
-#kept:empty::before { content: "No files yet: upload them, or drop them here."; color: var(--muted); }
+/* a list of nothing yet: what its data-empty says, in the app's language */
+ul[data-empty]:empty::before { content: attr(data-empty); color: var(--muted); }
 :is(#listed, #chats, #kept):empty { padding: calc(12px * var(--density)) 4px; }
 .page h2 { margin: calc(28px * var(--density)) 0 4px; font-size: 0.875rem; color: var(--muted); font-weight: 600; }
 .page form select {
@@ -176,6 +174,7 @@ body.project :is(#log, #greeting) {
 .page li a { color: var(--text); text-decoration: none; }
 .page li a:hover { text-decoration: underline; }
 .page .meta { color: var(--muted); font-size: 0.8125rem; white-space: nowrap; }
+.page p.meta { white-space: normal; } /* a sentence, as a phone's width wraps it */
 .page .meta.failed { color: var(--error); cursor: help; }
 .page li button { padding: 0 8px; color: var(--muted); font-size: 1.125rem; }
 /* a project's page: back to the projects, its name, in place, whom it is shared with, and below
@@ -225,7 +224,7 @@ body.project :is(#log, #greeting) {
 .message { margin-bottom: calc(28px * var(--density)); white-space: pre-wrap; overflow-wrap: anywhere; }
 /* where the messages the model reads begin again, those before summarized */
 .turn.summarized::before {
-  content: "Earlier messages were summarized to make room"; display: block; margin: 0 0 calc(28px * var(--density));
+  content: var(--summarized); display: block; margin: 0 0 calc(28px * var(--density));
   padding-top: 8px; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.75rem;
   text-align: center;
 }
@@ -390,7 +389,6 @@ main.empty #shortcuts { display: flex; }
   color: var(--text); font-size: 1rem; text-align: left;
 }
 .page li .use .meta { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
-#flows:empty::before { content: "None yet. Save a request you sent in a chat here with Save as workflow, below it."; color: var(--muted); }
 #flows:empty { padding: calc(12px * var(--density)) 4px; }
 #flows select, #flows input { flex: none; padding: 4px 8px; border: 1px solid var(--line); border-radius: var(--round-large); background: var(--card); color: inherit; font: inherit; font-size: 0.8125rem; }
 #composer .box {
@@ -516,7 +514,7 @@ body.gated #gate { display: grid; flex: 1; place-items: center; min-height: 100v
 #older:hover { background: var(--bubble); }
 #older[hidden] { display: none; }
 #overview[hidden] { display: none; }
-#room { margin: 4px 0 4px; font-size: 0.875rem; }
+#room { margin: 4px 0 4px; font-size: 0.875rem; white-space: normal; }
 #room.meta { color: var(--muted); }
 #room.warning { color: var(--error); }
 /* the box, and whether Leat may reach the internet, an admin's to choose */

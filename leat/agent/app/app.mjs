@@ -169,11 +169,13 @@ async function speak(language) {
     const text = node.data.trim();
     if (text) node.data = node.data.replace(text, t(text));
   }
-  for (const e of document.querySelectorAll("[placeholder], [title], [aria-label]")) {
-    for (const name of ["placeholder", "title", "aria-label"]) {
+  for (const e of document.querySelectorAll("[placeholder], [title], [aria-label], [data-empty]")) {
+    for (const name of ["placeholder", "title", "aria-label", "data-empty"]) {
       if (e.hasAttribute(name)) e.setAttribute(name, t(e.getAttribute(name)));
     }
   }
+  // and the style's own words, as of where the model's reading begins again
+  document.documentElement.style.setProperty("--summarized", JSON.stringify(t("Earlier messages were summarized to make room")));
 }
 
 // a text in the app's language, as its words have it, its values put in its places, as {name}
@@ -465,7 +467,7 @@ function handle(event) {
     case "models":
       models = event.models;
       loading = models.find((m) => m.status === "loading")?.id ?? null;
-      if (event.error) status(event.error, true);
+      if (event.error) status(t("The engine is not reachable"), true, event.error); // its why, on hover
       else if (unreachable) status(""); // back
       unreachable = event.error ?? null;
       renderModels();
@@ -1760,9 +1762,11 @@ function controls() {
   $("model").disabled = !me?.admin || loading !== null || conversations.some((c) => c.running);
 }
 
-function status(text, error = false) {
+// says a line in the header, an error's in red, and what more there is to it on hover, if any
+function status(text, error = false, more = "") {
   $("status").textContent = text;
   $("status").className = error ? "error" : "";
+  $("status").title = more;
 }
 
 // a message's element, whose update() shows it again as it changes: a tool's is a line of the
