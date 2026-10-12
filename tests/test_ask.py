@@ -64,6 +64,7 @@ def test_ask(engine, space):
     assert asked[1]["content"].startswith("The question: Each invoice's date and total?\n\n"
                                           "The file, a.txt:\n\nInvoice 1")  # fmt: skip
     assert engine.requests[0]["user"] == "person-1"
+    assert engine.requests[0]["service_tier"] == "flex"  # each file's reading, background work
     assert [r["file"] for r in result.info["results"]] == ["a.txt", "b.txt"]
     assert result.info["results"][0] == {"n": 1, "url": "file:a.txt", "title": "a.txt",
                                          "file": "a.txt"}  # fmt: skip

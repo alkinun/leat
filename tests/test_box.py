@@ -646,6 +646,8 @@ def test_watch(tmp_path, monkeypatch):
     warned = seen.look()
     assert [w["key"] for w in warned] == ["internet", "certificate"]
     assert warned[1]["title"] == "Leat's certificate expires in 14 days"
+    found["left"] = 1
+    assert seen.look()[1]["title"] == "Leat's certificate expires within a day"
     found["left"] = 0
     assert seen.look()[1]["title"] == "Leat's certificate has expired"
     found.update(reached=True, left=89)  # back, and the name still unfound: from now
@@ -685,6 +687,9 @@ def test_watch_days_left(tmp_path, monkeypatch):
     trusted, default = tmp_path / "cert.pem", ssl.create_default_context
     monkeypatch.setattr(watch.ssl, "create_default_context", lambda: default(cafile=trusted))
     assert serving("-days", "10") == 9
+    soon = datetime.datetime.now(datetime.UTC) + datetime.timedelta(hours=3)
+    assert serving("-not_before", "20260101000000Z", "-not_after",
+                   soon.strftime("%Y%m%d%H%M%SZ")) == 1  # its last day: valid still  # fmt: skip
     day = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=1)
     assert serving("-not_before", "20260101000000Z", "-not_after",
                    day.strftime("%Y%m%d%H%M%SZ")) == 0  # fmt: skip
@@ -781,7 +786,11 @@ def test_hotspot(tmp_path, monkeypatch):
 
     state = tmp_path / "state.json"
     spot = hotspot.Hotspot("Leat-7J32", ask, lambda: online[0], lambda: now[0], state)
+    with pytest.raises(ValueError, match="closed"):  # no network to choose while it is closed
+        spot.join("Office", "kq7x-2mpa")
+    started[0] = True  # of the service before it restarted: closed, to be opened anew
     spot.look()
+    assert asked[-1] == {"hotspot": "stop"} and not started[0]
     now[0] = hotspot.AFTER - 1
     spot.look()
     assert spot.passphrase is None and not state.exists()
@@ -793,10 +802,10 @@ def test_hotspot(tmp_path, monkeypatch):
                                              "failed": None}  # fmt: skip
     spot.look()
     assert spot.networks == found  # of its first scan
-    started[0] = False  # iwd restarted, its access point gone: opened again
+    started[0] = False  # iwd restarted, its access point gone: opened again, of the same passphrase
     was = spot.passphrase
     spot.look()
-    assert started[0] and spot.passphrase != was
+    assert started[0] and spot.passphrase == was
     spot.join("Office", "wrong-passphrase")
     assert asked[-1] == {"wifi": "join", "name": "Office", "passphrase": "wrong-passphrase"}
     for _ in range(50):  # closed, of a thread, once its page reached the phone
@@ -808,8 +817,8 @@ def test_hotspot(tmp_path, monkeypatch):
     spot.look()
     assert spot.passphrase is None
     now[0] += 1
-    spot.look()  # not joined: forgotten, and the hotspot again, saying so
-    assert {"wifi": "forget", "name": "Office"} in asked and spot.passphrase is not None
+    spot.look()  # not joined: forgotten, and the hotspot again, saying so, as phones joined it
+    assert {"wifi": "forget", "name": "Office"} in asked and spot.passphrase == was
     assert json.loads(state.read_text())["failed"] == "Office"
     online[0] = True  # a cable plugged in
     spot.look()
@@ -832,6 +841,11 @@ def test_hotspot(tmp_path, monkeypatch):
     spot.look()  # not joined after all: the hotspot again, nothing forgotten
     assert spot.passphrase is not None
     assert len([a for a in asked if "forget" in a.values()]) == forgotten
+    for _ in range(5):  # nor closed for it again, as it can't be joined: no hotspot that flaps
+        now[0] += hotspot.RESCAN
+        spot.look()
+        assert spot.passphrase is not None
+    assert online[0] is False
 
 
 def test_hotspot_dns():

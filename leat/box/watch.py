@@ -11,6 +11,7 @@ seconds, has what was last seen at once, never waiting on DNS or the box's helpe
 import shutil
 import socket
 import ssl
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -47,7 +48,10 @@ class Watch:
 
         def looking() -> None:
             while True:
-                self.look()
+                try:
+                    self.look()
+                except Exception as e:  # looked at again, as one look failing is no reason to stop
+                    print(f"leat: the box's watch failed: {e!r}", file=sys.stderr, flush=True)
                 time.sleep(LOOK)
 
         threading.Thread(target=looking, daemon=True).start()
@@ -66,8 +70,9 @@ class Watch:
                                   "office's firewall."))  # fmt: skip
         left = _days_left(self.name)
         if left is not None and left <= EXPIRING:
-            title = (f"Leat's certificate expires in {left} days" if left > 0
-                     else "Leat's certificate has expired")  # fmt: skip
+            title = (f"Leat's certificate expires in {left} days" if left > 1 else
+                     "Leat's certificate expires within a day" if left == 1 else
+                     "Leat's certificate has expired")  # fmt: skip
             found.append(_warning("certificate", title,
                                   "The box renews it over the internet, and couldn't so far; "
                                   "browsers warn of Leat once it expires. Check the box reaches "
@@ -142,9 +147,10 @@ def _days_left(name: str) -> int | None:
             expires = ssl.cert_time_to_seconds(str((tls.getpeercert() or {})["notAfter"]))
     except ssl.SSLCertVerificationError as e:
         return 0 if e.verify_code == EXPIRED else None
-    except OSError:
+    except (OSError, KeyError, ValueError):  # none served, or one of no date it reads
         return None
-    return max(0, int((expires - time.time()) // 86400))
+    left = expires - time.time()  # 0 days once it expired; 1 of its last day, as it holds still
+    return 0 if left <= 0 else max(1, int(left // 86400))
 
 
 def _warning(key: str, title: str, said: str) -> dict[str, str]:

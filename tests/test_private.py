@@ -12,6 +12,8 @@ def test_names():
     assert names(text) == {"anna", "weber", "hofmann", "textil", "müller", "john", "smith", "acme"}
     assert names("Kündigung Müller GmbH") == {"kündigung", "müller"}  # a heading, alone
     assert names("Die Weißbier GmbH zahlt.") == {"weissbier"}  # as the index folds it
+    # after a title, a name whatever else the word is, as "der Richter" is the judge
+    assert names("Herr Richter klagt. Der Richter entschied.") == {"richter"}
 
 
 def test_held():

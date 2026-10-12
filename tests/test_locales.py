@@ -25,6 +25,7 @@ WARNINGS = {
     "cable or Wi-Fi, and the office's firewall.",
     "Leat's certificate expires in {days} days",
     "Leat's certificate has expired",
+    "Leat's certificate expires within a day",
     "The box renews it over the internet, and couldn't so far; browsers warn of Leat once it "
     "expires. Check the box reaches the internet.",
     "The box is nearly full",
@@ -84,6 +85,7 @@ ERRORS = {
     "type {word} to erase everything on this Leat",
     "a passphrase is 8 to 63 letters, digits and signs",
     "a Wi-Fi network's name is 1 to 32 bytes",
+    "the box's hotspot is closed",
 }
 
 

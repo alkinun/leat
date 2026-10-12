@@ -84,10 +84,15 @@ RULES = (
     "turns on, never for names, amounts, addresses or other details of the user's files or of "
     "this conversation.",
 )
-# what the model is told of a query not searched, of what of it must not leave the box
+# what the model is told of a query not searched, or a page not read, of what of it must not leave
+# the box, as the page's address would carry it
 UNSEARCHED = (
     "Not searched: {} must not leave the office, of the user's files or this conversation. Search "
     "for the general question instead, without names or details of the user's work."
+)
+UNREAD = (
+    "Not read: {} must not leave the office, as the page's address would carry it. Read the pages "
+    "a search found, or the user gave, instead."
 )
 # a reader's instructions, of a page and a question
 READING = """\
@@ -159,6 +164,8 @@ def fetch(
 ) -> Result:  # fmt: skip
     if urllib.parse.urlsplit(url).scheme not in ("http", "https"):
         raise ValueError(f"not a web page's address: {url}")
+    if context is not None and (kept := context.private(url)):
+        return Result(UNREAD.format(", ".join(f'"{k}"' for k in kept)), {"url": url, "kept": kept})
     request = urllib.request.Request(url, headers={"User-Agent": _AGENT})
     with _OPENER.open(request, timeout=TIMEOUT) as response:
         kind, final = response.headers.get_content_type(), response.url

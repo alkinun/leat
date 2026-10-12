@@ -62,11 +62,16 @@ class Hotspot:
         state: Path = STATE,
     ):  # fmt: skip
         self.name, self.ask, self.online, self.clock, self.state = name, ask, online, clock, state
-        self.passphrase: str | None = None
+        self.passphrase: str | None = None  # while it is open
         self.networks: list[dict[str, Any]] = []
         self.failed: str | None = None  # the network chosen last that the box could not join
         self._since: float | None = None  # since when the box has gone without a network
         self._scanned = 0.0
+        # its passphrase, the same while the box goes without a network, as a phone joined to it
+        # before a network chosen failed joins it again; and the known networks that came back in
+        # reach and could not be joined, which it closes for no more till the box has a network
+        self._key = _passphrase()
+        self._unjoinable: set[str] = set()
         # the network the box joins now, if any: its name, since when, and whether it was chosen,
         # rather than a known one back in reach
         self._joining: tuple[str, float, bool] | None = None
@@ -79,6 +84,7 @@ class Hotspot:
             now = self.clock()
             if self.online():
                 self._since = self._joining = self.failed = None
+                self._key, self._unjoinable = _passphrase(), set()
                 if self.passphrase:
                     self._close()
                 return
@@ -90,19 +96,25 @@ class Hotspot:
                 if chosen:  # its passphrase mistyped, as like as not: forgotten, to type again
                     self.failed = name
                     self.ask({"wifi": "forget", "name": name})
+                else:  # its passphrase changed, or its DHCP down: not left for again
+                    self._unjoinable.add(name)
                 return self._open()
             if self.passphrase:
                 if not self.ask({"hotspot": "status"}).get("started"):  # as iwd restarted
                     return self._open()
                 if now - self._scanned >= (RESCAN if self.networks else LOOK):
                     self._scan()
-                    if known := next((n["name"] for n in self.networks if n["known"]), None):
+                    back = [n["name"] for n in self.networks
+                            if n["known"] and n["name"] not in self._unjoinable]  # fmt: skip
+                    if back:
                         self._close()  # the box joins it by itself
-                        self._joining = (known, now, False)
+                        self._joining = (back[0], now, False)
                 return
             status = self.ask({"hotspot": "status"})
             if not status.get("radio"):
                 return
+            if status.get("started"):  # of this service before it restarted: closed, to open anew
+                self.ask({"hotspot": "stop"})
             self._since = now if self._since is None else self._since
             if now - self._since >= (KNOWN_AFTER if status.get("known") else AFTER):
                 self._open()
@@ -110,8 +122,10 @@ class Hotspot:
     def join(self, name: str, passphrase: str | None) -> None:
         """Joins a network a phone on the hotspot chose, closing the hotspot CLOSING seconds from
         now, as its page reaches the phone first. Raises ValueError of a name or passphrase that
-        is not one."""
+        is not one, or while the hotspot is closed, as a phone off it has no network to choose."""
         with self._lock:
+            if self.passphrase is None:
+                raise ValueError("the box's hotspot is closed")
             self.ask({"wifi": "join", "name": name, "passphrase": passphrase})
             self._joining, self.failed = (name, self.clock() + CLOSING, True), None
 
@@ -124,8 +138,8 @@ class Hotspot:
         threading.Thread(target=closing, daemon=True).start()
 
     def _open(self) -> None:
-        self.passphrase = _passphrase()
-        self.ask({"hotspot": "start", "name": self.name, "passphrase": self.passphrase})
+        self.ask({"hotspot": "start", "name": self.name, "passphrase": self._key})
+        self.passphrase = self._key  # once it is open
         self._scanned = self.clock() - RESCAN  # its networks found at its next look
         self._write()
 

@@ -58,6 +58,10 @@ class Completion:
 # seconds the engine may take to list its models: one that takes longer is as good as away, whereas
 # a completion, which may wait for others, or a load, may take any time
 LIST = 10
+# of a completion's body that no one waits on, as a file's reading of ask_files, a scan's, a title,
+# a workflow running by itself: OpenAI's flex processing, which leat serve starts after the
+# completions someone waits on, and others ignore
+BACKGROUND = {"service_tier": "flex"}
 
 
 class Client:

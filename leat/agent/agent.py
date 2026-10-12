@@ -31,7 +31,7 @@ from typing import Any
 
 from leat.agent import context, documents, private, quotes, schedule
 from leat.agent.background import Background
-from leat.agent.client import Client, Completion, EngineError, merge, whole
+from leat.agent.client import BACKGROUND, Client, Completion, EngineError, merge, whole
 from leat.agent.index import Index
 from leat.agent.store import Store
 from leat.agent.sync import SYNC, mirror
@@ -197,6 +197,7 @@ class Agent:
     def send(
         self, id: str | None, content: str, effort: str | None = None,
         attached: list[str] | None = None, person: int | None = None, project: str | None = None,
+        background: bool = False,
     ) -> str:  # fmt: skip
         """Starts a turn of a person's message, in a new conversation without an id, held in
         `project` if one; returns the conversation's id. The model reasons at `effort`, one of
@@ -227,7 +228,7 @@ class Agent:
             else:
                 start = len(self.store.messages(id))
                 self.store.append(id, message)
-            turn = _Turn(self, id, person, project, start, content, effort)
+            turn = _Turn(self, id, person, project, start, content, effort, background)
             self._turns[id] = turn
             self._publish_summary(id)
             self._publish_message(id, person, start, message)
@@ -384,7 +385,7 @@ class Agent:
                 continue
             try:
                 id = self.send(None, w["prompt"], attached=attached or None, person=w["by"],
-                               project=w["project"])  # fmt: skip
+                               project=w["project"], background=True)  # fmt: skip
             except (NotFound, Busy):
                 continue
             self._runs[w["id"]] = id
@@ -425,16 +426,27 @@ class Agent:
         self.store.note(person, action, held["name"] if held else None, detail, leat)
 
     def private(self, conversation: str, space: Workspace | None, text: str) -> list[str]:
-        """What of a text must not leave the box, as leat.agent.private finds it: the names a
-        conversation's files give, of the passages that hold the text's words, and its person's
-        messages; the box's people's names, and its office's."""
-        texts = [m["content"] for m in self.store.messages(conversation)
-                 if m["role"] == "user" and isinstance(m.get("content"), str)]  # fmt: skip
+        """What of a text must not leave the box, a query or a page's address, as
+        leat.agent.private finds it: the names a conversation's files give, of the passages that
+        hold the text's words, and its person's messages; the box's people's names, and its
+        office's. None of an address the conversation was given, as its person pasted it or a
+        search found it, rather than the model wrote it."""
+        messages = self.store.messages(conversation)
+        said = [m["content"] for m in messages
+                if m["role"] == "user" and isinstance(m.get("content"), str)]  # fmt: skip
+        found = {r.get("url") for m in messages if m["role"] == "tool"
+                 for r in (m.get("info") or {}).get("results", [])}  # fmt: skip
+        if text.startswith(("http://", "https://")) and (
+                text in found or any(text in s for s in said)):  # fmt: skip
+            return []
+        texts, unquoted = list(said), urllib.parse.unquote_plus(text)
         if self.index is not None and space is not None:
-            texts += [t for word in private.asked(text) for t in self.index.holding(space, word)]
+            among = sorted(private.TITLES | private.FORMS)  # where a word is a name
+            texts += [t for word in private.asked(unquoted)
+                      for t in self.index.holding(space, word, among=among)]  # fmt: skip
         wholes = [p["name"] for p in self.store.people()]
         wholes += [office] if (office := self.store.setting("office")) else []
-        return private.held(text, private.names("\n".join(texts)), wholes)
+        return private.held(unquoted, private.names("\n".join(texts)), wholes)
 
     def forget(self) -> None:
         """Forgets the files' earlier versions kept longer than they are kept, once a day."""
@@ -749,9 +761,10 @@ class _Turn:
 
     def __init__(
         self, agent: Agent, id: str, person: int | None, project: str | None, start: int,
-        content: str, effort: str | None,
+        content: str, effort: str | None, background: bool = False,
     ):  # fmt: skip
         self.agent, self.id, self.person, self.start = agent, id, person, start
+        self.background = background  # of no one waiting on it, as a workflow run by itself
         self.project = project
         # the files its tools work among: its project's, or its person's own
         self.workspace = agent._space(project, person) if agent.workspace else None
@@ -829,7 +842,7 @@ class _Turn:
         started, finish = time.monotonic(), None
         chunks: Iterable[dict[str, Any]] = ()
         if not self.stopped.is_set():  # as it may be, while the prompt was made smaller
-            chunks = self.completion = a.engine.complete(body, self.person)
+            chunks = self.completion = a.engine.complete(self._tiered(body), self.person)
             if self.stopped.is_set():  # before the completion was there to close
                 self.completion.close()
         for chunk in chunks:
@@ -940,13 +953,17 @@ class _Turn:
 
     def _whole(self, body: dict[str, Any]) -> dict[str, Any]:
         # the model's reply to body, whole, which a stop cuts short: raises _Stopped then
-        self.completion = self.agent.engine.complete(body, self.person)
+        self.completion = self.agent.engine.complete(self._tiered(body), self.person)
         if self.stopped.is_set():  # before the completion was there to close
             self.completion.close()
         reply = whole(self.completion)
         if self.stopped.is_set():
             raise _Stopped
         return reply
+
+    def _tiered(self, body: dict[str, Any]) -> dict[str, Any]:
+        # a completion's body, as background work of a turn no one waits on
+        return body | BACKGROUND if self.background else body
 
     def _seen(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         # the prompt's messages, each image a message shows before its text as a data: URL if
@@ -1055,8 +1072,11 @@ class _Turn:
         # what a source says: of a passage of a file, the file's whole text; of a page of the web,
         # its text as it was saved, and what its tools' messages said of it, as a search's snippet
         space, a = self.workspace, self.agent
-        if url.startswith("file:"):
-            name = url.removeprefix("file:").split("#")[0]
+        if url.startswith("file:"):  # of its name as its tool gave it, which may hold a "#"
+            named = (r.get("file") for m in messages if m["role"] == "tool"
+                     for r in (m.get("info") or {}).get("results", [])
+                     if r.get("url") == url)  # fmt: skip
+            name = next(filter(None, named), None) or url.removeprefix("file:").split("#")[0]
             with contextlib.suppress(Exception):  # a file gone, or one that can't be read
                 if space is not None:
                     return [a.index.text(space, name) if a.index else documents.text(space, name)]
@@ -1191,7 +1211,7 @@ def _did(
         did.append(("searched the files", None))
     elif name == "search_web" and not info.get("kept"):
         did.append(("searched the web", None))
-    elif name == "fetch" and info.get("url"):
+    elif name == "fetch" and info.get("url") and not info.get("kept"):
         did.append(("read a page of", urllib.parse.urlsplit(info["url"]).hostname))
     return did + [("made", made) for made in info.get("files", [])]
 

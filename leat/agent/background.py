@@ -9,7 +9,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from leat.agent import context
-from leat.agent.client import EngineError
+from leat.agent.client import BACKGROUND, EngineError
 
 if TYPE_CHECKING:
     from leat.agent.agent import Agent
@@ -84,7 +84,7 @@ def name(agent: "Agent", id: str) -> None:
     body = {
         "messages": [{"role": "system", "content": NAME}, {"role": "user", "content": said}],
         "max_tokens": NAME_TOKENS, "temperature": 0.3, "reasoning_effort": "none",
-    }  # fmt: skip
+    } | BACKGROUND  # fmt: skip
     lines = agent.engine.reply(body, c["person"])["content"].strip().splitlines()
     title = lines[0].strip(" \"'“”.") if lines else ""
     agent.rename(id, title[:80] or c["title"])

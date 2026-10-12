@@ -103,6 +103,8 @@ _FIELDS: dict[str, tuple[Callable[[Any], bool], str]] = {
     "user": (lambda v: isinstance(v, str) and len(v) <= 256, "a string of 256 characters at most"),
     "safety_identifier": (lambda v: isinstance(v, str) and len(v) <= 256,
                           "a string of 256 characters at most"),
+    "service_tier": (lambda v: v in ("auto", "default", "flex", "priority"),
+                     "one of auto, default, flex and priority"),
 }  # fmt: skip
 
 # what leat does not implement, each with the value that asks for nothing more
@@ -164,6 +166,9 @@ class _Completion:
     user: str = ""  # the end user it is for, if the client names them
     thinking: bool = False  # the prompt opened a <think> block
     opened: str = ""  # what the prompt opened the reply with, as ChatTemplate.answer
+    # work no one waits on, of service_tier "flex", as OpenAI's flex processing: started after the
+    # completions that wait before it, and never into the last slot free
+    background: bool = False
     id: str = field(default_factory=lambda: f"chatcmpl-{uuid.uuid4().hex}")
     created: int = field(default_factory=lambda: int(time.time()))
     # from the worker: pieces of text, then how generation finished or the exception it raised
@@ -279,8 +284,7 @@ class Server(ThreadingHTTPServer):
                         embedding.append(request)
                     else:
                         waiting.append(request)
-                while waiting and self._start(waiting[0], running):
-                    waiting.popleft()
+                self._admit(waiting, running)
                 if embedding:
                     self._embed(embedding)
                 if running:
@@ -352,6 +356,37 @@ class Server(ThreadingHTTPServer):
             else:
                 continue
             del running[sequence]
+
+    def _admit(
+        self, waiting: collections.deque[_Completion | _Load], running: dict[Sequence, "_Writer"]
+    ) -> None:  # fmt: skip
+        # starts what waits, as it may: a load once it is first, and nothing after it before it;
+        # then the completions before the next load, those someone waits on first, each in turn,
+        # and background ones while more than one slot is free, so that a chat asked meanwhile
+        # starts at once, however much background work waits
+        while waiting and isinstance(waiting[0], _Load):
+            if not self._start(waiting[0], running):
+                return
+            waiting.popleft()
+        ahead: list[_Completion] = []
+        for request in waiting:
+            if not isinstance(request, _Completion):
+                break
+            ahead.append(request)
+        for request in sorted(ahead, key=lambda r: r.background):
+            if request.background and not request.cancelled.is_set() and not self._spare():
+                break
+            if not self._start(request, running):
+                break
+            waiting.remove(request)
+
+    def _spare(self) -> bool:
+        # whether a slot is free besides the one kept for completions someone waits on, of an
+        # engine of more than one; a completion of no model loaded ends at once, as _start ends it
+        if (loaded := self.loaded) is None:
+            return True
+        engine = loaded.engine
+        return len(engine.active) < engine.slots - (engine.slots > 1)
 
     def _start(self, request: _Completion | _Load, running: dict[Sequence, "_Writer"]) -> bool:
         # starts a request, or ends it if it never can: a completion while a slot is free, a load
@@ -901,6 +936,7 @@ def _completion(body: Any, server: Server) -> _Completion:
         user=body.get("safety_identifier") or body.get("user") or "",
         thinking=loaded.chat.opens_thinking(text),
         opened=opened,
+        background=body.get("service_tier") == "flex",
     )
 
 

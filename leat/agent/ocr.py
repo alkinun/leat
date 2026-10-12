@@ -6,7 +6,7 @@ import base64
 import threading
 import time
 
-from leat.agent.client import Client, EngineError
+from leat.agent.client import BACKGROUND, Client, EngineError
 
 CHECK = 10  # seconds the engine's word on whether its model sees images holds
 WORDS = 2000  # tokens of an image's text at most
@@ -52,5 +52,5 @@ class Transcriber:
             "max_tokens": WORDS,
             "temperature": 0,
             "reasoning_effort": "none",
-        }
+        } | BACKGROUND
         return self.engine.reply(body)["content"].strip()

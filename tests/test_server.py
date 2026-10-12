@@ -10,6 +10,7 @@ import urllib.request
 import weakref
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import openai
 import pytest
@@ -20,7 +21,7 @@ from leat.engine import Engine
 from leat.gguf import GGUF
 from leat.keys import Keys
 from leat.sampler import Sampling
-from leat.server import Server, _calls, _completion, _Load, _Writer
+from leat.server import Server, _calls, _Completion, _completion, _Load, _Writer
 from leat.tokenizer import Tokenizer
 from tests.helpers import CONTEXT, Oracle, chat_template, reference_embedding
 
@@ -929,3 +930,47 @@ def test_embeddings_of_an_encoder(tiny_model, tiny):
     assert len(tokens) >= CONTEXT
     expected = reference_embedding(weights, tokens[: CONTEXT - 1], "gemma-embedding2")
     assert said.data[0].embedding == pytest.approx(expected, abs=2e-3)
+
+
+def test_background_waits(monkeypatch):
+    # completions someone waits on start before background ones that came before them, each in
+    # turn; background ones never take the last slot free; a load lets nothing after it go first
+    def completion(background: bool) -> _Completion:
+        return _Completion(
+            [1], "m", 8, None, None, [], None, False, False, background=background)  # fmt: skip
+
+    engine = SimpleNamespace(active=[], slots=3)
+    started: list = []
+
+    def start(request, running):
+        if isinstance(request, _Load):
+            return not engine.active
+        if len(engine.active) == engine.slots:
+            return False
+        engine.active.append(request)
+        started.append(request)
+        return True
+
+    fake = SimpleNamespace(loaded=SimpleNamespace(engine=engine), _start=start)
+    fake._spare = lambda: Server._spare(fake)
+    readers = [completion(True) for _ in range(4)]
+    chat, other = completion(False), completion(False)
+    waiting = collections.deque([*readers, chat])
+    Server._admit(fake, waiting, {})
+    assert started == [chat, *readers[:1]]  # the chat first; one reader, the last slot kept
+    assert list(waiting) == readers[1:]
+    waiting.append(other)
+    Server._admit(fake, waiting, {})
+    assert started[-1] is other and len(engine.active) == 3  # the slot kept, the chat's
+    engine.active.clear()
+    load = _Load("n")
+    waiting = collections.deque([readers[1], load, chat])
+    started.clear()
+    Server._admit(fake, waiting, {})
+    assert started == [readers[1]] and list(waiting) == [load, chat]  # nothing past the load
+    one = SimpleNamespace(active=[], slots=1)  # of one slot, nothing kept
+    fake.loaded = SimpleNamespace(engine=one)
+    engine = one
+    waiting = collections.deque([readers[2]])
+    Server._admit(fake, waiting, {})
+    assert not waiting

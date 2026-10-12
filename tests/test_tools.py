@@ -125,6 +125,16 @@ def test_search_kept(site):
     assert web.search(site, "Kündigungsfrist Probezeit", context).info["results"]
 
 
+def test_fetch_kept(site, monkeypatch):
+    # a page whose address holds what must not leave the box is not read, the model told why
+    allow(monkeypatch, site)
+    context = Context("c", private=lambda text: ["Hofmann"] if "Hofmann" in text else [])
+    result = web.fetch(f"{site}/page?q=Hofmann", context=context)
+    assert result.content.startswith('Not read: "Hofmann" must not leave the office')
+    assert result.info == {"url": f"{site}/page?q=Hofmann", "kept": ["Hofmann"]}
+    assert web.fetch(f"{site}/page", context=context).info["title"] == "A page"
+
+
 def test_fetch(site, monkeypatch):
     # a page's title and text, without its menus and code, a line to each block
     allow(monkeypatch, site)

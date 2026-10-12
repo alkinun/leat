@@ -32,7 +32,7 @@ import re
 import sqlite3
 import threading
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -178,13 +178,22 @@ class Index:
                 found.append({"name": name, "place": place, "start": start, "text": text})
         return found
 
-    def holding(self, space: Workspace, word: str, n: int = HOLDING) -> list[str]:
+    def holding(
+        self, space: Workspace, word: str, n: int = HOLDING, among: Iterable[str] = ()
+    ) -> list[str]:  # fmt: skip
         """The texts of a space's passages that hold a word as it is written, its accents and case
-        aside, n at most."""
+        aside, n at most: those that hold any of the words `among` too first."""
+        quoted = lambda w: '"' + w.replace('"', '""') + '"'  # noqa: E731
+        queries = [f"{quoted(word)} AND ({' OR '.join(map(quoted, among))})"] if among else []
+        found: dict[int, str] = {}
         with self._lock:
-            return [text for (text,) in self._db.execute(
-                "SELECT text FROM passages WHERE passages MATCH ?1 AND folder = ?2 LIMIT ?3",
-                ('"' + word.replace('"', '""') + '"', self._folder(space), n))]  # fmt: skip
+            for match in [*queries, quoted(word)]:
+                found |= dict(self._db.execute(
+                    "SELECT rowid, text FROM passages WHERE passages MATCH ?1 AND folder = ?2"
+                    " LIMIT ?3", (match, self._folder(space), n)).fetchall())  # fmt: skip
+                if len(found) >= n:
+                    break
+        return list(found.values())[:n]
 
     def common(self, query: str) -> frozenset[str]:
         """The words of a query that are in every sentence: English's and German's, and those in

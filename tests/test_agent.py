@@ -599,6 +599,7 @@ def test_scheduled_workflow(agent, engine, events):
     assert agent.conversations(me) == []  # no model to run it
     engine.status = "loaded"
     engine.replies.put([HOLD, {"content": "All fine."}])
+    asked = len(engine.requests)
     agent.run_due()
     (run,) = agent.conversations(me)
     assert run["project"] == project and run["title"].startswith("Payslips · ")
@@ -608,6 +609,8 @@ def test_scheduled_workflow(agent, engine, events):
     engine.released.set()
     until(events, ended)
     assert agent.store.messages(run["id"])[1]["content"].endswith("Check the payslips.")
+    # background work, which a chat someone waits on goes before
+    assert [r.get("service_tier") for r in engine.requests[asked:]] == ["flex"]
     assert agent.store.activity()[0]["action"] == "ran the workflow"
     agent.run_due()  # due, as it was made so above, and its last run ended
     assert len(agent.conversations(me)) == 2
@@ -996,6 +999,8 @@ def test_name(agent, engine, events):
     asked = engine.requests[-1]["messages"]
     assert asked[0]["content"] == background.NAME
     assert engine.requests[-1]["reasoning_effort"] == "none"  # the least the model takes
+    assert engine.requests[-1]["service_tier"] == "flex"  # as no one waits on it
+    assert "service_tier" not in engine.requests[0]  # but on the chat
     # and room for the analysis of a model that reasons all the same, as gpt-oss, which spent 24
     # tokens on its own and named nothing
     assert engine.requests[-1]["max_tokens"] >= 64

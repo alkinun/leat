@@ -24,7 +24,7 @@ import re
 from typing import Any
 
 from leat.agent import documents
-from leat.agent.client import Client, EngineError
+from leat.agent.client import BACKGROUND, Client, EngineError
 from leat.agent.context import picture
 from leat.agent.index import Index
 from leat.agent.tools import Context, Result, Tool
@@ -222,7 +222,7 @@ def _answer(
         "max_tokens": ANSWER,
         "temperature": 0,
         "reasoning_effort": "none",
-    }
+    } | BACKGROUND
     try:
         said = reader.reply(body, person)["content"].strip()
     except EngineError as e:

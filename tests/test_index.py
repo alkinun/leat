@@ -222,14 +222,23 @@ def test_private(workspace, index, tmp_path):
     assert private("Schulz Kündigung") == []  # of another space's files
     assert private("Kanzlei Weber Bewertungen") == ["Kanzlei Weber"]
     assert private("Alkın Ünlü Rechtsanwalt") == ["Alkın Ünlü"]
+    # a page's address the model wrote, as of a search engine's; not one its person or a search gave
+    assert private("https://duckduckgo.com/html/?q=Hofmann+Textil+K%C3%BCndigung") == [
+        "Hofmann", "Textil"]  # fmt: skip
+    said = {"role": "user", "content": "Lies https://hofmann-textil.de/impressum bitte."}
+    searched = {"role": "tool", "content": "…", "info": {"results": [
+        {"url": "https://news.example/hofmann-textil-insolvenz", "n": 1}]}}  # fmt: skip
+    agent.store.append(id, said, searched)
+    assert private("https://hofmann-textil.de/impressum") == []
+    assert private("https://news.example/hofmann-textil-insolvenz") == []
 
 
 def test_quotes_checked(engine, workspace, index, tmp_path):
     # an answer's quotes checked against the sources they cite, by code: of a passage, its file's
-    # whole text; each found there, or not, in its info
+    # whole text, of a name that holds a "#" too; each found there, or not, in its info
     agent = Agent(Store(tmp_path / "leat.db"), Client(engine.url), files.tools(index), workspace,
                   index)  # fmt: skip
-    files.write(agent.space(), "lease.md", "# Kündigung\n\nDie Kündigungsfrist beträgt drei "
+    files.write(agent.space(), "Akte #12.md", "# Kündigung\n\nDie Kündigungsfrist beträgt drei "
                 "Monate zum Quartalsende.\n\n# Miete\n\nDie Miete beträgt 900 EUR.")  # fmt: skip
     index.update("people/0")
     engine.replies.put([{"tool_calls": [call("search_files", {"query": "Kündigungsfrist"})]}])

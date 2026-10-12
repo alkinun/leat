@@ -4,11 +4,12 @@ people of their matters, its own people's, and any e-mail address or IBAN.
 
 A name is found as offices write one: after a title or a role, as "Herr Hofmann", "Frau Dr. Anna
 Weber" or "Mandantin Yılmaz", and before a company's form, as "Hofmann Textil GmbH" or "Müller &
-Co. KG", of the conversation's files and what its person wrote; but for a word written after an
-article elsewhere, as "die Kündigung", a noun's, which German capitalizes as a name, and which a
-heading, as "Kündigung Müller GmbH", puts where a name would be. And whole, as the box's people's
-names and its office's. A query is checked by its words: each the files hold is looked for there,
-in their passages that hold it, as the index finds them.
+Co. KG", of the conversation's files and what its person wrote; before a company's form, but for a
+word written after an article elsewhere, as "die Kündigung", a noun's, which German capitalizes as a
+name, and which a heading, as "Kündigung Müller GmbH", puts where a name would be; after a title,
+always, as "Herr Richter" is one, whatever "der Richter" is. And whole, as the box's people's names
+and its office's. A query is checked by its words: each the files hold is looked for there, in their
+passages that hold it, as the index finds them, those of a title or a company's form first.
 """
 
 import re
@@ -40,21 +41,21 @@ _IBAN = re.compile(r"\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]{4}){3,7}(?: ?[A-Z0-9]{1,3})?\b
 
 def names(text: str) -> set[str]:
     """The words of the names a text gives, as the index folds them: those after a title or a
-    role, and before a company's form, but for those it writes after an article, as nouns are,
-    elsewhere than before a company's form."""
+    role; and those before a company's form, but for those it writes after an article, as nouns
+    are, elsewhere than before a company's form."""
     words = _WORD.findall(text)
     folded = [fold(w) for w in words]
-    found, nouns = set[str](), set[str]()
+    titled, formed, nouns = set[str](), set[str](), set[str]()
     for i, word in enumerate(folded):
         if word in TITLES:
             after = [w for w in words[i + 1 : i + 1 + NAMED + 1] if fold(w) not in TITLES]
-            found |= _named(after[:NAMED])
+            titled |= _named(after[:NAMED])
         elif word in FORMS and words[i][0].isupper():
             before = [w for w in reversed(words[max(0, i - NAMED - 1) : i]) if fold(w) not in FORMS]
-            found |= _named(before[:NAMED])
+            formed |= _named(before[:NAMED])
         elif i and folded[i - 1] in ARTICLES and not FORMS & set(folded[i + 1 : i + 1 + NAMED]):
             nouns.add(word)
-    return found - nouns
+    return titled | (formed - nouns)
 
 
 def held(query: str, named: set[str], wholes: list[str]) -> list[str]:

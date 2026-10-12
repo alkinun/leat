@@ -26,8 +26,9 @@
 
 http:// {
 	# of a phone on the box's own hotspot, whatever it asks: its page, which picks the office's
-	# Wi-Fi, as leat.box.hotspot serves it
-	@hotspot remote_ip 10.42.0.0/24
+	# Wi-Fi, as leat.box.hotspot serves it; known by the hotspot's own address, which it asked,
+	# that the box has only while the hotspot is open, as an office's network may be of any range
+	@hotspot expression {http.request.local.host} == "10.42.0.1"
 	handle @hotspot {
 		reverse_proxy 127.0.0.1:8090
 	}

@@ -1354,7 +1354,7 @@ function renderProject() {
   if (document.activeElement !== $("title")) $("title").value = p.name;
   if (document.activeElement !== $("instructions")) $("instructions").value = p.instructions;
   const mine = p.person === me?.person;
-  const mode = p.shared ? "everyone" : p.members.length || choosingFor === p.id ? "chosen" : "me";
+  const mode = choosingFor === p.id && !p.members.length ? "chosen" : p.shared ? "everyone" : p.members.length ? "chosen" : "me";
   const modes = [["me", t("Only me")], ["chosen", t("Chosen people")], ["everyone", t("Everyone")]];
   const unchangeable = t("Only whoever made the project can change whom it is shared with");
   $("sharing").replaceChildren(...modes.map(([m, said]) => {
@@ -1364,7 +1364,8 @@ function renderProject() {
     button.onclick = () => {
       if (m === mode) return;
       choosingFor = m === "chosen" ? p.id : null;
-      if (m === "chosen") renderProject(); // shared once someone is chosen
+      if (m === "chosen" && p.shared) change(p.id, { shared: false }); // with no one, till chosen
+      else if (m === "chosen") renderProject();
       else change(p.id, m === "everyone" ? { shared: true } : { shared: false, members: [] });
     };
     return button;
@@ -1689,7 +1690,7 @@ const DID = {
 }; // each t()'d as said
 
 // what a turn's calls did, in a few words, in the order it began them; those that failed not, nor
-// a web search not made, of what must not leave the box, but that it was kept out
+// a search not made or a page not read, of what must not leave the box, but that names were kept
 function summary(all) {
   const calls = all.filter((m) => !m.info?.error && !m.info?.kept);
   const parts = [...new Set(calls.map((m) => m.name))].map((name) => {
@@ -1697,7 +1698,7 @@ function summary(all) {
     const [one, many] = own(DID, name) ?? ["used {name}", "used {name}"];
     return n > 1 ? t(many, { n, name }) : t(one, { name });
   });
-  if (all.some((m) => m.info?.kept)) parts.push(t("kept names out of a web search"));
+  if (all.some((m) => m.info?.kept)) parts.push(t("kept names in the office"));
   const said = parts.join(", ") || t("worked");
   return said[0].toUpperCase() + said.slice(1);
 }
@@ -1801,8 +1802,8 @@ const LINES = {
     : t("Searched for “{query}”", a), t("Couldn't search for “{query}”", a)],
   search_files: (a) => [t("Searching the files for “{query}”…", a), t("Searched the files for “{query}”", a),
     t("Couldn't search the files for “{query}”", a)],
-  fetch: (a, i) => [t("Reading {name}…", { name: host(a.url) }), t("Read {name}", { name: i.title || host(i.url ?? a.url) }),
-    t("Couldn't read {name}", { name: host(a.url) })],
+  fetch: (a, i) => [t("Reading {name}…", { name: host(a.url) }), i.kept ? t("Kept {names} out of a page's address", { names: i.kept.join(", ") })
+    : t("Read {name}", { name: i.title || host(i.url ?? a.url) }), t("Couldn't read {name}", { name: host(a.url) })],
   read: (a) => [t("Reading {name}…", { name: named(a.path) }), t("Read {name}", { name: named(a.path) }),
     t("Couldn't read {name}", { name: named(a.path) })],
   write: (a) => [t("Writing {path}…", a), t("Wrote {path}", a), t("Couldn't write {path}", a)],
