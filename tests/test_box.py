@@ -1,10 +1,12 @@
 import base64
+import contextlib
 import datetime
 import io
 import json
 import os
 import shutil
 import socket
+import ssl
 import subprocess
 import threading
 from collections.abc import Iterator
@@ -597,10 +599,11 @@ def test_health(tmp_path, monkeypatch):
 def test_watch(tmp_path, monkeypatch):
     # what needs attention: the name unfound, said once it has gone so for ten minutes, as a new
     # address takes some, and never while the DNS finds no name at all, as without internet; the
-    # disk nearly full; the model out of reach; an update failed
+    # internet unreached, as long; the certificate expiring; the disk nearly full; the model out of
+    # reach; an update failed
     now = [0.0]
     dns = {"k7x2qm.leatbox.net": [], "leatbox.net": ["2.28.106.154"]}
-    found = {"free": 50e9, "failed": None, "model": None}
+    found = {"free": 50e9, "failed": None, "model": None, "reached": True, "left": 60}
 
     def getaddrinfo(name, port, family):
         if not dns[name]:
@@ -613,6 +616,8 @@ def test_watch(tmp_path, monkeypatch):
         watch.shutil, "disk_usage", lambda path: SimpleNamespace(total=100e9, free=found["free"])
     )
     monkeypatch.setattr(watch.system, "ask", lambda r: {"failed": found["failed"]})
+    monkeypatch.setattr(watch, "_reached", lambda: found["reached"])
+    monkeypatch.setattr(watch, "_days_left", lambda name: found["left"])
     seen = watch.Watch("k7x2qm.leatbox.net", tmp_path, lambda: found["model"],
                        clock=lambda: now[0])  # fmt: skip
     assert seen.look() == [] and seen.warnings == []  # unfound just now
@@ -626,15 +631,62 @@ def test_watch(tmp_path, monkeypatch):
     assert [w["key"] for w in warned] == ["disk", "model", "update"]
     assert "5 GB" in warned[0]["said"] and "2026.10.12.0300-abc1234" in warned[2]["said"]
     found.update(free=50e9, failed=None, model=None)
-    dns.update({"k7x2qm.leatbox.net": [], "leatbox.net": []})  # no internet: none of it said
+    dns.update({"k7x2qm.leatbox.net": [], "leatbox.net": []})  # no internet: said of it alone
+    found["reached"] = False
     now[0] = 2000
     assert seen.look() == []
-    now[0] = 3000
+    now[0] = 2600
+    assert [w["key"] for w in seen.look()] == ["internet"]
+    found["left"] = 14
+    warned = seen.look()
+    assert [w["key"] for w in warned] == ["internet", "certificate"]
+    assert warned[1]["title"] == "Leat's certificate expires in 14 days"
+    found["left"] = 0
+    assert seen.look()[1]["title"] == "Leat's certificate has expired"
+    found.update(reached=True, left=89)  # back, and the name still unfound: from now
+    dns["leatbox.net"] = ["2.28.106.154"]
     assert seen.look() == []
-    dns["leatbox.net"] = ["2.28.106.154"]  # back, and the name still unfound: from now
-    assert seen.look() == []
-    now[0] = 3600
+    now[0] = 3200
     assert [w["key"] for w in seen.look()] == ["name"]
+
+
+def test_watch_days_left(tmp_path, monkeypatch):
+    # the days left of the certificate the box serves its name with, as a browser trusting its CA
+    # sees it: 0 once expired; none of one it does not trust, nor while it serves none
+    name = "k7x2qm.leatbox.net"
+
+    def serving(*dates: str) -> int | None:
+        key, cert = tmp_path / "key.pem", tmp_path / "cert.pem"
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt",
+                        "ec_paramgen_curve:P-256", "-nodes", "-keyout", key, "-out", cert,
+                        "-subj", f"/CN={name}", "-addext", f"subjectAltName=DNS:{name}",
+                        *dates], check=True, capture_output=True)  # fmt: skip
+        server = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server.load_cert_chain(cert, key)
+        listening = socket.create_server(("127.0.0.1", 0))
+        monkeypatch.setattr(watch, "HTTPS", listening.getsockname())
+
+        def serve() -> None:
+            connection = listening.accept()[0]
+            with contextlib.suppress(OSError), server.wrap_socket(connection, server_side=True):
+                pass
+
+        threading.Thread(target=serve, daemon=True).start()
+        try:
+            return watch._days_left(name)
+        finally:
+            listening.close()
+
+    trusted, default = tmp_path / "cert.pem", ssl.create_default_context
+    monkeypatch.setattr(watch.ssl, "create_default_context", lambda: default(cafile=trusted))
+    assert serving("-days", "10") == 9
+    day = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=1)
+    assert serving("-not_before", "20260101000000Z", "-not_after",
+                   day.strftime("%Y%m%d%H%M%SZ")) == 0  # fmt: skip
+    monkeypatch.setattr(watch.ssl, "create_default_context", default)
+    assert serving("-days", "10") is None  # of a CA no browser trusts
+    monkeypatch.setattr(watch, "HTTPS", ("127.0.0.1", 9))
+    assert watch._days_left(name) is None  # none served
 
 
 def test_units():
