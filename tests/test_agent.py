@@ -726,6 +726,17 @@ def test_update(server, monkeypatch):
     assert ada("/api/update")[0] == 403 and ada("/api/update", "POST", {})[0] == 403
 
 
+def test_diagnostics(server, monkeypatch):
+    # the box's system, a file an admin downloads to send us
+    monkeypatch.setattr(system, "ask", lambda r: {"text": "## Version\n\nleat"})
+    with urllib.request.urlopen(f"{server}/api/diagnostics") as response:
+        assert response.read() == b"## Version\n\nleat"
+        assert response.headers["Content-Type"] == "text/plain; charset=utf-8"
+        assert response.headers["Content-Disposition"].startswith('attachment; filename="leat-box-')
+    _, ada = joining(server, "Ada", paired(server))
+    assert ada("/api/diagnostics")[0] == 403
+
+
 def test_health(server):
     # what of the box needs attention, the admins' to see: nothing of a Leat that is no box
     assert json.loads(request(f"{server}/api/health")[1]) == {"warnings": []}

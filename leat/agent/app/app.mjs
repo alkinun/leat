@@ -1063,7 +1063,10 @@ async function renderSoftware(asked = false) {
       .catch((error) => status(error.message, true));
     parts.push(check);
   }
-  $("software").replaceChildren(...parts);
+  const diagnostics = Object.assign(element("a", "diagnostics", "Download diagnostics"),
+    { href: "/api/diagnostics", title: "A file to send Leat's support when something is wrong: of " +
+      "the box's system alone, nothing of anyone's work" });
+  $("software").replaceChildren(...parts, diagnostics);
 }
 
 // the box restarted, or switched off, of an admin, once they confirm it; or reset, its state erased,

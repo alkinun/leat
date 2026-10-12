@@ -9,6 +9,7 @@ checked, by a helper systemd runs as root for each request, on a socket leat's g
     {"reset": true}                                        erases the box's state, and restarts
     {"update": "status"}                                   its version, and an update ready, if one
     {"update": "check"}                                    looks for an update now
+    {"diagnostics": true}                                  the box's system, as text, for support
 
 Each answer is a JSON object: {} or what was asked, or {"error": why}. The agent asks by ask().
 
@@ -70,6 +71,8 @@ def handle(request: Any) -> dict[str, Any]:
             return reset()
         if request.get("update") == "status":
             return update_status()
+        if request.get("diagnostics") is True:
+            return {"text": diagnostics()}
         if request.get("update") == "check":
             subprocess.run(["systemctl", "--no-block", "start", "systemd-sysupdate.service"],
                            check=True, capture_output=True, timeout=10)  # fmt: skip
@@ -170,6 +173,49 @@ def reset() -> dict[str, Any]:
     reset is none of the box's, as it marks itself done in the initrd, which makes no partitions."""
     _write(RESET, "", 0o600)
     return power("restart")
+
+
+# the system's services, whose logs say nothing of anyone's work, as leat agent's errors might of a
+# file's name, and Caddy's requests of the path asked for: Caddy's own of its certificate alone
+LOGGED = ["leat-address", "leat-screen", "leat-health", "leat-fallback", "leat-provision",
+          "leat-system@*", "systemd-sysupdate*", "systemd-repart", "systemd-cryptsetup@*",
+          "systemd-networkd", "iwd", "systemd-timesyncd"]  # fmt: skip
+DIAGNOSED = [
+    ("Version", ["cat", "/etc/os-release"]),
+    ("Up", ["uptime"]),
+    ("Failed units", ["systemctl", "--failed", "--no-legend", "--no-pager"]),
+    ("The box's units", ["systemctl", "list-units", "--all", "--no-legend", "--no-pager", "leat-*",
+                         "systemd-sysupdate*", "systemd-repart*", "systemd-cryptsetup@*"]),
+    ("Timers", ["systemctl", "list-timers", "--all", "--no-legend", "--no-pager"]),
+    ("Boot entries", ["ls", "-l", "/boot/EFI/Linux"]),
+    ("Disks", ["lsblk", "-o", "NAME,SIZE,TYPE,PARTLABEL,FSTYPE,MOUNTPOINTS"]),
+    ("Room", ["df", "-h", "/", "/etc/leat", "/var", "/boot"]),
+    ("Memory", ["free", "-h"]),
+    ("Network", ["ip", "-br", "address"]),
+    ("Routes", ["ip", "route"]),
+    ("DNS", ["resolvectl", "status", "--no-pager"]),
+    ("Identity", ["cat", "/etc/leat/box.env"]),
+    ("Logs", ["journalctl", "--boot", "--no-pager", "--lines=400", "--output=short-iso",
+              *(f"--unit={u}" for u in LOGGED)]),
+    ("Certificate", ["journalctl", "--boot", "--no-pager", "--output=cat", "--unit=leat-proxy",
+                     "--grep", '"logger":"tls']),
+    ("Kernel errors", ["journalctl", "--boot", "--no-pager", "--dmesg", "--priority=err"]),
+]  # fmt: skip
+
+
+def diagnostics() -> str:
+    """The box's system, as text an admin sends us when something is wrong: its version, units,
+    disks, network and the logs of its system's services; nothing of anyone's work, nor the office's
+    name, nor who uses it."""
+    parts = []
+    for title, command in DIAGNOSED:
+        try:
+            done = subprocess.run(command, capture_output=True, text=True, timeout=20, check=False)
+            said = (done.stdout + done.stderr).strip()
+        except (OSError, subprocess.SubprocessError) as e:
+            said = f"({e})"
+        parts.append(f"## {title}\n\n{said}\n")
+    return "\n".join(parts)
 
 
 def update_status() -> dict[str, Any]:

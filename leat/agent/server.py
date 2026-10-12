@@ -186,6 +186,19 @@ class _Handler(BaseHTTPRequestHandler):
             elif path == "/api/update":  # the box's version, and an update ready, if one is
                 _admin(me)
                 self._json(200, _system({"update": "status"}))
+            elif path == "/api/diagnostics":  # the box's system, as a file an admin sends us
+                _admin(me)
+                text = _system({"diagnostics": True})["text"].encode()
+                day = time.strftime("%Y-%m-%d")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(text)))
+                self.send_header(
+                    "Content-Disposition",
+                    f'attachment; filename="leat-{self.server.name or "box"}-{day}.txt"',
+                )
+                self.end_headers()
+                self.wfile.write(text)
             elif path == "/api/health":  # what of the box needs attention, the admins' to see
                 _admin(me)
                 self._json(200, {"warnings": self._warnings()})

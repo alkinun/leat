@@ -467,6 +467,27 @@ def test_system_update_status(tmp_path, monkeypatch):
     assert ran == [["systemctl", "--no-block", "start", "systemd-sysupdate.service"]]
 
 
+def test_system_diagnostics(monkeypatch):
+    # the box's system, as text, each part under its title, a command that fails said so; the
+    # logs of the system's services alone, never leat agent's, nor Caddy's of its requests
+    ran = []
+
+    def run(args, **kw):
+        ran.append(args)
+        if args[0] == "lsblk":
+            raise FileNotFoundError("no lsblk")
+        return SimpleNamespace(stdout=f"of {args[0]}", stderr="")
+
+    monkeypatch.setattr(system.subprocess, "run", run)
+    text = system.handle({"diagnostics": True})["text"]
+    assert "## Version\n\nof cat" in text and "## Disks\n\n(no lsblk)" in text
+    logs = next(a for a in ran if "--lines=400" in a)
+    assert "--unit=leat-address" in logs and not any("leat-agent" in a or "leat-proxy" in a
+                                                     for a in logs)  # fmt: skip
+    certificate = next(a for a in ran if "--unit=leat-proxy" in a)
+    assert certificate[-2:] == ["--grep", '"logger":"tls']
+
+
 def test_system_wifi_files(tmp_path, monkeypatch):
     # a network joined is iwd's known network: a file of its name, or of its name's bytes in hex,
     # root's alone to read; open of no passphrase; forgotten, gone
