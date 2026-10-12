@@ -192,6 +192,9 @@ class _Handler(BaseHTTPRequestHandler):
             elif path == "/api/wifi":  # the Wi-Fi networks in reach, the admins' to see
                 _admin(me)
                 self._json(200, _system({"wifi": "scan"}))
+            elif path == "/api/network":  # the wired link's address, fixed or DHCP's, an admin's
+                _admin(me)
+                self._json(200, _system({"network": "status"}))
             elif path == "/api/update":  # the box's version, and an update ready, if one is
                 _admin(me)
                 self._json(200, _system({"update": "status"}))
@@ -321,6 +324,14 @@ class _Handler(BaseHTTPRequestHandler):
                 name, passphrase = _text(body, "name"), body.get("passphrase")
                 _system({"wifi": "join", "name": name, "passphrase": passphrase})
                 agent.note(person, "joined the Wi-Fi network", detail=name)
+                self._json(200, {})
+            elif path == "/api/network":  # a fixed address of the wired link's, or DHCP's again
+                _admin(me)
+                fixed = body.get("fixed")
+                _system({"network": fixed or "dhcp"})
+                done = "set a fixed address" if fixed else "set the address to automatic"
+                address = fixed.get("address") if isinstance(fixed, dict) else None
+                agent.note(person, done, detail=address)
                 self._json(200, {})
             elif path == "/api/update":  # an update looked for now, an admin's to ask
                 _admin(me)

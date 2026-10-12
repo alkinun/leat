@@ -63,6 +63,15 @@ Tried in a VM, of `modprobe mac80211_hwsim radios=3`: the box's radio, a phone's
 access point (iwd's `DriverQuirks` `DefaultInterface=*` there, as hwsim's radios refused iwd's own
 interfaces).
 
+## A fixed address
+
+An office whose IT gives the box its own address sets it in Settings, The box, Network: an address
+and its prefix, a gateway and DNS servers, which the box's helper writes as
+`/run/systemd/network/10-leat-fixed.network`, ahead of the wired link's DHCP. It is kept on the data
+partition and written again at each boot. Forty seconds after one is set, a check asks whether the
+gateway answers on the link, by its neighbour's entry. If it doesn't, as of an address mistyped, the
+box goes back to DHCP by itself and Settings says so, so a box is never lost to a wrong one.
+
 ## Its disk
 
 `box/image` builds it with mkosi. The image holds the first three partitions; the box's first boot

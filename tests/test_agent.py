@@ -783,6 +783,23 @@ def test_wifi(server, agent, monkeypatch):
     assert status == 400 and b"no box" in body and b"Errno" not in body
 
 
+def test_network(server, agent, monkeypatch):
+    # the wired link's address, fixed or DHCP's, an admin's to set, as the box's helper sets it,
+    # each noted
+    asked = []
+    status = {"fixed": None, "fell_back": True}
+    monkeypatch.setattr(system, "ask", lambda r: asked.append(r) or (
+        status if r["network"] == "status" else {}))  # fmt: skip
+    assert json.loads(request(f"{server}/api/network")[1]) == status
+    fixed = {"address": "192.168.1.50/24", "gateway": "192.168.1.1", "dns": ["192.168.1.1"]}
+    assert request(f"{server}/api/network", "POST", {"fixed": fixed})[0] == 200
+    assert request(f"{server}/api/network", "POST", {"fixed": None})[0] == 200
+    assert asked[1:] == [{"network": fixed}, {"network": "dhcp"}]
+    noted = [(a["action"], a["detail"]) for a in agent.store.activity()][:2]
+    assert noted == [("set the address to automatic", None),
+                     ("set a fixed address", "192.168.1.50/24")]  # fmt: skip
+
+
 def test_power(server, agent, monkeypatch):
     # the box restarted or switched off by an admin, noted first
     asked = []

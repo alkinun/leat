@@ -964,3 +964,41 @@ def test_screen_local():
     assert (
         screen.written(replace(state, language="de"), "##")[-1] == "oder geben Sie leat2.local ein"
     )
+
+
+def test_system_network(tmp_path, monkeypatch):
+    # a fixed address of the wired link's, checked, written as networkd reads it, a check of its
+    # gateway asked for a while after; DHCP's again once the gateway answers not, said so; kept,
+    # and put back at boot
+    ran = []
+    monkeypatch.setattr(system, "KEPT", tmp_path / "kept")
+    monkeypatch.setattr(system, "FIXED", tmp_path / "run" / "10-leat-fixed.network")
+    monkeypatch.setattr(system.subprocess, "run", lambda args, **kw: ran.append(args))
+    for wrong in (
+        {"address": "192.168.1.50", "gateway": "192.168.1.1"},  # of no prefix: a /32
+        {"address": "192.168.1.50/24", "gateway": "10.0.0.1"},
+        {"address": "192.168.1.255/24", "gateway": "192.168.1.1"},
+        "static",
+        5,
+    ):
+        assert "error" in system.handle({"network": wrong})
+    fixed = {"address": "192.168.1.50/24", "gateway": "192.168.1.1", "dns": ["9.9.9.9"]}
+    assert system.handle({"network": fixed}) == {}
+    written = system.FIXED.read_text()
+    assert "Address=192.168.1.50/24\nGateway=192.168.1.1\nDNS=9.9.9.9\n" in written
+    assert ["networkctl", "reload"] in ran
+    assert any(a[0] == "systemd-run" and "--check-network" in a for a in ran)
+    assert system.handle({"network": "status"}) == {"fixed": fixed, "fell_back": False}
+    monkeypatch.setattr(system, "_answers", lambda gateway: True)
+    system.check_network()
+    assert system.FIXED.exists()
+    system.FIXED.unlink()  # as a boot clears /run
+    system.restore()
+    assert system.FIXED.exists()
+    monkeypatch.setattr(system, "_answers", lambda gateway: False)
+    system.check_network()
+    assert not system.FIXED.exists()
+    assert system.handle({"network": "status"}) == {"fixed": None, "fell_back": True}
+    assert system.handle({"network": fixed}) == {}  # set again: no fall back said
+    assert system.handle({"network": "dhcp"}) == {} and not system.FIXED.exists()
+    assert system.handle({"network": "status"}) == {"fixed": None, "fell_back": False}

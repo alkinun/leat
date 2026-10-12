@@ -1104,6 +1104,7 @@ function renderBox() {
   zone.value = settings.timezone ?? "";
   zone.onchange = () => changeSettings({ timezone: zone.value });
   if (!$("wifi").childElementCount) renderWifi();
+  if (!$("network").childElementCount) renderNetwork();
   if (!$("power").childElementCount) renderPower();
   if (!$("software").childElementCount) renderSoftware();
 }
@@ -1212,6 +1213,53 @@ function renderWifi(found = null, error = "") {
   }
   if (error) parts.push(element("p", "error", error));
   $("wifi").replaceChildren(...parts);
+}
+
+// the box's wired address, an admin's to set: DHCP's, or a fixed one, as an office's IT gives, from
+// which the box falls back to DHCP's by itself if its gateway answers not; and that it did, if so
+async function renderNetwork(fixing = false, said = "") {
+  const parts = [element("h3", "", t("Network"))];
+  let state;
+  try {
+    state = await (await fetch("/api/network")).json();
+    if (state.error) throw new Error(state.error.message);
+  } catch (error) {
+    return $("network").replaceChildren(...parts, element("p", "about", error.message));
+  }
+  const fixed = fixing || Boolean(state.fixed);
+  const choice = element("div", "choice");
+  choice.append(...[[false, t("Automatic")], [true, t("Fixed address")]].map(([value, label]) => {
+    const button = element("button", value === fixed ? "on" : "", label);
+    button.type = "button";
+    button.onclick = () => value !== fixed && (value ? renderNetwork(true)
+      : post("/api/network", { fixed: null }).then(() => renderNetwork(false, t("The box takes its address of the office's network again.")))
+        .catch((error) => status(error.message, true)));
+    return button;
+  }));
+  parts.push(choice);
+  if (state.fell_back) parts.push(element("p", "error", t("The fixed address didn't reach its gateway, so the box went back to an automatic one.")));
+  if (fixed) {
+    const form = element("form", "fixed");
+    const field = (value, placeholder) => Object.assign(element("input"), { value: value ?? "", placeholder, spellcheck: false });
+    const address = field(state.fixed?.address, t("Address, as 192.168.1.50/24"));
+    const gateway = field(state.fixed?.gateway, t("Gateway, as 192.168.1.1"));
+    const dns = field(state.fixed?.dns?.join(", "), t("DNS servers, as 192.168.1.1"));
+    const save = element("button", "", t("Save"));
+    form.append(address, gateway, dns, save);
+    form.onsubmit = async (event) => {
+      event.preventDefault();
+      const servers = dns.value.split(/[\s,]+/).filter(Boolean);
+      try {
+        await post("/api/network", { fixed: { address: address.value.trim(), gateway: gateway.value.trim(), dns: servers } });
+        renderNetwork(false, t("The box takes the fixed address now. If its gateway doesn't answer within a minute, it goes back to an automatic one."));
+      } catch (error) {
+        status(error.message, true);
+      }
+    };
+    parts.push(form);
+  }
+  parts.push(element("p", "about", said || t("Automatic takes an address of the office's network, as most offices have it. A fixed one is for networks whose IT gives the box its own.")));
+  $("network").replaceChildren(...parts);
 }
 
 // the Wi-Fi networks in reach, as the box finds them

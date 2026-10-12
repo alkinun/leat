@@ -580,3 +580,5 @@ body.gated #gate { display: grid; flex: 1; place-items: center; min-height: 100v
   margin: 4px 0 0; font-family: var(--font-mono); font-size: 0.9375rem; user-select: all;
   overflow-wrap: anywhere;
 }
+/* a fixed address's fields, one beneath the other */
+#network form.fixed { display: grid; gap: 8px; max-width: 360px; margin: 12px 0 0; }

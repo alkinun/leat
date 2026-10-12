@@ -11,6 +11,11 @@ checked, by a helper systemd runs as root for each request, on a socket leat's g
      "passphrase": "…"}
     {"hotspot": "scan"}                                    the networks in reach of the hotspot
     {"hotspot": "stop"}                                    closes it, its Wi-Fi joining networks
+    {"network": {"address": "192.168.1.50/24",             a fixed address of its wired link's,
+     "gateway": "192.168.1.1", "dns": ["192.168.1.1"]}}    from which it falls back to DHCP if its
+                                                           gateway answers not
+    {"network": "dhcp"}                                    its address of DHCP's again
+    {"network": "status"}                                  which, and whether it fell back
     {"power": "off"}                                       switches the box off, or "restart"
     {"reset": true}                                        erases the box's state, and restarts
     {"update": "status"}                                   its version, and an update ready, if one
@@ -29,6 +34,7 @@ the box opens a hotspot of its own, as leat.box.hotspot does to be set up withou
 """
 
 import contextlib
+import ipaddress
 import json
 import os
 import re
@@ -47,6 +53,10 @@ IWD = Path("/var/lib/iwd")  # iwd's known networks
 KEPT = Path("/var/lib/leat-system")
 # the flag of a factory reset, on the ESP: empty, as systemd-repart heeds its being there alone
 RESET = Path("/boot/leat-reset")
+# a fixed address of the wired link's, as systemd-networkd reads it, made anew at boot of what is
+# kept
+FIXED = Path("/run/systemd/network/10-leat-fixed.network")
+CHECK = 40  # seconds after a fixed address is set before its gateway must answer, or DHCP's again
 UKIS = Path("/boot/EFI/Linux")  # the box's UKIs, leat_<version>[+tries].efi, each its system's
 OS_RELEASE = Path("/etc/os-release")
 LONGEST = 4096  # bytes of a request at most
@@ -74,6 +84,8 @@ def handle(request: Any) -> dict[str, Any]:
             return join(request.get("name"), request.get("passphrase"))
         if wifi == "forget":
             return forget(request.get("name"))
+        if "network" in request:
+            return network(request["network"])
         if "hotspot" in request:
             return hotspot(request["hotspot"], request.get("name"), request.get("passphrase"))
         if "power" in request:
@@ -105,11 +117,51 @@ def set_timezone(zone: Any) -> dict[str, Any]:
 
 
 def restore() -> None:
-    """Puts back what the helper set that the system's partition holds, as an update replaced it:
-    the time zone, of its kept name."""
+    """Puts back what the helper set that the system's partition holds, as an update replaced it,
+    or that is of a boot alone: the time zone, of its kept name; the wired link's fixed address."""
     with contextlib.suppress(FileNotFoundError, Refused):  # none kept, or no zone the system has
         if (kept := (KEPT / "timezone").read_text().strip()) != zone():
             set_timezone(kept)
+    with contextlib.suppress(FileNotFoundError, ValueError, OSError, subprocess.SubprocessError):
+        _fix(json.loads((KEPT / "network.json").read_text()))
+
+
+def network(how: Any) -> dict[str, Any]:
+    """The wired link's address: fixed, of {"address": "192.168.1.50/24", "gateway": …, "dns": […]},
+    which the box falls back from to DHCP's if its gateway answers not CHECK seconds after, as an
+    office's IT may mistype one and lose the box else; DHCP's again, of "dhcp"; or which it is now,
+    and whether it fell back, of "status"."""
+    kept, fell = KEPT / "network.json", KEPT / "network-fell-back"
+    if how == "status":
+        with contextlib.suppress(FileNotFoundError, ValueError):
+            return {"fixed": json.loads(kept.read_text()), "fell_back": False}
+        return {"fixed": None, "fell_back": fell.exists()}
+    fell.unlink(missing_ok=True)
+    if how == "dhcp":
+        kept.unlink(missing_ok=True)
+        _fix(None)
+        return {}
+    fixed = _checked_network(how)
+    KEPT.mkdir(exist_ok=True)
+    _write(kept, json.dumps(fixed) + "\n", 0o644)
+    _fix(fixed)
+    subprocess.run(["systemctl", "stop", "leat-network-check.timer"], capture_output=True,
+                   timeout=10)  # an earlier check's, of an address set again since  # fmt: skip
+    subprocess.run(["systemd-run", f"--on-active={CHECK}", "--unit=leat-network-check",
+                    "--description=Whether the box's fixed address reaches its gateway",
+                    sys.executable, "-m", "leat.box.system", "--check-network"],
+                   check=True, capture_output=True, timeout=10)  # fmt: skip
+    return {}
+
+
+def check_network() -> None:
+    """Falls back to DHCP's address if the fixed one's gateway answers not, as `network` asks once
+    one is set."""
+    with contextlib.suppress(FileNotFoundError, ValueError):
+        fixed = json.loads((KEPT / "network.json").read_text())
+        if not _answers(fixed["gateway"]):
+            network("dhcp")
+            (KEPT / "network-fell-back").touch()
 
 
 def scan() -> dict[str, Any]:
@@ -393,6 +445,58 @@ def _known() -> list[str]:
                   for i in _objects().values() if "net.connman.iwd.KnownNetwork" in i)  # fmt: skip
 
 
+def _checked_network(how: Any) -> dict[str, Any]:
+    # a fixed address as networkd is to have it, checked. Raises Refused of one that is no address
+    if not isinstance(how, dict):
+        raise Refused('a network is "dhcp", or a fixed address, its gateway and DNS servers')
+    try:
+        address = ipaddress.IPv4Interface(how.get("address"))
+        gateway = ipaddress.IPv4Address(how.get("gateway"))
+        dns = [str(ipaddress.IPv4Address(d)) for d in how.get("dns") or [str(gateway)]]
+    except (ValueError, TypeError) as e:
+        raise Refused(f"that is no address: {e}") from None
+    net = address.network
+    if not 8 <= net.prefixlen <= 30 or address.ip in (net.network_address, net.broadcast_address):
+        raise Refused(f"{address} is no address of a host on a network")
+    if gateway not in net or gateway == address.ip:
+        raise Refused(f"the gateway {gateway} is not on {net}")
+    if len(dns) > 3:
+        raise Refused("three DNS servers at most")
+    return {"address": str(address), "gateway": str(gateway), "dns": dns}
+
+
+def _fix(fixed: dict[str, Any] | None) -> None:
+    # the wired links' fixed address, as networkd is to have it, or none, and networkd told
+    if fixed is None:
+        FIXED.unlink(missing_ok=True)
+    else:
+        dns = "".join(f"DNS={d}\n" for d in fixed["dns"])
+        FIXED.parent.mkdir(parents=True, exist_ok=True)
+        _write(FIXED, f"# leat.box.system's, of an admin's fixed address\n[Match]\nType=ether\n\n"
+               f"[Network]\nAddress={fixed['address']}\nGateway={fixed['gateway']}\n{dns}"
+               "MulticastDNS=yes\n", 0o644)  # fmt: skip
+    subprocess.run(["networkctl", "reload"], check=True, capture_output=True, timeout=10)
+    for link in Path("/sys/class/net").iterdir():  # each wired link configured anew
+        if (link / "type").read_text().strip() == "1" and not (link / "wireless").exists() and (
+                link / "device").exists():  # fmt: skip
+            subprocess.run(["networkctl", "reconfigure", link.name], capture_output=True,
+                           timeout=10)  # fmt: skip
+
+
+def _answers(gateway: str, wait: float = 5) -> bool:
+    # whether a gateway answers on the link, as its neighbour's entry shows once a packet was sent
+    with contextlib.suppress(OSError), socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.sendto(b"", (gateway, 9))
+    for _ in range(int(wait * 4)):
+        told = subprocess.run(["ip", "-j", "neigh", "show", gateway], capture_output=True,
+                              text=True, timeout=5).stdout  # fmt: skip
+        states = {s for entry in json.loads(told or "[]") for s in entry.get("state", [])}
+        if states & {"REACHABLE", "STALE", "DELAY", "PROBE", "PERMANENT"}:
+            return True
+        time.sleep(0.25)
+    return False
+
+
 def _checked_passphrase(passphrase: Any) -> None:
     # raises Refused of what is no WPA2 passphrase
     if (
@@ -413,6 +517,8 @@ def main() -> None:
     # at boot, what the helper set put back
     if sys.argv[1:] == ["--restore"]:
         return restore()
+    if sys.argv[1:] == ["--check-network"]:
+        return check_network()
     raw = sys.stdin.buffer.read(LONGEST + 1)
     try:
         request = json.loads(raw) if len(raw) <= LONGEST else None

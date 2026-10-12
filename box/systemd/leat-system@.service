@@ -12,9 +12,9 @@ StandardError=journal
 TimeoutSec=30
 NoNewPrivileges=yes
 ProtectSystem=strict
-# iwd's known networks, the ESP, of a factory reset's flag, and what it keeps of what it set, the
-# time zone's name
-ReadWritePaths=/var/lib/iwd /boot
+# iwd's known networks, the ESP, of a factory reset's flag, networkd's runtime folder, of a fixed
+# address, and what it keeps of what it set, the time zone's name and the fixed address
+ReadWritePaths=/var/lib/iwd /boot /run/systemd/network
 StateDirectory=leat-system
 ProtectHome=yes
 PrivateTmp=yes
