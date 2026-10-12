@@ -955,3 +955,12 @@ def test_screen_look(tmp_path, monkeypatch):
     looked = screen.look()
     assert looked.hotspot == ("Leat-7J32", "kq7x-2mpa")
     assert looked.warnings[0][0] == "Die Box konnte sich nicht mit Office verbinden"
+
+
+def test_screen_local():
+    # the box's name on the office's network, as resolved publishes it: leat2 of a second box
+    state = replace(READY, local="leat2")
+    assert screen.written(state, "##")[-1] == "or type leat2.local"
+    assert (
+        screen.written(replace(state, language="de"), "##")[-1] == "oder geben Sie leat2.local ein"
+    )

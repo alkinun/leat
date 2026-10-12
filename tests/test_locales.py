@@ -14,6 +14,7 @@ APP = ROOT / "agent" / "app"
 SAME = {"Leat", "K7X 2QM", "Kanzlei Weber"}
 # the screen's words it says of values it is told, as a model's status, and of its link
 SCREEN = {"ready", "loading", "Network", "Wired", "Wi-Fi", "{size} GB free", "Setup code",
+          "or type {local}.local",
           "Recovery code, for {minutes} more minutes"}  # fmt: skip
 # the box's warnings, as leat.box.watch says them, of their values
 WARNINGS = {

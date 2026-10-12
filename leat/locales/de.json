@@ -386,7 +386,7 @@
   "only whoever made a project may change whom it is shared with": "Nur wer ein Projekt erstellt hat, darf ändern, mit wem es geteilt ist",
   "only whoever made a project, or an admin, may delete it": "Nur wer ein Projekt erstellt hat, oder ein Admin, darf es löschen",
   "open": "offen",
-  "or type leat.local": "oder geben Sie leat.local ein",
+  "or type {local}.local": "oder geben Sie {local}.local ein",
   "ran code": "führte Code aus",
   "ran code {n} times": "führte {n}-mal Code aus",
   "ran the workflow": "startete den Workflow",

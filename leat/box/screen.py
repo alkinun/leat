@@ -112,6 +112,9 @@ class State:
     language: str = "en"
     # the box's own Wi-Fi, while it is open for want of a network: its name and passphrase
     hotspot: tuple[str, str] | None = None
+    # its name on the office's network, of multicast DNS: leat, or leat2 of a second box there, as
+    # systemd-resolved names one whose name another has
+    local: str = "leat"
 
 
 def look(root: Path = ROOT) -> State:
@@ -119,7 +122,7 @@ def look(root: Path = ROOT) -> State:
     name, address = _name(root), _address()
     booting = time.clock_gettime(time.CLOCK_BOOTTIME) < BOOTING
     state = State(name, address, booting=booting, link=_link(), free=_free(), version=_version(),
-                  language=LANGUAGE)  # fmt: skip
+                  language=LANGUAGE, local=_local())  # fmt: skip
     if address is None:  # and its hotspot, if it opened one, and the network it could not join
         with contextlib.suppress(OSError, ValueError, KeyError):
             spot = json.loads(hotspot.STATE.read_text())
@@ -277,8 +280,9 @@ def paint(state: State, size: tuple[int, int], now: datetime.datetime) -> Image.
                   *((line, advice, WARNING, 0.6 * u)
                     for line in _wrapped(what, advice, right - margin, pen))]  # fmt: skip
     if url:
+        local = state.local
         lines += [(url.removeprefix("https://"), font(round(3.2 * u), "Medium"), TEXT, 1.1 * u),
-                  (t("or type leat.local"), font(round(2.4 * u)), MUTED, 0.0)]  # fmt: skip
+                  (t(f"or type {local}.local"), font(round(2.4 * u)), MUTED, 0.0)]  # fmt: skip
         lines[-3] = (*lines[-3][:3], 4.0 * u)  # room before the address
         # and the code that recovers it, or sets it up, below
         shown = (holds(state), state.recovery) if state.recovery else ("Setup code", state.setup)
@@ -328,7 +332,8 @@ def written(state: State, qr: str = "") -> list[str]:
     for warned, what in state.warnings[:2]:
         lines += ["", f"{BOLD}{warned}{PLAIN}: {what}"]
     if url:
-        lines += ["", url, "", *qr.splitlines(), "", t("or type leat.local")]
+        local = state.local
+        lines += ["", url, "", *qr.splitlines(), "", t(f"or type {local}.local")]
     if url and state.recovery:
         lines += ["", f"{t(holds(state))}: {BOLD}{spaced(state.recovery)}{PLAIN}", "",
                   t("Press the power button again to switch the box off.")]  # fmt: skip
@@ -498,6 +503,19 @@ def _link() -> str | None:
             if fields[1] == "00000000":
                 return "Wi-Fi" if Path(f"/sys/class/net/{fields[0]}/wireless").exists() else "Wired"
     return None
+
+
+def _local() -> str:
+    # the box's name of multicast DNS, as systemd-resolved publishes it: its hostname, numbered
+    # once another on the network had it; leat, of none told
+    with contextlib.suppress(OSError, subprocess.SubprocessError, ValueError, KeyError):
+        told = subprocess.run(
+            ["busctl", "--json=short", "get-property", "org.freedesktop.resolve1",
+             "/org/freedesktop/resolve1", "org.freedesktop.resolve1.Manager", "LLMNRHostname"],
+            capture_output=True, text=True, timeout=3, check=True,
+        ).stdout  # fmt: skip
+        return json.loads(told)["data"] or "leat"
+    return "leat"
 
 
 def _free() -> int | None:
