@@ -247,8 +247,9 @@ def _agent(args: argparse.Namespace) -> None:
     with AgentServer(agent, args.host, args.port, args.name) as server:
         restored = args.data / "restored.json"  # of a backup leat.box.backup restored
         if restored.exists():
-            if person := server.accounts.restored(json.loads(restored.read_text()), args.name):
-                agent.note(person["id"], "restored a backup")
+            with contextlib.suppress(ValueError):  # of one unreadable, no device paired again
+                if person := server.accounts.restored(json.loads(restored.read_text()), args.name):
+                    agent.note(person["id"], "restored a backup")
             restored.unlink()
         url = f"https://{args.name}" if args.name else _url(args.host, server.server_port)
         print(f"leat agent at {url}, its models of {args.engine}. Ctrl-C quits.", flush=True)
