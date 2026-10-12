@@ -139,7 +139,7 @@ def _days_left(name: str) -> int | None:
     try:
         with (socket.create_connection(HTTPS, TIMEOUT) as connection,
               context.wrap_socket(connection, server_hostname=name) as tls):  # fmt: skip
-            expires = ssl.cert_time_to_seconds(tls.getpeercert()["notAfter"])
+            expires = ssl.cert_time_to_seconds(str((tls.getpeercert() or {})["notAfter"]))
     except ssl.SSLCertVerificationError as e:
         return 0 if e.verify_code == EXPIRED else None
     except OSError:
