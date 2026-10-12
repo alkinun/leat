@@ -342,7 +342,7 @@ class Workspace:
                 self._apply(upper)
         finally:
             if upper is not None:
-                _clear(upper.parent)
+                _remove_run(upper.parent)
         return Ran(None if stopped.is_set() else status, output)
 
     def _apply(self, upper: Path) -> None:
@@ -399,7 +399,7 @@ def _overlays(scratch: Path) -> bool:
     except (OSError, subprocess.TimeoutExpired):
         return False
     finally:
-        _clear(probe)
+        _remove_run(probe)
 
 
 def _opaque(folder: Path) -> bool:
@@ -413,7 +413,7 @@ def _opaque(folder: Path) -> bool:
     return False
 
 
-def _clear(folder: Path) -> None:
+def _remove_run(folder: Path) -> None:
     # deletes a folder of a run's, its overlay's work folder too, which overlayfs leaves unreadable
     for inside in folder.rglob("*") if folder.is_dir() else []:
         if inside.is_dir() and not inside.is_symlink():

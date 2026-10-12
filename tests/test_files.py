@@ -6,6 +6,7 @@ import http.client
 import json
 import os
 import shutil
+import socket
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
@@ -308,14 +309,22 @@ def test_api_files(server, agent, monkeypatch):
         bad.add_unredirected_header("Content-Length", length)
         with pytest.raises(urllib.error.HTTPError, match="400"):
             urllib.request.urlopen(bad)
-    # a body in chunks, of no length, which would make an empty file
+    # a body in chunks, of no length, as a browser may stream one
     chunked = urllib.request.Request(f"{server}/api/files/c.txt", iter([b"x"]), method="PUT")
     chunked.add_unredirected_header("Transfer-Encoding", "chunked")
-    with pytest.raises(urllib.error.HTTPError, match="400"):
-        urllib.request.urlopen(chunked)
-    assert not agent.space(None, 1).path("c.txt").exists()
-    monkeypatch.setattr("leat.agent.server.UPLOAD", 4)
+    with urllib.request.urlopen(chunked) as r:
+        assert json.loads(r.read()) == {"name": "c.txt"}
+    assert agent.space(None, 1).path("c.txt").read_bytes() == b"x"
+    monkeypatch.setattr("leat.agent.dav.UPLOAD", 4)
     assert call(f"{server}/api/files/big.bin", "PUT", b"12345")[0] == 413
+    # a body cut short, as of a connection gone, makes no file
+    host, port = server.removeprefix("http://").split(":")
+    with socket.create_connection((host, int(port))) as s:
+        s.sendall(f"PUT /api/files/short.txt HTTP/1.1\r\nHost: {host}\r\nCookie: {cookie()}\r\n"
+                  "Content-Length: 3\r\n\r\nab".encode())  # fmt: skip
+        s.shutdown(socket.SHUT_WR)
+        s.recv(1024)
+    assert not any("short" in p.name for p in agent.space(None, 1).root.iterdir())
     assert call(f"{server}/files")[0] == 200  # the app's page of them
 
 

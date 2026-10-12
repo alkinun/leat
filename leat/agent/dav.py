@@ -19,6 +19,7 @@ asks one to edit, is granted and kept for no one: two people editing a document 
 save, the last's kept, the first's an earlier version.
 """
 
+import contextlib
 import email.utils
 import mimetypes
 import os
@@ -28,12 +29,13 @@ import time
 import urllib.parse
 import uuid
 import xml.etree.ElementTree as ET
+from collections.abc import Iterator
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from leat.agent.agent import NotFound, Refused
+from leat.agent.agent import NAME, NotFound, Refused
 from leat.agent.workspace import Workspace, hidden
 
 if TYPE_CHECKING:
@@ -83,7 +85,7 @@ class Drive:
             self._body()
             if parts[1] in self._folders():
                 return self._send(405, b"")
-            self.agent.add_project(parts[1][:80], self.person)
+            self.agent.add_project(parts[1][:NAME], self.person)
             self.agent.note(self.person, "made the project by the network drive", detail=parts[1])
             return self._send(201, b"")
         if method == "MOVE" and len(parts) == 2 and parts[0] == self.projects:  # a project renamed
@@ -182,18 +184,12 @@ class Drive:
             return self._send(409, b"")  # its folder first, as WebDAV has it
         if target.is_dir():
             raise Refused(f"{name} is a folder")
-        partial = target.parent / f".dav-{uuid.uuid4().hex}"
-        try:
-            with partial.open("wb") as f:
-                for chunk in self._chunks():
-                    f.write(chunk)
+        with received(self.handler, target.parent) as partial:
             # new, of one there is not, or empty, as a lock, or Windows, makes one before it puts
             # it, and a document just moved aside, as Word saves one, is changed, not new
             new = (not target.exists() or not target.stat().st_size) and not _away(space, name)
             space.keep(name)  # if there is one, of content, as an empty one is kept not
             os.replace(partial, target)
-        finally:
-            partial.unlink(missing_ok=True)
         if not target.stat().st_size:  # an empty file, as Windows puts first, is no file yet
             return self._send(201, b"")
         action = "uploaded by the network drive" if new else "changed by the network drive"
@@ -279,7 +275,7 @@ class Drive:
             raise Refused("a project is renamed among the projects, never moved")
         if parts[1] in self._folders():
             return self._send(412, b"")
-        self.agent.change_project(project, self.person, name=parts[1][:80])  # theirs, or Refused
+        self.agent.change_project(project, self.person, name=parts[1][:NAME])  # theirs, or Refused
         self.agent.note(self.person, "renamed the project by the network drive", project)
         self._send(201, b"")
 
@@ -386,37 +382,8 @@ class Drive:
             self.agent.arrived(project, self.person, [name])
         self.agent.note(self.person, action, project, detail or name)
 
-    def _chunks(self) -> Any:
-        # the request's body, a chunk at a time, of its length, or in HTTP's chunks, as macOS sends
-        # a file of unknown length. Raises ValueError of one past UPLOAD
-        read, total = self.handler.rfile, 0
-        if self.handler.headers.get("Transfer-Encoding", "").lower() == "chunked":
-            while True:
-                line = read.readline()
-                if not line:  # the connection gone before the last chunk
-                    raise ConnectionError("the body broke off")
-                if not (size := int(line.split(b";")[0].strip() or b"0", 16)):
-                    break
-                if size < 0 or (total := total + size) > UPLOAD:
-                    raise ValueError(f"a file may be {UPLOAD >> 20} MB at most")
-                if len(chunk := read.read(size)) < size:
-                    raise ConnectionError("the body broke off")
-                yield chunk
-                read.readline()
-            while read.readline().strip():  # the trailer, to its empty line
-                pass
-            return
-        left = int(self.handler.headers.get("Content-Length") or 0)
-        if left > UPLOAD or left < 0:
-            raise ValueError(f"a file may be {UPLOAD >> 20} MB at most")
-        while left > 0:
-            if not (chunk := read.read(min(CHUNK, left))):  # gone before its length: no file
-                raise ConnectionError("the body broke off")
-            left -= len(chunk)
-            yield chunk
-
     def _body(self) -> bytes:
-        return b"".join(self._chunks())[: 1 << 20]
+        return b"".join(chunks(self.handler))[: 1 << 20]
 
     def _xml(self, status: int, root: ET.Element, headers: dict[str, str] | None = None) -> None:
         data = b'<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(root)
@@ -437,6 +404,59 @@ def send(handler: BaseHTTPRequestHandler, status: int, data: bytes,
     handler.send_header("Content-Length", str(len(data)))
     handler.end_headers()
     handler.wfile.write(data)
+
+
+class TooLarge(ValueError):
+    """A request's body is larger than it may be."""
+
+
+def chunks(handler: BaseHTTPRequestHandler) -> Iterator[bytes]:
+    """A request's body, a chunk at a time, of its length, or in HTTP's chunks, as macOS sends a
+    file of unknown length. Raises TooLarge of one past UPLOAD, ValueError of a length there cannot
+    be, ConnectionError of one cut short, as of a laptop gone to sleep while it saved."""
+    read, total = handler.rfile, 0
+    if handler.headers.get("Transfer-Encoding", "").lower() == "chunked":
+        while True:
+            line = read.readline()
+            if not line:  # the connection gone before the last chunk
+                raise ConnectionError("the body broke off")
+            if not (size := int(line.split(b";")[0].strip() or b"0", 16)):
+                break
+            if size < 0:
+                raise ValueError("a chunk's length cannot be negative")
+            if (total := total + size) > UPLOAD:
+                raise TooLarge(f"a file may be {UPLOAD >> 20} MB at most")
+            if len(chunk := read.read(size)) < size:
+                raise ConnectionError("the body broke off")
+            yield chunk
+            read.readline()
+        while read.readline().strip():  # the trailer, to its empty line
+            pass
+        return
+    left = int(handler.headers.get("Content-Length") or 0)
+    if left < 0:
+        raise ValueError("a body's length cannot be negative")
+    if left > UPLOAD:
+        raise TooLarge(f"a file may be {UPLOAD >> 20} MB at most")
+    while left > 0:
+        if not (chunk := read.read(min(CHUNK, left))):  # gone before its length: no file
+            raise ConnectionError("the body broke off")
+        left -= len(chunk)
+        yield chunk
+
+
+@contextlib.contextmanager
+def received(handler: BaseHTTPRequestHandler, folder: Path) -> Iterator[Path]:
+    """A request's body, as a hidden file in `folder` written whole, to be moved to its place, and
+    deleted if it was not; none, of a body cut short, which overwrites nothing."""
+    partial = folder / f".upload-{uuid.uuid4().hex}"
+    try:
+        with partial.open("wb") as f:
+            for chunk in chunks(handler):
+                f.write(chunk)
+        yield partial
+    finally:
+        partial.unlink(missing_ok=True)
 
 
 def _away(space: Workspace, name: str) -> bool:

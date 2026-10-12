@@ -27,6 +27,7 @@ import http.cookies
 import ipaddress
 import json
 import mimetypes
+import os
 import queue
 import re
 import socket
@@ -40,7 +41,7 @@ from typing import Any
 from leat import locales
 from leat.agent import dav
 from leat.agent.accounts import Accounts
-from leat.agent.agent import Agent, Busy, NotFound, Refused
+from leat.agent.agent import NAME, Agent, Busy, NotFound, Refused
 from leat.agent.client import EngineError
 from leat.agent.store import Store
 from leat.agent.workspace import Workspace
@@ -70,9 +71,7 @@ _TYPES = {
     ".svg": "image/svg+xml",
 }
 _KEEP_ALIVE = 15  # seconds between comments on a quiet event stream, which find its client gone
-UPLOAD = 100 << 20  # bytes of a file uploaded at most
 BODY = 10 << 20  # bytes of a request's JSON at most, which may come before its device is known
-PROJECT_NAME = 80  # characters of a project's name at most
 OFFICE = 60  # characters of an office's name at most, as the box's screen shows it
 INSTRUCTIONS = 20000  # characters of a project's instructions at most
 COOKIE = "leat"  # the cookie of a device's secret
@@ -169,8 +168,7 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(200, "application/json", file.read_bytes())
         with self._answering():
             if path == "/api/box":  # of the box's own screen, on this machine, never its front door
-                if not _loopback(urllib.parse.urlsplit(f"//{self.headers.get('Host', '')}").hostname
-                                 or ""):  # fmt: skip
+                if not _loopback(self._hostname()):
                     return self._error(404, f"there is no GET {path}")
                 # and its setup code, while it is to be set up, and a recovery code, while one holds
                 accounts, shown = self.server.accounts, agent.box()
@@ -243,16 +241,12 @@ class _Handler(BaseHTTPRequestHandler):
             # a POST, of this server's page alone: a link another gave could log a browser in
             return self._joined(match[1])
         with self._answering():
-            if (size := self._length()) > BODY:
-                return self._error(413, f"a request may be {BODY >> 20} MB at most")
-            body = json.loads(self.rfile.read(size))
-            if not isinstance(body, dict):
-                raise ValueError("the body must be a JSON object")
+            body = self._body()
             if path == "/api/setup":  # the box's first person, its first admin, and its settings
                 settings = _settings(body, ("offline", "office", "language", "timezone"))
                 zone = settings.pop("timezone", None)
                 code = body.get("code") if isinstance(body.get("code"), str) else None
-                secret = accounts.setup(_text(body, "name"), _device(self.headers), code)
+                secret = accounts.setup(_text(body, "name"), _described(self.headers), code)
                 agent.change(**settings)
                 with contextlib.suppress(ValueError):  # their device's, which a box takes as its
                     # own, if it can; one that is no box keeps its own
@@ -263,8 +257,7 @@ class _Handler(BaseHTTPRequestHandler):
                 )
                 return self._json(200, {}, secret)
             if path == "/api/box/recovery":  # of the box's power button, on this machine alone
-                if not _loopback(urllib.parse.urlsplit(f"//{self.headers.get('Host', '')}").hostname
-                                 or ""):  # fmt: skip
+                if not _loopback(self._hostname()):
                     return self._error(404, f"there is no POST {path}")
                 if accounts.empty():
                     return self._error(409, "this Leat is not set up: there is no one to recover")
@@ -272,12 +265,12 @@ class _Handler(BaseHTTPRequestHandler):
             if path == "/api/recover":  # a new admin, of the recovery code the box's screen shows
                 given = body.get("code") if isinstance(body.get("code"), str) else ""
                 person, secret = accounts.recover(
-                    str(given), _text(body, "name"), _device(self.headers)
+                    str(given), _text(body, "name"), _described(self.headers)
                 )
                 agent.note(person["id"], "got back in, as an admin, by the box's recovery code")
                 return self._json(200, {}, secret)
             if path == "/api/pairings":  # a device's request to join
-                return self._json(200, accounts.ask(_text(body, "name"), _device(self.headers)))
+                return self._json(200, accounts.ask(_text(body, "name"), _described(self.headers)))
             me = self._device()
             person, match = me["person"], _CONVERSATION.fullmatch(path)
             if path == "/api/conversations":  # in a project, if the body names one
@@ -419,11 +412,7 @@ class _Handler(BaseHTTPRequestHandler):
             changed = _PERSON.fullmatch(path)
             if not flow and not match and not changed and path != "/api/settings":
                 return self._error(404, f"there is no PATCH {path}")
-            if (size := self._length()) > BODY:
-                return self._error(413, f"a request may be {BODY >> 20} MB at most")
-            body = json.loads(self.rfile.read(size))
-            if not isinstance(body, dict):
-                raise ValueError("the body must be a JSON object")
+            body = self._body()
             if changed:
                 return self._json(200, self._person(int(changed[1]), body, me))
             if path == "/api/settings":
@@ -470,16 +459,15 @@ class _Handler(BaseHTTPRequestHandler):
         path, agent = urllib.parse.urlsplit(self.path).path, self.server.agent
         if _drive(path):
             return self._dav("PUT")
-        with self._answering():
+        with self._answering(), contextlib.suppress(ConnectionError):  # a body cut short: no file
             person = self._device()["person"]
             if not path.startswith("/api/") or not (match := _FILE.fullmatch(path)):
                 return self._error(404, f"there is no PUT {path}")
             space = agent.space(match[1], person)
-            if (size := self._length()) > UPLOAD:
-                return self._error(413, f"a file may be {UPLOAD >> 20} MB at most")
             name = space.free(urllib.parse.unquote(match[2]), folders=True)
             space.path(name).parent.mkdir(parents=True, exist_ok=True)
-            space.path(name).write_bytes(self.rfile.read(size))
+            with dav.received(self, space.path(name).parent) as partial:
+                os.replace(partial, space.path(name))
             unpacked = None
             try:  # a zip unpacked into a folder of its name, if asked
                 query = urllib.parse.urlsplit(self.path).query
@@ -563,6 +551,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._error(401, "this device has not joined this Leat: ask to join")
         except _Refused:
             self._error(403, "only this Leat's admins may do that")
+        except dav.TooLarge as e:
+            self._error(413, str(e))
         except Refused as e:
             self._error(403, str(e))
         except (ValueError, RecursionError) as e:  # JSON nested too deep to parse, too
@@ -573,6 +563,15 @@ class _Handler(BaseHTTPRequestHandler):
             self._error(409, str(e))
         except EngineError as e:
             self._error(502, str(e))
+
+    def _body(self) -> dict[str, Any]:
+        # the request's JSON object. Raises _TooLarge of one larger than BODY, ValueError of one
+        # that is no JSON object
+        if (size := self._length()) > BODY:
+            raise dav.TooLarge(f"a request may be {BODY >> 20} MB at most")
+        if not isinstance(body := json.loads(self.rfile.read(size)), dict):
+            raise ValueError("the body must be a JSON object")
+        return body
 
     def _device(self) -> dict[str, Any]:
         # the paired device the request comes from, by its cookie's secret. Raises _Unpaired
@@ -695,14 +694,17 @@ class _Handler(BaseHTTPRequestHandler):
         # served by its name, which the proxy in front alone reaches, or else by an address or a
         # local name; and by loopback always. A write comes from no browser, which sends no
         # Origin, or from a page of this server's, https://<name> of the box's name
-        host, name = self.headers.get("Host", ""), self.server.name
-        hostname = urllib.parse.urlsplit(f"//{host}").hostname or ""
+        host, name, hostname = self.headers.get("Host", ""), self.server.name, self._hostname()
         if not (hostname == name or _loopback(hostname) or name is None and _local(hostname)):
             return False
         if not write or (origin := self.headers.get("Origin")) is None:
             return True
         page = urllib.parse.urlsplit(origin)
         return page.netloc == host and (hostname != name or page.scheme == "https")
+
+    def _hostname(self) -> str:
+        # the name or address the request was sent to, as its Host header says it
+        return urllib.parse.urlsplit(f"//{self.headers.get('Host', '')}").hostname or ""
 
     def end_headers(self) -> None:
         # of every answer: its type as it says, not sniffed; no address of the box's told a site a
@@ -714,8 +716,8 @@ class _Handler(BaseHTTPRequestHandler):
         super().end_headers()
 
     def _length(self) -> int:
-        # the body's length, as its header says. Raises ValueError if it says none there can be,
-        # or the body comes in chunks, which this server does not read: an upload would be empty
+        # a JSON body's length, as its header says. Raises ValueError if it says none there can be,
+        # or the body comes in chunks, as only a file's may
         if "Transfer-Encoding" in self.headers:
             raise ValueError("a body must come whole, of the length its Content-Length says")
         if (n := int(self.headers.get("Content-Length") or 0)) < 0:
@@ -799,7 +801,7 @@ def _loopback(host: str) -> bool:
     return host == "localhost"
 
 
-def _device(headers: Any) -> str:
+def _described(headers: Any) -> str:
     # what a device is, in words, of its browser's User-Agent: "Firefox on Android"
     agent = headers.get("User-Agent", "")
     systems = (("Android", "Android"), ("iPhone", "iPhone"), ("iPad", "iPad"), ("Mac OS", "Mac"),
@@ -821,8 +823,8 @@ def _text(body: dict[str, Any], key: str) -> str:
 def _workflow(body: dict[str, Any]) -> tuple[str, str]:
     # a workflow's name and request, of a body; raises ValueError if they are not as they must be
     name, prompt = _text(body, "name").strip(), _text(body, "prompt").strip()
-    if len(name) > PROJECT_NAME or len(prompt) > INSTRUCTIONS:
-        raise ValueError(f"a workflow's name is {PROJECT_NAME} characters at most, and its "
+    if len(name) > NAME or len(prompt) > INSTRUCTIONS:
+        raise ValueError(f"a workflow's name is {NAME} characters at most, and its "
                          f"request {INSTRUCTIONS}")  # fmt: skip
     return name, prompt
 
@@ -847,8 +849,8 @@ def _project(body: dict[str, Any], new: bool = False) -> dict[str, Any]:
         raise ValueError("members must be a list of people's ids")
     if new or "name" in fields:
         name = _text(body, "name").strip()
-        if len(name) > PROJECT_NAME:
-            raise ValueError(f"a project's name is {PROJECT_NAME} characters at most")
+        if len(name) > NAME:
+            raise ValueError(f"a project's name is {NAME} characters at most")
         fields["name"] = name
     if not isinstance(fields.get("instructions", ""), str):
         raise ValueError("instructions must be text")

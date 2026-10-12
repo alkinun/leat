@@ -498,7 +498,6 @@ def test_project_members(agent, engine, events):
     assert agent.projects(ben)[0]["members"] == [] and agent.projects(ben)[0]["shared"]
 
 
-
 def test_projects_order(agent):
     # the latest changed first: renamed, or shared, a project rises; synced, of its folder, not,
     # as a synced project would else rise every few minutes
@@ -510,6 +509,7 @@ def test_projects_order(agent):
     assert [p["name"] for p in agent.projects(me)] == ["Older", "New"]
     agent.store.change_project(new, members=[])
     assert [p["name"] for p in agent.projects(me)] == ["New", "Older"]
+
 
 def test_projects_of_one_removed(server, agent):
     # a person removed takes their own projects with them; those they shared with everyone become

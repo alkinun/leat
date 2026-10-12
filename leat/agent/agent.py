@@ -77,6 +77,7 @@ PROJECT = """\
 ## This project
 This conversation is in the project "{name}".{instructions}"""
 INSTRUCTIONS = " Follow its instructions, which hold for every conversation in it:\n\n{text}"
+NAME = 80  # characters of a project's or workflow's name at most
 TITLE = 60  # characters of a conversation's title at most: its first message's start
 FORGET = 86400  # seconds between forgettings of the files' oldest earlier versions
 SETTLE = 60  # seconds after the last file arrived in a space before its workflows run, so that
@@ -220,10 +221,10 @@ class Agent:
                 info["files"] = attached
             if id is None:
                 who = (self.store.person(person) or {}) if person else {}
-                system = _system(self.workspace is not None, who.get("name"), held,
+                prompt = _system(self.workspace is not None, who.get("name"), held,
                                  self.offered().values(), self.offline())  # fmt: skip
                 title = _title(content)
-                id = self.store.create(title, [system, message], person, project)["id"]
+                id = self.store.create(title, [prompt, message], person, project)["id"]
                 start = 1
             else:
                 start = len(self.store.messages(id))
@@ -254,7 +255,7 @@ class Agent:
 
     def projects(self, person: int | None = None) -> list[dict[str, Any]]:
         """The projects a person sees, the latest updated first."""
-        return [_project(p) for p in self.store.projects(person)]
+        return [_shown_project(p) for p in self.store.projects(person)]
 
     def add_project(
         self, name: str, person: int | None = None, instructions: str = "", shared: bool = False
@@ -263,7 +264,7 @@ class Agent:
         with self._lock:
             project = self.store.add_project(name, person, instructions, shared)
             self._publish_projects()
-        return _project(project)
+        return _shown_project(project)
 
     def change_project(self, id: str, person: int | None = None, **changes: Any) -> None:
         """Changes a project a person sees: its name, instructions, whether it is shared with
@@ -312,7 +313,7 @@ class Agent:
 
     def workflows(self, person: int | None = None) -> list[dict[str, Any]]:
         """The workflows a person sees, their own and their projects', by name."""
-        return [_workflow(w) for w in self.store.workflows(person)]
+        return [_shown_workflow(w) for w in self.store.workflows(person)]
 
     def add_workflow(
         self, name: str, prompt: str, person: int | None = None, project: str | None = None
@@ -324,7 +325,7 @@ class Agent:
                 self._project(project, person)
             workflow = self.store.add_workflow(name, prompt, person, project)
             self._publish_workflows()
-        return _workflow(workflow)
+        return _shown_workflow(workflow)
 
     def schedule_workflow(
         self, id: int, when: str | None, person: int | None = None
@@ -338,7 +339,7 @@ class Agent:
                 raise NotFound(f"there is no workflow {id}")
             self.store.schedule_workflow(id, kept, person)
             self._publish_workflows()
-        return _workflow(self.store.workflow(id) or {})
+        return _shown_workflow(self.store.workflow(id) or {})
 
     def arrived(self, project: str | None, person: int | None, names: list[str]) -> None:
         """Notes files arrived in a space, uploaded or synced, which start its workflows that run
@@ -1228,12 +1229,12 @@ def _sees(project: dict[str, Any] | None, person: int | None) -> bool:
     )
 
 
-def _workflow(w: dict[str, Any]) -> dict[str, Any]:
+def _shown_workflow(w: dict[str, Any]) -> dict[str, Any]:
     # a workflow as the apps show it
     return {k: w.get(k) for k in ("id", "name", "prompt", "project", "schedule")}
 
 
-def _project(p: dict[str, Any]) -> dict[str, Any]:
+def _shown_project(p: dict[str, Any]) -> dict[str, Any]:
     # a project as the apps show it: whoever made it, and its members, by their ids; the folder its
     # files are synced with too, if any, when they last were, and why not, if not
     keys = ("id", "name", "instructions", "person", "members", "updated", "source", "synced",
