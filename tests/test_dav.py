@@ -237,8 +237,32 @@ def test_word_saves_by_renames(server, agent):
     assert ask("DELETE", "/dav/My files/~WRL0001.tmp")[0] == 204
     space = agent.space(None, 1)
     assert space.path("Vertrag.docx").read_bytes() == b"v2" and arrived == []
-    assert "Vertrag.docx" in {v["name"] for v in space.versions()}
+    assert [v["name"] for v in space.versions()] == ["Vertrag.docx"]  # not Word's ~WRL0001.tmp
     assert agent.store.activity()[0]["action"] == "changed by the network drive"
+
+
+def test_mac_saves_by_renames(server, agent):
+    # a Mac's app's save of a document on a network drive, by macOS's safe save, as TextEdit's and
+    # Pages' are: the document moved aside, its new content put by its name, the aside one deleted:
+    # the document changed, its earlier content kept by its own name, nothing new arrived
+    ask, _ = connected(server)
+    assert ask("PUT", "/dav/My files/Brief.docx", b"v1")[0] == 201
+    arrived = []
+    agent.arrived = lambda project, person, names: arrived.extend(names)
+    aside = "/dav/My files/Brief.docx.sb-0d3df477-FBQRBZ"
+    assert ask("MOVE", "/dav/My files/Brief.docx", Destination=f"{server}{aside}")[0] == 201
+    assert ask("PUT", "/dav/My files/Brief.docx", b"v2")[0] == 204  # changed, not new
+    assert ask("DELETE", aside)[0] == 204
+    space = agent.space(None, 1)
+    assert space.path("Brief.docx").read_bytes() == b"v2" and arrived == []
+    versions = space.versions()
+    assert [(v["name"], v["deleted"]) for v in versions] == [("Brief.docx", False)]
+    assert (
+        space.path("Brief.docx").read_bytes()
+        != (space.history / "Brief.docx" / versions[0]["version"]).read_bytes()
+        == b"v1"
+    )
+    assert [a["action"] for a in agent.store.activity()[:1]] == ["changed by the network drive"]
 
 
 def test_drive_edges(server, agent):

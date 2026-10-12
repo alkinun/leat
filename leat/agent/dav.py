@@ -52,6 +52,9 @@ PROJECTS = {"en": "Projects", "de": "Projekte"}
 AWAY = 60  # seconds a document moved aside, as Word saves one, is to be named so again
 # the documents moved aside, by their spaces' folders and names, and when
 _AWAY: dict[tuple[str, str], float] = {}
+# the end of the name a Mac's app gives a document it moves aside as it saves it, by macOS's safe
+# save: .sb-, the app's hash and a random part
+_SAFE_SAVE = re.compile(r"\.sb-[0-9a-f]+-[0-9A-Za-z]+$")
 METHODS = "OPTIONS, PROPFIND, PROPPATCH, GET, HEAD, PUT, DELETE, MKCOL, MOVE, COPY, LOCK, UNLOCK"
 ET.register_namespace("D", DAV)
 
@@ -200,7 +203,7 @@ class Drive:
         space, name = self._space(place)
         if not name:
             raise Refused("a project is deleted in Leat's app, never by its drive")
-        space.delete(name)
+        space.delete(name, kept=not _passing(name))  # a program's file for a while, of no one's
         self._changed(place.project, "deleted by the network drive", name)
         self._send(204, b"")
 
@@ -480,9 +483,11 @@ def _sub(parent: ET.Element, *names: str) -> ET.Element:
 
 def _passing(name: str) -> bool:
     # whether a file is one a program makes for a while beside a document, as Word's ~$ owner file
-    # and ~WRL0001.tmp, and macOS's ._ files, which the activity does not note
+    # and ~WRL0001.tmp, macOS's ._ files, and the document a Mac's app moves aside as it saves,
+    # Brief.docx.sb-0d3df477-FBQRBZ: which the activity does not note, nor its versions keep
     base = name.rsplit("/", 1)[-1]
-    return base.startswith(("~", ".")) or base.lower().endswith((".tmp", "~"))
+    return (base.startswith(("~", ".")) or base.lower().endswith((".tmp", "~"))
+            or _SAFE_SAVE.search(base) is not None)  # fmt: skip
 
 
 def _href(path: str) -> str:

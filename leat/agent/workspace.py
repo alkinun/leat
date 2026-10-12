@@ -261,15 +261,17 @@ class Workspace:
         self.path(made).parent.mkdir(parents=True, exist_ok=True)
         return made
 
-    def delete(self, name: str) -> None:
-        """Deletes a file, or a folder with every file in it, each kept as an earlier version.
-        Raises FileNotFoundError if there is none."""
+    def delete(self, name: str, kept: bool = True) -> None:
+        """Deletes a file, or a folder with every file in it, each kept as an earlier version, if
+        `kept`. Raises FileNotFoundError if there is none."""
         path = self.path(name)
         if path.is_dir() and path != self.root:
-            self.keep(name, move=True)
+            if kept:
+                self.keep(name, move=True)
             shutil.rmtree(path)  # and what was not kept, hidden files and folders left empty
         elif path.is_file():
-            self.keep(name, move=True)
+            if kept:
+                self.keep(name, move=True)
             path.unlink(missing_ok=True)  # one not kept, as a hidden one
         else:
             raise self.missing(name)
