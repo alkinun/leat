@@ -1061,8 +1061,8 @@ class _Turn:
         urls = {n: url for url, n in self.sources.items()}
         messages = self.agent.store.messages(self.id)
         checked = []
-        for quote, cited in quotes.quoted(content):
-            if known := [n for n in cited if n in urls]:
+        for quote, cited in quotes.quoted(content):  # of none cited, as a block, every source
+            if known := [n for n in cited if n in urls] if cited else sorted(urls):
                 texts = (t for n in known for t in self._texts(urls[n], messages))
                 found = any(quotes.found(quote, t) for t in texts)
                 checked.append({"quote": quote, "cited": known, "found": found})

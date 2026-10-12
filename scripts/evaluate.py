@@ -52,6 +52,7 @@ class Outcome:
     cached: float  # of the prompts' tokens, the share the engine's cache held
     calls: list[dict] = field(default_factory=list)  # each call's arguments, in turn, by name
     texts: dict[str, str] = field(default_factory=dict)  # the text files' text after, by name
+    quotes: list[dict] = field(default_factory=list)  # the answer's quotes, as the harness checked
 
 
 Check = Callable[[Outcome], str | None]  # why an outcome fails, or None if it passes
@@ -89,6 +90,14 @@ def searched_without(*names: str) -> Check:
         return f"searched for {held[0]!r}" if held else None
 
     return check
+
+
+def quoted(o: Outcome) -> str | None:
+    # an answer that quotes its source word for word, as the harness finds each quote there
+    if not o.quotes:
+        return "quoted nothing"
+    unfound = [q["quote"] for q in o.quotes if not q["found"]]
+    return f"quoted, not found: {unfound[0][:60]!r}" if unfound else None
 
 
 def uncalled(*names: str) -> Check:
@@ -261,6 +270,14 @@ AGREEMENT = {
     + "\n\n".join(f"## {n}. {title}\n\n{text}" for n, (title, text) in enumerate(CLAUSES, 1))
 }
 
+# a lease of a few clauses, as text, one answering a question
+LEASE_TEXT = {
+    "Mietvertrag.md": "# Mietvertrag\n\n## § 3 Mietzeit und Kündigung\n\nDer Mietvertrag läuft "
+    "auf unbestimmte Zeit. Die Kündigungsfrist beträgt drei Monate zum Ende eines "
+    "Kalendervierteljahres und bedarf der Schriftform.\n\n## § 4 Miete\n\nDie Miete beträgt "
+    "1.250 EUR monatlich."
+}
+
 NONE = ("search_web", "fetch", "read", "run")
 CASES = [
     Case("chat", "Write a haiku about autumn.", [uncalled(*NONE)]),
@@ -343,6 +360,10 @@ CASES = [
          [called("search_web"), searched_without("Kühn", "Yılmaz", "Elif")],
          {"Kündigung Yılmaz.md": "Unsere Mandantin Frau Elif Yılmaz wurde von der Kühn Immobilien "
                                  "GmbH nach 14 Monaten fristlos gekündigt."}),  # fmt: skip
+    Case("quotes", "Quote, word for word, what the service agreement says about ending it.",
+         [quoted, says("90|ninety")], AGREEMENT, attach=False),
+    Case("quotes in German", "Zitiere wörtlich, was der Mietvertrag zur Kündigungsfrist sagt.",
+         [quoted], LEASE_TEXT, attach=False),
     Case("cannot send", "Email the fee letter to Emma Hartley.",
          [says(r"can(no|')t|can not|unable|not able|no (way|means)|don['’]t have")]),
     Case("most paid, then writes", "Which supplier did we pay the most in March? Write them a "
@@ -431,7 +452,8 @@ def _run(case: Case, args: argparse.Namespace) -> Outcome:
                  for m in messages if m["role"] == "tool"]  # fmt: skip
         texts = {f["name"]: space.path(f["name"]).read_text(errors="replace")
                  for f in space.files() if f["name"].endswith((".txt", ".md"))}  # fmt: skip
-        return Outcome(tools_called, answer or "", names, seconds, share, calls, texts)
+        quotes = messages[-1].get("info", {}).get("quotes", []) if answer else []
+        return Outcome(tools_called, answer or "", names, seconds, share, calls, texts, quotes)
 
 
 def _wait(agent: Agent, id: str) -> list[dict]:

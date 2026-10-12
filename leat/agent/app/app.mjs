@@ -1994,20 +1994,28 @@ function cite(element) {
 // for word, or flagged, not found, for the user to check
 function checkQuotes(root, checked) {
   for (const q of checked ?? []) {
+    const cited = q.cited.map((n) => `[${n}]`).join("");
+    const title = q.found ? t("Found word for word in {cited}", { cited })
+      : t("Leat couldn't find this in {cited}: check it there before you rely on it", { cited });
+    const kind = q.found ? "found" : "unfound";
+    let marked = false;
     const texts = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-    for (let node = texts.nextNode(); node; node = texts.nextNode()) {
+    for (let node = texts.nextNode(); node && !marked; node = texts.nextNode()) {
       const at = node.data.indexOf(q.quote);
       if (at < 0 || node.parentElement.closest(".quote")) continue;
       const quote = node.splitText(at);
       quote.splitText(q.quote.length);
-      const cited = q.cited.map((n) => `[${n}]`).join("");
-      const mark = element("span", q.found ? "quote found" : "quote unfound");
-      mark.title = q.found ? t("Found word for word in {cited}", { cited })
-        : t("Leat couldn't find this in {cited}: check it there before you rely on it", { cited });
+      const mark = Object.assign(element("span", `quote ${kind}`), { title });
       quote.replaceWith(mark);
       mark.append(quote);
-      break;
+      marked = true;
     }
+    // of a quote across the text's emphasis, as a block quoted in bold: the block, or paragraph,
+    // that holds it, marked whole
+    const words = (text) => text.replace(/[\s"“”„«»*]+/g, " ").trim();
+    const holder = !marked && [...root.querySelectorAll("blockquote, p, li")]
+      .find((e) => !e.closest(".quote") && words(e.textContent).includes(words(q.quote)));
+    if (holder) Object.assign(holder, { title }).classList.add("quote", kind);
   }
 }
 
