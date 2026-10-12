@@ -1,0 +1,15 @@
+[Unit]
+Description=Whether the box came up as it should, before its boot is marked good
+# of a boot of an update's UKI, whose tries systemd-boot counts: systemd-bless-boot marks it good
+# once boot-complete.target is reached, which this is required by; leat.box.health restarts a trial
+# boot whose Leat never answers
+After=leat-agent.service
+Before=boot-complete.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/leat/.venv/bin/python -m leat.box.health
+
+[Install]
+RequiredBy=boot-complete.target

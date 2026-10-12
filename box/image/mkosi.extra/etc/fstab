@@ -1,4 +1,5 @@
-# the box's identity, and its state, on the partitions systemd-repart makes on the first boot,
-# waited for as long as a slow disk takes to make them
-PARTLABEL=leat-identity  /etc/leat  ext4  defaults,x-systemd.requires=systemd-repart.service,x-systemd.device-timeout=5min  0 2
-PARTLABEL=leat-data      /var       ext4  defaults,x-systemd.requires=systemd-repart.service,x-systemd.device-timeout=5min  0 2
+# the box's identity, and its state, of their partitions unlocked, as /etc/crypttab says, once
+# systemd-repart has made them on the first boot: after it, never failing with it, as a box whose
+# partitions are there must mount them whatever repart makes of the rest
+/dev/mapper/leat-identity  /etc/leat  ext4  defaults,x-systemd.after=systemd-repart.service  0 2
+/dev/mapper/leat-data      /var       ext4  defaults,x-systemd.after=systemd-repart.service  0 2

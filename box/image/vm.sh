@@ -1,14 +1,19 @@
 #!/bin/sh
 # Boots the image just built, as a fresh box would, in a VM of its own: a copy of the image on a
-# 24 GB disk, which its first boot partitions; its serial port logged to ~/.cache/leat-vm/serial.log;
+# 24 GB disk, which its first boot partitions, and a TPM of swtpm's, which its encrypted partitions
+# are sealed to; its serial port logged to ~/.cache/leat-vm/serial.log;
 # SSH, HTTPS and HTTP forwarded to this machine's 2222, 9443 and 9080; its QEMU monitor, as for
 # screenshots of its display, at monitor.sock. Stops the VM it booted before.
 #
 #     box/image/vm.sh                  # then: ssh leat-vm (of ~/.ssh/config)
 #     box/image/vm.sh leat-box.json    # with a box's registration on its boot partition, as a
 #                                      # stick's is put: leatbox-registry register's JSON
-#     box/image/vm.sh again            # the VM cut off, as a power cut does, and booted again
+#     box/image/vm.sh again            # the VM cut off, as a power cut does, and booted again, of
+#                                      # the same disk and TPM
 #     box/image/vm.sh stop
+#
+# Of 2 GB of memory, or $LEAT_VM_MEMORY; its disk written past this machine's page cache, as an
+# update's 8 GB written into it would fill its memory else.
 set -eu
 here=$(dirname "$(realpath "$0")")
 image=$here/mkosi.output/leat-box.raw
@@ -20,10 +25,14 @@ if [ -f "$vm/qemu.pid" ]; then
     rm -f "$vm/qemu.pid"
     sleep 1
 fi
+if [ -f "$vm/swtpm.pid" ]; then
+    kill "$(cat "$vm/swtpm.pid")" 2>/dev/null || true
+    rm -f "$vm/swtpm.pid"
+fi
 [ "${1:-}" = stop ] && exit 0
 rm -f "$vm/serial.log"
 if [ "${1:-}" != again ]; then
-    rm -f "$vm/disk.raw"
+    rm -rf "$vm/disk.raw" "$vm/tpm"
     cp --sparse=always "$image" "$vm/disk.raw"
     truncate -s 24G "$vm/disk.raw"
     cp "$firmware/OVMF_VARS.4m.fd" "$vm/vars.fd"
@@ -32,10 +41,15 @@ if [ -n "${1:-}" ] && [ "$1" != again ]; then  # into the boot partition, the im
     start=$(sfdisk -J "$vm/disk.raw" | python3 -c "import json, sys; print(json.load(sys.stdin)['partitiontable']['partitions'][0]['start'] * 512)")
     (cd "$here" && mkosi sandbox -- mcopy -o -i "$vm/disk.raw@@$start" "$(realpath "$1")" ::leat-box.json)
 fi
-qemu-system-x86_64 -enable-kvm -cpu host -smp 4 -m 4G -machine q35 \
+mkdir -p "$vm/tpm"
+(cd "$here" && mkosi sandbox -- swtpm socket --tpm2 --tpmstate dir="$vm/tpm" \
+    --ctrl type=unixio,path="$vm/swtpm.sock" --pid file="$vm/swtpm.pid" --daemon)
+qemu-system-x86_64 -enable-kvm -cpu host -smp 4 -m "${LEAT_VM_MEMORY:-2G}" -machine q35 \
+    -chardev socket,id=tpm,path="$vm/swtpm.sock" -tpmdev emulator,id=tpm,chardev=tpm \
+    -device tpm-tis,tpmdev=tpm \
     -drive if=pflash,format=raw,readonly=on,file="$firmware/OVMF_CODE.4m.fd" \
     -drive if=pflash,format=raw,file="$vm/vars.fd" \
-    -drive file="$vm/disk.raw",format=raw,if=virtio \
+    -drive file="$vm/disk.raw",format=raw,if=virtio,cache=none \
     -nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:2222-:22,hostfwd=tcp:127.0.0.1:9443-:443,hostfwd=tcp:127.0.0.1:9080-:80 \
     -display none -serial file:"$vm/serial.log" -monitor unix:"$vm/monitor.sock",server,nowait \
     -daemonize -pidfile "$vm/qemu.pid"

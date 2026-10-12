@@ -5,3 +5,5 @@ mkosi.local.extra/
 mkosi.local.conf
 mkosi.tools.manifest
 mkosi.builddir/
+mkosi.key
+mkosi.crt

@@ -1,7 +1,8 @@
 #!/bin/sh
-# The image's version, as its os-release says it and the box's screen shows it: the day it was
-# built and its commit, marked dirty if built of changes not committed
+# The image's version, as its os-release says it, the box's screen shows it and updates are ordered
+# by it: the minute it was built, so that a later build is a newer version whatever its commit, and
+# its commit, marked dirty if built of changes not committed
 set -eu
 commit=$(git rev-parse --short HEAD)
 git diff --quiet HEAD -- ../.. 2>/dev/null || commit="$commit-dirty"
-echo "$(date +%Y.%m.%d)-$commit"
+echo "$(date +%Y.%m.%d.%H%M)-$commit"

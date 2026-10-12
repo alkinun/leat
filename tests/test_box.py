@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image, ImageColor
 
-from leat.box import address, provision, screen, system
+from leat.box import address, health, provision, screen, system
 
 REGISTERED = {
     "id": "k7x2qm",
@@ -408,12 +408,46 @@ def test_system_timezone(tmp_path, monkeypatch):
     assert ran == [] and not list((tmp_path / "kept").iterdir())
 
 
-def test_system_power(monkeypatch):
-    # the box switched off, or restarted, by systemd, the answer given first
+def test_system_power(tmp_path, monkeypatch):
+    # the box switched off, or restarted, by systemd, the answer given first; or reset, of a flag on
+    # the ESP that systemd-repart reads, and restarted
     ran = []
     monkeypatch.setattr(system.subprocess, "run", lambda args, **kw: ran.append(args))
+    monkeypatch.setattr(system, "RESET", tmp_path / "leat-reset")
     assert system.handle({"power": "off"}) == {} and system.handle({"power": "restart"}) == {}
     assert ran == [["systemctl", "--no-block", "poweroff"], ["systemctl", "--no-block", "reboot"]]
+    ran.clear()
+    assert "error" in system.handle({"reset": "yes"}) and ran == []
+    assert system.handle({"reset": True}) == {}
+    assert (tmp_path / "leat-reset").read_text() == "LEAT_FACTORY_RESET=--factory-reset=yes\n"
+    assert ran == [["systemctl", "--no-block", "reboot"]]
+
+
+def test_system_update_status(tmp_path, monkeypatch):
+    # the box's version, and the newest UKI an update installed past it, whatever its tries; whether
+    # it looks for one now, and when it last did
+    monkeypatch.setattr(system, "OS_RELEASE", tmp_path / "os-release")
+    monkeypatch.setattr(system, "UKIS", tmp_path)
+    (tmp_path / "os-release").write_text('ID=arch\nIMAGE_VERSION="2026.10.11.2241-fe75bd0"\n')
+    (tmp_path / "leat_2026.10.11.2241-fe75bd0.efi").write_bytes(b"")
+    shown = {"ActiveState": "inactive", "LastTriggerUSecRealtime": "@1791760000"}
+    monkeypatch.setattr(system, "_shown", lambda unit, name: shown[name])
+    assert system.handle({"update": "status"}) == {
+        "version": "2026.10.11.2241-fe75bd0", "ready": None, "checking": False,
+        "checked": 1791760000}  # fmt: skip
+    (tmp_path / "leat_2026.10.12.0300-abc1234+3-0.efi").write_bytes(b"")
+    (tmp_path / "leat_2026.10.11.1900-0000000.efi").write_bytes(b"")  # older: none to boot into
+    shown.update(ActiveState="activating", LastTriggerUSecRealtime="")
+    assert system.update_status() | {"version": None} == {
+        "version": None,
+        "ready": "2026.10.12.0300-abc1234",
+        "checking": True,
+        "checked": None,
+    }
+    ran = []
+    monkeypatch.setattr(system.subprocess, "run", lambda args, **kw: ran.append(args))
+    assert system.handle({"update": "check"}) == {}
+    assert ran == [["systemctl", "--no-block", "start", "systemd-sysupdate.service"]]
 
 
 def test_system_wifi_files(tmp_path, monkeypatch):
@@ -496,6 +530,29 @@ def test_system_ask(tmp_path):
     server.close()
     with pytest.raises(OSError):
         system.ask({"wifi": "scan"}, str(tmp_path / "none.sock"))
+
+
+def test_health(tmp_path, monkeypatch):
+    # healthy once Leat answers, of a box provisioned, or of one not; a trial boot of an update
+    # whose Leat never answers is restarted, and the check fails whatever
+    assert health.healthy(tmp_path, wait=0)  # not provisioned: no Leat to run
+    (tmp_path / "box.env").write_text("LEAT_NAME=k7x2qm.leatbox.net\n")
+    answers = iter([None, None, {"empty": False}])
+    monkeypatch.setattr(screen, "box", lambda: next(answers))
+    assert health.healthy(tmp_path, wait=5, every=0)
+    monkeypatch.setattr(screen, "box", lambda: None)
+    assert not health.healthy(tmp_path, wait=0.05, every=0.01)
+    ran = []
+    monkeypatch.setattr(health.subprocess, "run", lambda args, **kw: ran.append(args))
+    monkeypatch.setattr(health, "healthy", lambda: False)
+    monkeypatch.setattr(health, "TRIAL", tmp_path / "LoaderBootCountPath")
+    with pytest.raises(SystemExit):
+        health.main()
+    assert ran == []  # a boot marked good: no restart
+    (tmp_path / "LoaderBootCountPath").write_bytes(b"")
+    with pytest.raises(SystemExit):
+        health.main()
+    assert ran == [["systemctl", "--no-block", "reboot"]]
 
 
 def test_units():

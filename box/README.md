@@ -46,6 +46,42 @@ ten seconds.
 None of it carries anything of the office's work. Its name and address, as every certificate's
 name, are public: a name points at a private address, reachable inside its office alone.
 
+## Its disk
+
+`box/image` builds it with mkosi. The image holds the first three partitions; the box's first boot
+makes the last two, of the rest of its disk.
+
+| Partition | Size | What |
+|---|---|---|
+| ESP | 512 MB | systemd-boot, and a UKI of each system, `leat_<version>.efi` |
+| `leat_<version>` | 8 GB | the system, A, of the image, replaced whole by an update |
+| `_empty` | 8 GB | the system, B, which an update writes, the two taking turns |
+| `leat-identity` | 64 MB | `/etc/leat`: the box's name, registration and certificate account |
+| `leat-data` | the rest | `/var`: the office's data, and the system's own state, Wi-Fi, certificates, journal |
+
+The last two are encrypted, sealed to the TPM by a signed PCR policy: they unlock for a UKI of
+ours alone, of any version, and a disk taken out of a box gives nothing away. The identity outlives
+updates and a factory reset; the data outlives updates. A factory reset, an admin's, puts a flag on
+the ESP, and the boot after deletes the data's partition and makes it anew, of a new key.
+
+## Updates
+
+Every few hours the box looks at `https://leatbox.com/updates/` (systemd-sysupdate, of
+`/usr/lib/sysupdate.d`), checks its `SHA256SUMS` against our key, and writes a newer system into
+its other partition and its UKI beside the running one, with three tries. At night it restarts into
+it (`systemd-sysupdate-reboot.timer`); the boot is kept once Leat answers (`leat-health.service`,
+before `boot-complete.target`), and else, its tries spent, systemd-boot boots the system before. An
+admin sees the version, and an update ready, in Settings.
+
+```bash
+box/image/keys.sh                     # once: the keys, kept in ~/.config/leat/box-keys
+cd box/image && mkosi build           # a product build, of a commit, without the dev profile
+./publish.sh --upload                 # onto leatbox.com/updates, for every box to take
+```
+
+**Back up `~/.config/leat/box-keys`.** Its PCR key signs every UKI the boxes' TPMs unlock their
+data for, and its GPG key every update they take: lost, no box takes an update again.
+
 ## Trying it on a machine of your own
 
 On ports 8443 and 8088, without root, its state in a folder of its own:

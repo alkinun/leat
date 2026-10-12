@@ -1,0 +1,4 @@
+# the box's identity, and its state, on the partitions systemd-repart makes, encrypted, on the first
+# boot: unlocked by the TPM, for a UKI of ours alone, and waited for as long as a slow disk takes
+leat-identity  PARTLABEL=leat-identity  -  tpm2-device=auto,x-systemd.device-timeout=5min
+leat-data      PARTLABEL=leat-data      -  tpm2-device=auto,x-systemd.device-timeout=5min,discard

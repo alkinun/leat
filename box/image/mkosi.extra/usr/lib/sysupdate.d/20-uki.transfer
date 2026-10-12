@@ -1,0 +1,22 @@
+# An update's UKI, of the same version as its system: put beside the running one, with three tries,
+# which systemd-boot counts down until the boot is marked good, once Leat answers (leat-health),
+# and else boots the UKI before, and its system
+[Transfer]
+ProtectVersion=%A
+
+[Source]
+Type=url-file
+Path=https://leatbox.com/updates/
+MatchPattern=leat_@v.efi
+
+[Target]
+Type=regular-file
+Path=/EFI/Linux
+PathRelativeTo=boot
+MatchPattern=leat_@v+@l-@d.efi leat_@v+@l.efi leat_@v.efi
+# writable, as systemd-boot renames the file to count its tries down, which FAT's read-only
+# attribute, of a mode without w, keeps it from doing, and the boot is never counted nor kept
+Mode=0644
+TriesLeft=3
+TriesDone=0
+InstancesMax=2

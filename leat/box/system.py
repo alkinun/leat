@@ -6,6 +6,9 @@ checked, by a helper systemd runs as root for each request, on a socket leat's g
     {"wifi": "join", "name": "Office", "passphrase": "…"}  joins one, and again whenever in reach
     {"wifi": "forget", "name": "Office"}                   forgets one
     {"power": "off"}                                       switches the box off, or "restart"
+    {"reset": true}                                        erases the box's state, and restarts
+    {"update": "status"}                                   its version, and an update ready, if one
+    {"update": "check"}                                    looks for an update now
 
 Each answer is a JSON object: {} or what was asked, or {"error": why}. The agent asks by ask().
 
@@ -34,6 +37,10 @@ IWD = Path("/var/lib/iwd")  # iwd's known networks
 # what the helper set that the system's partition holds, as the time zone's /etc/localtime, kept on
 # the state's, as the system's is replaced by an update, and put back at boot
 KEPT = Path("/var/lib/leat-system")
+# the flag of a factory reset, on the ESP, as systemd-repart reads it
+RESET = Path("/boot/leat-reset")
+UKIS = Path("/boot/EFI/Linux")  # the box's UKIs, leat_<version>[+tries].efi, each its system's
+OS_RELEASE = Path("/etc/os-release")
 LONGEST = 4096  # bytes of a request at most
 SCANNING = 6  # seconds a scan for networks is waited for at most
 _PLAIN = re.compile(r"[A-Za-z0-9 _-]+")  # a network's name iwd names its file by, as it is
@@ -59,6 +66,14 @@ def handle(request: Any) -> dict[str, Any]:
             return forget(request.get("name"))
         if "power" in request:
             return power(request["power"])
+        if request.get("reset") is True:
+            return reset()
+        if request.get("update") == "status":
+            return update_status()
+        if request.get("update") == "check":
+            subprocess.run(["systemctl", "--no-block", "start", "systemd-sysupdate.service"],
+                           check=True, capture_output=True, timeout=10)  # fmt: skip
+            return {}
         raise Refused(f"there is no such request: {json.dumps(request)[:100]}")
     except (Refused, OSError, subprocess.SubprocessError) as e:
         return {"error": str(e)}
@@ -148,6 +163,30 @@ def power(how: Any) -> dict[str, Any]:
     return {}
 
 
+def reset() -> dict[str, Any]:
+    """Erases the box's state, everything of the office's and its settings, keeping its identity:
+    a flag on the ESP, of which systemd-repart, on the boot the box restarts to, deletes the state's
+    partition and makes it anew, of a new key, before anything unlocks it. systemd's own factory
+    reset is none of the box's, as it marks itself done in the initrd, which makes no partitions."""
+    _write(RESET, "LEAT_FACTORY_RESET=--factory-reset=yes\n", 0o600)
+    return power("restart")
+
+
+def update_status() -> dict[str, Any]:
+    """The box's version; the newer one an update installed, which the box boots into as it next
+    restarts, at night by systemd-sysupdate-reboot.timer, if one is; whether it is looking for an
+    update now; and when it last looked, in seconds since the epoch, if it has."""
+    version = next((line.split("=", 1)[1].strip('"') for line in OS_RELEASE.read_text().splitlines()
+                    if line.startswith("IMAGE_VERSION=")), None)  # fmt: skip
+    installed = [_version(p.name) for p in UKIS.glob("leat_*.efi")]
+    newer = max((v for v in installed if version and _order(v) > _order(version)), default=None,
+                key=_order)  # fmt: skip
+    checking = _shown("systemd-sysupdate.service", "ActiveState") in ("activating", "active")
+    last = _shown("systemd-sysupdate.timer", "LastTriggerUSecRealtime").removeprefix("@")
+    return {"version": version, "ready": newer, "checking": checking,
+            "checked": int(last) if last.isdigit() else None}  # fmt: skip
+
+
 def zone() -> str | None:
     """The box's time zone, of the IANA database, as /etc/localtime names it, or None."""
     localtime = str(Path("/etc/localtime").resolve())
@@ -182,6 +221,23 @@ def _write(path: Path, text: str, mode: int) -> None:
         os.fsync(directory)
     finally:
         os.close(directory)
+
+
+def _shown(unit: str, name: str) -> str:
+    # a unit's property, as systemctl shows it, a time as "@<seconds since the epoch>"
+    return subprocess.run(["systemctl", "show", unit, f"--property={name}", "--value",
+                           "--timestamp=unix"], capture_output=True, text=True, timeout=10,
+                          check=False).stdout.strip()  # fmt: skip
+
+
+def _version(name: str) -> str:
+    # a UKI's version, of its file's name: leat_<version>[+left[-done]].efi
+    return name.removeprefix("leat_").removesuffix(".efi").split("+", 1)[0]
+
+
+def _order(version: str) -> tuple[int, ...]:
+    # a version's order: of its minute, as mkosi.version writes it, 2026.10.11.2241-<commit>
+    return tuple(int(n) for n in version.split("-", 1)[0].split(".") if n.isdigit())
 
 
 def _checked_name(name: Any) -> None:

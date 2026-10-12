@@ -1,0 +1,17 @@
+# An update's system, of leatbox.com, its SHA256SUMS signed by our key, which the image's
+# /usr/lib/systemd/import-pubring.pgp holds: written onto the system's other partition, of A and B,
+# named of its version, as its UKI boots it by
+[Transfer]
+ProtectVersion=%A
+
+[Source]
+Type=url-file
+Path=https://leatbox.com/updates/
+MatchPattern=leat_@v.root.raw.zst
+
+[Target]
+Type=partition
+Path=auto
+MatchPattern=leat_@v
+MatchPartitionType=root
+InstancesMax=2

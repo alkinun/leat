@@ -712,6 +712,36 @@ def test_power(server, agent, monkeypatch):
     assert ada("/api/power", "POST", {"power": "off"})[0] == 403
 
 
+def test_update(server, monkeypatch):
+    # the box's update, an admin's to see and to look for
+    asked = []
+    status_ = {"version": "2026.10.11.2241-fe75bd0", "ready": None, "checking": False,
+               "checked": None}  # fmt: skip
+    monkeypatch.setattr(system, "ask", lambda r: asked.append(r) or (status_ if r["update"] ==
+                        "status" else {}))  # fmt: skip
+    assert json.loads(request(f"{server}/api/update")[1]) == status_
+    assert request(f"{server}/api/update", "POST", {})[0] == 200
+    assert asked == [{"update": "status"}, {"update": "check"}]
+    _, ada = joining(server, "Ada", paired(server))
+    assert ada("/api/update")[0] == 403 and ada("/api/update", "POST", {})[0] == 403
+
+
+def test_reset(server, agent, monkeypatch):
+    # the box's state erased by an admin once they typed the office's name, of any case, or
+    # "reset" of a box of none; anyone else may not
+    asked = []
+    monkeypatch.setattr(system, "ask", lambda r: asked.append(r) or {})
+    status, body = request(f"{server}/api/reset", "POST", {"confirm": "yes"})
+    assert status == 400 and b"type reset" in body
+    agent.change(office="Kanzlei Weber")
+    assert request(f"{server}/api/reset", "POST", {"confirm": "reset"})[0] == 400
+    _, ada = joining(server, "Ada", paired(server))
+    assert ada("/api/reset", "POST", {"confirm": "Kanzlei Weber"})[0] == 403
+    assert asked == []
+    assert request(f"{server}/api/reset", "POST", {"confirm": " kanzlei weber "})[0] == 200
+    assert asked == [{"reset": True}]
+
+
 def test_setup_settings(agent):
     # the box's first person sets it up with its office's name and whether it reaches the internet
     with Server(agent, port=0) as server:

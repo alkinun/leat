@@ -1009,11 +1009,53 @@ function renderBox() {
   zone.onchange = () => changeSettings({ timezone: zone.value });
   if (!$("wifi").childElementCount) renderWifi();
   if (!$("power").childElementCount) renderPower();
+  if (!$("software").childElementCount) renderSoftware();
 }
 
-// the box restarted, or switched off, of an admin, once they confirm it
+// the box's software, an admin's to see: its version, and an update installed, which it restarts
+// into at night, or now; or that it is looking for one, or when it last did, and a button to look
+async function renderSoftware(asked = false) {
+  let state;
+  try {
+    state = await (await fetch("/api/update")).json();
+    if (state.error) throw new Error(state.error.message);
+  } catch (error) {
+    return $("software").replaceChildren(element("p", "about", error.message));
+  }
+  const said = element("p", "about");
+  const parts = [element("p", "", `Leat ${state.version ?? "of no version"}`), said];
+  if (state.ready) {
+    said.textContent = `An update, ${state.ready}, is ready: the box restarts into it tonight, ` +
+      "at about four, or now.";
+    const restart = element("button", "quiet", "Restart now");
+    restart.type = "button";
+    restart.onclick = () => post("/api/power", { power: "restart" })
+      .then(() => status("The box is restarting into its update…"))
+      .catch((error) => status(error.message, true));
+    parts.push(restart);
+  } else {
+    said.textContent = state.checking || asked ? "Looking for an update…"
+      : state.checked ? `Up to date, as of ${new Date(state.checked * 1000).toLocaleString()}. ` +
+        "The box looks every few hours, and installs what it finds at night."
+      : "The box looks for updates every few hours, and installs what it finds at night.";
+    const check = element("button", "quiet", "Look for an update");
+    check.type = "button";
+    check.disabled = state.checking || asked;
+    check.onclick = () => post("/api/update", {})
+      .then(() => {
+        renderSoftware(true);
+        setTimeout(() => renderSoftware(), 30000); // what it found, once it has looked
+      })
+      .catch((error) => status(error.message, true));
+    parts.push(check);
+  }
+  $("software").replaceChildren(...parts);
+}
+
+// the box restarted, or switched off, of an admin, once they confirm it; or reset, its state erased,
+// once they type the office's name
 function renderPower() {
-  $("power").replaceChildren(...[["restart", "Restart", "Restart the box? Leat is away for a minute or two."],
+  const buttons = [["restart", "Restart", "Restart the box? Leat is away for a minute or two."],
     ["off", "Switch off", "Switch the box off? Leat is away until someone presses its power button."]]
     .map(([power, label, asked]) => {
       const button = element("button", "quiet", label);
@@ -1022,7 +1064,19 @@ function renderPower() {
         .then(() => status(power === "off" ? "The box is switching off." : "The box is restarting…"))
         .catch((error) => status(error.message, true));
       return button;
-    }));
+    });
+  const reset = element("button", "danger", "Erase everything");
+  reset.type = "button";
+  reset.onclick = () => {
+    const word = settings.office || "reset";
+    const typed = prompt("Erase everything on this Leat? Everyone's chats, files and projects, its " +
+      "people and devices, its settings and Wi-Fi networks are erased for good, and it starts again " +
+      `at "Set up your Leat", its address the same. Type ${word} to go on.`);
+    if (typed !== null) post("/api/reset", { confirm: typed })
+      .then(() => status("The box is erasing everything, and restarting."))
+      .catch((error) => status(error.message, true));
+  };
+  $("power").replaceChildren(...buttons, reset);
 }
 
 // the box's Wi-Fi, an admin's to set: the networks in reach, found as asked, each joined of its

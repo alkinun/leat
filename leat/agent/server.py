@@ -176,6 +176,9 @@ class _Handler(BaseHTTPRequestHandler):
             elif path == "/api/wifi":  # the Wi-Fi networks in reach, the admins' to see
                 _admin(me)
                 self._json(200, _system({"wifi": "scan"}))
+            elif path == "/api/update":  # the box's version, and an update ready, if one is
+                _admin(me)
+                self._json(200, _system({"update": "status"}))
             elif path == "/api/activity":  # what was done, the latest first, before ?before
                 _admin(me)
                 query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
@@ -279,6 +282,9 @@ class _Handler(BaseHTTPRequestHandler):
                 _system({"wifi": "join", "name": name, "passphrase": passphrase})
                 agent.note(person, "joined the Wi-Fi network", detail=name)
                 self._json(200, {})
+            elif path == "/api/update":  # an update looked for now, an admin's to ask
+                _admin(me)
+                self._json(200, _system({"update": "check"}))
             elif path == "/api/power":  # the box restarted, or switched off, an admin's to do
                 _admin(me)
                 if (power := body.get("power")) not in ("restart", "off"):
@@ -287,6 +293,13 @@ class _Handler(BaseHTTPRequestHandler):
                     person, "restarted the box" if power == "restart" else "switched the box off"
                 )
                 _system({"power": power})
+                self._json(200, {})
+            elif path == "/api/reset":  # the box's state erased, an admin's to do, once they typed
+                _admin(me)  # the office's name, or "reset" of a box of none, as a box is no undo
+                word = agent.settings()["office"] or "reset"
+                if str(body.get("confirm", "")).strip().casefold() != word.casefold():
+                    raise ValueError(f"type {word} to erase everything on this Leat")
+                _system({"reset": True})
                 self._json(200, {})
             elif path == "/api/models/load":
                 _admin(me)

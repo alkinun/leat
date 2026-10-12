@@ -11,8 +11,9 @@ StandardError=journal
 TimeoutSec=30
 NoNewPrivileges=yes
 ProtectSystem=strict
-# iwd's known networks, and what it keeps of what it set, the time zone's name
-ReadWritePaths=/var/lib/iwd
+# iwd's known networks, the ESP, of a factory reset's flag, and what it keeps of what it set, the
+# time zone's name
+ReadWritePaths=/var/lib/iwd /boot
 StateDirectory=leat-system
 ProtectHome=yes
 PrivateTmp=yes

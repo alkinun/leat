@@ -109,16 +109,16 @@ def look(root: Path = ROOT) -> State:
     state = State(name, address, booting=booting, link=_link(), free=_free(), version=_version())
     if name is None or address is None:
         return state
-    box = _box()
-    if box is None:
+    told = box()
+    if told is None:
         return dataclasses.replace(state, certified=_certified(name))
-    model = box.get("model")
+    model = told.get("model")
     return dataclasses.replace(
-        state, certified=_certified(name), answering=True, empty=bool(box.get("empty")),
-        office=box.get("office"), show_address=bool(box.get("address", True)),
-        model=(model["id"], model["status"]) if model else None, offline=bool(box.get("offline")),
-        setup=box.get("setup"), recovery=box.get("recovery"),
-        recovery_left=int(box.get("recovery_left") or 0),
+        state, certified=_certified(name), answering=True, empty=bool(told.get("empty")),
+        office=told.get("office"), show_address=bool(told.get("address", True)),
+        model=(model["id"], model["status"]) if model else None, offline=bool(told.get("offline")),
+        setup=told.get("setup"), recovery=told.get("recovery"),
+        recovery_left=int(told.get("recovery_left") or 0),
     )  # fmt: skip
 
 
@@ -459,8 +459,8 @@ def _certified(name: str) -> bool:
     return False
 
 
-def _box() -> dict | None:
-    # the box as the agent tells its screen, or None if the agent does not answer
+def box() -> dict | None:
+    """The box as the agent tells its screen, or None if the agent does not answer."""
     with (
         contextlib.suppress(OSError, ValueError),
         urllib.request.urlopen(f"{AGENT}/api/box", timeout=3) as response,
