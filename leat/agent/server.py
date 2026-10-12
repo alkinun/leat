@@ -36,6 +36,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from leat import locales
 from leat.agent.accounts import Accounts
 from leat.agent.agent import Agent, Busy, NotFound, Refused
 from leat.agent.client import EngineError
@@ -57,6 +58,7 @@ _FILES = (
     "logo.svg",
 )
 _PAGES = ("/", "/projects", "/files", "/settings", "/activity")
+_LOCALES = {f"{language}.json" for language in locales.LANGUAGES if language != "en"}
 _TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
@@ -158,6 +160,9 @@ class _Handler(BaseHTTPRequestHandler):
         if path[1:] in _FILES:
             file = APP / path[1:]
             return self._send(200, _TYPES[file.suffix], file.read_bytes())
+        if path.removeprefix("/locales/") in _LOCALES:  # a language's table, which the app speaks
+            file = locales.HERE / path.removeprefix("/locales/")
+            return self._send(200, "application/json", file.read_bytes())
         with self._answering():
             if path == "/api/box":  # of the box's own screen, on this machine, never its front door
                 if not _loopback(urllib.parse.urlsplit(f"//{self.headers.get('Host', '')}").hostname
@@ -172,10 +177,9 @@ class _Handler(BaseHTTPRequestHandler):
                     shown |= {"recovery": recovery, "recovery_left": left}
                 return self._json(200, shown | {"warnings": self._warnings()})
             me = self._device()
-            if path == "/api/me":
-                self._json(
-                    200, {k: me[k] for k in ("person", "name", "admin")} | {"device": me["id"]}
-                )
+            if path == "/api/me":  # and the box's language, which the app speaks
+                self._json(200, {k: me[k] for k in ("person", "name", "admin")}
+                           | {"device": me["id"], "language": self._language()})  # fmt: skip
             elif path == "/api/events":
                 self._events(me)
             elif path == "/api/overview":  # the box, as its admins look after it
@@ -209,7 +213,11 @@ class _Handler(BaseHTTPRequestHandler):
                 before = query.get("before", [""])[0]
                 if before and not before.isdigit():
                     raise ValueError("before must be the id of a thing done")
-                self._json(200, {"activity": agent.store.activity(int(before) if before else None)})
+                done = agent.store.activity(int(before) if before else None)
+                language = self._language()  # what was done, said in the box's language
+                for a in done:
+                    a["action"] = locales.translated(a["action"], language)
+                self._json(200, {"activity": done})
             elif not path.startswith("/api/") and (match := _FILE.fullmatch(path)):
                 space = agent.space(match[1], me["person"])
                 self._download(space, urllib.parse.unquote(match[2]))
@@ -237,7 +245,7 @@ class _Handler(BaseHTTPRequestHandler):
             if not isinstance(body, dict):
                 raise ValueError("the body must be a JSON object")
             if path == "/api/setup":  # the box's first person, its first admin, and its settings
-                settings = _settings(body, ("offline", "office", "timezone"))
+                settings = _settings(body, ("offline", "office", "language", "timezone"))
                 zone = settings.pop("timezone", None)
                 code = body.get("code") if isinstance(body.get("code"), str) else None
                 secret = accounts.setup(_text(body, "name"), _device(self.headers), code)
@@ -298,7 +306,7 @@ class _Handler(BaseHTTPRequestHandler):
                     raise ValueError("person must be the id of one of this Leat's people")
                 name = body.get("name") if isinstance(body.get("name"), str) else None
                 allowed = accounts.allow(match[1], me, to, name)
-                agent.note(person, "let in", detail=f"{allowed['name']}'s {allowed['device']}")
+                agent.note(person, "let in", detail=f"{allowed['name']} ({allowed['device']})")
                 self._json(200, allowed)
             elif path == "/api/wifi":  # a Wi-Fi network joined, an admin's to choose
                 _admin(me)
@@ -414,17 +422,19 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._json(200, self._person(int(changed[1]), body, me))
             if path == "/api/settings":
                 _admin(me)
-                settings = _settings(body, ("offline", "office", "address", "timezone"), only=True)
+                keys = ("offline", "office", "address", "language", "timezone")
+                settings = _settings(body, keys, only=True)
                 agent.change(**settings)
                 for key, value in settings.items():  # each change noted
                     said = {
-                        "offline": f"turned the internet {'off' if value else 'on'}",
+                        "offline": "turned the internet off" if value else "turned the internet on",
                         "office": "named the office" if value else "took the office's name away",
                         "address": "showed the address on the box's screen" if value
                         else "hid the address from the box's screen",
+                        "language": "set the language",
                         "timezone": "set the time zone",
                     }  # fmt: skip
-                    shown = value if key in ("office", "timezone") else None
+                    shown = value if key in ("office", "language", "timezone") else None
                     agent.note(me["person"], said[key], detail=shown)
                 return self._json(200, {})
             if flow:
@@ -516,8 +526,11 @@ class _Handler(BaseHTTPRequestHandler):
         return device if device["person"] == person else None
 
     def _warnings(self) -> list[dict[str, str]]:
-        # what of the box needs attention, as last seen, of a box's; none of a Leat that is no box
-        return self.server.watch.warnings if self.server.watch else []
+        # what of the box needs attention, as last seen, in its language, of a box's; none of a
+        # Leat that is no box
+        found, language = self.server.watch.warnings if self.server.watch else [], self._language()
+        keys = ("title", "said")
+        return [w | {k: locales.translated(w[k], language) for k in keys} for w in found]
 
     def _person(self, id: int, body: dict[str, Any], me: dict[str, Any]) -> dict[str, Any]:
         # a person changed: renamed, of themselves or an admin; made an admin or not, of an admin;
@@ -533,7 +546,7 @@ class _Handler(BaseHTTPRequestHandler):
             _admin(me)
         if "name" in body:
             accounts.rename(id, _text(body, "name"))
-            agent.note(me["person"], "renamed", detail=f"{was['name']} as {_text(body, 'name')}")
+            agent.note(me["person"], "renamed", detail=f"{was['name']} → {_text(body, 'name')}")
         if "admin" in body and body["admin"] != bool(was["admin"]):
             accounts.set_admin(id, body["admin"])
             said = "made an admin" if body["admin"] else "made no longer an admin"
@@ -643,8 +656,10 @@ class _Handler(BaseHTTPRequestHandler):
         return n
 
     def _event(self, event: dict[str, Any]) -> None:
-        # an event as the app reads it, without whose it is
+        # an event as the app reads it, without whose it is, its error said in the box's language
         event = {k: v for k, v in event.items() if k != "to"}
+        if isinstance(event.get("error"), str):
+            event["error"] = locales.translated(event["error"], self._language())
         self.wfile.write(f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode())
 
     def _json(self, status: int, body: dict[str, Any], secret: str | None = None) -> None:
@@ -673,15 +688,21 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _error(self, status: int, message: str) -> None:
-        body: dict[str, Any] = {"error": {"message": message}}
+        # an error's answer, what it says in the box's language
+        body: dict[str, Any] = {"error": {"message": locales.translated(message, self._language())}}
         if status == 401:  # and whether the box is yet to be set up, by its first person, and
-            # whether that takes the code its screen shows
+            # whether that takes the code its screen shows, and its language, which the app speaks
+            body["language"] = self._language()
             body["empty"] = self.server.accounts.empty()
             if body["empty"]:
                 body["locked"] = self.server.accounts.locked
             else:  # and whether a recovery code holds, the box's power button pressed
                 body["recovering"] = self.server.accounts.recovery() is not None
         self._json(status, body)
+
+    def _language(self) -> str | None:
+        # the box's language, if an admin chose one
+        return self.server.agent.store.setting("language")
 
 
 def _admin(device: dict[str, Any]) -> None:
@@ -768,26 +789,21 @@ def _project(body: dict[str, Any], new: bool = False) -> dict[str, Any]:
 
 def _sharing(
     was: dict[str, Any], now: dict[str, Any], store: Store
-) -> list[tuple[str, str]]:  # fmt: skip
+) -> list[tuple[str, str | None]]:  # fmt: skip
     # what changed of whom a project is shared with, as the activity notes it: each what was done,
-    # and with whom, by their names
+    # and with whom, by their names, those of the box's people, of no language's words
     names = {p["id"]: p["name"] for p in store.people()}
     before, after = set(was.get("members", [])), set(now["members"])
-    done = []
+    done: list[tuple[str, str | None]] = []
     if now["shared"] != was.get("shared", now["shared"]):
-        done.append(("shared the project with" if now["shared"] else
-                     "stopped sharing the project with", "everyone"))  # fmt: skip
+        done.append(("shared the project with everyone" if now["shared"] else
+                     "stopped sharing the project with everyone", None))  # fmt: skip
+    whom = lambda ids: ", ".join(names.get(m, "?") for m in ids)  # noqa: E731
     if added := sorted(after - before):
-        done.append(("shared the project with", _listed([names.get(m, "someone") for m in added])))
+        done.append(("shared the project with", whom(added)))
     if (taken := sorted(before - after)) and not now["shared"]:
-        whom = _listed([names.get(m, "someone") for m in taken])
-        done.append(("stopped sharing the project with", whom))
+        done.append(("stopped sharing the project with", whom(taken)))
     return done
-
-
-def _listed(names: list[str]) -> str:
-    # names as a sentence says them: "Anna", "Anna and Ben", "Anna, Ben and Clara"
-    return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
 
 
 def _system(request: dict[str, Any]) -> dict[str, Any]:
@@ -809,6 +825,8 @@ def _settings(body: dict[str, Any], keys: tuple[str, ...], only: bool = False) -
     for key in ("offline", "address"):
         if key in settings and not isinstance(settings[key], bool):
             raise ValueError(f"{key} must be true or false")
+    if "language" in settings and settings["language"] not in locales.LANGUAGES:
+        raise ValueError(f"language must be one of {', '.join(locales.LANGUAGES)}")
     if "timezone" in settings and not isinstance(settings["timezone"], str):
         raise ValueError("timezone must be one of the IANA database's, as Europe/Berlin")
     if "office" in settings:

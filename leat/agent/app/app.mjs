@@ -24,8 +24,8 @@ let me = null; // the person whose this device is: {person, name, admin, device}
 // an admin's, or else this person's own; and the devices asking to join
 let accounts = null;
 // the box's settings, as its admins chose them: whether it is kept from the internet, its office's
-// name, and whether its screen shows its address
-let settings = { offline: false, office: null, address: true, timezone: null };
+// name, whether its screen shows its address, its language, and its time zone
+let settings = { offline: false, office: null, address: true, language: null, timezone: null };
 // the conversations whose turns ended while another was shown, as this device saw them
 const unread = new Set(JSON.parse(localStorage.getItem("leat.unread") ?? "[]"));
 let models = [], loading = null, unreachable = null; // the engine's, a model it loads, or why not
@@ -37,7 +37,10 @@ const opened = new Map(); // whether each fold is open, as the user left it: wor
 // the pages beside the conversations, each a section of its own name, and their titles; a
 // project's page, "project", has its name
 const PAGES = ["projects", "project", "files", "settings", "activity"];
-const TITLES = { projects: "Projects", files: "Files", settings: "Settings", activity: "Activity" };
+const TITLES = { projects: () => t("Projects"), files: () => t("Files"), settings: () => t("Settings"), activity: () => t("Activity") };
+// the words of the box's language, each of its English text, as leat/locales has them; none of English
+let words = {};
+const LANGUAGES = [["de", "Deutsch"], ["en", "English"]]; // each as its own speakers name it
 
 $("new").onclick = () => {
   open(null);
@@ -81,12 +84,12 @@ $("instructions").oninput = () => {
   clearTimeout(saving);
   const id = viewing, instructions = $("instructions").value;
   saving = setTimeout(async () => {
-    if (await change(id, { instructions })) $("saved").textContent = "Saved. They hold for chats begun from now on.";
+    if (await change(id, { instructions })) $("saved").textContent = t("Saved. They hold for chats begun from now on.");
   }, 600);
 };
 $("discard").onclick = async () => {
   const p = project(viewing);
-  if (!confirm(`Delete “${p.name}”, with its files and every chat in it? It cannot be undone.`)) return;
+  if (!confirm(t("Delete “{name}”, with its files and every chat in it? It cannot be undone.", { name: p.name }))) return;
   if (await del(`/api/projects/${p.id}`)) turnTo("projects");
 };
 $("input").onpaste = (event) => { // images pasted, as a screenshot, attached to the next message
@@ -119,29 +122,29 @@ $("input").onkeydown = (event) => {
 };
 window.onpopstate = route;
 
-renderModes();
 start();
 
-// the app, of the person whose this device is; or, of a device not yet paired, the gate
+// the app, of the person whose this device is; or, of a device not yet paired, the gate; in the
+// box's language, or this device's while the box has none
 async function start() {
   const response = await fetch("/api/me").catch(() => null);
   if (!response?.ok && response?.status !== 401) { // the box away: tried again, in a while
-    status("Reconnecting to the box…", true);
+    status(t("Reconnecting to the box…"), true);
     return setTimeout(start, 3000);
   }
   status("");
-  if (response.status === 401) {
-    const { empty, locked, recovering } = await response.json();
-    return gate(empty, locked, recovering);
-  }
-  me = await response.json();
+  const told = await response.json();
+  await speak(told.language);
+  renderModes();
+  if (response.status === 401) return gate(told.empty, told.locked, told.recovering);
+  me = told;
   renderAccounts();
   if (me.admin) watchHealth();
   const events = new EventSource("/api/events");
   events.onmessage = (event) => handle(JSON.parse(event.data));
   events.onerror = async () => {
     lost = true;
-    status("Reconnecting to the box…", true);
+    status(t("Reconnecting to the box…"), true);
     const response = await fetch("/api/me").catch(() => null);
     if (response?.status === 401) location.reload(); // unpaired: the gate
   };
@@ -154,6 +157,34 @@ async function start() {
   route();
 }
 
+// the app in a language, of leat/locales's, or this device's if none: its words, and the page's own
+async function speak(language) {
+  language ??= navigator.language?.toLowerCase().startsWith("de") ? "de" : "en";
+  document.documentElement.lang = language;
+  words = language === "en" ? {}
+    : await fetch(`/locales/${language}.json`).then((r) => r.json()).catch(() => ({}));
+  const texts = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  for (let node = texts.nextNode(); node; node = texts.nextNode()) {
+    const text = node.data.trim();
+    if (text) node.data = node.data.replace(text, t(text));
+  }
+  for (const e of document.querySelectorAll("[placeholder], [title], [aria-label]")) {
+    for (const name of ["placeholder", "title", "aria-label"]) {
+      if (e.hasAttribute(name)) e.setAttribute(name, t(e.getAttribute(name)));
+    }
+  }
+}
+
+// a text in the app's language, as its words have it, its values put in its places, as {name}
+function t(text, values = {}) {
+  return (words[text] ?? text).replace(/\{(\w+)\}/g, (all, key) => (key in values ? values[key] : all));
+}
+
+// the language a person reads, as dates and numbers are written in it
+function locale() {
+  return document.documentElement.lang;
+}
+
 // the gate of a device not yet paired: the box's first person sets it up, and is its first admin;
 // any other asks to join, showing a code the devices paired show too
 function gate(empty, locked, recovering) {
@@ -162,28 +193,24 @@ function gate(empty, locked, recovering) {
   const scanned = new URLSearchParams(location.hash.slice(1)).get("recover");
   if (scanned) history.replaceState(null, "", location.pathname); // kept out of the address bar
   if (scanned || recovering) { // the box's power button pressed: its recovery code, to give
-    const link = element("a", "", "Use the recovery code the box's screen shows");
+    const link = element("a", "", t("Use the recovery code the box's screen shows"));
     link.href = "#";
     link.onclick = (event) => (event.preventDefault(), recover(""));
-    $("join").append(element("p", "recovering", "Has everyone who looks after this Leat lost " +
-      "their devices? "), link);
+    $("join").append(element("p", "recovering", `${t("Has everyone who looks after this Leat lost their devices?")} `), link);
     if (scanned) return recover(scanned);
   }
-  $("welcome").textContent = empty
-    ? "Welcome! This Leat is new. What's your name? You'll be the one who lets the others in."
-    : "This device has not joined this Leat yet. What's your name?";
-  $("joining").textContent = empty ? "Start" : "Ask to join";
+  $("welcome").textContent = t("This device has not joined this Leat yet. What's your name?");
+  $("joining").textContent = t("Ask to join");
   $("join").onsubmit = async (event) => {
     event.preventDefault();
     const name = $("who").value.trim();
     if (!name) return;
     $("refusal").textContent = "";
     try {
-      if (empty) return (await post("/api/setup", { name }), location.reload());
       const { id, code } = await (await post("/api/pairings", { name })).json();
       $("join").querySelector(".row").hidden = true;
-      $("code").replaceChildren("Let this device in from Leat on a device of yours, in Settings, " +
-        "or ask an admin to. They'll see this code:", element("b", "", `${code.slice(0, 3)} ${code.slice(3)}`));
+      $("code").replaceChildren(t("Let this device in from Leat on a device of yours, in Settings, or ask an admin to. They'll see this code:"),
+        element("b", "", `${code.slice(0, 3)} ${code.slice(3)}`));
       await waitToJoin(id);
     } catch (error) {
       $("refusal").textContent = error.message;
@@ -191,35 +218,47 @@ function gate(empty, locked, recovering) {
   };
 }
 
-// the box set up by its first person, its first admin, a step at a time: of a box, the code its
-// screen shows, which its QR code gives the address it opens, else typed; its office's name, theirs,
-// and whether it may reach the internet, sent at once at the end
+// the box set up by its first person, its first admin, a step at a time: its language, this
+// device's at first; of a box, the code its screen shows, which its QR code gives the address it
+// opens, else typed; its office's name, theirs, and whether it may reach the internet, sent at once
+// at the end
 function setup(locked) {
   const scanned = new URLSearchParams(location.hash.slice(1)).get("setup");
   if (scanned) history.replaceState(null, "", location.pathname); // kept out of the address bar
-  const chosen = { code: scanned ?? "", office: "", name: "", offline: false };
-  const typing = { title: "The setup code", about: "Type the setup code the box's screen shows, " +
-    "below its address. It shows that you're in the office with the box.", key: "code",
-    placeholder: "K7X 2QM", autocomplete: "off", max: 7, needed: true };
+  const chosen = { code: scanned ?? "", office: "", name: "", offline: false, language: locale() };
+  const typing = { title: "The setup code", about: "Type the setup code the box's screen shows, below its address. It shows that you're in the office with the box.",
+    key: "code", placeholder: "K7X 2QM", autocomplete: "off", max: 7, needed: true };
   const steps = [
-    { title: "Welcome to Leat", about: "Your office's own assistant. It runs on this box, and what " +
-      "you give it stays here. Setting it up takes a minute.", next: "Begin" },
+    { title: "Welcome to Leat", about: "Your office's own assistant. It runs on this box, and what you give it stays here. Setting it up takes a minute.",
+      next: "Begin", languages: true },
     ...(locked && !scanned ? [typing] : []),
-    { title: "Your office", about: "What is your office called? The box's screen shows its name. " +
-      "You can change it later in Settings.", key: "office", placeholder: "Kanzlei Weber",
-      autocomplete: "organization", max: 60 },
-    { title: "Your name", about: "You'll be this Leat's admin: you let the others in, and look " +
-      "after it in Settings. You can make others admins too.", key: "name", placeholder: "Your name", autocomplete: "name", max: 40,
-      needed: true },
+    { title: "Your office", about: "What is your office called? The box's screen shows its name. You can change it later in Settings.",
+      key: "office", placeholder: "Kanzlei Weber", autocomplete: "organization", max: 60 },
+    { title: "Your name", about: "You'll be this Leat's admin: you let the others in, and look after it in Settings. You can make others admins too.",
+      key: "name", placeholder: "Your name", autocomplete: "name", max: 40, needed: true },
     { title: "The internet", about: null, next: "Set up Leat" },
   ];
   const show = (at) => {
     const step = steps[at];
-    const parts = [element("h1", "", step.title)];
-    if (step.about) parts.push(element("p", "", step.about));
+    const parts = [element("h1", "", t(step.title))];
+    if (step.languages) { // the language of the box, and of this setup from now on
+      const choice = element("div", "choice");
+      choice.append(...LANGUAGES.map(([language, said]) => {
+        const button = element("button", language === chosen.language ? "on" : "", said);
+        button.type = "button";
+        button.onclick = async () => {
+          chosen.language = language;
+          await speak(language);
+          show(at);
+        };
+        return button;
+      }));
+      parts.push(choice);
+    }
+    if (step.about) parts.push(element("p", "", t(step.about)));
     let input = null;
     if (step.key) {
-      input = Object.assign(element("input", step.key), { value: chosen[step.key], placeholder: step.placeholder,
+      input = Object.assign(element("input", step.key), { value: chosen[step.key], placeholder: t(step.placeholder),
         autocomplete: step.autocomplete, maxLength: step.max });
       parts.push(input);
     }
@@ -228,30 +267,29 @@ function setup(locked) {
       const choice = element("div", "choice");
       const pick = (off) => {
         chosen.offline = off;
-        choice.replaceChildren(...[[false, "On"], [true, "Off"]].map(([value, label]) => {
+        choice.replaceChildren(...[[false, t("On")], [true, t("Off")]].map(([value, label]) => {
           const button = element("button", value === off ? "on" : "", label);
           button.type = "button";
           button.onclick = () => pick(value);
           return button;
         }));
         said.textContent = off
-          ? "Leat answers from what it knows and your files alone: nothing it does reaches the internet."
-          : "Leat may search the web and read pages to answer. What it searches for leaves the " +
-            "office; your files never do.";
+          ? t("Leat answers from what it knows and your files alone: nothing it does reaches the internet.")
+          : t("Leat may search the web and read pages to answer. What it searches for leaves the office; your files never do.");
       };
       pick(chosen.offline);
       parts.push(choice, said);
     }
     const refusal = element("p", "error");
     const actions = element("div", "actions");
-    actions.append(element("span", "steps", `${at + 1} of ${steps.length}`));
+    actions.append(element("span", "steps", t("{at} of {all}", { at: at + 1, all: steps.length })));
     if (at > 0) {
-      const back = element("button", "previous", "Back");
+      const back = element("button", "previous", t("Back"));
       back.type = "button";
       back.onclick = () => show(at - 1);
       actions.append(back);
     }
-    actions.append(element("button", "", step.next ?? "Next"));
+    actions.append(element("button", "", t(step.next ?? "Next")));
     parts.push(actions, refusal);
     $("join").replaceChildren(...parts);
     input?.focus();
@@ -263,7 +301,7 @@ function setup(locked) {
       try {
         const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone; // this device's, the box's too
         await post("/api/setup", { code: chosen.code || null, name: chosen.name, office: chosen.office || null,
-          offline: chosen.offline, timezone });
+          offline: chosen.offline, language: chosen.language, timezone });
         location.reload();
       } catch (error) {
         if (error.status !== 403 || !locked) return (refusal.textContent = error.message);
@@ -281,18 +319,17 @@ function setup(locked) {
 // a new admin, of the recovery code the box's screen shows once its power button is pressed, and a
 // name, as an office whose every admin's device is gone gets back in
 function recover(code) {
-  const title = element("h1", "", "Recovery");
-  const about = element("p", "", "Type the recovery code the box's screen shows, and your name. " +
-    "This device becomes an admin of this Leat, as someone new.");
+  const title = element("h1", "", t("Recovery"));
+  const about = element("p", "", t("Type the recovery code the box's screen shows, and your name. This device becomes an admin of this Leat, as someone new."));
   const typed = Object.assign(element("input", "code"), { value: code, placeholder: "K7X 2QM",
-    autocomplete: "off", maxLength: 7, ariaLabel: "The recovery code" });
-  const name = Object.assign(element("input"), { placeholder: "Your name", autocomplete: "name",
-    maxLength: 40, ariaLabel: "Your name" });
+    autocomplete: "off", maxLength: 7, ariaLabel: t("The recovery code") });
+  const name = Object.assign(element("input"), { placeholder: t("Your name"), autocomplete: "name",
+    maxLength: 40, ariaLabel: t("Your name") });
   const refusal = element("p", "error"), actions = element("div", "actions");
-  const back = element("button", "previous", "Back");
+  const back = element("button", "previous", t("Back"));
   back.type = "button";
   back.onclick = () => location.reload();
-  actions.append(element("span", "steps"), back, element("button", "", "Get back in"));
+  actions.append(element("span", "steps"), back, element("button", "", t("Get back in")));
   $("join").replaceChildren(title, about, typed, name, actions, refusal);
   (code ? name : typed).focus();
   $("join").onsubmit = async (event) => {
@@ -317,7 +354,7 @@ async function waitToJoin(id) {
     if (response?.status === 404) {
       $("join").querySelector(".row").hidden = false;
       $("code").replaceChildren();
-      throw new Error("The request was turned down, or waited too long: ask again.");
+      throw new Error(t("The request was turned down, or waited too long: ask again."));
     }
   }
 }
@@ -325,8 +362,8 @@ async function waitToJoin(id) {
 // the modes Leat's look may be in, the system's by default, as this device last chose
 function renderModes() {
   document.documentElement.dataset.mode = mode;
-  $("modes").replaceChildren(...["system", "light", "dark"].map((m) => {
-    const button = element("button", m === mode ? "on" : "", m[0].toUpperCase() + m.slice(1));
+  $("modes").replaceChildren(...[["system", t("System")], ["light", t("Light")], ["dark", t("Dark")]].map(([m, said]) => {
+    const button = element("button", m === mode ? "on" : "", said);
     button.onclick = () => {
       mode = m;
       localStorage.setItem("leat.mode", m);
@@ -414,8 +451,9 @@ function handle(event) {
       renderProjects(); // as they name those they are shared with
       return;
     case "settings":
+      if (event.language && event.language !== locale()) return location.reload(); // in it
       settings = { offline: event.offline, office: event.office, address: event.address,
-        timezone: event.timezone };
+        language: event.language, timezone: event.timezone };
       renderInternet();
       renderBox();
       return;
@@ -541,7 +579,7 @@ async function stop() {
 
 // deletes a conversation, once the user says so: it cannot be had back
 function remove(c) {
-  if (confirm(`Delete “${c.title}”? It cannot be undone.`)) del(`/api/conversations/${c.id}`);
+  if (confirm(t("Delete “{name}”? It cannot be undone.", { name: c.title }))) del(`/api/conversations/${c.id}`);
 }
 
 // deletes what a path names; whether it did, saying why not if not
@@ -607,7 +645,7 @@ function turnTo(name, push = true) {
   document.body.classList.remove("menu", ...PAGES);
   document.body.classList.add(name);
   shown = viewing = null;
-  heading = TITLES[name];
+  heading = TITLES[name]();
   render();
   if (name === "settings") renderOverview();
   if (name === "activity") renderActivity();
@@ -619,7 +657,7 @@ function showProject(id, push = true) {
   if (push) history.pushState(null, "", `/projects/${id}`);
   document.body.classList.remove("menu", ...PAGES);
   document.body.classList.add("project");
-  if (viewing !== id) $("saved").textContent = "They hold for chats begun from now on.";
+  if (viewing !== id) $("saved").textContent = t("They hold for chats begun from now on.");
   shown = null;
   viewing = id;
   render();
@@ -633,8 +671,8 @@ function renderSyncing(p) {
   const box = $("syncing"), admin = me?.admin;
   if (choosing && admin && !p.source) {
     if (box.querySelector("form")) return; // as they type
-    const form = element("form"), path = element("input"), ok = element("button", "", "Sync"), cancel = element("button", "", "Cancel");
-    Object.assign(path, { placeholder: "The folder's path, as /mnt/office/Yılmaz", spellcheck: false });
+    const form = element("form"), path = element("input"), ok = element("button", "", t("Sync")), cancel = element("button", "", t("Cancel"));
+    Object.assign(path, { placeholder: t("The folder's path, as /mnt/office/Yılmaz"), spellcheck: false });
     cancel.type = "button";
     cancel.onclick = () => (choosing = false, renderSyncing(p));
     form.onsubmit = async (event) => {
@@ -652,18 +690,19 @@ function renderSyncing(p) {
   }
   const parts = [];
   if (p.source) {
-    const said = p.unsynced ? `Couldn't sync with ${p.source}: ${p.unsynced}`
-      : p.synced ? `Synced from ${p.source} · ${ago(p.synced)}` : `Syncing with ${p.source}…`;
+    const said = p.unsynced ? t("Couldn't sync with {folder}: {why}", { folder: p.source, why: p.unsynced })
+      : p.synced ? t("Synced from {folder} · {when}", { folder: p.source, when: ago(p.synced) })
+      : t("Syncing with {folder}…", { folder: p.source });
     parts.push(element("span", p.unsynced ? "warning" : "meta", said));
     if (admin) {
-      const stop = element("button", "", "Stop syncing");
-      stop.onclick = () => confirm(`Stop syncing with ${p.source}? The files copied so far stay.`)
+      const stop = element("button", "", t("Stop syncing"));
+      stop.onclick = () => confirm(t("Stop syncing with {folder}? The files copied so far stay.", { folder: p.source }))
         && post(`/api/projects/${p.id}/sync`, { source: null }).catch((e) => status(e.message, true));
       parts.push(stop);
     }
   } else if (admin) {
-    const start = element("button", "", "Sync with a folder on this computer…");
-    start.title = "Keep a copy of a folder here, as a network drive's, in this project's files";
+    const start = element("button", "", t("Sync with a folder on this computer…"));
+    start.title = t("Keep a copy of a folder here, as a network drive's, in this project's files");
     start.onclick = () => (choosing = true, renderSyncing(p));
     parts.push(start);
   }
@@ -673,8 +712,8 @@ function renderSyncing(p) {
 // a time, in seconds, as how long ago it was
 function ago(seconds) {
   const minutes = Math.round((Date.now() / 1000 - seconds) / 60);
-  return minutes < 1 ? "just now" : minutes < 60 ? `${minutes} min ago`
-    : minutes < 1440 ? `${Math.round(minutes / 60)} h ago` : day(seconds);
+  return minutes < 1 ? t("just now") : minutes < 60 ? t("{n} min ago", { n: minutes })
+    : minutes < 1440 ? t("{n} h ago", { n: Math.round(minutes / 60) }) : day(seconds);
 }
 
 // a project this person sees, by its id
@@ -689,7 +728,7 @@ function paged(name) {
 
 // a time, in seconds, as a day people read
 function day(seconds) {
-  return new Date(seconds * 1000).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+  return new Date(seconds * 1000).toLocaleDateString(locale(), { day: "numeric", month: "short" });
 }
 
 // the accounts: who this person is here, and their own devices, each to unpair; the devices asking
@@ -700,32 +739,32 @@ function renderAccounts() {
   const box = $("accounts");
   if (!me || !accounts) return box.replaceChildren();
   const self = accounts.people.find((p) => p.id === me.person);
-  const you = element("p", "", `You are ${me.name} here`);
-  you.append(element("span", "meta", me.admin ? " · Admin" : ""), " ", renaming(self ?? { id: me.person, name: me.name }));
+  const you = element("p", "", t("You are {name} here", { name: me.name }));
+  you.append(element("span", "meta", me.admin ? ` · ${t("Admin")}` : ""), " ", renaming(self ?? { id: me.person, name: me.name }));
   const mine = element("ul");
   mine.append(...(self?.devices ?? []).map((d) => deviceRow(d)));
   const asking = accounts.requests.map((r) => {
     const item = element("li"), about = element("div");
     const code = element("b", "", `${r.code.slice(0, 3)} ${r.code.slice(3)}`);
-    const meta = element("span", "meta", `${r.device} · code `);
+    const meta = element("span", "meta", `${r.device} · ${t("code")} `);
     meta.append(code);
-    about.append(element("span", "", `${r.name} asks to join`), meta);
+    about.append(element("span", "", t("{name} asks to join", { name: r.name })), meta);
     const as = element("select");
-    as.append(new Option(`as you, ${me.name}`, me.person));
+    as.append(new Option(t("as you, {name}", { name: me.name }), me.person));
     if (me.admin) {
-      as.append(new Option(`as someone new, ${r.name}`, ""), ...accounts.people
+      as.append(new Option(t("as someone new, {name}", { name: r.name }), ""), ...accounts.people
         .filter((p) => p.id !== me.person && !p.devices.length)
-        .map((p) => new Option(`as ${p.name}, who has no device`, p.id)));
+        .map((p) => new Option(t("as {name}, who has no device", { name: p.name }), p.id)));
       as.value = r.name === me.name ? me.person : "";
     }
     as.hidden = !me.admin;
-    const allow = element("button", "allow", me.admin ? "Let in" : "It's mine");
+    const allow = element("button", "allow", me.admin ? t("Let in") : t("It's mine"));
     allow.onclick = () => post(`/api/pairings/${r.id}/allow`, as.value ? { person: Number(as.value) } : {})
       .catch((error) => status(error.message, true));
     item.append(about, as, allow);
     if (me.admin) {
       const no = element("button", "", "×");
-      no.title = "Turn down";
+      no.title = t("Turn down");
       no.onclick = () => del(`/api/pairings/${r.id}`);
       item.append(no);
     }
@@ -733,35 +772,31 @@ function renderAccounts() {
   });
   const requests = element("ul");
   requests.append(...asking);
-  const parts = [you, element("h3", "", "Your devices"), mine];
-  if (asking.length) parts.push(element("h3", "", "Asking to join"), requests);
+  const parts = [you, element("h3", "", t("Your devices")), mine];
+  if (asking.length) parts.push(element("h3", "", t("Asking to join")), requests);
   const others = accounts.people.filter((p) => p.id !== me.person);
   if (me.admin) {
     const people = element("ul", "people");
-    if (others.length) parts.push(element("h3", "", "People"), people);
+    if (others.length) parts.push(element("h3", "", t("People")), people);
     people.append(...others.map((p) => {
       const item = element("li"), about = element("div");
-      const seen = p.devices.length ? `${p.devices.length} device${p.devices.length > 1 ? "s" : ""}` : "no device";
-      about.append(element("span", "", p.name), element("span", "meta", `${p.admin ? "Admin" : "Member"} · ${seen}`));
+      const n = p.devices.length, seen = n > 1 ? t("{n} devices", { n }) : n ? t("1 device") : t("no device");
+      about.append(element("span", "", p.name), element("span", "meta", `${p.admin ? t("Admin") : t("Member")} · ${seen}`));
       const devices = element("ul");
       devices.append(...p.devices.map((d) => deviceRow(d)));
       about.append(devices);
-      const making = element("button", "", p.admin ? "Remove admin" : "Make admin");
+      const making = element("button", "", p.admin ? t("Remove admin") : t("Make admin"));
       making.onclick = () => patchPerson(p.id, { admin: !p.admin });
-      const remover = element("button", "", "Remove");
-      remover.onclick = () => confirm(`Remove ${p.name}, with their own chats, projects and files? ` +
-        "The projects they shared with everyone stay, as yours; those they shared with chosen people, " +
-        "as the first of those's.") && del(`/api/people/${p.id}`);
+      const remover = element("button", "", t("Remove"));
+      remover.onclick = () => confirm(t("Remove {name}, with their own chats, projects and files? The projects they shared with everyone stay, as yours; those they shared with chosen people, as the first of those's.", { name: p.name }))
+        && del(`/api/people/${p.id}`);
       item.append(about, making, renaming(p), remover);
       return item;
     }));
-    parts.push(element("p", "meta", "To add someone, open Leat on their device: it asks to join, " +
-      "and shows here for you to let in. Admins let people in and look after the box; no one sees " +
-      "another's own chats or files."));
+    parts.push(element("p", "meta", t("To add someone, open Leat on their device: it asks to join, and shows here for you to let in. Admins let people in and look after the box; no one sees another's own chats or files.")));
   } else {
     const admins = accounts.people.filter((p) => p.admin).map((p) => p.name).join(", ");
-    parts.push(element("p", "meta", "To add a device of yours, open Leat on it: it asks to join, and " +
-      `shows here for you to let in. To add someone else, ask an admin: ${admins}.`));
+    parts.push(element("p", "meta", t("To add a device of yours, open Leat on it: it asks to join, and shows here for you to let in. To add someone else, ask an admin: {admins}.", { admins })));
   }
   box.replaceChildren(...parts);
 }
@@ -776,9 +811,9 @@ function renderRecovering() {
   $("recovering").hidden = !left || minutes <= 0;
   clearTimeout(recoveryTimer);
   if ($("recovering").hidden) return;
-  $("recovering").querySelector("span").textContent = "Someone pressed the box's power button: its " +
-    `screen shows a recovery code, which makes whoever types it an admin, for ${minutes} more ` +
-    `minute${minutes > 1 ? "s" : ""}. Not you?`;
+  $("recovering").querySelector("span").textContent = minutes > 1
+    ? t("Someone pressed the box's power button: its screen shows a recovery code, which makes whoever types it an admin, for {n} more minutes. Not you?", { n: minutes })
+    : t("Someone pressed the box's power button: its screen shows a recovery code, which makes whoever types it an admin, for 1 more minute. Not you?");
   recoveryTimer = setTimeout(() => {
     if (accounts) accounts.recovering = Math.max(0, (recoveryEnds - Date.now()) / 1000) || null;
     renderRecovering();
@@ -802,22 +837,22 @@ async function watchHealth() {
 // signs it out
 function deviceRow(d) {
   const item = element("li"), about = element("div"), self = d.id === me.device;
-  about.append(element("span", "", self ? `${d.name} (this device)` : d.name),
-    element("span", "meta", `seen ${day(d.seen)}`));
-  const remover = element("button", "", self ? "Sign out" : "Unpair");
+  about.append(element("span", "", self ? t("{name} (this device)", { name: d.name }) : d.name),
+    element("span", "meta", t("seen {day}", { day: day(d.seen) })));
+  const remover = element("button", "", self ? t("Sign out") : t("Unpair"));
   remover.onclick = () => self
-    ? confirm("Sign this device out? Using Leat on it again takes asking to join.")
+    ? confirm(t("Sign this device out? Using Leat on it again takes asking to join."))
       && del(`/api/devices/${d.id}`).then((done) => done && location.reload())
-    : confirm(`Unpair ${d.name}? Using Leat on it again takes asking to join.`) && del(`/api/devices/${d.id}`);
+    : confirm(t("Unpair {name}? Using Leat on it again takes asking to join.", { name: d.name })) && del(`/api/devices/${d.id}`);
   item.append(about, remover);
   return item;
 }
 
 // a button that renames a person, asking for the name
 function renaming(p) {
-  const button = element("button", "", "Rename");
+  const button = element("button", "", t("Rename"));
   button.onclick = () => {
-    const name = prompt(`A new name for ${p.name}:`, p.name)?.trim();
+    const name = prompt(t("A new name for {name}:", { name: p.name }), p.name)?.trim();
     if (name && name !== p.name) patchPerson(p.id, { name });
   };
   return button;
@@ -857,8 +892,8 @@ function listFiles(project) {
 function fileRow(f, project, label = f.name) {
   const item = element("li"), link = fileLink(f.name, project);
   link.textContent = label;
-  const about = element("span", "meta", [STATES[f.state], bytes(f.size), day(f.modified)].filter(Boolean).join(" · "));
-  about.title = f.error ?? (f.state === "scanned" ? "Its scanned pages are read once a model that sees images is loaded" : "");
+  const about = element("span", "meta", [STATES[f.state]?.(), bytes(f.size), day(f.modified)].filter(Boolean).join(" · "));
+  about.title = f.error ?? (f.state === "scanned" ? t("Its scanned pages are read once a model that sees images is loaded") : "");
   about.classList.toggle("failed", f.state === "failed");
   item.append(link, about, remover(`“${f.name}”`, f.name, project));
   return item;
@@ -877,20 +912,22 @@ function folderRow(name, files, project) {
   const reading = files.filter((f) => f.state === "reading").length;
   const failed = files.filter((f) => f.state === "failed").length;
   const size = files.reduce((sum, f) => sum + f.size, 0);
-  const about = element("span", "meta", [reading && `Reading ${reading}…`, failed && `${failed} couldn't be read`,
-    `${files.length} ${files.length === 1 ? "file" : "files"}`, bytes(size)].filter(Boolean).join(" · "));
+  const about = element("span", "meta", [reading && t("Reading {n}…", { n: reading }), failed && t("{n} couldn't be read", { n: failed }),
+    count(files.length, "1 file", "{n} files"), bytes(size)].filter(Boolean).join(" · "));
   about.classList.toggle("failed", failed > 0 && !reading);
   const inside = element("ul");
   if (open) inside.append(...files.map((f) => fileRow(f, project, f.name.slice(name.length + 1))));
-  item.append(toggle, about, remover(`the folder “${name}”, with its ${files.length} ${files.length === 1 ? "file" : "files"}`, name, project), inside);
+  const what = files.length === 1 ? t("the folder “{name}”, with its 1 file", { name })
+    : t("the folder “{name}”, with its {n} files", { name, n: files.length });
+  item.append(toggle, about, remover(what, name, project), inside);
   return item;
 }
 
 // a row's button that deletes a file or a folder, once the user says so
 function remover(what, name, project) {
   const button = element("button", "", "×");
-  button.title = "Delete";
-  button.onclick = () => confirm(`Delete ${what}? It can be restored from Earlier versions for 30 days.`)
+  button.title = t("Delete");
+  button.onclick = () => confirm(t("Delete {what}? It can be restored from Earlier versions for 30 days.", { what }))
     && del(`/api${place(project)}/files/${encodeURIComponent(name)}`);
   return button;
 }
@@ -905,24 +942,24 @@ async function renderHistory(details, project) {
     if (!response.ok) throw new Error((await response.json()).error.message);
     const { versions } = await response.json();
     details.querySelector("ul").replaceChildren(...(versions.length ? versions.map((v) => versionRow(v, project))
-      : [element("li", "meta", "Nothing changed or deleted in the last 30 days.")]));
+      : [element("li", "meta", t("Nothing changed or deleted in the last 30 days."))]));
   } catch (error) {
     status(error.message, true);
   }
 }
 
 function versionRow(v, project) {
-  const item = element("li"), restore = element("button", "restore", "Restore");
-  const when = new Date(v.kept * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  const item = element("li"), restore = element("button", "restore", t("Restore"));
+  const when = new Date(v.kept * 1000).toLocaleTimeString(locale(), { hour: "2-digit", minute: "2-digit" });
   restore.onclick = () => post(`/api${place(project)}/history`, { name: v.name, version: v.version })
     .catch((error) => status(error.message, true));
   item.append(element("span", "", v.name),
-    element("span", "meta", [v.deleted ? "Deleted" : "Earlier version", `${day(v.kept)} ${when}`, bytes(v.size)].join(" · ")), restore);
+    element("span", "meta", [v.deleted ? t("Deleted") : t("Earlier version"), `${day(v.kept)} ${when}`, bytes(v.size)].join(" · ")), restore);
   return item;
 }
 
 // what a file's state in the index says, while it is not read: being read, or not readable
-const STATES = { reading: "Reading…", failed: "Couldn't read", scanned: "Scanned" };
+const STATES = { reading: () => t("Reading…"), failed: () => t("Couldn't read"), scanned: () => t("Scanned") };
 
 // the box as its admins look after it, asked as Settings opens: the room its files take and that
 // left on their disk, a warning if little is, and each person's use this month, counted
@@ -934,11 +971,16 @@ async function renderOverview() {
     if (!response.ok) throw new Error((await response.json()).error.message);
     const { files, versions, disk, people } = await response.json();
     const low = disk && disk.free < disk.total / 10;
-    $("room").textContent = `Files take ${bytes(files)}` + (versions ? `, and their earlier versions ${bytes(versions)}` : "") + (disk ? `; ${bytes(disk.free)} of ${bytes(disk.total)} is free on this computer's disk${low ? ": it is nearly full" : ""}.` : ".");
+    const taken = versions ? t("Files take {size}, and their earlier versions {earlier}", { size: bytes(files), earlier: bytes(versions) })
+      : t("Files take {size}", { size: bytes(files) });
+    const free = !disk ? "." : low ? t("; {free} of {total} is free on this computer's disk: it is nearly full.", { free: bytes(disk.free), total: bytes(disk.total) })
+      : t("; {free} of {total} is free on this computer's disk.", { free: bytes(disk.free), total: bytes(disk.total) });
+    $("room").textContent = taken + free;
     $("room").className = low ? "warning" : "meta";
     $("use").replaceChildren(...people.map((p) => {
       const item = element("li");
-      item.append(element("span", "", p.name), element("span", "meta", `${p.chats} ${p.chats === 1 ? "chat" : "chats"}, ${p.messages} ${p.messages === 1 ? "message" : "messages"} this month`));
+      const used = `${count(p.chats, "1 chat", "{n} chats")}, ${count(p.messages, "1 message", "{n} messages")}`;
+      item.append(element("span", "", p.name), element("span", "meta", t("{used} this month", { used })));
       return item;
     }));
   } catch (error) {
@@ -968,8 +1010,8 @@ async function renderActivity(older = false) {
   $("done").replaceChildren(...[...days].flatMap(([day, done]) => {
     const list = element("ul");
     list.append(...done.map((a) => {
-      const item = element("li"), time = new Date(a.at * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
-      const who = a.leat ? (a.person ? `Leat, for ${a.person}` : "Leat") : (a.person ?? "Someone removed");
+      const item = element("li"), time = new Date(a.at * 1000).toLocaleTimeString(locale(), { hour: "2-digit", minute: "2-digit" });
+      const who = a.leat ? (a.person ? t("Leat, for {name}", { name: a.person }) : "Leat") : (a.person ?? t("Someone removed"));
       const what = element("span", "what");
       what.append(element("span", "meta", time), element("b", "", who), `${a.action}${a.detail ? ` ${a.detail}` : ""}`);
       item.append(what);
@@ -978,28 +1020,28 @@ async function renderActivity(older = false) {
     }));
     return [element("h2", "", day), list];
   }));
-  if (!activity.length) $("done").replaceChildren(element("p", "meta", "Nothing yet."));
+  if (!activity.length) $("done").replaceChildren(element("p", "meta", t("Nothing yet.")));
 }
 
 // a time, in seconds, as the day it fell on: today, yesterday, or its date
 function dayOf(seconds) {
   const at = new Date(seconds * 1000), today = new Date();
   const days = Math.round((new Date(today.toDateString()) - new Date(at.toDateString())) / 86400000);
-  return days === 0 ? "Today" : days === 1 ? "Yesterday"
-    : at.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" });
+  return days === 0 ? t("Today") : days === 1 ? t("Yesterday")
+    : at.toLocaleDateString(locale(), { weekday: "long", day: "numeric", month: "long" });
 }
 
 // whether Leat may reach the internet, an admin's to choose, and what each choice means
 function renderInternet() {
   $("internet").hidden = !me?.admin;
-  $("reach").replaceChildren(...[[false, "On"], [true, "Off"]].map(([off, said]) => {
+  $("reach").replaceChildren(...[[false, t("On")], [true, t("Off")]].map(([off, said]) => {
     const button = element("button", off === settings.offline ? "on" : "", said);
     button.onclick = () => off !== settings.offline && changeSettings({ offline: off });
     return button;
   }));
   $("reached").textContent = settings.offline
-    ? "Leat answers from what it knows and your files alone: nothing it does reaches the internet."
-    : "Leat may search the web and read pages to answer. What it searches for leaves the office; your files never do.";
+    ? t("Leat answers from what it knows and your files alone: nothing it does reaches the internet.")
+    : t("Leat may search the web and read pages to answer. What it searches for leaves the office; your files never do.");
 }
 
 // the box itself, an admin's to set: its office's name, which its screen shows beside Leat's, and
@@ -1009,14 +1051,19 @@ function renderBox() {
   const office = $("office");
   if (document.activeElement !== office) office.value = settings.office ?? "";
   office.onchange = () => changeSettings({ office: office.value });
-  $("showing").replaceChildren(...[[true, "Address shown"], [false, "Hidden"]].map(([shown, said]) => {
+  $("speaking").replaceChildren(...LANGUAGES.map(([language, said]) => {
+    const button = element("button", language === (settings.language ?? locale()) ? "on" : "", said);
+    button.onclick = () => language !== settings.language && changeSettings({ language });
+    return button;
+  }));
+  $("showing").replaceChildren(...[[true, t("Address shown")], [false, t("Hidden")]].map(([shown, said]) => {
     const button = element("button", shown === settings.address ? "on" : "", said);
     button.onclick = () => shown !== settings.address && changeSettings({ address: shown });
     return button;
   }));
   $("shown").textContent = settings.address
-    ? "The box's screen shows its address, and a code a phone scans to open Leat."
-    : "The box's screen says Leat is ready, without its address: tell the office where it is yourself.";
+    ? t("The box's screen shows its address, and a code a phone scans to open Leat.")
+    : t("The box's screen says Leat is ready, without its address: tell the office where it is yourself.");
   const zone = $("zone");
   const zones = Intl.supportedValuesOf("timeZone");
   if (settings.timezone && !zones.includes(settings.timezone)) zones.unshift(settings.timezone);
@@ -1039,23 +1086,21 @@ async function renderSoftware(asked = false) {
     return $("software").replaceChildren(element("p", "about", error.message));
   }
   const said = element("p", "about");
-  const parts = [element("p", "", `Leat ${state.version ?? "of no version"}`), said];
+  const parts = [element("p", "", `Leat ${state.version ?? t("of no version")}`), said];
   if (state.ready) {
-    said.textContent = `An update, ${state.ready}, is ready: the box restarts into it tonight, ` +
-      "at about four, or now.";
-    const restart = element("button", "quiet", "Restart now");
+    said.textContent = t("An update, {version}, is ready: the box restarts into it tonight, at about four, or now.", { version: state.ready });
+    const restart = element("button", "quiet", t("Restart now"));
     restart.type = "button";
     restart.onclick = () => post("/api/power", { power: "restart" })
-      .then(() => status("The box is restarting into its update…"))
+      .then(() => status(t("The box is restarting into its update…")))
       .catch((error) => status(error.message, true));
     parts.push(restart);
   } else {
-    said.textContent = state.checking || asked ? "Looking for an update…"
-      : state.checked ? `Up to date, as of ${new Date(state.checked * 1000).toLocaleString()}. ` +
-        "The box looks every few hours, installs what it finds, and restarts into it at night."
-      : "The box looks for updates every few hours, installs what it finds, and restarts into it " +
-        "at night.";
-    const check = element("button", "quiet", "Look for an update");
+    said.textContent = state.checking || asked ? t("Looking for an update…")
+      : state.checked ? t("Up to date, as of {when}. The box looks every few hours, installs what it finds, and restarts into it at night.",
+        { when: new Date(state.checked * 1000).toLocaleString(locale()) })
+      : t("The box looks for updates every few hours, installs what it finds, and restarts into it at night.");
+    const check = element("button", "quiet", t("Look for an update"));
     check.type = "button";
     check.disabled = state.checking || asked;
     check.onclick = () => post("/api/update", {})
@@ -1066,34 +1111,32 @@ async function renderSoftware(asked = false) {
       .catch((error) => status(error.message, true));
     parts.push(check);
   }
-  const diagnostics = Object.assign(element("a", "diagnostics", "Download diagnostics"),
-    { href: "/api/diagnostics", title: "A file to send Leat's support when something is wrong: of " +
-      "the box's system alone, nothing of anyone's work" });
+  const diagnostics = Object.assign(element("a", "diagnostics", t("Download diagnostics")),
+    { href: "/api/diagnostics", title: t("A file to send Leat's support when something is wrong: of the box's system alone, nothing of anyone's work") });
   $("software").replaceChildren(...parts, diagnostics);
 }
 
 // the box restarted, or switched off, of an admin, once they confirm it; or reset, its state erased,
 // once they type the office's name
 function renderPower() {
-  const buttons = [["restart", "Restart", "Restart the box? Leat is away for a minute or two."],
-    ["off", "Switch off", "Switch the box off? Leat is away until someone presses its power button."]]
+  const buttons = [["restart", t("Restart"), t("Restart the box? Leat is away for a minute or two.")],
+    ["off", t("Switch off"), t("Switch the box off? Leat is away until someone presses its power button.")]]
     .map(([power, label, asked]) => {
       const button = element("button", "quiet", label);
       button.type = "button";
       button.onclick = () => confirm(asked) && post("/api/power", { power })
-        .then(() => status(power === "off" ? "The box is switching off." : "The box is restarting…"))
+        .then(() => status(power === "off" ? t("The box is switching off.") : t("The box is restarting…")))
         .catch((error) => status(error.message, true));
       return button;
     });
-  const reset = element("button", "danger", "Erase everything");
+  const reset = element("button", "danger", t("Erase everything"));
   reset.type = "button";
   reset.onclick = () => {
     const word = settings.office || "reset";
-    const typed = prompt("Erase everything on this Leat? Everyone's chats, files and projects, its " +
-      "people and devices, its settings and Wi-Fi networks are erased for good, and it starts again " +
-      `at "Set up your Leat", its address the same. Type ${word} to go on.`);
+    const typed = prompt(t("Erase everything on this Leat? Everyone's chats, files and projects, its people and devices, its settings and Wi-Fi networks are erased for good, and it starts again at “{start}”, its address the same. Type {word} to go on.",
+      { start: t("Set up your Leat"), word }));
     if (typed !== null) post("/api/reset", { confirm: typed })
-      .then(() => status("The box is erasing everything, and restarting."))
+      .then(() => status(t("The box is erasing everything, and restarting.")))
       .catch((error) => status(error.message, true));
   };
   $("power").replaceChildren(...buttons, reset);
@@ -1102,24 +1145,24 @@ function renderPower() {
 // the box's Wi-Fi, an admin's to set: the networks in reach, found as asked, each joined of its
 // passphrase, the one the box is on forgotten; a cable stays its way out while it has one
 function renderWifi(found = null, error = "") {
-  const parts = [element("h3", "", "Wi-Fi")];
+  const parts = [element("h3", "", t("Wi-Fi"))];
   if (!found) {
-    const find = element("button", "quiet", "Find Wi-Fi networks");
+    const find = element("button", "quiet", t("Find Wi-Fi networks"));
     find.type = "button";
     find.onclick = () => scanWifi();
     parts.push(find);
   } else if (!found.radio) {
-    parts.push(element("p", "about", "This box has no Wi-Fi: it is on its network by cable."));
+    parts.push(element("p", "about", t("This box has no Wi-Fi: it is on its network by cable.")));
   } else {
     const list = element("ul");
     for (const network of found.networks) {
       const row = element("li");
       const name = element("span", "", network.name);
-      const about = [["", "▂", "▂▄", "▂▄▆", "▂▄▆█"][network.strength], network.secure ? "secured" : "open"];
-      if (network.connected) about.push("connected");
+      const about = [["", "▂", "▂▄", "▂▄▆", "▂▄▆█"][network.strength], network.secure ? t("secured") : t("open")];
+      if (network.connected) about.push(t("connected"));
       row.append(name, element("span", "meta", about.filter(Boolean).join(" · ")));
       if (network.connected) {
-        const forget = element("button", "quiet", "Forget");
+        const forget = element("button", "quiet", t("Forget"));
         forget.type = "button";
         forget.onclick = () => del(`/api/wifi/${encodeURIComponent(network.name)}`).then(() => scanWifi());
         row.append(forget);
@@ -1128,8 +1171,8 @@ function renderWifi(found = null, error = "") {
       }
       list.append(row);
     }
-    if (!found.networks.length) list.append(element("li", "meta", "No Wi-Fi network is in reach."));
-    const again = element("button", "quiet", "Look again");
+    if (!found.networks.length) list.append(element("li", "meta", t("No Wi-Fi network is in reach.")));
+    const again = element("button", "quiet", t("Look again"));
     again.type = "button";
     again.onclick = () => scanWifi();
     parts.push(list, again);
@@ -1155,9 +1198,9 @@ async function scanWifi() {
 function joinWifi(row, network) {
   if (row.querySelector("form")) return;
   const form = element("form", "join");
-  const passphrase = Object.assign(element("input"), { type: "password", placeholder: "Passphrase",
+  const passphrase = Object.assign(element("input"), { type: "password", placeholder: t("Passphrase"),
     autocomplete: "off", minLength: 8, maxLength: 63, required: true });
-  const join = element("button", "", "Join");
+  const join = element("button", "", t("Join"));
   if (network.secure) form.append(passphrase);
   form.append(join);
   form.onsubmit = async (event) => {
@@ -1166,7 +1209,7 @@ function joinWifi(row, network) {
     try {
       await post("/api/wifi", { name: network.name, passphrase: network.secure ? passphrase.value : null });
       renderWifi({ radio: true, networks: [] }, "");
-      $("wifi").querySelector("ul").replaceChildren(element("li", "meta", `Joining ${network.name}…`));
+      $("wifi").querySelector("ul").replaceChildren(element("li", "meta", t("Joining {name}…", { name: network.name })));
       setTimeout(scanWifi, 6000);
     } catch (error) {
       renderWifi(null, error.message);
@@ -1220,20 +1263,19 @@ function renderWorkflows() {
 // arrive in its project, or every day, weekday, a day of the week or the month's first, at a time
 // of the box's
 const EVERY = [["", "On request"], ["files", "When files arrive"], ["daily", "Every day"],
-  ["weekdays", "Every weekday"],
-  ...["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-    .map((day) => [`weekly ${day.slice(0, 3).toLowerCase()}`, `Every ${day}`]),
-  ["monthly 1", "On the 1st of each month"]];
+  ["weekdays", "Every weekday"], ["weekly mon", "Every Monday"], ["weekly tue", "Every Tuesday"],
+  ["weekly wed", "Every Wednesday"], ["weekly thu", "Every Thursday"], ["weekly fri", "Every Friday"],
+  ["weekly sat", "Every Saturday"], ["weekly sun", "Every Sunday"], ["monthly 1", "On the 1st of each month"]];
 
 function scheduler(w) {
   const every = element("select"), at = element("input");
-  const timed = w.schedule && w.schedule !== "files", words = (w.schedule ?? "").split(" ");
-  const kind = timed ? words.slice(0, -1).join(" ") : w.schedule ?? "";
+  const timed = w.schedule && w.schedule !== "files", parts = (w.schedule ?? "").split(" ");
+  const kind = timed ? parts.slice(0, -1).join(" ") : w.schedule ?? "";
   const kinds = EVERY.some(([k]) => k === kind) ? EVERY : [...EVERY, [kind, kind]];
-  every.replaceChildren(...kinds.map(([value, label]) => new Option(label, value)));
+  every.replaceChildren(...kinds.map(([value, label]) => new Option(t(label), value)));
   every.value = kind;
-  Object.assign(at, { type: "time", value: timed ? words.at(-1) : "08:00", hidden: !timed });
-  every.title = "When it runs by itself, as a chat of yours";
+  Object.assign(at, { type: "time", value: timed ? parts.at(-1) : "08:00", hidden: !timed });
+  every.title = t("When it runs by itself, as a chat of yours");
   every.onchange = at.onchange = () => {
     at.hidden = !every.value || every.value === "files";
     const schedule = !every.value ? null : every.value === "files" ? "files" : `${every.value} ${at.value || "08:00"}`;
@@ -1245,8 +1287,8 @@ function scheduler(w) {
 // a workflow's button that deletes it, once the user says so
 function forget(w) {
   const button = element("button", "", "×");
-  button.title = "Delete";
-  button.onclick = () => confirm(`Delete the workflow “${w.name}”?`) && del(`/api/workflows/${w.id}`);
+  button.title = t("Delete");
+  button.onclick = () => confirm(t("Delete the workflow “{name}”?", { name: w.name })) && del(`/api/workflows/${w.id}`);
   return button;
 }
 
@@ -1262,11 +1304,11 @@ function compose(text) {
 // below a message the user sent, an action that saves it as a workflow, of a name they give it
 // there: the project's, if the chat is in one, or their own
 function saver(m) {
-  const box = element("div", "actions"), save = element("button", "", "Save as workflow");
+  const box = element("div", "actions"), save = element("button", "", t("Save as workflow"));
   save.onclick = () => {
-    const form = element("form"), name = element("input"), ok = element("button", "", "Save");
-    const cancel = element("button", "", "Cancel");
-    Object.assign(name, { value: m.content.split(/\s+/).slice(0, 6).join(" "), maxLength: 80, placeholder: "The workflow's name" });
+    const form = element("form"), name = element("input"), ok = element("button", "", t("Save"));
+    const cancel = element("button", "", t("Cancel"));
+    Object.assign(name, { value: m.content.split(/\s+/).slice(0, 6).join(" "), maxLength: 80, placeholder: t("The workflow's name") });
     cancel.type = "button";
     cancel.onclick = () => box.replaceChildren(save);
     form.onsubmit = async (event) => {
@@ -1274,7 +1316,7 @@ function saver(m) {
       if (!name.value.trim()) return;
       try {
         await post("/api/workflows", { name: name.value.trim(), prompt: m.content, project: shown?.project ?? undefined });
-        box.replaceChildren(element("span", "done", shown?.project ? "Saved to this project's workflows" : "Saved to your workflows, below a new chat"));
+        box.replaceChildren(element("span", "done", shown?.project ? t("Saved to this project's workflows") : t("Saved to your workflows, below a new chat")));
       } catch (error) {
         status(error.message, true);
       }
@@ -1297,7 +1339,7 @@ function renderProjects() {
       showProject(p.id);
     };
     const n = filesOf(p.id).length;
-    const about = [sharedWith(p), `${n} ${n === 1 ? "file" : "files"}`, day(p.updated)];
+    const about = [sharedWith(p), count(n, "1 file", "{n} files"), day(p.updated)];
     item.append(a, element("span", "meta", about.join(" · ")));
     return item;
   }));
@@ -1313,8 +1355,8 @@ function renderProject() {
   if (document.activeElement !== $("instructions")) $("instructions").value = p.instructions;
   const mine = p.person === me?.person;
   const mode = p.shared ? "everyone" : p.members.length || choosingFor === p.id ? "chosen" : "me";
-  const modes = [["me", "Only me"], ["chosen", "Chosen people"], ["everyone", "Everyone"]];
-  const unchangeable = "Only whoever made the project can change whom it is shared with";
+  const modes = [["me", t("Only me")], ["chosen", t("Chosen people")], ["everyone", t("Everyone")]];
+  const unchangeable = t("Only whoever made the project can change whom it is shared with");
   $("sharing").replaceChildren(...modes.map(([m, said]) => {
     const button = element("button", m === mode ? "on" : "", said);
     button.disabled = !mine;
@@ -1331,14 +1373,14 @@ function renderProject() {
   const others = (accounts?.people ?? []).filter((q) => q.id !== p.person);
   const chips = mode !== "chosen" ? [] : others.map((q) => {
     const chosen = p.members.includes(q.id);
-    const button = element("button", chosen ? "on" : "", q.id === me?.person ? "You" : q.name);
+    const button = element("button", chosen ? "on" : "", q.id === me?.person ? t("You") : q.name);
     button.disabled = !mine;
     button.title = mine ? "" : unchangeable;
     button.onclick = () => change(p.id, { members: chosen ? p.members.filter((id) => id !== q.id) : [...p.members, q.id] });
     return button;
   });
-  if (mode === "chosen" && !others.length) chips.push(element("span", "meta", "No one else uses this Leat yet."));
-  if (!mine) chips.unshift(element("span", "meta", `${nameOf(p.person)}'s project`));
+  if (mode === "chosen" && !others.length) chips.push(element("span", "meta", t("No one else uses this Leat yet.")));
+  if (!mine) chips.unshift(element("span", "meta", t("{name}'s project", { name: nameOf(p.person) })));
   $("members").replaceChildren(...chips);
   $("discard").hidden = !mine && !me?.admin;
   renderSyncing(p);
@@ -1357,14 +1399,16 @@ function renderProject() {
 // whom else a project is shared with, as its line in the list says: everyone, those who see it
 // beside this person by name, or no one
 function sharedWith(p) {
-  if (p.shared) return "Everyone";
+  if (p.shared) return t("Everyone");
   const names = [p.person, ...p.members].filter((id) => id !== me?.person).map(nameOf);
-  return names.length ? `With ${names.length > 1 ? `${names.slice(0, -1).join(", ")} and ` : ""}${names.at(-1)}` : "Only you";
+  if (!names.length) return t("Only you");
+  const whom = names.length > 1 ? t("{some} and {last}", { some: names.slice(0, -1).join(", "), last: names.at(-1) }) : names[0];
+  return t("With {whom}", { whom });
 }
 
 // the name of one of the box's people, by their id
 function nameOf(id) {
-  return accounts?.people.find((p) => p.id === id)?.name ?? "Someone";
+  return accounts?.people.find((p) => p.id === id)?.name ?? t("Someone");
 }
 
 // asks the user for files, or a `folder`, and hands them to `take`: {file, path}, each by its path
@@ -1401,7 +1445,7 @@ async function upload({ file, path }, project) {
     if (!response.ok) throw new Error((await response.json()).error.message);
     return (await response.json()).name;
   } catch (error) {
-    status(`${file.name} was not uploaded: ${error.message}`, true);
+    status(t("{name} was not uploaded: {why}", { name: file.name, why: error.message }), true);
     return null;
   }
 }
@@ -1411,7 +1455,7 @@ const UPLOADS = 4;
 async function uploads(items, project) {
   const names = [], waiting = fresh(items, project);
   let done = 0;
-  const say = () => items.length > 1 && status(done < items.length ? `Uploading ${done} of ${items.length} files…` : "");
+  const say = () => items.length > 1 && status(done < items.length ? t("Uploading {done} of {all} files…", { done, all: items.length }) : "");
   say();
   await Promise.all(Array.from({ length: Math.min(UPLOADS, items.length) }, async () => {
     for (let item; (item = waiting.shift());) {
@@ -1464,12 +1508,12 @@ async function attach(items) {
 function renderAttached() {
   $("attached").replaceChildren(...attached.map((a) => {
     const folder = a.name.endsWith("/");
-    const named = folder ? `${a.name.slice(0, -1)}${a.files > 1 ? ` · ${a.files} files` : ""}` : a.name;
+    const named = folder ? `${a.name.slice(0, -1)}${a.files > 1 ? ` · ${t("{n} files", { n: a.files })}` : ""}` : a.name;
     const chip = element("span", "chip", a.uploading ? `${named}…` : named);
     if (folder) chip.prepend(icon("folder"));
     if (!a.uploading && PICTURE.test(a.name)) chip.prepend(picture(a.name));
     const remover = element("button", "", "×");
-    remover.title = "Remove";
+    remover.title = t("Remove");
     remover.onclick = () => {
       attached = attached.filter((other) => other !== a);
       renderAttached();
@@ -1506,7 +1550,7 @@ function renderList() {
     item.classList.toggle("running", c.running);
     item.classList.toggle("unread", unread.has(c.id) && !c.running);
     const remover = element("button", "", "×");
-    remover.title = "Delete";
+    remover.title = t("Delete");
     remover.onclick = (event) => {
       event.stopPropagation();
       remove(c);
@@ -1518,14 +1562,14 @@ function renderList() {
 }
 
 function renderModels() {
-  const none = new Option(models.length ? "Choose a model" : "No models", "");
+  const none = new Option(models.length ? t("Choose a model") : t("No models"), "");
   none.disabled = true;
   $("model").replaceChildren(none, ...models.map((m) => new Option(m.id)));
   renderEffort();
 }
 
 // the efforts the model reasons at, as the composer names them: of two, the first none, off and on
-const EFFORTS = { none: "Off", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Max" };
+const EFFORTS = { none: "Off", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Max" }; // each t()'d as shown
 
 // the efforts the loaded model takes, as leat serve lists them, to choose among: none where the
 // model has no choice, as one that never reasons, or always does
@@ -1533,7 +1577,7 @@ function renderEffort() {
   const model = models.find((m) => m.id === ready()), efforts = model?.reasoning?.efforts ?? [];
   const toggle = efforts.length === 2 && efforts[0] === "none";
   $("effort").replaceChildren(...efforts.map((e) =>
-    new Option(toggle ? (e === "none" ? "Off" : "On") : (EFFORTS[e] ?? e), e)));
+    new Option(toggle ? (e === "none" ? t("Off") : t("On")) : (EFFORTS[e] ? t(EFFORTS[e]) : e), e)));
   $("effort").value = chosen(model) ?? "";
   $("reasoning").hidden = efforts.length < 2;
   $("reasoning").classList.toggle("on", (chosen(model) ?? "none") !== "none");
@@ -1613,7 +1657,7 @@ function meter(m) {
   const box = element("div", "meter"), track = element("div", "track"), done = element("span");
   done.style.width = `${(100 * (m.info.done ?? 0)) / m.info.total}%`;
   track.append(done);
-  box.append(track, element("p", "", "Leat keeps working if you leave or close this page, and marks the chat when it's done."));
+  box.append(track, element("p", "", t("Leat keeps working if you leave or close this page, and marks the chat when it's done.")));
   return box;
 }
 
@@ -1623,26 +1667,26 @@ function fold(start, indexes, unanswered) {
   const running = unanswered && shown.running && turns().at(-1)[0] === start; // working still
   const calls = indexes.map((i) => shown.messages[i]).filter((m) => m.role === "tool");
   box.classList.toggle("running", running);
-  const said = running ? (calls.length ? line(calls.at(-1)) : "Thinking…") : summary(calls);
+  const said = running ? (calls.length ? line(calls.at(-1)) : t("Thinking…")) : summary(calls);
   box.append(element("summary", "", said), ...indexes.map((i) => (views[i] = message(shown.messages[i], i))));
   return box;
 }
 
 // what each tool's calls did, in a few words: one call, and n
 const DID = {
-  ask_files: ["read the files", (n) => `read the files ${n} times`],
-  make_document: ["made a document", (n) => `made ${n} documents`],
-  compare_documents: ["compared documents", (n) => `compared documents ${n} times`],
-  fill_template: ["filled a template", (n) => `filled ${n} templates`],
-  suggest_edits: ["suggested edits", (n) => `suggested edits ${n} times`],
-  search_web: ["searched the web", (n) => `searched the web ${n} times`],
-  search_files: ["searched the files", (n) => `searched the files ${n} times`],
-  fetch: ["read a page", (n) => `read ${n} pages`],
-  read: ["read a file", (n) => `read ${n} files`],
-  run: ["ran code", (n) => `ran code ${n} times`],
-  write: ["wrote a file", (n) => `wrote ${n} files`],
-  edit: ["edited a file", (n) => `edited ${n} files`],
-};
+  ask_files: ["read the files", "read the files {n} times"],
+  make_document: ["made a document", "made {n} documents"],
+  compare_documents: ["compared documents", "compared documents {n} times"],
+  fill_template: ["filled a template", "filled {n} templates"],
+  suggest_edits: ["suggested edits", "suggested edits {n} times"],
+  search_web: ["searched the web", "searched the web {n} times"],
+  search_files: ["searched the files", "searched the files {n} times"],
+  fetch: ["read a page", "read {n} pages"],
+  read: ["read a file", "read {n} files"],
+  run: ["ran code", "ran code {n} times"],
+  write: ["wrote a file", "wrote {n} files"],
+  edit: ["edited a file", "edited {n} files"],
+}; // each t()'d as said
 
 // what a turn's calls did, in a few words, in the order it began them; those that failed not, nor
 // a web search not made, of what must not leave the box, but that it was kept out
@@ -1650,11 +1694,11 @@ function summary(all) {
   const calls = all.filter((m) => !m.info?.error && !m.info?.kept);
   const parts = [...new Set(calls.map((m) => m.name))].map((name) => {
     const n = calls.filter((m) => m.name === name).length;
-    const [one, many] = own(DID, name) ?? [`used ${name}`, () => `used ${name}`];
-    return n > 1 ? many(n) : one;
+    const [one, many] = own(DID, name) ?? ["used {name}", "used {name}"];
+    return n > 1 ? t(many, { n, name }) : t(one, { name });
   });
-  if (all.some((m) => m.info?.kept)) parts.push("kept names out of a web search");
-  const said = parts.join(", ") || "worked";
+  if (all.some((m) => m.info?.kept)) parts.push(t("kept names out of a web search"));
+  const said = parts.join(", ") || t("worked");
   return said[0].toUpperCase() + said.slice(1);
 }
 
@@ -1670,14 +1714,14 @@ function controls() {
   document.title = unread.size ? `(${unread.size}) ${named}` : named;
   $("main").classList.toggle("empty", !shown && !page);
   const held = project(here());
-  input.placeholder = viewing && held ? `Start a chat in ${held.name}` : "Message";
+  input.placeholder = viewing && held ? t("Start a chat in {name}", { name: held.name }) : t("Message");
   $("crumb").hidden = !shown || !held; // the project the conversation is in
   $("crumb").lastElementChild.textContent = held?.name ?? "";
   $("crumb").href = held ? `/projects/${held.id}` : "";
-  $("greeting").textContent = unreachable ? "The engine is not reachable"
-    : loading ? "Loading…" : !model ? "Choose a model" : "How can I help?";
+  $("greeting").textContent = unreachable ? t("The engine is not reachable")
+    : loading ? t("Loading…") : !model ? t("Choose a model") : t("How can I help?");
   $("send").classList.toggle("stop", running);
-  $("send").title = running ? "Stop" : "Send";
+  $("send").title = running ? t("Stop") : t("Send");
   const uploading = attached.some((a) => a.uploading);
   $("send").disabled = !running && !(model && input.value.trim() && !uploading);
   $("model").value = loading ?? model ?? "";
@@ -1696,7 +1740,7 @@ function message(m, index) {
   const item = element("div", `message ${m.role}`);
   const thinking = kept(element("details"), `thinking ${index}`), reasoning = element("div");
   const text = element("div"), pages = element("div", "sources"), note = element("div", "note");
-  const summary = element("summary", "", "Thinking"), cards = element("div", "cards");
+  const summary = element("summary", "", t("Thinking")), cards = element("div", "cards");
   thinking.append(summary, reasoning);
   item.append(thinking, text, cards, pages, note);
   item.update = () => {
@@ -1705,7 +1749,7 @@ function message(m, index) {
     item.classList.toggle("step", m.role === "assistant" && !answer);
     thinking.hidden = !m.reasoning_content;
     const thinks = !m.content && !m.tool_calls && live(m);
-    summary.textContent = thinks ? "Thinking…" : "Thinking";
+    summary.textContent = thinks ? t("Thinking…") : t("Thinking");
     markdown(reasoning, m.reasoning_content ?? "");
     if (m.role === "user") text.textContent = m.content;
     else markdown(text, m.content ?? "");
@@ -1717,7 +1761,7 @@ function message(m, index) {
     cards.replaceChildren(...names.map(card));
     if (m.role !== "user") note.textContent = answer ? describe(m.info ?? {}) : "";
     const { cached, read } = m.info ?? {};
-    note.title = read === undefined ? "" : `the prompt's tokens: ${cached} cached, ${read} read`;
+    note.title = read === undefined ? "" : t("the prompt's tokens: {cached} cached, {read} read", { cached, read });
   };
   item.update();
   return item;
@@ -1750,36 +1794,38 @@ function work(m, index) {
 // each tool's call in a line, of its arguments and info: what it is doing, what it did, and that
 // it failed
 const LINES = {
-  ask_files: (a, i) => [i.total ? `Reading ${i.done ?? 0} of ${i.total} files…` : "Reading the files…",
-    i.done < i.total ? `Read ${i.done} of ${i.total} files` : `Read ${i.total === 1 ? "1 file" : `${i.total ?? 0} files`}`,
-    "Couldn't read the files"],
-  search_web: (a, i) => [`Searching for “${a.query}”…`, i.kept ? `Kept ${i.kept.join(", ")} out of a web search`
-    : `Searched for “${a.query}”`, `Couldn't search for “${a.query}”`],
-  search_files: (a) => [`Searching the files for “${a.query}”…`, `Searched the files for “${a.query}”`,
-    `Couldn't search the files for “${a.query}”`],
-  fetch: (a, i) => [`Reading ${host(a.url)}…`, `Read ${i.title || host(i.url ?? a.url)}`,
-    `Couldn't read ${host(a.url)}`],
-  read: (a) => [`Reading ${named(a.path)}…`, `Read ${named(a.path)}`, `Couldn't read ${named(a.path)}`],
-  write: (a) => [`Writing ${a.path}…`, `Wrote ${a.path}`, `Couldn't write ${a.path}`],
-  make_document: (a, i) => [`Making ${a.name}…`, `Made ${i.files?.[0] ?? a.name}`, `Couldn't make ${a.name}`],
-  compare_documents: (a, i) => [`Comparing ${a.original} and ${a.revised}…`,
-    `Compared ${a.original} and ${a.revised}: ${i.changes ?? 0} ${i.changes === 1 ? "change" : "changes"}`,
-    `Couldn't compare ${a.original} and ${a.revised}`],
-  fill_template: (a, i) => [`Filling ${a.path}…`, `Filled ${a.path} as ${i.files?.[0] ?? a.name}`,
-    `Couldn't fill ${a.path}`],
-  suggest_edits: (a, i) => [`Suggesting edits to ${a.path}…`,
-    `Suggested ${i.suggested ?? 0} ${i.suggested === 1 ? "edit" : "edits"} to ${a.path}`, `Couldn't suggest edits to ${a.path}`],
-  edit: (a) => [`Editing ${a.path}…`, `Edited ${a.path}`, `Couldn't edit ${a.path}`],
-  run: (a, i) => ["Running code…", i.status === 0 ? "Ran code"
-    : i.status === null ? "Ran code, out of time" : "Ran code, which failed", "Couldn't run code"],
+  ask_files: (a, i) => [i.total ? t("Reading {done} of {all} files…", { done: i.done ?? 0, all: i.total }) : t("Reading the files…"),
+    i.done < i.total ? t("Read {done} of {all} files", { done: i.done, all: i.total }) : count(i.total ?? 0, "Read 1 file", "Read {n} files"),
+    t("Couldn't read the files")],
+  search_web: (a, i) => [t("Searching for “{query}”…", a), i.kept ? t("Kept {names} out of a web search", { names: i.kept.join(", ") })
+    : t("Searched for “{query}”", a), t("Couldn't search for “{query}”", a)],
+  search_files: (a) => [t("Searching the files for “{query}”…", a), t("Searched the files for “{query}”", a),
+    t("Couldn't search the files for “{query}”", a)],
+  fetch: (a, i) => [t("Reading {name}…", { name: host(a.url) }), t("Read {name}", { name: i.title || host(i.url ?? a.url) }),
+    t("Couldn't read {name}", { name: host(a.url) })],
+  read: (a) => [t("Reading {name}…", { name: named(a.path) }), t("Read {name}", { name: named(a.path) }),
+    t("Couldn't read {name}", { name: named(a.path) })],
+  write: (a) => [t("Writing {path}…", a), t("Wrote {path}", a), t("Couldn't write {path}", a)],
+  make_document: (a, i) => [t("Making {name}…", a), t("Made {name}", { name: i.files?.[0] ?? a.name }), t("Couldn't make {name}", a)],
+  compare_documents: (a, i) => [t("Comparing {original} and {revised}…", a),
+    i.changes === 1 ? t("Compared {original} and {revised}: 1 change", a) : t("Compared {original} and {revised}: {n} changes", { ...a, n: i.changes ?? 0 }),
+    t("Couldn't compare {original} and {revised}", a)],
+  fill_template: (a, i) => [t("Filling {path}…", a), t("Filled {path} as {name}", { path: a.path, name: i.files?.[0] ?? a.name }),
+    t("Couldn't fill {path}", a)],
+  suggest_edits: (a, i) => [t("Suggesting edits to {path}…", a),
+    i.suggested === 1 ? t("Suggested 1 edit to {path}", a) : t("Suggested {n} edits to {path}", { path: a.path, n: i.suggested ?? 0 }),
+    t("Couldn't suggest edits to {path}", a)],
+  edit: (a) => [t("Editing {path}…", a), t("Edited {path}", a), t("Couldn't edit {path}", a)],
+  run: (a, i) => [t("Running code…"), i.status === 0 ? t("Ran code")
+    : i.status === null ? t("Ran code, out of time") : t("Ran code, which failed"), t("Couldn't run code")],
 };
 
 function line(m) {
   const { arguments: args, error, stopped } = m.info ?? {};
-  const lines = own(LINES, m.name) ?? (() => [`${m.name}…`, m.name, `${m.name} failed`]);
+  const lines = own(LINES, m.name) ?? (() => [`${m.name}…`, m.name, t("{name} failed", { name: m.name })]);
   const [running, done, failed] = lines(typeof args === "object" ? args : {}, m.info ?? {});
   const said = !m.content ? running : error ? failed : done;
-  return stopped ? `${said} · stopped` : said;
+  return stopped ? `${said} · ${t("stopped")}` : said;
 }
 
 // what a tool's call found, as its line opens on it
@@ -1790,23 +1836,23 @@ function what(m) {
     return [cited(listed(results.map((r) => link(r.url, r.title)), true), results)];
   }
   if (m.name === "ask_files") { // what it asked of each file, and the spreadsheet of the answers
-    const asked = element("p", "", `Asked of each file: ${args?.question ?? ""}`);
-    const columns = m.info?.columns?.length > 1 ? [element("p", "meta", `Columns: ${m.info.columns.join(", ")}`)] : [];
-    const gaps = [["No answer in", m.info?.unanswered], ["Not read", m.info?.unread]]
-      .filter(([, names]) => names?.length).map(([said, names]) => element("p", "meta", `${said}: ${names.join(", ")}`));
+    const asked = element("p", "", t("Asked of each file: {question}", { question: args?.question ?? "" }));
+    const columns = m.info?.columns?.length > 1 ? [element("p", "meta", t("Columns: {names}", { names: m.info.columns.join(", ") }))] : [];
+    const gaps = [[t("No answer in: {names}"), m.info?.unanswered], [t("Not read: {names}"), m.info?.unread]]
+      .filter(([, names]) => names?.length).map(([said, names]) => element("p", "meta", said.replace("{names}", names.join(", "))));
     return [asked, ...columns, ...gaps, cards(m.info?.files ?? [])];
   }
   if (m.name === "search_files" && results?.length) {
     return [cited(listed(results.map((r) => sourceLink(r, r.title))), results)];
   }
   if (m.name === "fetch") { // and the question it was read for, if one
-    const asked = m.info?.question ? [element("p", "meta", `Read for: ${m.info.question}`)] : [];
+    const asked = m.info?.question ? [element("p", "meta", t("Read for: {question}", m.info))] : [];
     return [link(url, title || url), ...asked];
   }
   if (m.name === "write" || m.name === "edit") return [fileLink(args.path)];
   if (m.name === "suggest_edits" || m.name === "make_document") return [cards(m.info?.files ?? [])]; // the document made
   if (m.name === "fill_template") { // the document made, and the fields it left as they were
-    const left = m.info?.missing?.length ? [element("p", "meta", `Without values: ${m.info.missing.join(", ")}`)] : [];
+    const left = m.info?.missing?.length ? [element("p", "meta", t("Without values: {names}", { names: m.info.missing.join(", ") }))] : [];
     return [cards(m.info?.files ?? []), ...left];
   }
   if (m.info?.images) return [cards(m.info.images)]; // an image read, which the model saw
@@ -1822,7 +1868,7 @@ function what(m) {
 
 // a file's name, or a skill's, as people say it
 function named(path = "") {
-  return path.startsWith("skills/") ? `the ${path.split("/")[1]} skill` : path;
+  return path.startsWith("skills/") ? t("the {name} skill", { name: path.split("/")[1] }) : path;
 }
 
 // the files a reply's turn made or changed, that are still there
@@ -1882,7 +1928,7 @@ function bytes(n) {
   if (n < 1000) return `${n} B`;
   if (n < 1e6) return `${Math.round(n / 1e3)} KB`;
   const [size, unit] = n < 1e9 ? [n / 1e6, "MB"] : n < 1e12 ? [n / 1e9, "GB"] : [n / 1e12, "TB"];
-  return `${size.toFixed(1)} ${unit}`;
+  return `${size.toLocaleString(locale(), { minimumFractionDigits: 1, maximumFractionDigits: 1 })} ${unit}`;
 }
 
 // the sources the conversation's tools numbered, by their numbers
@@ -1920,8 +1966,8 @@ function checkQuotes(root, checked) {
       quote.splitText(q.quote.length);
       const cited = q.cited.map((n) => `[${n}]`).join("");
       const mark = element("span", q.found ? "quote found" : "quote unfound");
-      mark.title = q.found ? `Found word for word in ${cited}`
-        : `Leat couldn't find this in ${cited}: check it there before you rely on it`;
+      mark.title = q.found ? t("Found word for word in {cited}", { cited })
+        : t("Leat couldn't find this in {cited}: check it there before you rely on it", { cited });
       quote.replaceWith(mark);
       mark.append(quote);
       break;
@@ -1949,7 +1995,7 @@ function sources(m) {
 // a reply's sources as chips, the first CHIPS of many, then how many more
 const CHIPS = 8;
 function chips(all) {
-  const more = all.length > CHIPS + 1 ? [element("span", "more", `and ${all.length - CHIPS} more`)] : [];
+  const more = all.length > CHIPS + 1 ? [element("span", "more", t("and {n} more", { n: all.length - CHIPS }))] : [];
   return [...all.slice(0, more.length ? CHIPS : all.length).map(source), ...more];
 }
 
@@ -2033,21 +2079,27 @@ function icon(name) {
 // what a reply's info tells people: its model, its tokens, how fast they came, and whether it
 // was stopped, or cut off
 function describe({ model, tokens, rate, first, stopped, cut }) {
-  let speed = tokens ? `${tokens} ${tokens === 1 ? "token" : "tokens"}` : "";
-  if (rate) speed += `, ${rate.toFixed(1)} tok/s`;
-  if (speed && first !== undefined) speed += `, the first after ${first.toFixed(1)} s`;
-  const out = cut && "cut off: the conversation is out of room";
-  return [model, speed, stopped && "stopped", out].filter(Boolean).join(" · ");
+  const number = (n) => n.toLocaleString(locale(), { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  let speed = tokens ? count(tokens, "1 token", "{n} tokens") : "";
+  if (rate) speed += `, ${number(rate)} tok/s`;
+  if (speed && first !== undefined) speed += `, ${t("the first after {s} s", { s: number(first) })}`;
+  const out = cut && t("cut off: the conversation is out of room");
+  return [model, speed, stopped && t("stopped"), out].filter(Boolean).join(" · ");
+}
+
+// a count in words, of `one` if it is one, else of `many`, its {n} the count
+function count(n, one, many) {
+  return n === 1 ? t(one) : t(many, { n });
 }
 
 // sets a code block below a bar of its language and a button that copies it
 function codeBar(pre) {
   const block = element("div", "code"), bar = element("div", "bar");
-  const copy = element("button", "", "Copy");
+  const copy = element("button", "", t("Copy"));
   copy.onclick = async () => {
     await clipboard(pre.textContent);
-    copy.textContent = "Copied";
-    setTimeout(() => (copy.textContent = "Copy"), 2000);
+    copy.textContent = t("Copied");
+    setTimeout(() => (copy.textContent = t("Copy")), 2000);
   };
   bar.append(element("span", "", pre.firstChild.className.replace("language-", "")), copy);
   pre.replaceWith(block);

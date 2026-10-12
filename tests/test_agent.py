@@ -18,6 +18,7 @@ from unittest.mock import ANY
 
 import pytest
 
+from leat import locales
 from leat.agent import background, context
 from leat.agent.accounts import CODE, Accounts
 from leat.agent.agent import LAST, Agent, Busy, NotFound, Refused
@@ -551,9 +552,9 @@ def test_api_project_members(server, agent):
         assert request(url, "PATCH", wrong)[0] == 400
     assert request(f"{server}/api/projects", "POST", {"name": "x", "members": [ada]})[0] == 400
     noted = [(a["action"], a["detail"]) for a in agent.store.activity()][::-1]
-    assert noted[-3:] == [("shared the project with", "Ada and Ben"),
+    assert noted[-3:] == [("shared the project with", "Ada, Ben"),
                          ("stopped sharing the project with", "Ada"),
-                         ("shared the project with", "everyone")]  # fmt: skip
+                         ("shared the project with everyone", None)]  # fmt: skip
 
 
 def test_workflows(agent):
@@ -654,6 +655,7 @@ def test_offline(engine, tmp_path):
             "offline": True,
             "office": None,
             "address": True,
+            "language": None,
             "timezone": ZONE,
         }
     engine.replies.put(REPLY)
@@ -674,22 +676,42 @@ def test_offline(engine, tmp_path):
     assert "## The web\n- Call search_web.\n- Call fetch." in system and OFFLINE not in system
 
 
+def test_language(server, agent):
+    # the box's language, an admin's to set, in which the agent says its errors and what was done
+    url = f"{server}/api/settings"
+    assert json.loads(request(f"{server}/api/me")[1])["language"] is None
+    assert request(url, "PATCH", {"language": "de"})[0] == 200
+    assert json.loads(request(f"{server}/api/me")[1])["language"] == "de"
+    status, body = request(url, "PATCH", {"office": "x" * 61})
+    assert status == 400 and json.loads(body)["error"]["message"] == (
+        "Der Name eines Büros hat höchstens 60 Zeichen"
+    )
+    status, body = request(f"{server}/api/activity")
+    assert json.loads(body)["activity"][0]["action"] == "stellte die Sprache ein:"
+    assert request(f"{server}/locales/de.json")[0] == 200
+    assert request(f"{server}/locales/fr.json")[0] == 404
+    assert locales.translated("Terms and conditions.pdf", "de") == "Terms and conditions.pdf"
+
+
 def test_api_settings(server, agent):
     # the box's settings, its owner's to change, each as it must be, and each change noted
     url = f"{server}/api/settings"
     for wrong in ({"offline": "yes"}, {"address": 1}, {"office": 7}, {"office": "x" * 61},
-                  {"colour": "red"}):  # fmt: skip
+                  {"colour": "red"}, {"language": "fr"}):  # fmt: skip
         assert request(url, "PATCH", wrong)[0] == 400
     assert request(url, "PATCH", {"offline": True, "office": "  Kanzlei   Weber "})[0] == 200
+    assert request(url, "PATCH", {"language": "de"})[0] == 200
     assert request(url, "PATCH", {"address": False})[0] == 200
     assert agent.settings() == {
         "offline": True,
         "office": "Kanzlei Weber",
         "address": False,
+        "language": "de",
         "timezone": ZONE,
     }
-    assert request(url, "PATCH", {"office": "", "address": True})[0] == 200
-    assert agent.settings() == {"offline": True, "office": None, "address": True, "timezone": ZONE}
+    assert request(url, "PATCH", {"office": "", "address": True, "language": "en"})[0] == 200
+    assert agent.settings() == {"offline": True, "office": None, "address": True,
+                                "language": "en", "timezone": ZONE}  # fmt: skip
     done = [a["action"] for a in agent.store.activity()]
     for action in (
         "turned the internet off",
@@ -830,12 +852,13 @@ def test_setup_settings(agent):
             assert request(url, "POST", {"name": "Alkın", "office": 3})[0] == 400
             assert agent.store.people() == []  # nothing set up of a body refused
             setup = {"name": "Alkın", "office": "Kanzlei Weber", "offline": True,
-                     "timezone": "Europe/Istanbul"}  # fmt: skip
+                     "language": "de", "timezone": "Europe/Istanbul"}  # fmt: skip
             assert request(url, "POST", setup)[0] == 200  # no helper here: its own zone kept
             assert agent.settings() == {
                 "offline": True,
                 "office": "Kanzlei Weber",
                 "address": True,
+                "language": "de",
                 "timezone": ZONE,
             }
         finally:
@@ -851,7 +874,7 @@ def test_box(agent, engine):
             status, body = request(url)
             assert status == 200 and json.loads(body) == {
                 "empty": True, "offline": False, "office": None, "address": True,
-                "timezone": ZONE, "model": {"id": "fake", "status": "loaded"},
+                "language": None, "timezone": ZONE, "model": {"id": "fake", "status": "loaded"},
                 "setup": server.accounts.code, "warnings": [],
             }  # fmt: skip
             assert request(url, Host="k7x2qm.leatbox.net")[0] == 404
@@ -1432,7 +1455,8 @@ def test_joining(server, agent, engine, events):
         except urllib.error.HTTPError as e:
             return e.code, json.loads(e.read())
 
-    assert ask("/api/me") == (401, {"error": {"message": ANY}, "empty": False, "recovering": False})
+    gated = {"error": {"message": ANY}, "language": None, "empty": False, "recovering": False}
+    assert ask("/api/me") == (401, gated)
     assert ask("/api/setup", "POST", {"name": "Eve"})[0] == 400  # the box is set up
     status, asked = ask("/api/pairings", "POST", {"name": "Ada"})
     assert status == 200 and len(asked["code"]) == 6
@@ -1453,7 +1477,8 @@ def test_joining(server, agent, engine, events):
     assert status == 200 and json.loads(ada)["name"] == "Ada"
     assert ask(f"/api/pairings/{asked['id']}", "POST")[0] == 200  # its cookie, taken once
     assert ask(f"/api/pairings/{asked['id']}", "POST")[0] == 404
-    assert ask("/api/me") == (200, {"person": 2, "name": "Ada", "admin": False, "device": 2})
+    ada = {"person": 2, "name": "Ada", "admin": False, "device": 2, "language": None}
+    assert ask("/api/me") == (200, ada)
     # Ada's own alone: her events tell of her conversations, not the admin's
     adas = "; ".join(f"{c.name}={c.value}" for c in jar.cookiejar)
     connection = http.client.HTTPConnection(server.replace("http://", ""))
@@ -1542,7 +1567,7 @@ def test_own_devices(server, agent):
     assert status == 200 and phone("/api/me")[1]["person"] == 2
     status, laptop = joining(server, "Ada's laptop", phone, person=2)  # hers, from her phone
     assert status == 200 and laptop("/api/me")[1] == {
-        "person": 2, "name": "Ada", "admin": False, "device": 3}  # fmt: skip
+        "person": 2, "name": "Ada", "admin": False, "device": 3, "language": None}  # fmt: skip
     assert joining(server, "Eve", phone)[0] == 403  # someone new: an admin's to let in
     assert joining(server, "Alkın", phone, person=1)[0] == 403  # as another: never
     assert joining(server, "Ada", admins, person=2)[0] == 403  # as Ada, while she has devices
@@ -1587,10 +1612,10 @@ def test_admins(server, agent):
     seen = [(a["person"], a["action"], a["detail"]) for a in agent.store.activity()[:5]]
     assert seen == [
         ("Ada Lovelace", "made an admin", "Al"),
-        ("Ada Lovelace", "renamed", "Alkın as Al"),
+        ("Ada Lovelace", "renamed", "Alkın → Al"),
         ("Al", "made no longer an admin", "Alkın"),  # who did it, by their name now
         ("Al", "made an admin", "Ada Lovelace"),
-        ("Ada Lovelace", "renamed", "Ada as Ada Lovelace"),
+        ("Ada Lovelace", "renamed", "Ada → Ada Lovelace"),
     ]  # fmt: skip
 
 
@@ -1717,6 +1742,7 @@ def test_events(server, agent, engine):
         "offline": False,
         "office": None,
         "address": True,
+        "language": None,
         "timezone": ZONE,
     }
     engine.replies.put(REPLY)

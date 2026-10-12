@@ -632,7 +632,7 @@ def test_activity(server, agent, engine, tmp_path):
             for a in json.loads(body)["activity"]]  # fmt: skip
     assert status == 200 and seen == [
         ("Alkın", 0, "turned the internet off", None, None),
-        ("Alkın", 0, "shared the project with", "Yılmaz Ltd", "everyone"),
+        ("Alkın", 0, "shared the project with everyone", "Yılmaz Ltd", None),
         ("Alkın", 1, "read", "Yılmaz Ltd", "Lease.txt"),
         ("Alkın", 0, "began a chat", "Yılmaz Ltd", None),
         ("Alkın", 0, "uploaded", "Yılmaz Ltd", "Lease.txt"),
@@ -642,7 +642,7 @@ def test_activity(server, agent, engine, tmp_path):
     assert "Secret" not in body.decode() and "rent" not in body.decode().lower()
     newest = json.loads(body)["activity"][0]["id"]
     _, older = request(f"{server}/api/activity?before={newest}")
-    assert json.loads(older)["activity"][0]["action"] == "shared the project with"
+    assert json.loads(older)["activity"][0]["action"] == "shared the project with everyone"
     assert request(f"{server}/api/activity?before=x")[0] == 400
     request(f"{server}/api/projects/{project}", "DELETE")
     _, body = request(f"{server}/api/activity")

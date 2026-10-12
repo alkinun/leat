@@ -448,18 +448,18 @@ class Agent:
 
     def settings(self) -> dict[str, Any]:
         """The box's settings, as its admins chose them: whether it is kept from the internet, the
-        office's name, if given, whether its screen shows its address, and its time zone, as the
-        system has it."""
+        office's name, if given, whether its screen shows its address, its language, of
+        leat.locales's, if chosen, and its time zone, as the system has it."""
         office, hidden = self.store.setting("office"), self.store.setting("hide_address")
         return {"offline": self.offline(), "office": office, "address": not hidden,
-                "timezone": system.zone()}  # fmt: skip
+                "language": self.store.setting("language"), "timezone": system.zone()}  # fmt: skip
 
     def change(self, **changes: Any) -> None:
         """Changes the box's settings, of settings()'s keys, telling every app: kept from the
         internet, or let reach it, from each turn begun now on; the office named, or not; the
-        address shown on the box's screen, or hidden; and its time zone, set by the box's system
-        helper, first, as it alone may fail. Raises ValueError of a time zone that is not one, or
-        a box that cannot set it, as one that is no box."""
+        address shown on the box's screen, or hidden; its language; and its time zone, set by the
+        box's system helper, first, as it alone may fail. Raises ValueError of a time zone that is
+        not one, or a box that cannot set it, as one that is no box."""
         if (zone := changes.pop("timezone", None)) is not None:
             try:
                 system.ask({"timezone": zone})
@@ -468,8 +468,9 @@ class Agent:
                                  "time zone") from e  # fmt: skip
             time.tzset()  # the agent's own times, as workflows' schedules, of the new zone
         stored = {"offline": lambda v: v or None, "office": lambda v: v or None,
-                  "address": lambda v: None if v else True}  # fmt: skip
-        keys = {"offline": "offline", "office": "office", "address": "hide_address"}
+                  "address": lambda v: None if v else True, "language": lambda v: v}  # fmt: skip
+        keys = {"offline": "offline", "office": "office", "address": "hide_address",
+                "language": "language"}  # fmt: skip
         for key, value in changes.items():
             self.store.set_setting(keys[key], stored[key](value))
         self.events.publish(self.settings_event())

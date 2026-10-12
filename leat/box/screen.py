@@ -45,6 +45,7 @@ from pathlib import Path
 
 from PIL import Image, ImageColor, ImageDraw, ImageFont
 
+from leat import locales
 from leat.box import system
 from leat.box.address import ipv4
 from leat.box.provision import ROOT
@@ -66,6 +67,7 @@ PAGE, TEXT, MUTED, LINE, CARD = "#0a0a0a", "#ededed", "#8f8f8f", "#262626", "#ff
 WARNING = "#f5a524"  # of what needs attention
 # the hours, of the box's time zone, the screen is dimmed, once nothing needs seeing
 NIGHT = (22, 6)
+LANGUAGE = "de"  # the screen's, of a box whose admins chose none yet, as of German offices
 DIM = 0.2  # its brightness then
 BOLD, PLAIN = "\033[1;97m", "\033[0m"  # of the words that matter, written as text
 _TIOCLINUX, _KMSG_REDIRECT = 0x541C, 11  # the ioctl that sends the kernel's messages to a console
@@ -85,7 +87,8 @@ class State:
     "loading", whether the box is kept from the internet, the code that sets it up, while it is
     to be, and a recovery code, while one holds; whether the power button was pressed just now,
     once, so that a press again switches the box off; and its link, "Wired" or "Wi-Fi", the bytes
-    left on its data's partition, and its image's version."""
+    left on its data's partition, and its image's version; and the language it speaks, of
+    leat.locales's."""
 
     name: str | None
     address: str | None
@@ -106,13 +109,15 @@ class State:
     switching: bool = False
     # what needs attention: each its title, and what to do
     warnings: tuple[tuple[str, str], ...] = ()
+    language: str = "en"
 
 
 def look(root: Path = ROOT) -> State:
     """The box's state, as it is now."""
     name, address = _name(root), _address()
     booting = time.clock_gettime(time.CLOCK_BOOTTIME) < BOOTING
-    state = State(name, address, booting=booting, link=_link(), free=_free(), version=_version())
+    state = State(name, address, booting=booting, link=_link(), free=_free(), version=_version(),
+                  language=LANGUAGE)  # fmt: skip
     if name is None or address is None:
         return state
     told = box()
@@ -126,12 +131,13 @@ def look(root: Path = ROOT) -> State:
         setup=told.get("setup"), recovery=told.get("recovery"),
         recovery_left=int(told.get("recovery_left") or 0),
         warnings=tuple((w["title"], w["said"]) for w in told.get("warnings", [])),
+        language=told.get("language") or LANGUAGE,
     )  # fmt: skip
 
 
 def said(state: State) -> tuple[str, str, str | None]:
     """What the screen says of a state: a few words, a sentence, and the address to open, if it is
-    to be shown."""
+    to be shown; in English, which paint() and written() say in the box's language."""
     off = "Press the power button again to switch the box off."
     if state.switching and not state.recovery:
         return "Switch off?", off, None
@@ -173,7 +179,8 @@ def holds(state: State) -> str:
     """What the recovery code is said to be, and for how long it holds: "Recovery code, for 4 more
     minutes", by the minute begun."""
     minutes = max(1, -(-state.recovery_left // 60))
-    return f"Recovery code, for {minutes} more minute{'s' if minutes > 1 else ''}"
+    return f"Recovery code, for {minutes} more minutes" if minutes > 1 else (
+        "Recovery code, for 1 more minute")  # fmt: skip
 
 
 def spaced(code: str) -> str:
@@ -191,20 +198,20 @@ def dimmed(state: State, now: datetime.datetime) -> bool:
 
 def footer(state: State) -> list[str]:
     """The screen's last line, of the box: its model, its network, whether it reaches the internet,
-    and the room left on its data's partition; each once it is known."""
-    items = []
+    and the room left on its data's partition; each once it is known, in the box's language."""
+    items, t = [], functools.partial(locales.t, language=state.language)
     if state.answering:
         if state.model is None:
-            items.append("No model")
+            items.append(t("No model"))
         else:
             model, status = state.model
-            items.append(f"{_model(model)} · {'ready' if status == 'loaded' else status}")
+            items.append(f"{_model(model)} · {t('ready' if status == 'loaded' else status)}")
     if state.address:
-        items.append(f"{state.link or 'Network'} · {state.address}")
+        items.append(f"{t(state.link or 'Network')} · {state.address}")
     if state.answering:
-        items.append("Internet off" if state.offline else "Internet on")
+        items.append(t("Internet off" if state.offline else "Internet on"))
     if state.free is not None:
-        items.append(f"{state.free / 1e9:.0f} GB free")
+        items.append(t("{size} GB free", size=f"{state.free / 1e9:.0f}"))
     return items
 
 
@@ -213,6 +220,7 @@ def paint(state: State, size: tuple[int, int], now: datetime.datetime) -> Image.
     width, height = size
     u = min(height / 100, width / 160)  # the screen's measure: a hundredth of its height
     image = Image.new("RGB", size, PAGE)
+    t = functools.partial(locales.translated, language=state.language)
     pen = ImageDraw.Draw(image)
     margin, words = round(7 * u), font(round(2.6 * u))
 
@@ -228,6 +236,7 @@ def paint(state: State, size: tuple[int, int], now: datetime.datetime) -> Image.
 
     # the middle: what the box says, and the address to open, with its QR code on a card
     headline, sentence, url = said(state)
+    headline, sentence = t(headline), t(sentence)
     card = qr_card(scanned(state, url), round(min(40 * u, width * 0.28))) if url else None
     right = width - margin - (card.width + round(8 * u) if card else 0)
     lines: list[tuple[str, ImageFont.FreeTypeFont | ImageFont.ImageFont, str, float]] = [
@@ -243,10 +252,11 @@ def paint(state: State, size: tuple[int, int], now: datetime.datetime) -> Image.
                     for line in _wrapped(what, advice, right - margin, pen))]  # fmt: skip
     if url:
         lines += [(url.removeprefix("https://"), font(round(3.2 * u), "Medium"), TEXT, 1.1 * u),
-                  ("or type leat.local", font(round(2.4 * u)), MUTED, 0.0)]  # fmt: skip
+                  (t("or type leat.local"), font(round(2.4 * u)), MUTED, 0.0)]  # fmt: skip
         lines[-3] = (*lines[-3][:3], 4.0 * u)  # room before the address
         # and the code that recovers it, or sets it up, below
         shown = (holds(state), state.recovery) if state.recovery else ("Setup code", state.setup)
+        shown = (t(shown[0]), shown[1])
         if shown[1] and (state.recovery or state.empty):
             lines[-1] = (*lines[-1][:3], 3.0 * u)
             code = font(round(4.4 * u), "SemiBold")
@@ -254,7 +264,7 @@ def paint(state: State, size: tuple[int, int], now: datetime.datetime) -> Image.
                       (spaced(shown[1]), code, TEXT, 0.0)]  # fmt: skip
         if state.recovery:  # and that a press again switches the box off
             lines[-1] = (*lines[-1][:3], 3.0 * u)
-            lines.append(("Press the power button again to switch the box off.",
+            lines.append((t("Press the power button again to switch the box off."),
                           font(round(2.4 * u)), MUTED, 0.0))  # fmt: skip
     tall = sum(_height(pen, f) + gap for _, f, _, gap in lines)
     y = height / 2 - tall / 2
@@ -279,18 +289,19 @@ def paint(state: State, size: tuple[int, int], now: datetime.datetime) -> Image.
 def written(state: State, qr: str = "") -> list[str]:
     """The screen's lines, written as text, as on a display without a framebuffer, of a state and
     the QR code of its address, of block characters, if any."""
+    t = functools.partial(locales.translated, language=state.language)
     headline, sentence, url = said(state)
     title = f"Leat · {state.office}" if state.office else "Leat"
-    lines = [f"{BOLD}{title}{PLAIN}", "", f"{BOLD}{headline}{PLAIN}", "", sentence]
+    lines = [f"{BOLD}{title}{PLAIN}", "", f"{BOLD}{t(headline)}{PLAIN}", "", t(sentence)]
     for warned, what in state.warnings[:2]:
         lines += ["", f"{BOLD}{warned}{PLAIN}: {what}"]
     if url:
-        lines += ["", url, "", *qr.splitlines(), "", "or type leat.local"]
+        lines += ["", url, "", *qr.splitlines(), "", t("or type leat.local")]
     if url and state.recovery:
-        lines += ["", f"{holds(state)}: {BOLD}{spaced(state.recovery)}{PLAIN}", "",
-                  "Press the power button again to switch the box off."]  # fmt: skip
+        lines += ["", f"{t(holds(state))}: {BOLD}{spaced(state.recovery)}{PLAIN}", "",
+                  t("Press the power button again to switch the box off.")]  # fmt: skip
     elif url and state.empty and state.setup:
-        lines += ["", f"Setup code: {BOLD}{spaced(state.setup)}{PLAIN}"]
+        lines += ["", f"{t('Setup code')}: {BOLD}{spaced(state.setup)}{PLAIN}"]
     return lines
 
 
