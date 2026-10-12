@@ -101,7 +101,9 @@ Every few hours the box looks at `https://leatbox.com/updates/` (systemd-sysupda
 its other partition and its UKI beside the running one, with three tries. At night it restarts into
 it (`systemd-sysupdate-reboot.timer`); the boot is kept once Leat answers (`leat-health.service`,
 before `boot-complete.target`), and else, its tries spent, systemd-boot boots the system before. An
-admin sees the version, and an update ready, in Settings.
+update cut off while it downloads, as by a power cut, is removed before the next is tried, as
+systemd-sysupdate would refuse every update after it else. An admin sees the version, and an
+update ready, in Settings.
 
 ```bash
 box/image/keys.sh                     # once: the keys, kept in ~/.config/leat/box-keys

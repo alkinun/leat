@@ -655,6 +655,12 @@ def test_units():
                if line.startswith("enable leat-")}  # fmt: skip
     units = {p.name for p in (box / "systemd").iterdir()} - {"leat-system@.service"}
     assert enabled == units
+    # an update cut off removed before the next is tried, or none would be again
+    dropped = box / "image/mkosi.extra/usr/lib/systemd/system/systemd-sysupdate-update.service.d"
+    assert (
+        "ExecStartPre=-/usr/lib/systemd/systemd-sysupdate vacuum"
+        in (dropped / "leat.conf").read_text()
+    )
 
 
 def test_screen_look(tmp_path, monkeypatch):
