@@ -41,11 +41,12 @@ class Background:
         self._woken.set()
 
     def _work(self) -> None:
-        # tells the apps of the engine's models if they changed, as it came up, and names the
-        # conversations not named, as those whose first turns ended, one at a time, then waits
-        # for a wake or the next look. Each naming that fails is tried again at the next look,
-        # the others done meanwhile, as any while the engine is away. A bug's error is said, not
-        # the thread's end.
+        # at each look: syncs the projects whose sync is due, on a thread of its own; tells the
+        # apps of the engine's models if they changed; forgets files' old versions; runs the
+        # workflows due; and names the conversations not named, whose first turns ended, one at
+        # a time; then waits for a wake or the next look. Each naming that fails is tried again
+        # at the next look, the others done meanwhile, as any while the engine is away. A bug's
+        # error is said, not the thread's end.
         while True:
             self._woken.clear()
             try:

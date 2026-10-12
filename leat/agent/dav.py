@@ -109,9 +109,6 @@ class Drive:
             raise NotFound(f"there is no project {parts[1]}")
         return Place("space", project, "/".join(parts[2:]))
 
-    def _options(self, place: Place, path: str) -> None:
-        self._send(200, b"", {"Allow": METHODS})
-
     def _propfind(self, place: Place, path: str) -> None:
         self._body()  # what is asked of the properties: every one, of each, as most clients ask
         depth = self.handler.headers.get("Depth", "1")
@@ -427,12 +424,19 @@ class Drive:
         self._send(status, data, kind | (headers or {}))
 
     def _send(self, status: int, data: bytes, headers: dict[str, str] | None = None) -> None:
-        self.handler.send_response(status)
-        for key, value in {"DAV": "1, 2", "MS-Author-Via": "DAV", **(headers or {})}.items():
-            self.handler.send_header(key, value)
-        self.handler.send_header("Content-Length", str(len(data)))
-        self.handler.end_headers()
-        self.handler.wfile.write(data)
+        send(self.handler, status, data, headers)
+
+
+def send(handler: BaseHTTPRequestHandler, status: int, data: bytes,
+         headers: dict[str, str] | None = None) -> None:  # fmt: skip
+    """Answers a WebDAV request, as a drive's server says it is one: of DAV's classes and Office's
+    header, and `headers`."""
+    handler.send_response(status)
+    for key, value in {"DAV": "1, 2", "MS-Author-Via": "DAV", **(headers or {})}.items():
+        handler.send_header(key, value)
+    handler.send_header("Content-Length", str(len(data)))
+    handler.end_headers()
+    handler.wfile.write(data)
 
 
 def _away(space: Workspace, name: str) -> bool:

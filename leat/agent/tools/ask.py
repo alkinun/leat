@@ -336,7 +336,7 @@ def _totals(keys: list[str], rows: list[dict[str, str]]) -> dict[str, dict[str, 
         amounts = [_amount(text) for text in said if text]
         if len(amounts) < 2 or None in amounts:
             continue
-        found = [a for a in amounts if a is not None]
+        found = [a for a in amounts if a is not None]  # none, but as mypy knows it
         currencies = {a["currency"] for a in found if a["currency"]}
         if len(currencies) > 1 or 2 * sum(a["marked"] for a in found) < len(found):
             continue

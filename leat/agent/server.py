@@ -50,7 +50,8 @@ from leat.chat import EFFORTS
 
 APP = Path(__file__).parent / "app"
 # the app's files, each served at its path in app/, and their types; the app's pages, /c/<id> one
-# conversation's, /projects/<id> one project's, /projects, /files and /settings, are index.html
+# conversation's, /projects/<id> one project's, /projects, /files, /settings and /activity, are
+# index.html
 _FILES = (
     "index.html",
     "mode.js",
@@ -372,7 +373,7 @@ class _Handler(BaseHTTPRequestHandler):
             elif match := _PROJECT.fullmatch(path):
                 held = (store.project(match[1]) or {}).get("name")
                 agent.delete_project(match[1], person)
-                store.note(person, "deleted the project", held)
+                store.note(person, "deleted the project", held)  # the agent's, of one still there
             elif match := _WORKFLOW.fullmatch(path):
                 workflow = store.workflow(int(match[1])) or {}
                 agent.delete_workflow(int(match[1]), person)
@@ -530,11 +531,7 @@ class _Handler(BaseHTTPRequestHandler):
             return self._error(403, "this server answers its own network's requests alone")
         path = urllib.parse.urlsplit(self.path).path
         if method == "OPTIONS":
-            self.send_response(200)
-            for key, value in {"Allow": dav.METHODS, "DAV": "1, 2", "MS-Author-Via": "DAV",
-                               "Content-Length": "0"}.items():  # fmt: skip
-                self.send_header(key, value)
-            return self.end_headers()
+            return dav.send(self, 200, b"", {"Allow": dav.METHODS})
         if not _drive(path):
             return self._error(405, f"{method} is the network drive's, at {dav.PREFIX}")
         if (device := self._driven()) is None:
@@ -657,8 +654,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _events(self, me: dict[str, Any]) -> None:
         # what there is of a device's person's, then every change for them, until the client goes:
-        # the admins', to admins alone, as the device's person is one still; the accounts, as the
-        # device sees them, each time they change
+        # those to them, or to them among others; the accounts, as the device sees them, each time
+        # they change
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -690,8 +687,7 @@ class _Handler(BaseHTTPRequestHandler):
                 to = event.get("to", person)
                 if event["type"] == "accounts":
                     self._event(self.server.accounts.state(me))
-                elif to == person or isinstance(to, list) and person in to or (
-                        to == "admins" and me["admin"]):  # fmt: skip
+                elif to == person or isinstance(to, list) and person in to:
                     self._event(event)
 
     def _trusted(self, write: bool = False) -> bool:
@@ -893,8 +889,8 @@ def _system(request: dict[str, Any]) -> dict[str, Any]:
 
 def _settings(body: dict[str, Any], keys: tuple[str, ...], only: bool = False) -> dict[str, Any]:
     # the box's settings a body gives, of `keys`, each as it must be, a body of others refused if
-    # `only`: whether it is kept from the internet, the office's name, and whether the box's screen
-    # shows its address. Raises ValueError
+    # `only`: whether it is kept from the internet, the office's name, whether the box's screen
+    # shows its address, its language and its time zone. Raises ValueError
     if only and (others := set(body) - set(keys)):
         raise ValueError(f"there are no settings {', '.join(sorted(others))}")
     settings = {k: body[k] for k in keys if k in body}

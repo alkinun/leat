@@ -297,7 +297,7 @@ class Accounts:
 
     def _publish(self) -> None:
         # that the accounts changed, to every device, which each stream tells as its device sees
-        self.agent.events.publish({"type": "accounts", "to": "everyone"})
+        self.agent.events.publish({"type": "accounts"})
 
 
 def _checked(name: str) -> str:

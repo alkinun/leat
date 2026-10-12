@@ -369,8 +369,8 @@ SUGGEST = (
 
 
 def tools() -> list[Tool]:
-    """make_document, fill_template and suggest_edits, in their call's conversation's
-    workspace."""
+    """make_document, fill_template, suggest_edits and compare_documents, in their call's
+    conversation's workspace."""
     return [
         Tool(
             "make_document",

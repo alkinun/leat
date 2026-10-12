@@ -120,11 +120,10 @@ def compact(
     image: int = IMAGE,
 ) -> State:  # fmt: skip
     """The state in which a conversation's prompt, each image `image` tokens, takes COMPACT of
-    the context `limit` at most,
-    if clearing old answers or summarizing old messages can make it, or the most they can; one
-    smaller anyway if `force`, as for a reply the context cut off. `summarize` gives a summary of
-    messages, with the last one, in some tokens at most. Messages are summarized only if they take
-    twice those tokens: the summary must save more than it costs.
+    the context `limit` at most, if clearing old answers or summarizing old messages can make it,
+    or the most they can; one smaller anyway if `force`, as for a reply the context cut off.
+    `summarize` gives a summary of messages, with the last one, in some tokens at most. Messages
+    are summarized only if they take twice those tokens: the summary must save more than it costs.
 
     What came before the turn running is made smaller first, and its own answers only if that is
     not enough, so that a turn reading many pages keeps what it found to answer from."""

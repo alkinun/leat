@@ -498,6 +498,19 @@ def test_project_members(agent, engine, events):
     assert agent.projects(ben)[0]["members"] == [] and agent.projects(ben)[0]["shared"]
 
 
+
+def test_projects_order(agent):
+    # the latest changed first: renamed, or shared, a project rises; synced, of its folder, not,
+    # as a synced project would else rise every few minutes
+    me = agent.store.add_person("Me")["id"]
+    old, new = agent.add_project("Old", me)["id"], agent.add_project("New", me)["id"]
+    agent.store.change_project(old, synced=time.time() + 1, unsynced=None)
+    assert [p["name"] for p in agent.projects(me)] == ["New", "Old"]
+    agent.store.change_project(old, name="Older")
+    assert [p["name"] for p in agent.projects(me)] == ["Older", "New"]
+    agent.store.change_project(new, members=[])
+    assert [p["name"] for p in agent.projects(me)] == ["New", "Older"]
+
 def test_projects_of_one_removed(server, agent):
     # a person removed takes their own projects with them; those they shared with everyone become
     # the admin's who removed them, and those they shared with chosen people the first's of those,
@@ -1512,7 +1525,7 @@ def test_joining(server, agent, engine, events):
     assert request(f"{server}/api/devices/{device}", "DELETE")[0] == 200
     assert ask("/api/me")[0] == 401
     time.sleep(1.1)  # the stream open before ends, at the next event past a second
-    agent.events.publish({"type": "files", "files": [], "to": "admins"})
+    agent.events.publish({"type": "files", "files": [], "to": 0})
     assert stream.read().endswith(b"\n\n")  # to its end, which the server closed
     connection.close()
     assert request(f"{server}/api/people/2", "DELETE")[0] == 200

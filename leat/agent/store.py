@@ -432,24 +432,25 @@ class Store:
         assert project is not None
         return project
 
-    def change_project(self, id: str, **changes: Any) -> dict[str, Any] | None:
+    def change_project(self, id: str, **changes: Any) -> None:
         """Changes a project's name, instructions, whether it is shared with everyone, or its
-        members, by their ids, as `changes` give them; returns it as it now is, or None if there
-        is none."""
+        members, by their ids, as `changes` give them, which make it the latest changed; or the
+        folder it is kept a copy of, and when it was last synced and why not, which do not."""
         assert set(changes) <= {"name", "instructions", "shared", "members", "source", "synced",
                                 "unsynced"}  # fmt: skip
         members = changes.pop("members", None)
         with self._lock, self._db:
             self._db.execute("BEGIN")
-            sets = "".join(f"{key} = ?, " for key in changes)
-            sql = f"UPDATE projects SET {sets}updated = ? WHERE id = ? RETURNING person"
-            if (made := self._row(sql, *changes.values(), time.time(), id)) is None:
-                return None
+            if members is not None or set(changes) - {"source", "synced", "unsynced"}:
+                changes["updated"] = time.time()
+            sets = ", ".join(f"{key} = ?" for key in changes) or "id = id"
+            sql = f"UPDATE projects SET {sets} WHERE id = ? RETURNING person"
+            if (made := self._row(sql, *changes.values(), id)) is None:
+                return
             if members is not None:
                 self._db.execute("DELETE FROM members WHERE project = ?", (id,))
                 rows = [(id, m) for m in set(members) - {made["person"]}]
                 self._db.executemany("INSERT INTO members VALUES (?, ?)", rows)
-        return self.project(id)
 
     def delete_project(self, id: str) -> None:
         """Deletes a project, with every conversation in it, whoever's."""

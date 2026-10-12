@@ -6,9 +6,8 @@ A quote is text in quotation marks, of QUOTED words at least, as a clause or a s
 cited at once after it, as `“Die Kündigungsfrist beträgt drei Monate.” [1]`, by the numbers before
 the sentence's end; or a block quoted, Markdown's `> …`, cited in it or right after it, or by none,
 as models quote so, which is checked against every source the conversation read, as is one in
-quotation marks of no citation of UNCITED words at least. One left out of
-with an ellipsis, as `“Die Miete … ist monatlich fällig”`, is found if its parts are, in their
-order.
+quotation marks of no citation of UNCITED words at least. One with words left out, marked by an
+ellipsis, as `“Die Miete … ist monatlich fällig”`, is found if its parts are, in their order.
 """
 
 import re
@@ -17,7 +16,6 @@ import unicodedata
 QUOTED = 4  # words of a quote at least, as a term in quotation marks is none
 UNCITED = 8  # of one in quotation marks cited by none, as a sentence quoted is, checked against all
 AFTER = 80  # characters after a quote its citations may be in, before its sentence ends
-# a quote, between quotation marks as English, German and French write them
 # a quote, between quotation marks as English, German and French write them, and as models close
 # a German one, of a plain mark
 _QUOTE = re.compile(r'"([^"\n]+)"|“([^”"\n]+)[”"]|„([^“”"\n]+)[“”"]|«([^»\n]+)»|»([^«\n]+)«')
