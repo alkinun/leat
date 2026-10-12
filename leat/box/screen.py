@@ -64,6 +64,11 @@ FONTS = Path("/usr/share/fonts/inter")  # Inter, the app's own font but for Geis
 # phones read dark codes on light best
 PAGE, TEXT, MUTED, LINE, CARD = "#0a0a0a", "#ededed", "#8f8f8f", "#262626", "#ffffff"
 WARNING = "#f5a524"  # of what needs attention
+NIGHT = (
+    22,
+    6,
+)  # the hours, of the box's time zone, the screen is dimmed, once nothing needs seeing
+DIM = 0.2  # its brightness then
 BOLD, PLAIN = "\033[1;97m", "\033[0m"  # of the words that matter, written as text
 _TIOCLINUX, _KMSG_REDIRECT = 0x541C, 11  # the ioctl that sends the kernel's messages to a console
 _KDSETMODE, _KD_GRAPHICS = 0x4B3A, 1  # the ioctl that keeps the console's text off the display
@@ -177,6 +182,14 @@ def holds(state: State) -> str:
 def spaced(code: str) -> str:
     """A setup code as the screen shows it, in two halves: "K7X 2QM"."""
     return f"{code[:3]} {code[3:]}"
+
+
+def dimmed(state: State, now: datetime.datetime) -> bool:
+    """Whether the screen is dimmed: at night, when the box is ready and nothing of it needs
+    attention, as an empty office's display need not light it, nor wear; anything else wakes it."""
+    night = now.hour >= NIGHT[0] or now.hour < NIGHT[1]
+    quiet = said(state)[0] == "Ready" and not state.warnings and not state.switching
+    return night and quiet
 
 
 def footer(state: State) -> list[str]:
@@ -557,6 +570,7 @@ def main() -> None:
     shown: tuple | None = None
     drawn = 0.0
     while True:
+        time.tzset()  # the box's time zone, as an admin may have changed it
         state, now = look(), datetime.datetime.now()
         if power is not None:
             power.recovering = state.recovery is not None
@@ -564,7 +578,8 @@ def main() -> None:
         seen = (state, now.strftime("%H:%M"))
         if seen != shown or time.monotonic() - drawn > AGAIN:
             if display is not None:
-                display.show(paint(state, display.size, now))
+                painted = paint(state, display.size, now)
+                display.show(painted.point(lambda v: v * DIM) if dimmed(state, now) else painted)
             else:
                 url = said(state)[2]
                 lines = written(state, _text_qr(scanned(state, url)) if url else "")

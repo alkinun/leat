@@ -278,6 +278,17 @@ def test_power_listens():
     assert not listening.is_alive() and pressed == [True]
 
 
+def test_dimmed():
+    # dimmed at night, of a box ready and quiet; never of one that has something to say
+    night, day = datetime.datetime(2026, 10, 12, 23, 30), datetime.datetime(2026, 10, 12, 9, 0)
+    assert screen.dimmed(READY, night) and screen.dimmed(READY, night.replace(hour=5))
+    assert not screen.dimmed(READY, day) and not screen.dimmed(READY, night.replace(hour=6))
+    for awake in (replace(READY, warnings=(("The box is nearly full", "5 GB are left."),)),
+                  replace(READY, recovery="P4WR8N"), replace(READY, switching=True),
+                  replace(READY, empty=True), screen.State(NAME, None)):  # fmt: skip
+        assert not screen.dimmed(awake, night)
+
+
 def test_footer():
     assert screen.footer(READY) == [
         "Qwen3.6 35B A3B · ready",
