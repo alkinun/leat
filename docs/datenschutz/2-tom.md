@@ -29,6 +29,11 @@ auf einer Box im Büro läuft (Leat).
   fragt den Beitritt an und zeigt einen sechsstelligen Code; eine bereits berechtigte Person oder ein
   Admin lässt es herein, nachdem sie den Code verglichen hat. Das Gerät erhält ein Geheimnis in einem
   Cookie (HttpOnly, Secure), von dem die Box nur einen Hash speichert.
+- **Netzlaufwerk:** Wer seine Dateien und Projekte im Explorer oder Finder öffnen will, erzeugt in
+  den Einstellungen ein Passwort für seinen Computer. Es wird einmal angezeigt, die Box speichert nur
+  einen Hash, es steht bei den Geräten der Person und lässt sich dort entkoppeln. Es öffnet nur das
+  Netzlaufwerk, nicht die App, und nur über HTTPS. Das Netzlaufwerk zeigt nur die eigenen Dateien und
+  die Projekte, die die Person sieht.
 - **Einrichtung nur vor Ort:** Die erste Einrichtung verlangt einen Code, den nur der Bildschirm der
   Box zeigt. Wer die Box nicht sieht, kann sie nicht einrichten.
 - **Wiederherstellung nur vor Ort:** Haben alle Admins ihre Geräte verloren, macht ein Druck auf den
