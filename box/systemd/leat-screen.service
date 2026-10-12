@@ -3,8 +3,7 @@ Description=The box's screen: whether it is ready, and the address to open
 # in place of a login on the box's display, which no box has
 Conflicts=getty@tty2.service
 After=systemd-user-sessions.service getty-pre.target leat-provision.service
-# once the identity and the state are mounted, whose name and room it shows; never kept waiting for
-# them, as it says what is wrong if they fail
+# once the identity and the state are mounted, whose name and room it shows
 After=etc-leat.mount var.mount
 
 [Service]

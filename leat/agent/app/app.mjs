@@ -1049,8 +1049,9 @@ async function renderSoftware(asked = false) {
   } else {
     said.textContent = state.checking || asked ? "Looking for an update…"
       : state.checked ? `Up to date, as of ${new Date(state.checked * 1000).toLocaleString()}. ` +
-        "The box looks every few hours, and installs what it finds at night."
-      : "The box looks for updates every few hours, and installs what it finds at night.";
+        "The box looks every few hours, installs what it finds, and restarts into it at night."
+      : "The box looks for updates every few hours, installs what it finds, and restarts into it " +
+        "at night.";
     const check = element("button", "quiet", "Look for an update");
     check.type = "button";
     check.disabled = state.checking || asked;

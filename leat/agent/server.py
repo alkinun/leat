@@ -41,7 +41,7 @@ from leat.agent.agent import Agent, Busy, NotFound, Refused
 from leat.agent.client import EngineError
 from leat.agent.workspace import Workspace
 from leat.box import system
-from leat.box.health import Watch
+from leat.box.watch import Watch
 from leat.chat import EFFORTS
 
 APP = Path(__file__).parent / "app"
@@ -116,9 +116,11 @@ class Server(ThreadingHTTPServer):
         # a box's, set up by the code its screen shows
         self.agent, self.accounts = agent, Accounts(agent, locked=self.name is not None)
         # what of a box needs attention, which its screen and its admins are told
-        self.watch = (
-            Watch(self.name, agent.workspace.root) if self.name and agent.workspace else None
-        )
+        self.watch = None
+        if self.name and agent.workspace:
+            self.watch = Watch(self.name, agent.workspace.root,
+                               lambda: agent.models_event().get("error"))  # fmt: skip
+            self.watch.start()
         self.cookie = SECURE_COOKIE if self.name else COOKIE
         super().__init__((host, port), _Handler)
 
@@ -297,10 +299,9 @@ class _Handler(BaseHTTPRequestHandler):
                 _admin(me)
                 if (power := body.get("power")) not in ("restart", "off"):
                     raise ValueError('power must be "restart" or "off"')
-                agent.note(
-                    person, "restarted the box" if power == "restart" else "switched the box off"
-                )
-                _system({"power": power})
+                _system({"power": power})  # noted once the helper took it, the box going after
+                done = "restarted the box" if power == "restart" else "switched the box off"
+                agent.note(person, done)
                 self._json(200, {})
             elif path == "/api/reset":  # the box's state erased, an admin's to do, once they typed
                 _admin(me)  # the office's name, or "reset" of a box of none, as a box is no undo
@@ -503,9 +504,8 @@ class _Handler(BaseHTTPRequestHandler):
         return device if device["person"] == person else None
 
     def _warnings(self) -> list[dict[str, str]]:
-        # what of the box needs attention, of a box's; none of a Leat that is no box
-        agent, watch = self.server.agent, self.server.watch
-        return watch.warnings(lambda: agent.models_event().get("error")) if watch else []
+        # what of the box needs attention, as last seen, of a box's; none of a Leat that is no box
+        return self.server.watch.warnings if self.server.watch else []
 
     def _person(self, id: int, body: dict[str, Any], me: dict[str, Any]) -> dict[str, Any]:
         # a person changed: renamed, of themselves or an admin; made an admin or not, of an admin;

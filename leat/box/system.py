@@ -37,7 +37,7 @@ IWD = Path("/var/lib/iwd")  # iwd's known networks
 # what the helper set that the system's partition holds, as the time zone's /etc/localtime, kept on
 # the state's, as the system's is replaced by an update, and put back at boot
 KEPT = Path("/var/lib/leat-system")
-# the flag of a factory reset, on the ESP, as systemd-repart reads it
+# the flag of a factory reset, on the ESP: empty, as systemd-repart heeds its being there alone
 RESET = Path("/boot/leat-reset")
 UKIS = Path("/boot/EFI/Linux")  # the box's UKIs, leat_<version>[+tries].efi, each its system's
 OS_RELEASE = Path("/etc/os-release")
@@ -168,7 +168,7 @@ def reset() -> dict[str, Any]:
     a flag on the ESP, of which systemd-repart, on the boot the box restarts to, deletes the state's
     partition and makes it anew, of a new key, before anything unlocks it. systemd's own factory
     reset is none of the box's, as it marks itself done in the initrd, which makes no partitions."""
-    _write(RESET, "LEAT_FACTORY_RESET=--factory-reset=yes\n", 0o600)
+    _write(RESET, "", 0o600)
     return power("restart")
 
 
@@ -185,7 +185,8 @@ def update_status() -> dict[str, Any]:
     newer = max((v for v in installed if version and _order(v) > _order(version)), default=None,
                 key=_order)  # fmt: skip
     checking = _shown("systemd-sysupdate.service", "ActiveState") in ("activating", "active")
-    last = _shown("systemd-sysupdate.timer", "LastTriggerUSecRealtime").removeprefix("@")
+    # of its last look, the timer's or an admin's
+    last = _shown("systemd-sysupdate.service", "ExecMainExitTimestamp").removeprefix("@")
     return {"version": version, "ready": newer, "checking": checking,
             "checked": int(last) if last.isdigit() else None,
             "failed": max(failed, default=None, key=_order)}  # fmt: skip

@@ -1,5 +1,4 @@
 # the box's identity, and its state, of their partitions unlocked, as /etc/crypttab says, once
-# systemd-repart has made them on the first boot: after it, never failing with it, as a box whose
-# partitions are there must mount them whatever repart makes of the rest
-/dev/mapper/leat-identity  /etc/leat  ext4  defaults,x-systemd.after=systemd-repart.service  0 2
-/dev/mapper/leat-data      /var       ext4  defaults,x-systemd.after=systemd-repart.service  0 2
+# systemd-repart has made them on the first boot (systemd-cryptsetup@.service.d/leat.conf)
+/dev/mapper/leat-identity  /etc/leat  ext4  defaults  0 2
+/dev/mapper/leat-data      /var       ext4  defaults  0 2

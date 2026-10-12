@@ -1,0 +1,15 @@
+[Unit]
+Description=Restart an update's trial boot that failed before Leat could start
+# a boot of an update's UKI, whose tries systemd-boot counts, that fell into emergency mode, as when
+# the box's partitions would not unlock: restarted, so that systemd-boot tries it again, or, its
+# tries spent, boots the system before; a box has no keyboard to do anything else with it. A boot
+# marked good is left as it is
+DefaultDependencies=no
+ConditionPathExists=/sys/firmware/efi/efivars/LoaderBootCountPath-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
+
+[Service]
+Type=oneshot
+ExecStart=systemctl --no-block reboot
+
+[Install]
+WantedBy=emergency.target

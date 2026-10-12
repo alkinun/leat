@@ -64,10 +64,8 @@ FONTS = Path("/usr/share/fonts/inter")  # Inter, the app's own font but for Geis
 # phones read dark codes on light best
 PAGE, TEXT, MUTED, LINE, CARD = "#0a0a0a", "#ededed", "#8f8f8f", "#262626", "#ffffff"
 WARNING = "#f5a524"  # of what needs attention
-NIGHT = (
-    22,
-    6,
-)  # the hours, of the box's time zone, the screen is dimmed, once nothing needs seeing
+# the hours, of the box's time zone, the screen is dimmed, once nothing needs seeing
+NIGHT = (22, 6)
 DIM = 0.2  # its brightness then
 BOLD, PLAIN = "\033[1;97m", "\033[0m"  # of the words that matter, written as text
 _TIOCLINUX, _KMSG_REDIRECT = 0x541C, 11  # the ioctl that sends the kernel's messages to a console
@@ -106,9 +104,8 @@ class State:
     recovery: str | None = None
     recovery_left: int = 0  # seconds the recovery code holds for yet
     switching: bool = False
-    warnings: tuple[
-        tuple[str, str], ...
-    ] = ()  # what needs attention: each its title, and what to do
+    # what needs attention: each its title, and what to do
+    warnings: tuple[tuple[str, str], ...] = ()
 
 
 def look(root: Path = ROOT) -> State:

@@ -2,8 +2,9 @@
 Description=The box's system, changed for leat agent: one request
 
 [Service]
-# as root, as setting the time zone and joining a Wi-Fi network take it, for one request of leat
-# agent's alone, which leat.box.system checks: nothing else of the system's is the helper's to touch
+# as root, as setting the time zone, joining a Wi-Fi network, restarting or resetting the box and
+# looking at its updates take it, for one request of leat agent's alone, which leat.box.system
+# checks: nothing else of the system's is the helper's to touch
 ExecStart=/opt/leat/.venv/bin/python -m leat.box.system
 StandardInput=socket
 StandardOutput=socket

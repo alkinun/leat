@@ -1,5 +1,5 @@
 [Unit]
-Description=The box's system, changed for leat agent: its time zone and Wi-Fi
+Description=The box's system, changed for leat agent: its time zone, Wi-Fi, power and updates
 
 [Socket]
 ListenStream=/run/leat/system.sock

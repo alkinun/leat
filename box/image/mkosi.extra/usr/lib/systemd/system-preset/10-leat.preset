@@ -16,10 +16,7 @@ enable leat-system-restore.service
 enable systemd-sysupdate.timer
 enable systemd-sysupdate-reboot.timer
 enable leat-health.service
+enable leat-fallback.service
 enable iwd.service
-# no TPM cleared of a factory reset, as systemd's own would, should one ever be asked for: it would wait
-# for a key press at the firmware's prompt, which a box without a keyboard never gets, and lose the
-# identity sealed to the TPM. The box's own factory reset is leat.box.system's
-disable systemd-tpm2-clear.service
 # no login on the box's display, whose screen leat-screen.service draws, nor on any other
 disable getty@.service

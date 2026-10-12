@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image, ImageColor
 
-from leat.box import address, health, provision, screen, system
+from leat.box import address, health, provision, screen, system, watch
 
 REGISTERED = {
     "id": "k7x2qm",
@@ -434,7 +434,7 @@ def test_system_power(tmp_path, monkeypatch):
     ran.clear()
     assert "error" in system.handle({"reset": "yes"}) and ran == []
     assert system.handle({"reset": True}) == {}
-    assert (tmp_path / "leat-reset").read_text() == "LEAT_FACTORY_RESET=--factory-reset=yes\n"
+    assert (tmp_path / "leat-reset").read_text() == ""
     assert ran == [["systemctl", "--no-block", "reboot"]]
 
 
@@ -445,7 +445,7 @@ def test_system_update_status(tmp_path, monkeypatch):
     monkeypatch.setattr(system, "UKIS", tmp_path)
     (tmp_path / "os-release").write_text('ID=arch\nIMAGE_VERSION="2026.10.11.2241-fe75bd0"\n')
     (tmp_path / "leat_2026.10.11.2241-fe75bd0.efi").write_bytes(b"")
-    shown = {"ActiveState": "inactive", "LastTriggerUSecRealtime": "@1791760000"}
+    shown = {"ActiveState": "inactive", "ExecMainExitTimestamp": "@1791760000"}
     monkeypatch.setattr(system, "_shown", lambda unit, name: shown[name])
     assert system.handle({"update": "status"}) == {
         "version": "2026.10.11.2241-fe75bd0", "ready": None, "checking": False,
@@ -453,7 +453,7 @@ def test_system_update_status(tmp_path, monkeypatch):
     }  # fmt: skip
     (tmp_path / "leat_2026.10.12.0300-abc1234+3-0.efi").write_bytes(b"")
     (tmp_path / "leat_2026.10.11.1900-0000000.efi").write_bytes(b"")  # older: none to boot into
-    shown.update(ActiveState="activating", LastTriggerUSecRealtime="")
+    shown.update(ActiveState="activating", ExecMainExitTimestamp="")
     status = system.update_status()
     assert (status["ready"], status["checking"], status["checked"], status["failed"]) == (
         "2026.10.12.0300-abc1234", True, None, None)  # fmt: skip
@@ -550,15 +550,16 @@ def test_system_ask(tmp_path):
 
 
 def test_health(tmp_path, monkeypatch):
-    # healthy once Leat answers, of a box provisioned, or of one not; a trial boot of an update
-    # whose Leat never answers is restarted, and the check fails whatever
-    assert health.healthy(tmp_path, wait=0)  # not provisioned: no Leat to run
+    # healthy once the box's partitions are mounted and Leat answers, of a box provisioned, or of
+    # one not; a trial boot of an update whose Leat never answers is restarted, and the check fails
+    assert not health.healthy(tmp_path, wait=0, mounts=(tmp_path,))  # not a partition mounted
+    assert health.healthy(tmp_path, wait=0, mounts=())  # not provisioned: no Leat to run
     (tmp_path / "box.env").write_text("LEAT_NAME=k7x2qm.leatbox.net\n")
     answers = iter([None, None, {"empty": False}])
     monkeypatch.setattr(screen, "box", lambda: next(answers))
-    assert health.healthy(tmp_path, wait=5, every=0)
+    assert health.healthy(tmp_path, wait=5, every=0, mounts=())
     monkeypatch.setattr(screen, "box", lambda: None)
-    assert not health.healthy(tmp_path, wait=0.05, every=0.01)
+    assert not health.healthy(tmp_path, wait=0.05, every=0.01, mounts=())
     ran = []
     monkeypatch.setattr(health.subprocess, "run", lambda args, **kw: ran.append(args))
     monkeypatch.setattr(health, "healthy", lambda: False)
@@ -574,34 +575,45 @@ def test_health(tmp_path, monkeypatch):
 
 def test_watch(tmp_path, monkeypatch):
     # what needs attention: the name unfound, said once it has gone so for ten minutes, as a new
-    # address takes some; the disk nearly full; the model out of reach; an update failed. Looked at
-    # once a minute at most
+    # address takes some, and never while the DNS finds no name at all, as without internet; the
+    # disk nearly full; the model out of reach; an update failed
     now = [0.0]
-    found = {"addresses": [], "ipv4": "192.168.1.20", "free": 50e9, "failed": None}
-    monkeypatch.setattr(health.socket, "getaddrinfo", lambda name, port, family: [
-        (2, 1, 6, "", (a, port)) for a in found["addresses"]])  # fmt: skip
-    monkeypatch.setattr(health, "ipv4", lambda: found["ipv4"])
+    dns = {"k7x2qm.leatbox.net": [], "leatbox.net": ["2.28.106.154"]}
+    found = {"free": 50e9, "failed": None, "model": None}
+
+    def getaddrinfo(name, port, family):
+        if not dns[name]:
+            raise socket.gaierror("not found")
+        return [(2, 1, 6, "", (a, port)) for a in dns[name]]
+
+    monkeypatch.setattr(watch.socket, "getaddrinfo", getaddrinfo)
+    monkeypatch.setattr(watch, "ipv4", lambda: "192.168.1.20")
     monkeypatch.setattr(
-        health.shutil, "disk_usage", lambda path: SimpleNamespace(total=100e9, free=found["free"])
+        watch.shutil, "disk_usage", lambda path: SimpleNamespace(total=100e9, free=found["free"])
     )
-    monkeypatch.setattr(health.system, "ask", lambda r: {"failed": found["failed"]})
-    watch = health.Watch("k7x2qm.leatbox.net", tmp_path, clock=lambda: now[0])
-    assert watch.warnings() == []  # unfound just now
+    monkeypatch.setattr(watch.system, "ask", lambda r: {"failed": found["failed"]})
+    seen = watch.Watch("k7x2qm.leatbox.net", tmp_path, lambda: found["model"],
+                       clock=lambda: now[0])  # fmt: skip
+    assert seen.look() == [] and seen.warnings == []  # unfound just now
     now[0] = 599
-    assert watch.warnings() == []
-    now[0] = 660
-    assert [w["key"] for w in watch.warnings()] == ["name"]
-    found.update(addresses=["192.168.1.20"], free=5e9, failed="2026.10.12.0300-abc1234")
-    assert [w["key"] for w in watch.warnings()] == ["name"]  # looked at a minute ago: as then
-    now[0] = 720
-    warned = watch.warnings(lambda: "the engine is not reachable")
+    assert seen.look() == []
+    now[0] = 600
+    assert [w["key"] for w in seen.look()] == ["name"] and "FRITZ!Box" in seen.warnings[0]["said"]
+    dns["k7x2qm.leatbox.net"] = ["192.168.1.20"]
+    found.update(free=5e9, failed="2026.10.12.0300-abc1234", model="the engine is not reachable")
+    warned = seen.look()
     assert [w["key"] for w in warned] == ["disk", "model", "update"]
     assert "5 GB" in warned[0]["said"] and "2026.10.12.0300-abc1234" in warned[2]["said"]
-    found.update(addresses=["192.168.1.30"], free=50e9, failed=None)  # the name, of another
-    now[0] = 780
-    assert watch.warnings() == []  # unfound again, from now
-    now[0] = 1380
-    assert [w["key"] for w in watch.warnings()] == ["name"]
+    found.update(free=50e9, failed=None, model=None)
+    dns.update({"k7x2qm.leatbox.net": [], "leatbox.net": []})  # no internet: none of it said
+    now[0] = 2000
+    assert seen.look() == []
+    now[0] = 3000
+    assert seen.look() == []
+    dns["leatbox.net"] = ["2.28.106.154"]  # back, and the name still unfound: from now
+    assert seen.look() == []
+    now[0] = 3600
+    assert [w["key"] for w in seen.look()] == ["name"]
 
 
 def test_units():
