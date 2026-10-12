@@ -188,13 +188,13 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(200, agent.overview())
             elif path == "/api/network":  # the wired link's address, fixed or DHCP's, an admin's
                 _admin(me)
-                self._json(200, _system({"network": "status"}))
+                self._json(200, system.asked({"network": "status"}))
             elif path == "/api/update":  # the box's version, and an update ready, if one is
                 _admin(me)
-                self._json(200, _system({"update": "status"}))
+                self._json(200, system.asked({"update": "status"}))
             elif path == "/api/diagnostics":  # the box's system, as a file an admin sends us
                 _admin(me)
-                text = _system({"diagnostics": True})["text"].encode()
+                text = system.asked({"diagnostics": True})["text"].encode()
                 day = time.strftime("%Y-%m-%d")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -311,19 +311,19 @@ class _Handler(BaseHTTPRequestHandler):
             elif path == "/api/network":  # a fixed address of the wired link's, or DHCP's again
                 _admin(me)
                 fixed = body.get("fixed")
-                _system({"network": fixed or "dhcp"})
+                system.asked({"network": fixed or "dhcp"})
                 done = "set a fixed address" if fixed else "set the address to automatic"
                 address = fixed.get("address") if isinstance(fixed, dict) else None
                 agent.note(person, done, detail=address)
                 self._json(200, {})
             elif path == "/api/update":  # an update looked for now, an admin's to ask
                 _admin(me)
-                self._json(200, _system({"update": "check"}))
+                self._json(200, system.asked({"update": "check"}))
             elif path == "/api/power":  # the box restarted, or switched off, an admin's to do
                 _admin(me)
                 if (power := body.get("power")) not in ("restart", "off"):
                     raise ValueError('power must be "restart" or "off"')
-                _system({"power": power})  # noted once the helper took it, the box going after
+                system.asked({"power": power})  # noted once the helper took it, the box going after
                 done = "restarted the box" if power == "restart" else "switched the box off"
                 agent.note(person, done)
                 self._json(200, {})
@@ -332,7 +332,7 @@ class _Handler(BaseHTTPRequestHandler):
                 word = agent.settings()["office"] or "reset"
                 if str(body.get("confirm", "")).strip().casefold() != word.casefold():
                     raise ValueError(f"type {word} to erase everything on this Leat")
-                _system({"reset": True})
+                system.asked({"reset": True})
                 self._json(200, {})
             elif path == "/api/models/load":
                 _admin(me)
@@ -876,15 +876,6 @@ def _sharing(
     if (taken := sorted(before - after)) and not now["shared"]:
         done.append(("stopped sharing the project with", whom(taken)))
     return done
-
-
-def _system(request: dict[str, Any]) -> dict[str, Any]:
-    # the box's system helper's answer. Raises ValueError of its refusal, or of a Leat that is no
-    # box, which has none
-    try:
-        return system.ask(request)
-    except OSError as e:
-        raise ValueError("this Leat runs on no box of its own, so it cannot do that") from e
 
 
 def _settings(body: dict[str, Any], keys: tuple[str, ...], only: bool = False) -> dict[str, Any]:

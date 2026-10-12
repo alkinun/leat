@@ -655,7 +655,7 @@ def test_timezone(server, agent, monkeypatch):
 
     monkeypatch.setattr(system, "ask", away)
     status, body = request(url, "PATCH", {"timezone": "Europe/Istanbul"})
-    assert status == 400 and b"cannot set its time zone" in body and b"Errno" not in body
+    assert status == 400 and b"no box of its own" in body and b"Errno" not in body
 
 
 def test_network(server, agent, monkeypatch):

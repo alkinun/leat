@@ -237,6 +237,15 @@ def ask(request: dict[str, Any], path: str = SOCKET, timeout: float = 30) -> dic
     return answer
 
 
+def asked(request: dict[str, Any]) -> dict[str, Any]:
+    """The helper's answer, as leat agent asks it. Raises ValueError of a refusal, saying why, or
+    of a Leat that is no box, which has no helper."""
+    try:
+        return ask(request)
+    except OSError as e:
+        raise ValueError("this Leat runs on no box of its own, so it cannot do that") from e
+
+
 def _write(path: Path, text: str, mode: int) -> None:
     # a file whole, of its mode from the start, on the disk before it takes its name, as a power cut
     # just after left a file written but not yet on the disk empty

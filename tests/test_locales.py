@@ -70,7 +70,6 @@ ERRORS = {
     "this Leat keeps no files",
     "this Leat needs an admin: make someone else one first",
     "this Leat runs on no box of its own, so it cannot do that",
-    "this Leat runs on no box of its own, so it cannot set its time zone",
     "that is not the recovery code the box's screen shows",
     "that is not the recovery code, and it holds no more: press the box's power button for another",
     "that is not the setup code the box's screen shows",

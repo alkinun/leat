@@ -469,11 +469,7 @@ class Agent:
         box's system helper, first, as it alone may fail. Raises ValueError of a time zone that is
         not one, or a box that cannot set it, as one that is no box."""
         if (zone := changes.pop("timezone", None)) is not None:
-            try:
-                system.ask({"timezone": zone})
-            except OSError as e:
-                raise ValueError("this Leat runs on no box of its own, so it cannot set its "
-                                 "time zone") from e  # fmt: skip
+            system.asked({"timezone": zone})
             time.tzset()  # the agent's own times, as workflows' schedules, of the new zone
         stored = {"offline": lambda v: v or None, "office": lambda v: v or None,
                   "address": lambda v: None if v else True, "language": lambda v: v}  # fmt: skip
