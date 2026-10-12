@@ -33,7 +33,7 @@ from leat.agent.ocr import Transcriber
 from leat.agent.store import Store
 from leat.agent.tools import every
 from leat.agent.workspace import Workspace
-from leat.chat import EFFORTS
+from leat.defaults import EFFORTS
 
 TIMEOUT = 300  # seconds a turn may take
 

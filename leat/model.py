@@ -336,7 +336,7 @@ class Transformer:
         self.sizes = tuple(_ring(window, run, positions) for window in config.windows)
         self.rings = tuple(size < positions for size in self.sizes)
         self.cache = [
-            None if recurrent else _zeros(2, slots, kv_heads, size, dim, dtype=dtypes.half)
+            None if recurrent else zeros(2, slots, kv_heads, size, dim, dtype=dtypes.half)
             for kv_heads, dim, recurrent, size in zip(
                 config.kv_heads, config.head_dims, config.recurrent, self.sizes, strict=True
             )
@@ -345,20 +345,20 @@ class Transformer:
         # the recurrence's state of each value head, keys by values
         d = config.delta_net
         self.states = [
-            (_zeros(slots, d.conv - 1, 2 * d.k_heads * d.k_dim + d.v_heads * d.v_dim),
-             _zeros(slots, d.v_heads, d.k_dim, d.v_dim)) if d and recurrent else None
+            (zeros(slots, d.conv - 1, 2 * d.k_heads * d.k_dim + d.v_heads * d.v_dim),
+             zeros(slots, d.v_heads, d.k_dim, d.v_dim)) if d and recurrent else None
             for recurrent in config.recurrent
         ]  # fmt: skip
         # and a copy of them kept partway through a prompt, from which a later one may go on
         self.kept = [
-            None if s is None else (_zeros(*map(int, s[0].shape)), _zeros(*map(int, s[1].shape)))
+            None if s is None else (zeros(*map(int, s[0].shape)), zeros(*map(int, s[1].shape)))
             for s in self.states
         ]
         # and those after each of a run's `saved_tokens` tokens, from which it may go back
         self.saved = [
             None if s is None or not saved_tokens
-            else (_zeros(saved_tokens, *map(int, s[0].shape[1:])),
-                  _zeros(saved_tokens, *map(int, s[1].shape[1:])))
+            else (zeros(saved_tokens, *map(int, s[0].shape[1:])),
+                  zeros(saved_tokens, *map(int, s[1].shape[1:])))
             for s in self.states
         ]  # fmt: skip
 
@@ -662,7 +662,8 @@ def _slots(table: Tensor, slots: int) -> Tensor:
     return table.unsqueeze(0).expand(slots, *table.shape).contiguous().realize()
 
 
-def _zeros(*shape: int, dtype: DType = dtypes.float32) -> Tensor:
+def zeros(*shape: int, dtype: DType = dtypes.float32) -> Tensor:
+    """A tensor of zeros, made on the device now, of its own memory, as a cache's or a state's."""
     return Tensor.zeros(*shape, dtype=dtype).contiguous().realize()
 
 

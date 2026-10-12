@@ -5,9 +5,10 @@ answering a streamed chat. Writes a Markdown report to reports/ and prints it.
     uv run python scripts/validate.py MODEL.gguf|DIR ... [--llama-cpp llama.cpp/build/bin]
 
 Every model runs in a process of its own, so each has the GPU's memory to itself. DEV picks the
-device as for leat itself, AMD by default. A drafter is found for Qwen3.5's and Qwen3.6's mixtures
-of experts, whose own files hold their MTP layer, and for Gemma 4, an `mtp-*.gguf` beside it or in
-the directories given. --quick runs fewer repetitions and skips the batched and chat runs.
+device, AMD by default, as a box's Strix Halo is. A drafter is found for each model of an MTP layer
+of its own, as Qwen3.5's and Qwen3.6's, in its file or an `mtp-*.gguf` beside it, and for Gemma 4,
+a Gemma 4 assistant's GGUF among the files given. --quick runs fewer repetitions and skips the
+batched and chat runs.
 """
 
 import argparse

@@ -47,7 +47,7 @@ from leat.agent.store import Store
 from leat.agent.workspace import Workspace
 from leat.box import system
 from leat.box.watch import Watch
-from leat.chat import EFFORTS
+from leat.defaults import EFFORTS
 
 APP = Path(__file__).parent / "app"
 # the app's files, each served at its path in app/, and their types; the app's pages, /c/<id> one

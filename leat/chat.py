@@ -14,14 +14,12 @@ from typing import Any
 import jinja2.ext
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 
+from leat.defaults import EFFORTS
 from leat.tokenizer import Tokenizer
 
 # where an image of a message's content stands in the rendered text, which tokens() replaces with
 # the image's own tokens: the object replacement character, which text parts never hold
 IMAGE = "\ufffc"
-# the reasoning efforts a request may ask for, as OpenAI's reasoning_effort names them, the least
-# first: a model takes those its template does, and a request the nearest of them
-EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
 # the efforts of a template that takes reasoning_effort but compares it with no value, as gpt-oss's
 _LEVELS = ("low", "medium", "high")
 
@@ -182,7 +180,7 @@ def split_reply(text: str, form: str | None, thinking: bool = False, done: bool 
     more, so that what a stream has split stays so. `thinking` says the prompt opened a block of
     reasoning."""
     if not done:
-        text = text[: len(text) - _partial(text, _REPLY_MARKERS)]
+        text = text[: len(text) - partial_end(text, _REPLY_MARKERS)]
     if form == "harmony":
         return _harmony(text)
     if form in _THINKING:
@@ -219,8 +217,9 @@ def _harmony(text: str) -> Reply:
     return reply
 
 
-def _partial(text: str, markers: tuple[str, ...]) -> int:
-    # the length of the longest end of `text` that a marker begins with, short of the marker
+def partial_end(text: str, markers: Sequence[str]) -> int:
+    """The length of the longest end of `text` that a marker begins with, short of the marker: what
+    may yet become one, as more of a reply streams."""
     return max((n for m in markers for n in range(1, len(m)) if text.endswith(m[:n])), default=0)
 
 
@@ -270,8 +269,7 @@ def tool_call_start(text: str) -> int:
         return 0
     if starts := [i for m in _MARKERS if (i := text.find(m)) >= 0]:
         return len(text[: min(starts)].rstrip())
-    partial = (n for m in _MARKERS for n in range(1, len(m)) if text.endswith(m[:n]))
-    return len(text[: len(text) - max(partial, default=0)].rstrip())
+    return len(text[: len(text) - partial_end(text, _MARKERS)].rstrip())
 
 
 def _json_call(text: str, names: Container[str] | None = None) -> dict[str, Any] | None:

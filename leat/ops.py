@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from tinygrad import Tensor, UOp, dtypes
 
 from leat import kernels
+from leat.kernels.common import OAI_ALPHA, OAI_LIMIT
 from leat.quant import NATIVE, QTensor
 
 
@@ -58,8 +59,8 @@ def glu(kind: str, g: Tensor, u: Tensor) -> Tensor:
     # how an MLP's gate and up combine: act(g) * u for act SiLU or GELU, tanh's approximation, or
     # gpt-oss's clamped SwiGLU, "oai", as ggml's swiglu_oai
     if kind == "oai":
-        g, u = g.minimum(7.0), u.clip(-7.0, 7.0)
-        return g * (g * 1.702).sigmoid() * (u + 1)
+        g, u = g.minimum(OAI_LIMIT), u.clip(-OAI_LIMIT, OAI_LIMIT)
+        return g * (g * OAI_ALPHA).sigmoid() * (u + 1)
     return (g.gelu() if kind == "gelu" else g.silu()) * u
 
 
@@ -403,9 +404,9 @@ def delta_net(
     # heads than values: value head h takes their head h mod their heads. Each value head's state
     # (slots, heads, key dims, value dims) decays by exp(a * softplus(alpha + bias)) for decay
     # (a, bias), then moves the values it holds for the token's key a sigmoid(beta) share toward
-    # the token's values, gates (1, T, 2 * heads) holding its alphas, then betas; the output,
-    # the values the state holds for the token's query, is
-    # normed with norm and gated by SiLU of z (1, T, heads * value dims). A span from position 0
+    # the token's values, gates (1, T, 2 * heads) holding its alphas, then betas; the output, the
+    # values the state holds for the token's query, is normed with norm and gated by SiLU of z
+    # (1, T, heads * value dims). A span from position 0
     # starts its sequence, from zero states. The states after each token go to `saved`, if
     # given, (at least T, width - 1, channels) and (at least T, heads, key dims, value dims), the
     # t-th token's to row t, from which a sequence may go back to any of them. Returns (1, T,
@@ -504,8 +505,8 @@ def cutoff(scores: Tensor, top_k: Tensor, top_p: Tensor, min_p: Tensor) -> Tenso
     # its tokens, each option (B, 1): -inf where no option is set. top_k keeps the k likeliest
     # tokens, at 0 all; top_p then the likeliest of those whose probabilities, renormalized, sum
     # to top_p, one at least; min_p those at least min_p times as likely as the likeliest. The
-    # kernels cut within
-    # a hundredth below where this would, and keep no token 20 nats below the likeliest.
+    # kernels cut within a hundredth below where this would, and keep no token 20 nats below the
+    # likeliest.
     if _fast() and kernels.supports_cutoff(scores):
         top, by_k, by_p = kernels.cutoff(scores, top_k, top_p)
     else:

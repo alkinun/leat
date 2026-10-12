@@ -18,6 +18,7 @@ from tinygrad import Tensor, TinyJit, UOp, dtypes
 
 from leat.chat import ChatTemplate
 from leat.engine import BATCH, Engine, graph
+from leat.model import zeros
 from leat.sampler import GREEDY, Sampling
 
 
@@ -232,7 +233,7 @@ def _scorer(engine: Engine, ctx: int, decode: bool) -> Callable[[list[int]], Ten
     if not decode:  # in a graph, which plans its buffers: a plain call holds every layer's at once
         score = graph(lambda t: model.logits(model(t, 0)[:, first : ctx - 1])[0].log_softmax(-1))
         return lambda chunk: score(Tensor([tokens(chunk)], dtype=dtypes.int32))
-    rows = Tensor.zeros(ctx - 1 - first, engine.config.vocab_size).contiguous().realize()
+    rows = zeros(ctx - 1 - first, engine.config.vocab_size)
 
     def step(token: Tensor, pos: UOp) -> None:
         rows[pos - first : pos - first + 1].assign(

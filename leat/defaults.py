@@ -5,6 +5,9 @@ What a model's makers recommend comes of its GGUF's general.sampling keys, which
 converter writes of its generation_config.json, and, of the families whose files say none of it or
 not all, of their generation_config.json and model cards: Qwen's sets apart as the model thinks or
 not, and its presence_penalty, which no GGUF key holds. What neither says is OpenAI's default.
+
+And the reasoning efforts a request may ask for, EFFORTS, which leat agent imports too, as this
+module imports nothing of the engine's, nor tinygrad.
 """
 
 import json
@@ -14,6 +17,10 @@ import struct
 import threading
 from pathlib import Path
 from typing import Any
+
+# the reasoning efforts a request may ask for, as OpenAI's reasoning_effort names them, the least
+# first: a model takes those its template does, and a request the nearest of them
+EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
 
 # the options, as a request names them, and what each must be
 OPTIONS: dict[str, tuple[type, float, float]] = {

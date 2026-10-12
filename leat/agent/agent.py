@@ -201,7 +201,7 @@ class Agent:
     ) -> str:  # fmt: skip
         """Starts a turn of a person's message, in a new conversation without an id, held in
         `project` if one; returns the conversation's id. The model reasons at `effort`, one of
-        leat.chat's EFFORTS, which leat serve gives as near as the model can, or else at the
+        leat.defaults' EFFORTS, which leat serve gives as near as the model can, or else at the
         model's own default; and reads of the files and folders `attached`, in its space. Raises
         NotFound if there is no such conversation or project of the person's, or file, Busy if a
         turn runs in the conversation."""

@@ -41,6 +41,7 @@ from leat.chat import (
     Reply,
     images,
     parse_tool_calls,
+    partial_end,
     split_reply,
     tool_call_start,
 )
@@ -176,7 +177,7 @@ class _Completion:
     cancelled: threading.Event = field(default_factory=threading.Event)
     finish: _Finish = field(init=False)  # once pieces() is exhausted
 
-    def pieces(self, hung_up: Callable[[], bool] = lambda: False) -> Iterator[str]:
+    def pieces(self, hung_up: Callable[[], bool]) -> Iterator[str]:
         """The reply's text as the worker produces it; then `finish` says how it ended. Raises
         ConnectionAbortedError once `hung_up()`, checked at each piece and while none comes, as
         for a reply that sends nothing before it ends, which would never find its client gone."""
@@ -509,7 +510,7 @@ class _Writer:
         if found := [i for s in self.c.stop if (i := self.text.find(s, self.sent)) >= 0]:
             self.text, self.stopped = self.text[: min(found)], True
             return True
-        if (end := len(self.text) - _partial_stop(self.text, self.c.stop)) > self.sent:
+        if (end := len(self.text) - partial_end(self.text, self.c.stop)) > self.sent:
             self.c.out.put(self.text[self.sent : end])
             self.sent = end
         return False
@@ -964,7 +965,7 @@ def _reasons(chat: ChatTemplate, options: dict[str, Any]) -> bool:
 
 
 def _calls(
-    reply: Reply, tools: list[dict[str, Any]] | None, reason: str = "stop"
+    reply: Reply, tools: list[dict[str, Any]] | None, reason: str
 ) -> tuple[str, list[dict[str, Any]]]:
     # a reply's text and its calls to the tools: those of the harmony format, every one, or those
     # of the text. A call the context cut off, of a reply that ended for its length, is no text:
@@ -993,11 +994,6 @@ def _calls(
                 arguments = parsed
         calls.append({"name": name, "arguments": arguments})
     return reply.content, calls
-
-
-def _partial_stop(text: str, stops: list[str]) -> int:
-    # the length of the longest end of `text` that a stop string begins with
-    return max((n for s in stops for n in range(1, len(s)) if text.endswith(s[:n])), default=0)
 
 
 def _tool_calls(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:

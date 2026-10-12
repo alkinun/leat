@@ -198,7 +198,9 @@ class Tokenizer:
         self._vocab = {t: i for i, t in enumerate(tokens) if types[i] not in hidden}
         # some byte-level vocabs lack a few bytes' tokens, as MPT's and StarCoder's control
         # characters: llama.cpp drops those bytes
-        missing = [c for c in _BYTE_CHAR.values() if c not in self._vocab and self._byte_level]
+        missing = (
+            [c for c in _BYTE_CHAR.values() if c not in self._vocab] if self._byte_level else []
+        )
         if len(missing) > 128:
             raise ValueError(f"vocab lacks {len(missing)} byte tokens, it is not byte-level BPE")
         merges = metadata.get("tokenizer.ggml.merges", [])
@@ -275,7 +277,7 @@ class Tokenizer:
         # the text starts with BOS
         return piece.removeprefix(b" ") if self._space_prefix else piece
 
-    def _encode_ordinary(self, text: str, strip: bool = False) -> list[int]:
+    def _encode_ordinary(self, text: str, strip: bool) -> list[int]:
         # text between special tokens, without its leading whitespace if `strip`, which
         # SentencePiece starts with a space, as llama.cpp
         if strip:

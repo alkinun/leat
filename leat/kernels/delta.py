@@ -24,6 +24,7 @@ from leat.kernels.common import (
     warp_sum,
 )
 
+CHAINS = 8  # interleaved chains a long sum is split into
 MOST_DIMS = 128  # keys a column of the state holds, its lanes' shares in registers
 COLUMNS = 8  # of the state a warp holds, each by WARP // COLUMNS lanes
 CONV_WARPS = 4  # per block of the convolution
@@ -157,9 +158,9 @@ def _sum(values: list[UOp]) -> UOp:
     return functools.reduce(UOp.__add__, values) if values else UOp.const(0.0, dtypes.float32)
 
 
-def _chains(values: list[UOp], chains: int = 8) -> UOp:
-    # the sum in interleaved chains, whose additions overlap, rather than one long chain
-    return _sum([_sum(values[c::chains]) for c in range(min(chains, len(values)))])
+def _chains(values: list[UOp]) -> UOp:
+    # the sum in CHAINS interleaved chains, whose additions overlap, rather than one long chain
+    return _sum([_sum(values[c::CHAINS]) for c in range(min(CHAINS, len(values)))])
 
 
 def _sigmoid(x: UOp) -> UOp:
