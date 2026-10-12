@@ -19,6 +19,7 @@ browser ── https://k7x2qm.leatbox.net ──▶ Caddy (leat-proxy) ──▶
 | `Caddyfile` | the front door, at `/usr/share/leat/box/Caddyfile`: the app at the box's name over HTTPS, HTTP/2 and 3; plain HTTP, as `http://leat.local`, redirected there |
 | `build-caddy.sh` | builds `leat-caddy`, Caddy of a pinned release with the acme-dns module; the image's build runs it |
 | `systemd/leat-provision.service` | `python -m leat.box.provision`: on the first boot, takes in the registration a stick or VM put on the boot partition, into `/etc/leat` |
+| `systemd/leat-enroll.service` | `python -m leat.box.enroll`: on the first boot of a box with no registration, registers it of its TPM, as its maker's fingerprint of it allows |
 | `systemd/leat-proxy.service` | Caddy, as a user of its own, on 80 and 443 |
 | `systemd/leat-agent.service` | leat agent, with `--name <id>.leatbox.net`, on loopback alone, behind Caddy |
 | `systemd/leat-searxng.service` | SearXNG, the web's search, for Leat alone, on loopback |
@@ -51,6 +52,18 @@ Then one of:
   `curl -s http://ADDRESS:8099/install | bash`: the image installed onto its internal disk. It has
   no registration yet: put `leat-box.json` on its boot partition before it first boots, or it
   says "Not set up".
+
+A box we ship registers itself instead, on its first boot, by its TPM (`leat-enroll`): its maker
+runs `python -m leat.box.enroll --fingerprint` on each, or reads the endorsement key's
+fingerprint as the SHA-256 of its public key's DER, and we allow each on the server:
+
+```bash
+ssh leatbox leatbox-registry allow FINGERPRINT --serial SERIAL
+```
+
+The box gives the registry its endorsement key and an attestation key's name, takes the secret of
+the credential it is answered out of its TPM, which only that TPM can, and is answered its
+registration. One whose disk was erased registers itself again of its own name.
 
 The dev profile adds an SSH key, of the git-ignored `mkosi.local.conf`; a box we ship has none. On
 its first boot, `leat-provision` writes `/etc/leat/box.env` (its ID, name and the registry's

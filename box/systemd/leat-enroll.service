@@ -1,0 +1,20 @@
+[Unit]
+Description=Register the box of its TPM, on its first boot, as it has no identity yet
+# none yet, nor a file of its registration on its boot partition, which leat-provision takes in
+ConditionPathExists=!/etc/leat/box.env
+ConditionPathExists=!/boot/leat-box.json
+Wants=network-online.target
+After=network-online.target leat-provision.service
+RequiresMountsFor=/etc/leat
+# tried again until it is registered, as the office's internet may be down at first
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/opt/leat/.venv/bin/python -m leat.box.enroll
+RuntimeDirectory=leat-enroll
+Restart=on-failure
+RestartSec=5min
+
+[Install]
+WantedBy=multi-user.target

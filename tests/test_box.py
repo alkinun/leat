@@ -1,6 +1,7 @@
 import base64
 import contextlib
 import datetime
+import hashlib
 import io
 import json
 import os
@@ -18,7 +19,7 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image, ImageColor
 
-from leat.box import address, health, provision, screen, system, watch
+from leat.box import address, enroll, health, provision, screen, system, watch
 
 REGISTERED = {
     "id": "k7x2qm",
@@ -728,3 +729,53 @@ def test_system_network(tmp_path, monkeypatch):
     assert system.handle({"network": fixed}) == {}  # set again: no fall back said
     assert system.handle({"network": "dhcp"}) == {} and not system.FIXED.exists()
     assert system.handle({"network": "status"}) == {"fixed": None, "fell_back": False}
+
+
+def test_enroll(tmp_path, monkeypatch):
+    # the box registers itself of its TPM: its keys given, its credential's secret given back, and
+    # its registration written as a stick's is; a refusal said, nothing written
+    asked = []
+    box = {"id": "k7x2qm", "name": "k7x2qm.leatbox.net", "secret": "s3cret",
+           "registry": "https://api.leatbox.net",
+           "acme_dns": {"username": "u", "password": "p", "subdomain": "d",
+                        "server_url": "https://api.leatbox.net"}}  # fmt: skip
+
+    def post(url, body):
+        asked.append((url, body))
+        if url.endswith("/enroll"):
+            return {"challenge": "c1", "credential": base64.b64encode(b"credential").decode()}
+        return box
+
+    def activate(files):
+        assert (files / "credential").read_bytes() == b"credential"
+        return b"\x01\x02"
+
+    monkeypatch.setattr(enroll, "keys", lambda files: ("PEM", b"\x00\x0bname"))
+    monkeypatch.setattr(enroll, "activate", activate)
+    monkeypatch.setattr(enroll, "_post", post)
+    assert enroll.enroll("https://registry", tmp_path / "etc") == box
+    assert asked == [
+        ("https://registry/enroll", {"ek": "PEM", "ak_name": "000b6e616d65"}),
+        ("https://registry/enroll/confirm", {"challenge": "c1", "secret": "0102"}),
+    ]
+    assert "LEAT_ID=k7x2qm" in (tmp_path / "etc/box.env").read_text()
+    assert (tmp_path / "etc/registry-secret").read_text() == "s3cret"
+
+    def refused(url, body):
+        raise enroll.Refused("this box's TPM is not one of the boxes made")
+
+    monkeypatch.setattr(enroll, "_post", refused)
+    with pytest.raises(enroll.Refused):
+        enroll.enroll("https://registry", tmp_path / "none")
+    assert not (tmp_path / "none").exists()
+
+
+def test_fingerprint():
+    # an endorsement key's fingerprint, as the registry knows it: the SHA-256 of its DER
+    der = bytes(range(200))
+    pem = (
+        "-----BEGIN PUBLIC KEY-----\n"
+        + base64.encodebytes(der).decode()
+        + "-----END PUBLIC KEY-----\n"
+    )
+    assert enroll.fingerprint(pem) == hashlib.sha256(der).hexdigest()
