@@ -139,6 +139,7 @@ async function start() {
   renderModes();
   if (response.status === 401) return gate(told.empty, told.locked, told.recovering);
   me = told;
+  renderSections();
   renderAccounts();
   renderDrive();
   if (me.admin) watchHealth();
@@ -157,6 +158,14 @@ async function start() {
     if (shown) open(shown.id, false); // what changed meanwhile
   };
   route();
+}
+
+// the sections of Settings this person sees: their own, and of an admin's, the box's people, its
+// settings and its upkeep; of a Leat that runs on no box of its own, none of the box's alone
+function renderSections() {
+  for (const id of ["jump", "people-section", "the-box", "maintenance"]) $(id).hidden = !me.admin;
+  document.body.classList.toggle("box", Boolean(me.box));
+  if (me.admin) $("people-section").querySelector("h2").after($("requests")); // an admin lets in
 }
 
 // the app in a language, of leat/locales's, or this device's if none: its words, and the page's own
@@ -217,7 +226,7 @@ function gate(empty, locked, recovering) {
         element("b", "", spaced(code)));
       await waitToJoin(id);
     } catch (error) {
-      $("refusal").textContent = error.message;
+      $("refusal").textContent = sentence(error.message);
     }
   };
 }
@@ -257,7 +266,7 @@ function setup(locked) {
     if (step.about) parts.push(element("p", "", t(step.about)));
     let input = null;
     if (step.key) {
-      input = Object.assign(element("input", step.key), { value: chosen[step.key], placeholder: t(step.placeholder),
+      input = Object.assign(element("input", `field ${step.key}`), { value: chosen[step.key], placeholder: t(step.placeholder),
         autocomplete: step.autocomplete, maxLength: step.max });
       parts.push(input);
     }
@@ -276,12 +285,12 @@ function setup(locked) {
     const actions = element("div", "actions");
     actions.append(element("span", "steps", t("{at} of {all}", { at: at + 1, all: steps.length })));
     if (at > 0) {
-      const back = element("button", "previous", t("Back"));
+      const back = element("button", "button quiet", t("Back"));
       back.type = "button";
       back.onclick = () => show(at - 1);
       actions.append(back);
     }
-    actions.append(element("button", "", t(step.next ?? "Next")));
+    actions.append(element("button", "button primary", t(step.next ?? "Next")));
     parts.push(actions, refusal);
     $("join").replaceChildren(...parts);
     input?.focus();
@@ -296,12 +305,12 @@ function setup(locked) {
           offline: chosen.offline, language: chosen.language, timezone });
         location.reload();
       } catch (error) {
-        if (error.status !== 403 || !locked) return (refusal.textContent = error.message);
+        if (error.status !== 403 || !locked) return (refusal.textContent = sentence(error.message));
         // the code wrong, or a new one shown: typed again, at its step
         if (!steps.includes(typing)) steps.splice(1, 0, typing);
         chosen.code = "";
         show(1);
-        $("join").querySelector(".error").textContent = error.message[0].toUpperCase() + error.message.slice(1) + ".";
+        $("join").querySelector(".error").textContent = sentence(error.message);
       }
     };
   };
@@ -313,15 +322,15 @@ function setup(locked) {
 function recover(code) {
   const title = element("h1", "", t("Recovery"));
   const about = element("p", "", t("Type the recovery code the box's screen shows, and your name. This device becomes an admin of this Leat, as someone new."));
-  const typed = Object.assign(element("input", "code"), { value: code, placeholder: "K7X 2QM",
+  const typed = Object.assign(element("input", "field code"), { value: code, placeholder: "K7X 2QM",
     autocomplete: "off", maxLength: 7, ariaLabel: t("The recovery code") });
-  const name = Object.assign(element("input"), { placeholder: t("Your name"), autocomplete: "name",
+  const name = Object.assign(element("input", "field"), { placeholder: t("Your name"), autocomplete: "name",
     maxLength: 40, ariaLabel: t("Your name") });
   const refusal = element("p", "error"), actions = element("div", "actions");
-  const back = element("button", "previous", t("Back"));
+  const back = element("button", "button quiet", t("Back"));
   back.type = "button";
   back.onclick = () => location.reload();
-  actions.append(element("span", "steps"), back, element("button", "", t("Get back in")));
+  actions.append(element("span", "steps"), back, element("button", "button primary", t("Get back in")));
   $("join").replaceChildren(title, about, typed, name, actions, refusal);
   (code ? name : typed).focus();
   $("join").onsubmit = async (event) => {
@@ -332,7 +341,7 @@ function recover(code) {
       await post("/api/recover", { code: typed.value, name: name.value.trim() });
       location.reload();
     } catch (error) {
-      refusal.textContent = error.message[0].toUpperCase() + error.message.slice(1) + ".";
+      refusal.textContent = sentence(error.message);
     }
   };
 }
@@ -616,7 +625,13 @@ function choices(options, current, pick, refused = "") {
 
 // says what went wrong, as a request's error says it
 function report(error) {
-  status(error.message, true);
+  status(sentence(error.message), true);
+}
+
+// a message as a sentence: its first letter a capital, ending in a full stop
+function sentence(text) {
+  const said = `${text[0]?.toUpperCase() ?? ""}${text.slice(1)}`;
+  return /[.!?…:]$/.test(said) ? said : `${said}.`;
 }
 
 // makes a project of the name the user gave, and shows its page
@@ -677,7 +692,8 @@ function renderSyncing(p) {
   const box = $("syncing"), admin = me?.admin;
   if (choosing && admin && !p.source) {
     if (box.querySelector("form")) return; // as they type
-    const form = element("form"), path = element("input"), ok = element("button", "", t("Sync")), cancel = element("button", "", t("Cancel"));
+    const form = element("form"), path = element("input", "field small"), ok = element("button", "button primary small", t("Sync"));
+    const cancel = element("button", "button quiet small", t("Cancel"));
     Object.assign(path, { placeholder: t("The folder's path, as /mnt/office/Yılmaz"), spellcheck: false });
     cancel.type = "button";
     cancel.onclick = () => (choosing = false, renderSyncing(p));
@@ -701,13 +717,13 @@ function renderSyncing(p) {
       : t("Syncing with {folder}…", { folder: p.source });
     parts.push(element("span", p.unsynced ? "warning" : "meta", said));
     if (admin) {
-      const stopSync = element("button", "", t("Stop syncing"));
+      const stopSync = element("button", "button quiet small", t("Stop syncing"));
       stopSync.onclick = () => confirm(t("Stop syncing with {folder}? The files copied so far stay.", { folder: p.source }))
         && post(`/api/projects/${p.id}/sync`, { source: null }).catch(report);
       parts.push(stopSync);
     }
-  } else if (admin) {
-    const startSync = element("button", "", t("Sync with a folder on this computer…"));
+  } else if (admin && !me.box) { // a box mounts no folder to sync with
+    const startSync = element("button", "button quiet small", t("Sync with a folder on this computer…"));
     startSync.title = t("Keep a copy of a folder here, as a network drive's, in this project's files");
     startSync.onclick = () => (choosing = true, renderSyncing(p));
     parts.push(startSync);
@@ -752,20 +768,22 @@ function spaced(code) {
 // admin lets in as someone new, or as someone whose every device is gone; and, of an admin, the
 // box's people, each to rename, make an admin or not, or remove, with their devices
 function renderAccounts() {
-  const box = $("accounts");
-  if (!me || !accounts) return box.replaceChildren();
+  if (!me || !accounts) return;
   const self = accounts.people.find((p) => p.id === me.person);
-  const you = element("p", "", t("You are {name} here", { name: me.name }));
-  you.append(element("span", "meta", me.admin ? ` · ${t("Admin")}` : ""), " ", renaming(self ?? { id: me.person, name: me.name }));
-  const mine = element("ul");
-  mine.append(...(self?.devices ?? []).map((d) => deviceRow(d)));
-  const asking = accounts.requests.map((r) => {
+  $("identity").replaceChildren(element("span", "", me.name), element("span", "meta", me.admin ? t("Admin") : t("Member")),
+    renaming(self ?? { id: me.person, name: me.name }));
+  $("devices").replaceChildren(...(self?.devices ?? []).map((d) => deviceRow(d)));
+  const admins = accounts.people.filter((p) => p.admin).map((p) => p.name).join(", ");
+  $("devicesAbout").textContent = me.admin
+    ? t("To add a device of yours, open Leat on it: it asks to join, and shows here for you to let in.")
+    : t("To add a device of yours, open Leat on it: it asks to join, and shows here for you to let in. To add someone else, ask an admin: {admins}.", { admins });
+  $("asking").replaceChildren(...accounts.requests.map((r) => {
     const item = element("li"), about = element("div");
     const code = element("b", "", spaced(r.code));
     const meta = element("span", "meta", `${r.device} · ${t("code")} `);
     meta.append(code);
     about.append(element("span", "", t("{name} asks to join", { name: r.name })), meta);
-    const as = element("select");
+    const as = element("select", "field small");
     as.append(new Option(t("as you, {name}", { name: me.name }), me.person));
     if (me.admin) {
       as.append(new Option(t("as someone new, {name}", { name: r.name }), ""), ...accounts.people
@@ -774,47 +792,35 @@ function renderAccounts() {
       as.value = r.name === me.name ? me.person : "";
     }
     as.hidden = !me.admin;
-    const allow = element("button", "allow", me.admin ? t("Let in") : t("It's mine"));
+    const allow = element("button", "button primary small", me.admin ? t("Let in") : t("It's mine"));
     allow.onclick = () => post(`/api/pairings/${r.id}/allow`, as.value ? { person: Number(as.value) } : {})
       .catch(report);
     item.append(about, as, allow);
     if (me.admin) {
-      const no = element("button", "", "×");
+      const no = element("button", "remove", "×");
       no.title = t("Turn down");
       no.onclick = () => del(`/api/pairings/${r.id}`);
       item.append(no);
     }
     return item;
-  });
-  const requests = element("ul");
-  requests.append(...asking);
-  const parts = [you, element("h3", "", t("Your devices")), mine];
-  if (asking.length) parts.push(element("h3", "", t("Asking to join")), requests);
-  const others = accounts.people.filter((p) => p.id !== me.person);
-  if (me.admin) {
-    const people = element("ul", "people");
-    if (others.length) parts.push(element("h3", "", t("People")), people);
-    people.append(...others.map((p) => {
-      const item = element("li"), about = element("div");
-      const n = p.devices.length, seen = n > 1 ? t("{n} devices", { n }) : n ? t("1 device") : t("no device");
-      about.append(element("span", "", p.name), element("span", "meta", `${p.admin ? t("Admin") : t("Member")} · ${seen}`));
-      const devices = element("ul");
-      devices.append(...p.devices.map((d) => deviceRow(d)));
-      about.append(devices);
-      const making = element("button", "", p.admin ? t("Remove admin") : t("Make admin"));
-      making.onclick = () => patchPerson(p.id, { admin: !p.admin });
-      const removeButton = element("button", "", t("Remove"));
-      removeButton.onclick = () => confirm(t("Remove {name}, with their own chats, projects and files? The projects they shared with everyone stay, as yours; those they shared with chosen people, as the first of those's.", { name: p.name }))
-        && del(`/api/people/${p.id}`);
-      item.append(about, making, renaming(p), removeButton);
-      return item;
-    }));
-    parts.push(element("p", "meta", t("To add someone, open Leat on their device: it asks to join, and shows here for you to let in. Admins let people in and look after the box; no one sees another's own chats or files.")));
-  } else {
-    const admins = accounts.people.filter((p) => p.admin).map((p) => p.name).join(", ");
-    parts.push(element("p", "meta", t("To add a device of yours, open Leat on it: it asks to join, and shows here for you to let in. To add someone else, ask an admin: {admins}.", { admins })));
-  }
-  box.replaceChildren(...parts);
+  }));
+  $("requests").hidden = !accounts.requests.length;
+  if (!me.admin) return;
+  $("people").replaceChildren(...accounts.people.filter((p) => p.id !== me.person).map((p) => {
+    const item = element("li"), about = element("div");
+    const n = p.devices.length, seen = n > 1 ? t("{n} devices", { n }) : n ? t("1 device") : t("no device");
+    about.append(element("span", "", p.name), element("span", "meta", `${p.admin ? t("Admin") : t("Member")} · ${seen}`));
+    const devices = element("ul");
+    devices.append(...p.devices.map((d) => deviceRow(d)));
+    about.append(devices);
+    const making = element("button", "button quiet small", p.admin ? t("Remove admin") : t("Make admin"));
+    making.onclick = () => patchPerson(p.id, { admin: !p.admin });
+    const removeButton = element("button", "button quiet small", t("Remove"));
+    removeButton.onclick = () => confirm(t("Remove {name}, with their own chats, projects and files? The projects they shared with everyone stay, as yours; those they shared with chosen people, as the first of those's.", { name: p.name }))
+      && del(`/api/people/${p.id}`);
+    item.append(about, making, renaming(p), removeButton);
+    return item;
+  }));
 }
 
 // the person's network drive: their files and projects in Explorer or Finder, of a password of
@@ -831,10 +837,10 @@ function renderDrive(made = null) {
       [t("Your name"), made.user], [t("Password"), made.password],
     ];
     const list = element("dl");
-    for (const [said, value] of steps) list.append(element("dt", "", said), element("dd", "code", value));
-    parts.push(list, element("p", "meta", t("The password is shown once: the computer keeps it. It is listed among your devices, to unpair.")));
+    for (const [said, value] of steps) list.append(element("dt", "", said), element("dd", "", value));
+    parts.push(list, element("p", "about", t("The password is shown once: the computer keeps it. It is listed among your devices, to unpair.")));
   }
-  const connect = element("button", "quiet", t("Connect a computer"));
+  const connect = element("button", "button", t("Connect a computer"));
   connect.type = "button";
   connect.onclick = async () => {
     try {
@@ -872,8 +878,9 @@ $("cancelRecovery").onclick = () => del("/api/recovery");
 async function watchHealth() {
   const answer = await fetch("/api/health").then((r) => r.ok ? r.json() : null).catch(() => null);
   $("warnings").replaceChildren(...(answer?.warnings ?? []).map((w) => {
-    const item = element("div", "warning");
-    item.append(element("b", "", w.title), " ", w.said);
+    const item = element("div", "notice"), said = element("span");
+    said.append(element("b", "", w.title), " ", w.said);
+    item.append(said);
     return item;
   }));
   setTimeout(watchHealth, 300000);
@@ -885,7 +892,7 @@ function deviceRow(d) {
   const item = element("li"), about = element("div"), self = d.id === me.device;
   about.append(element("span", "", self ? t("{name} (this device)", { name: d.name }) : t(d.name)),
     element("span", "meta", t("seen {day}", { day: day(d.seen) })));
-  const leave = element("button", "", self ? t("Sign out") : t("Unpair"));
+  const leave = element("button", "button quiet small", self ? t("Sign out") : t("Unpair"));
   leave.onclick = () => self
     ? confirm(t("Sign this device out? Using Leat on it again takes asking to join."))
       && del(`/api/devices/${d.id}`).then((done) => done && location.reload())
@@ -896,7 +903,7 @@ function deviceRow(d) {
 
 // a button that renames a person, asking for the name
 function renaming(p) {
-  const button = element("button", "", t("Rename"));
+  const button = element("button", "button quiet small", t("Rename"));
   button.onclick = () => {
     const name = prompt(t("A new name for {name}:", { name: p.name }), p.name)?.trim();
     if (name && name !== p.name) patchPerson(p.id, { name });
@@ -971,7 +978,7 @@ function folderRow(name, files, project) {
 
 // a row's button that deletes a file or a folder, once the user says so
 function remover(what, name, project) {
-  const button = element("button", "", "×");
+  const button = element("button", "remove", "×");
   button.title = t("Delete");
   button.onclick = () => confirm(t("Delete {what}? It can be restored from Earlier versions for 30 days.", { what }))
     && del(`/api${place(project)}/files/${encodeURIComponent(name)}`);
@@ -993,7 +1000,7 @@ async function renderHistory(details, project) {
 }
 
 function versionRow(v, project) {
-  const item = element("li"), restore = element("button", "restore", t("Restore"));
+  const item = element("li"), restore = element("button", "button small", t("Restore"));
   const when = clock(v.kept);
   restore.onclick = () => post(`/api${place(project)}/history`, { name: v.name, version: v.version })
     .catch(report);
@@ -1008,7 +1015,6 @@ const STATES = { reading: () => t("Reading…"), failed: () => t("Couldn't read"
 // the box as its admins look after it, asked as Settings opens: the room its files take and that
 // left on their disk, a warning if little is, and each person's use this month, counted
 async function renderOverview() {
-  $("overview").hidden = !me?.admin;
   if (!me?.admin) return;
   try {
     const { files, versions, disk, people } = await api("/api/overview");
@@ -1018,7 +1024,7 @@ async function renderOverview() {
     const free = !disk ? "." : low ? t("; {free} of {total} is free on this computer's disk: it is nearly full.", { free: bytes(disk.free), total: bytes(disk.total) })
       : t("; {free} of {total} is free on this computer's disk.", { free: bytes(disk.free), total: bytes(disk.total) });
     $("room").textContent = taken + free;
-    $("room").className = low ? "warning" : "meta";
+    $("room").className = low ? "about warning" : "about";
     $("use").replaceChildren(...people.map((p) => {
       const item = element("li");
       const used = `${count(p.chats, "1 chat", "{n} chats")}, ${count(p.messages, "1 message", "{n} messages")}`;
@@ -1073,7 +1079,6 @@ function dayOf(seconds) {
 
 // whether Leat may reach the internet, an admin's to choose, and what each choice means
 function renderInternet() {
-  $("internet").hidden = !me?.admin;
   $("reach").replaceChildren(...choices(reaching(), settings.offline, (offline) => changeSettings({ offline })));
   $("reached").textContent = reached(settings.offline);
 }
@@ -1093,7 +1098,6 @@ function reached(offline) {
 // whether the screen shows its address and the code a phone scans to open it; its language and
 // time zone; and its network, software and power
 function renderBox() {
-  $("box").hidden = !me?.admin;
   const office = $("office");
   if (document.activeElement !== office) office.value = settings.office ?? "";
   office.onchange = () => changeSettings({ office: office.value });
@@ -1109,6 +1113,7 @@ function renderBox() {
   zone.replaceChildren(...zones.map((z) => Object.assign(element("option", "", z.replaceAll("_", " ")), { value: z })));
   zone.value = settings.timezone ?? "";
   zone.onchange = () => changeSettings({ timezone: zone.value });
+  if (!me?.box) return; // the box's own, of a Leat that runs on one
   if (!$("network").childElementCount) renderNetwork();
   if (!$("power").childElementCount) renderPower();
   if (!$("software").childElementCount) renderSoftware();
@@ -1121,24 +1126,24 @@ async function renderSoftware(asked = false) {
   try {
     state = await api("/api/update");
   } catch (error) {
-    return $("software").replaceChildren(element("p", "about", error.message));
+    return $("software").replaceChildren(element("p", "about", sentence(error.message)));
   }
-  const said = element("p", "about");
-  const parts = [element("p", "", `Leat ${state.version ?? t("of no version")}`), said];
+  const said = element("p", "about"), buttons = element("div", "buttons");
+  const parts = [element("p", "", `Leat ${state.version ?? t("of no version")}`), said, buttons];
   if (state.ready) {
     said.textContent = t("An update, {version}, is ready: the box restarts into it tonight, at about four, or now.", { version: state.ready });
-    const restart = element("button", "quiet", t("Restart now"));
+    const restart = element("button", "button small", t("Restart now"));
     restart.type = "button";
     restart.onclick = () => post("/api/power", { power: "restart" })
       .then(() => status(t("The box is restarting into its update…")))
       .catch(report);
-    parts.push(restart);
+    buttons.append(restart);
   } else {
     said.textContent = state.checking || asked ? t("Looking for an update…")
       : state.checked ? t("Up to date, as of {when}. The box looks every few hours, installs what it finds, and restarts into it at night.",
         { when: new Date(state.checked * 1000).toLocaleString(locale()) })
       : t("The box looks for updates every few hours, installs what it finds, and restarts into it at night.");
-    const check = element("button", "quiet", t("Look for an update"));
+    const check = element("button", "button small", t("Look for an update"));
     check.type = "button";
     check.disabled = state.checking || asked;
     check.onclick = () => post("/api/update", {})
@@ -1147,11 +1152,11 @@ async function renderSoftware(asked = false) {
         setTimeout(() => renderSoftware(), 30000); // what it found, once it has looked
       })
       .catch(report);
-    parts.push(check);
+    buttons.append(check);
   }
-  const diagnostics = Object.assign(element("a", "diagnostics", t("Download diagnostics")),
-    { href: "/api/diagnostics", title: t("A file to send Leat's support when something is wrong: of the box's system alone, nothing of anyone's work") });
-  $("software").replaceChildren(...parts, diagnostics);
+  buttons.append(Object.assign(element("a", "button quiet small", t("Download diagnostics")),
+    { href: "/api/diagnostics", title: t("A file to send Leat's support when something is wrong: of the box's system alone, nothing of anyone's work") }));
+  $("software").replaceChildren(...parts);
 }
 
 // the box restarted, or switched off, of an admin, once they confirm it; or reset, its state erased,
@@ -1160,16 +1165,14 @@ function renderPower() {
   const buttons = [["restart", t("Restart"), t("Restart the box? Leat is away for a minute or two.")],
     ["off", t("Switch off"), t("Switch the box off? Leat is away until someone presses its power button.")]]
     .map(([power, label, asked]) => {
-      const button = element("button", "quiet", label);
+      const button = element("button", "button", label);
       button.type = "button";
       button.onclick = () => confirm(asked) && post("/api/power", { power })
         .then(() => status(power === "off" ? t("The box is switching off.") : t("The box is restarting…")))
         .catch(report);
       return button;
     });
-  const reset = element("button", "danger", t("Erase everything"));
-  reset.type = "button";
-  reset.onclick = () => {
+  $("erase").onclick = () => {
     const word = settings.office || "reset";
     const typed = prompt(t("Erase everything on this Leat? Everyone's chats, files and projects, its people and devices and its settings are erased for good, and it starts again at “{start}”, its address the same. Type {word} to go on.",
       { start: t("Set up your Leat"), word }));
@@ -1177,7 +1180,7 @@ function renderPower() {
       .then(() => status(t("The box is erasing everything, and restarting.")))
       .catch(report);
   };
-  $("power").replaceChildren(...buttons, reset);
+  $("power").replaceChildren(...buttons);
 }
 
 // the box's wired address, an admin's to set: DHCP's, or a fixed one, as an office's IT gives, from
@@ -1188,7 +1191,7 @@ async function renderNetwork(fixing = false, said = "") {
   try {
     state = await api("/api/network");
   } catch (error) {
-    return $("network").replaceChildren(...parts, element("p", "about", error.message));
+    return $("network").replaceChildren(...parts, element("p", "about", sentence(error.message)));
   }
   const fixed = fixing || Boolean(state.fixed);
   const choice = element("div", "choice");
@@ -1199,11 +1202,11 @@ async function renderNetwork(fixing = false, said = "") {
   if (state.fell_back) parts.push(element("p", "error", t("The fixed address didn't reach its gateway, so the box went back to an automatic one.")));
   if (fixed) {
     const form = element("form", "fixed");
-    const field = (value, placeholder) => Object.assign(element("input"), { value: value ?? "", placeholder, spellcheck: false });
+    const field = (value, placeholder) => Object.assign(element("input", "field"), { value: value ?? "", placeholder, spellcheck: false });
     const address = field(state.fixed?.address, t("Address, as 192.168.1.50/24"));
     const gateway = field(state.fixed?.gateway, t("Gateway, as 192.168.1.1"));
     const dns = field(state.fixed?.dns?.join(", "), t("DNS servers, as 192.168.1.1"));
-    const save = element("button", "", t("Save"));
+    const save = element("button", "button primary small", t("Save"));
     form.append(address, gateway, dns, save);
     form.onsubmit = async (event) => {
       event.preventDefault();
@@ -1270,7 +1273,7 @@ const EVERY = [["", "On request"], ["files", "When files arrive"], ["daily", "Ev
   ["weekly sat", "Every Saturday"], ["weekly sun", "Every Sunday"], ["monthly 1", "On the 1st of each month"]];
 
 function scheduler(w) {
-  const every = element("select"), at = element("input");
+  const every = element("select", "field small"), at = element("input", "field small");
   const timed = w.schedule && w.schedule !== "files", parts = (w.schedule ?? "").split(" ");
   const kind = timed ? parts.slice(0, -1).join(" ") : w.schedule ?? "";
   const kinds = EVERY.some(([k]) => k === kind) ? EVERY : [...EVERY, [kind, kind]];
@@ -1288,7 +1291,7 @@ function scheduler(w) {
 
 // a workflow's button that deletes it, once the user says so
 function forget(w) {
-  const button = element("button", "", "×");
+  const button = element("button", "remove", "×");
   button.title = t("Delete");
   button.onclick = () => confirm(t("Delete the workflow “{name}”?", { name: w.name })) && del(`/api/workflows/${w.id}`);
   return button;
@@ -1306,10 +1309,10 @@ function compose(text) {
 // below a message the user sent, an action that saves it as a workflow, of a name they give it
 // there: the project's, if the chat is in one, or their own
 function saver(m) {
-  const box = element("div", "actions"), save = element("button", "", t("Save as workflow"));
+  const box = element("div", "actions"), save = element("button", "button quiet small", t("Save as workflow"));
   save.onclick = () => {
-    const form = element("form"), name = element("input"), ok = element("button", "", t("Save"));
-    const cancel = element("button", "", t("Cancel"));
+    const form = element("form"), name = element("input", "field small"), ok = element("button", "button primary small", t("Save"));
+    const cancel = element("button", "button quiet small", t("Cancel"));
     Object.assign(name, { value: m.content.split(/\s+/).slice(0, 6).join(" "), maxLength: 80, placeholder: t("The workflow's name") });
     cancel.type = "button";
     cancel.onclick = () => box.replaceChildren(save);
@@ -1505,7 +1508,7 @@ function renderAttached() {
     const chip = element("span", "chip", a.uploading ? `${named}…` : named);
     if (folder) chip.prepend(icon("folder"));
     if (!a.uploading && PICTURE.test(a.name)) chip.prepend(picture(a.name));
-    const detach = element("button", "", "×");
+    const detach = element("button", "remove", "×");
     detach.title = t("Remove");
     detach.onclick = () => {
       attached = attached.filter((other) => other !== a);
@@ -1542,7 +1545,7 @@ function renderList() {
     item.classList.toggle("shown", c.id === shown?.id);
     item.classList.toggle("running", c.running);
     item.classList.toggle("unread", unread.has(c.id) && !c.running);
-    const deleteButton = element("button", "", "×");
+    const deleteButton = element("button", "remove", "×");
     deleteButton.title = t("Delete");
     deleteButton.onclick = (event) => {
       event.stopPropagation();
@@ -1744,7 +1747,7 @@ function message(m, index) {
     item.classList.toggle("step", m.role === "assistant" && !answer);
     thinking.hidden = !m.reasoning_content;
     const thinks = !m.content && !m.tool_calls && live(m);
-    summary.textContent = thinks ? t("Thinking…") : t("Thinking");
+    head.textContent = thinks ? t("Thinking…") : t("Thinking");
     markdown(reasoning, m.reasoning_content ?? "");
     if (m.role === "user") text.textContent = m.content;
     else markdown(text, m.content ?? "");
@@ -2101,7 +2104,7 @@ function count(n, one, many) {
 // sets a code block below a bar of its language and a button that copies it
 function codeBar(pre) {
   const block = element("div", "code"), bar = element("div", "bar");
-  const copy = element("button", "", t("Copy"));
+  const copy = element("button", "button quiet small", t("Copy"));
   copy.onclick = async () => {
     await clipboard(pre.textContent);
     copy.textContent = t("Copied");

@@ -61,6 +61,8 @@ _FILES = (
     "app.mjs",
     "markdown.mjs",
     "logo.svg",
+    "chevron.svg",
+    "fonts/Inter.woff",
 )
 _PAGES = ("/", "/projects", "/files", "/settings", "/activity")
 _LOCALES = {f"{language}.json" for language in locales.LANGUAGES if language != "en"}
@@ -70,6 +72,7 @@ _TYPES = {
     ".mjs": "text/javascript; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
     ".svg": "image/svg+xml",
+    ".woff": "font/woff",
 }
 _KEEP_ALIVE = 15  # seconds between comments on a quiet event stream, which find its client gone
 BODY = 10 << 20  # bytes of a request's JSON at most, which may come before its device is known
@@ -180,8 +183,10 @@ class _Handler(BaseHTTPRequestHandler):
                     shown |= {"recovery": recovery, "recovery_left": left}
                 return self._json(200, shown | {"warnings": self._warnings()})
             me = self._device()
-            if path == "/api/me":  # and the box's language, which the app speaks
-                self._json(200, Accounts.me(me) | {"language": self._language()})
+            if path == "/api/me":  # and the box's language, which the app speaks, and whether
+                # this Leat runs on a box, which the box's own settings are of
+                told = {"language": self._language(), "box": self.server.name is not None}
+                self._json(200, Accounts.me(me) | told)
             elif path == "/api/events":
                 self._events(me)
             elif path == "/api/overview":  # the box, as its admins look after it

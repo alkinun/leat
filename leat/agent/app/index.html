@@ -16,24 +16,25 @@
     <h1>Leat</h1>
     <p id="welcome"></p>
     <div class="row">
-      <input id="who" placeholder="Your name" autocomplete="given-name" maxlength="40">
-      <button id="joining"></button>
+      <input id="who" class="field" placeholder="Your name" autocomplete="given-name" maxlength="40">
+      <button id="joining" class="button primary"></button>
     </div>
     <p id="code"></p>
     <p id="refusal" class="error"></p>
   </form>
 </section>
 <nav>
-  <button id="new">
+  <button id="new" class="place">
     <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>New chat
   </button>
   <button id="held" class="place">
     <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/></svg>Projects
   </button>
-  <div id="conversations"></div>
   <button id="filed" class="place">
     <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>Files
   </button>
+  <h2 id="chatsHeading" hidden>Chats</h2>
+  <div id="conversations"></div>
   <button id="set" class="place">
     <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>Settings
   </button>
@@ -52,66 +53,120 @@
     </a>
   </header>
   <div id="warnings"></div>
-  <div id="recovering" hidden>
+  <div id="recovering" class="notice error" hidden>
     <span></span>
-    <button id="cancelRecovery">Cancel</button>
+    <button id="cancelRecovery" class="button danger small">Cancel it</button>
   </div>
   <h1 id="greeting"></h1>
   <div id="log"></div>
   <section id="settings" class="page">
     <h1>Settings</h1>
-    <div id="overview" hidden>
-      <h2>This Leat <a id="seeActivity" href="/activity">Activity</a></h2>
-      <p id="room"></p>
-      <ul id="use"></ul>
-    </div>
-    <h2>Appearance</h2>
-    <div id="modes" class="choice"></div>
-    <h2>People and devices</h2>
-    <div id="accounts"></div>
-    <h2>Network drive</h2>
-    <div id="drive"></div>
-    <div id="box" hidden>
+    <nav id="jump" aria-label="Settings' sections" hidden>
+      <a href="#you">You</a><a href="#people-section">People</a><a href="#the-box">The box</a><a href="#maintenance">Maintenance</a>
+    </nav>
+    <section id="you">
+      <h2>You</h2>
+      <div class="setting">
+        <h3>Name</h3>
+        <div id="identity" class="value"></div>
+      </div>
+      <div class="setting">
+        <h3>Appearance</h3>
+        <div id="modes" class="choice"></div>
+        <p class="about">On this device alone.</p>
+      </div>
+      <div class="setting">
+        <h3>Your devices</h3>
+        <ul id="devices"></ul>
+        <p class="about" id="devicesAbout"></p>
+      </div>
+      <div class="setting" id="requests" hidden>
+        <h3>Asking to join</h3>
+        <ul id="asking"></ul>
+      </div>
+      <div class="setting">
+        <h3>Network drive</h3>
+        <div id="drive"></div>
+      </div>
+    </section>
+    <section id="people-section" hidden>
+      <h2>People</h2>
+      <ul id="people" data-empty="No one else uses this Leat yet."></ul>
+      <p class="about">To add someone, open Leat on their device: it asks to join, and shows here for you to let in. Admins let people in and look after the box; no one sees another's own chats or files.</p>
+    </section>
+    <section id="the-box" hidden>
       <h2>The box</h2>
-      <h3>Office</h3>
-      <input id="office" maxlength="60" autocomplete="organization" placeholder="Your office's name" aria-label="The office's name">
-      <p class="about">The box's screen shows it beside Leat's name.</p>
-      <h3>Language</h3>
-      <div id="speaking" class="choice"></div>
-      <p class="about">Leat's, for everyone, in the app and on the box's screen.</p>
-      <h3>Its screen</h3>
-      <div id="showing" class="choice"></div>
-      <p class="about" id="shown"></p>
-      <h3>Time zone</h3>
-      <select id="zone" aria-label="The box's time zone"></select>
-      <p class="about">Its time zone, in which workflows run and its screen tells the time.</p>
-      <h3>Network</h3>
-      <div id="network"></div>
-      <h3>Software</h3>
-      <div id="software"></div>
-      <h3>Power</h3>
-      <div id="power"></div>
-      <p class="about">Everyone's chats stop while the box restarts, which takes a minute or two. Switched off, it starts again with its power button. Erased, it keeps nothing of the office's, as a box passed on to another must.</p>
-    </div>
-    <div id="internet" hidden>
-      <h2>Internet</h2>
-      <div id="reach" class="choice"></div>
-      <p class="about" id="reached"></p>
-    </div>
+      <div class="setting">
+        <h3>Office</h3>
+        <input id="office" class="field" maxlength="60" autocomplete="organization" placeholder="Your office's name" aria-label="The office's name">
+        <p class="about">The box's screen shows it beside Leat's name.</p>
+      </div>
+      <div class="setting">
+        <h3>Language</h3>
+        <div id="speaking" class="choice"></div>
+        <p class="about">Leat's, for everyone, in the app and on the box's screen.</p>
+      </div>
+      <div class="setting box-only">
+        <h3>Time zone</h3>
+        <select id="zone" class="field" aria-label="The box's time zone"></select>
+        <p class="about">Its time zone, in which workflows run and its screen tells the time.</p>
+      </div>
+      <div class="setting box-only">
+        <h3>Screen</h3>
+        <div id="showing" class="choice"></div>
+        <p class="about" id="shown"></p>
+      </div>
+      <div class="setting">
+        <h3>Internet</h3>
+        <div id="reach" class="choice"></div>
+        <p class="about" id="reached"></p>
+      </div>
+      <div class="setting box-only">
+        <h3>Network</h3>
+        <div id="network"></div>
+      </div>
+    </section>
+    <section id="maintenance" hidden>
+      <h2>Maintenance</h2>
+      <div class="setting">
+        <h3>Storage and use</h3>
+        <p id="room" class="about"></p>
+        <ul id="use"></ul>
+      </div>
+      <div class="setting">
+        <h3>Activity</h3>
+        <p class="about">What was done on this Leat, by whom and where, kept a year.</p>
+        <a id="seeActivity" class="button" href="/activity">See activity</a>
+      </div>
+      <div class="setting box-only">
+        <h3>Software</h3>
+        <div id="software"></div>
+      </div>
+      <div class="setting box-only">
+        <h3>Power</h3>
+        <div id="power"></div>
+        <p class="about">Everyone's chats stop while the box restarts, which takes a minute or two. Switched off, it starts again with its power button.</p>
+      </div>
+      <div class="setting box-only">
+        <h3>Erase everything</h3>
+        <p class="about">Erases everything of the office's for good, its people, chats, files and settings, and starts again at the setup, as a box passed on to another must be.</p>
+        <button id="erase" class="button danger" type="button">Erase everything</button>
+      </div>
+    </section>
   </section>
   <section id="files" class="page">
     <h1>Files</h1>
-    <p>Your own files, which Leat reads and makes, and only you see. Attach them to a message, or drop files and folders here; a zip is unpacked into a folder. A project's files are on its page.</p>
-    <form><button type="button" id="upload">Upload files</button><button type="button" id="uploadFolder" class="quiet">Upload a folder</button></form>
+    <p class="lead">Your own files, which Leat reads and makes, and only you see. Attach them to a message, or drop files and folders here; a zip is unpacked into a folder. A project's files are on its page.</p>
+    <div class="actions"><button type="button" id="upload" class="button primary">Upload files</button><button type="button" id="uploadFolder" class="button">Upload a folder</button></div>
     <ul id="workspace" data-empty="Nothing yet."></ul>
     <details id="workspaceHistory" class="history"><summary>Earlier versions</summary><ul></ul></details>
   </section>
   <section id="projects" class="page">
     <h1>Projects</h1>
-    <p>A project keeps a client's or a matter's files, instructions and chats together. Its chats read its files and follow its instructions.</p>
+    <p class="lead">A project keeps a client's or a matter's files, instructions and chats together. Its chats read its files and follow its instructions.</p>
     <form id="create">
-      <input id="naming" placeholder="A new project's name" maxlength="80" autocomplete="off">
-      <button>Create</button>
+      <input id="naming" class="field" placeholder="A new project's name" maxlength="80" autocomplete="off">
+      <button class="button primary">Create project</button>
     </form>
     <ul id="listed" data-empty="No projects yet: name one above."></ul>
   </section>
@@ -120,29 +175,29 @@
       <svg viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg>Settings
     </a>
     <h1>Activity</h1>
-    <p>What was done on this Leat, by whom and where, kept a year. What anyone asks, and what Leat answers, is never kept here.</p>
+    <p class="lead">What was done on this Leat, by whom and where, kept a year. What anyone asks, and what Leat answers, is never kept here.</p>
     <div id="done"></div>
-    <button id="older" class="quiet" type="button" hidden>Show older</button>
+    <button id="older" class="button" type="button" hidden>Show older</button>
   </section>
   <section id="project" class="page">
     <a id="back" class="back" href="/projects">
       <svg viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg>Projects
     </a>
-    <input id="title" maxlength="80" autocomplete="off" aria-label="The project's name">
-    <div id="sharing" class="choice"></div>
+    <input id="title" maxlength="80" autocomplete="off" aria-label="The project's name" title="Rename the project">
+    <div id="sharing-row"><span>Shared with</span><div id="sharing" class="choice"></div></div>
     <div id="members"></div>
     <h2>Chats</h2>
     <ul id="chats" data-empty="No chats yet: write below to begin one."></ul>
     <h2>Workflows</h2>
     <ul id="flows" data-empty="None yet. Save a request you sent in a chat here with Save as workflow, below it."></ul>
-    <h2>Files <span><button id="adding" type="button">Upload files</button><button id="addingFolder" type="button">Upload a folder</button></span></h2>
+    <h2>Files <span><button id="adding" class="button small" type="button">Upload files</button><button id="addingFolder" class="button small" type="button">Upload a folder</button></span></h2>
     <div id="syncing"></div>
     <ul id="kept" data-empty="No files yet: upload them, or drop them here."></ul>
     <details id="keptHistory" class="history"><summary>Earlier versions</summary><ul></ul></details>
     <h2>Instructions</h2>
-    <textarea id="instructions" rows="4" placeholder="What Leat should know and do in this project: who the client is, what to watch for, how to write."></textarea>
-    <p id="saved" class="meta">They hold for chats begun from now on.</p>
-    <button id="discard" type="button">Delete project</button>
+    <textarea id="instructions" class="field" rows="4" placeholder="What Leat should know and do in this project: who the client is, what to watch for, how to write."></textarea>
+    <p id="saved" class="about">They hold for chats begun from now on.</p>
+    <button id="discard" class="button danger small" type="button">Delete project</button>
   </section>
   <div id="composer">
     <div class="box">

@@ -1324,7 +1324,7 @@ def test_joining(server, agent, engine, events):
     assert status == 200 and json.loads(ada)["name"] == "Ada"
     assert ask(f"/api/pairings/{asked['id']}", "POST")[0] == 200  # its cookie, taken once
     assert ask(f"/api/pairings/{asked['id']}", "POST")[0] == 404
-    ada = {"person": 2, "name": "Ada", "admin": False, "device": 2, "language": None}
+    ada = {"person": 2, "name": "Ada", "admin": False, "device": 2, "language": None, "box": False}
     assert ask("/api/me") == (200, ada)
     # Ada's own alone: her events tell of her conversations, not the admin's
     adas = "; ".join(f"{c.name}={c.value}" for c in jar.cookiejar)
@@ -1414,7 +1414,8 @@ def test_own_devices(server, agent):
     assert status == 200 and phone("/api/me")[1]["person"] == 2
     status, laptop = joining(server, "Ada's laptop", phone, person=2)  # hers, from her phone
     assert status == 200 and laptop("/api/me")[1] == {
-        "person": 2, "name": "Ada", "admin": False, "device": 3, "language": None}  # fmt: skip
+        "person": 2, "name": "Ada", "admin": False, "device": 3, "language": None,
+        "box": False}  # fmt: skip
     assert joining(server, "Eve", phone)[0] == 403  # someone new: an admin's to let in
     assert joining(server, "Alkın", phone, person=1)[0] == 403  # as another: never
     assert joining(server, "Ada", admins, person=2)[0] == 403  # as Ada, while she has devices
