@@ -1,0 +1,26 @@
+[Unit]
+Description=The box's own Wi-Fi, opened for want of a network, to be set up without a cable
+Wants=iwd.service
+After=iwd.service systemd-networkd.service leat-provision.service
+# its name, of the box's ID, of its identity's partition
+RequiresMountsFor=/etc/leat
+
+[Service]
+User=leat
+Group=leat
+ExecStart=/opt/leat/.venv/bin/python -m leat.box.hotspot
+Restart=always
+RestartSec=5
+# its DNS, on port 53 of the hotspot's address, which every name its devices ask for is
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+# its name and passphrase, for the box's screen, of leat's group, to show
+RuntimeDirectory=leat-hotspot
+RuntimeDirectoryMode=0750
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

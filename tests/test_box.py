@@ -4,11 +4,16 @@ import datetime
 import io
 import json
 import os
+import re
 import shutil
 import socket
 import ssl
+import struct
 import subprocess
 import threading
+import time
+import urllib.parse
+import urllib.request
 from collections.abc import Iterator
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -18,7 +23,7 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image, ImageColor
 
-from leat.box import address, health, provision, screen, system, watch
+from leat.box import address, health, hotspot, provision, screen, system, watch
 
 REGISTERED = {
     "id": "k7x2qm",
@@ -700,3 +705,206 @@ def test_units():
     assert "-m leat.box.address" in updater
     shown = (box / "systemd/leat-screen.service").read_text()
     assert "TTYPath=/dev/tty2" in shown and "-m leat.box.screen --take" in shown
+
+
+def test_system_hotspot(monkeypatch):
+    # the box's own hotspot, of its Wi-Fi as iwd's access point: its status, opened of a name and
+    # passphrase checked, the networks in reach of it, those known said so, and closed
+    def prop(kind, value):
+        return {"type": kind, "data": value}
+
+    device = "/net/connman/iwd/0/4"
+    objects = {
+        device: {"net.connman.iwd.Device": {"Mode": prop("s", "station")},
+                 "net.connman.iwd.Station": {}},
+        "/net/connman/iwd/Office_psk": {
+            "net.connman.iwd.KnownNetwork": {"Name": prop("s", "Office")}},
+    }  # fmt: skip
+    called = []
+
+    def bus(*args, check=True):
+        called.append(args)
+        if args[-1] == "GetManagedObjects":
+            return {"data": [objects]}
+        if args[:2] == ("set-property", device) and args[-1] == "ap":
+            objects[device] = {"net.connman.iwd.Device": {}, "net.connman.iwd.AccessPoint": {}}
+        if args[-1] == "GetOrderedNetworks":
+            found = [("Office", -5500, "psk"), ("Café", -8500, "open")]
+            networks = [{"Name": prop("s", name), "SignalStrength": prop("n", signal),
+                         "Type": prop("s", kind)} for name, signal, kind in found]  # fmt: skip
+            return {"data": [networks]}
+        return {}
+
+    monkeypatch.setattr(system, "_bus", bus)
+    assert system.handle({"hotspot": "status"}) == {
+        "radio": True,
+        "started": False,
+        "known": ["Office"],
+    }
+    for name, passphrase in (("Office", "kq7x-2mpa"), ("Leat-7J32", "short")):
+        assert "error" in system.handle(
+            {"hotspot": "start", "name": name, "passphrase": passphrase}
+        )
+    assert system.handle({"hotspot": "start", "name": "Leat-7J32", "passphrase": "kq7x-2mpa"}) == {}
+    assert ("set-property", device, "net.connman.iwd.Device", "Mode", "s", "ap") in called
+    assert ("call", device, "net.connman.iwd.AccessPoint", "Start", "ss", "Leat-7J32",
+            "kq7x-2mpa") in called  # fmt: skip
+    assert system.handle({"hotspot": "status"})["started"] is True
+    assert system.handle({"hotspot": "scan"}) == {"networks": [
+        {"name": "Office", "secure": True, "strength": 3, "known": True},
+        {"name": "Café", "secure": False, "strength": 0, "known": False},
+    ]}  # fmt: skip
+    assert system.handle({"hotspot": "stop"}) == {}
+    assert called[-1] == ("set-property", device, "net.connman.iwd.Device", "Mode", "s", "station")
+    objects.clear()
+    assert system.handle({"hotspot": "status"}) == {"radio": False, "started": False, "known": []}
+    assert system.handle({"hotspot": "start", "name": "Leat-7J32", "passphrase": "kq7x-2mpa"}) == {
+        "error": "this box has no Wi-Fi"}  # fmt: skip
+
+
+def test_hotspot(tmp_path, monkeypatch):
+    # opened once the box has gone a minute without a network, its name and passphrase for the
+    # screen; a network chosen joined, and the hotspot closed; one not joined in half a minute
+    # forgotten, and the hotspot opened again, saying so; closed once the box has a network
+    monkeypatch.setattr(hotspot, "CLOSING", 0)
+    now, online, asked = [0.0], [False], []
+    found = [{"name": "Office", "secure": True, "strength": 3, "known": False}]
+    known = []
+
+    def ask(request):
+        asked.append(request)
+        if request == {"hotspot": "status"}:
+            return {"radio": True, "started": False, "known": known}
+        return {"networks": found} if request == {"hotspot": "scan"} else {}
+
+    state = tmp_path / "state.json"
+    spot = hotspot.Hotspot("Leat-7J32", ask, lambda: online[0], lambda: now[0], state)
+    spot.look()
+    now[0] = hotspot.AFTER - 1
+    spot.look()
+    assert spot.passphrase is None and not state.exists()
+    now[0] = hotspot.AFTER
+    spot.look()
+    assert re.fullmatch(r"[a-z2-9]{4}-[a-z2-9]{4}", spot.passphrase)
+    assert asked[-1] == {"hotspot": "start", "name": "Leat-7J32", "passphrase": spot.passphrase}
+    assert json.loads(state.read_text()) == {"name": "Leat-7J32", "passphrase": spot.passphrase,
+                                             "failed": None}  # fmt: skip
+    spot.look()
+    assert spot.networks == found  # of its first scan
+    spot.join("Office", "wrong-passphrase")
+    assert asked[-1] == {"wifi": "join", "name": "Office", "passphrase": "wrong-passphrase"}
+    for _ in range(50):  # closed, of a thread, once its page reached the phone
+        if spot.passphrase is None:
+            break
+        time.sleep(0.01)
+    assert asked[-1] == {"hotspot": "stop"} and not state.exists()
+    now[0] += hotspot.JOINING - 1
+    spot.look()
+    assert spot.passphrase is None
+    now[0] += 1
+    spot.look()  # not joined: forgotten, and the hotspot again, saying so
+    assert {"wifi": "forget", "name": "Office"} in asked and spot.passphrase is not None
+    assert json.loads(state.read_text())["failed"] == "Office"
+    online[0] = True  # a cable plugged in
+    spot.look()
+    assert asked[-1] == {"hotspot": "stop"} and spot.passphrase is None and spot.failed is None
+    # a box that knows a network waits five minutes; a known one back in reach, the hotspot closes
+    online[0], known[:] = False, ["Office"]
+    start = now[0]
+    spot.look()
+    now[0] = start + hotspot.AFTER
+    spot.look()
+    assert spot.passphrase is None
+    now[0] = start + hotspot.KNOWN_AFTER
+    spot.look()
+    assert spot.passphrase is not None
+    found[0]["known"] = True
+    spot.look()
+    assert asked[-1] == {"hotspot": "stop"}
+    forgotten = len([a for a in asked if "forget" in a.values()])
+    now[0] += hotspot.JOINING
+    spot.look()  # not joined after all: the hotspot again, nothing forgotten
+    assert spot.passphrase is not None
+    assert len([a for a in asked if "forget" in a.values()]) == forgotten
+
+
+def test_hotspot_dns():
+    # every name a phone on the hotspot asks for is the box's; of any other kind, none; and a
+    # packet that is no query unanswered
+    def query(name: str, kind: int) -> bytes:
+        labels = b"".join(bytes([len(p)]) + p.encode() for p in name.split("."))
+        return (
+            struct.pack("!HHHHHH", 0x1234, 0x0100, 1, 0, 0, 0)
+            + labels
+            + b"\0"
+            + struct.pack("!HH", kind, 1)
+        )
+
+    asked = query("captive.apple.com", 1)
+    answered = hotspot.answer(asked)
+    assert answered[:2] == b"\x12\x34" and struct.unpack("!H", answered[6:8])[0] == 1
+    assert answered[len(asked) - 12 + 12 :][-4:] == socket.inet_aton("10.42.0.1")
+    assert struct.unpack("!H", hotspot.answer(query("example.com", 28))[6:8])[0] == 0  # AAAA
+    assert hotspot.answer(b"\x00\x01") is None
+    assert hotspot.answer(answered) is None  # an answer, not a query
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as free:
+        free.bind(("127.0.0.1", 0))
+        where = free.getsockname()
+    threading.Thread(target=hotspot.answering, args=(where,), daemon=True).start()
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.settimeout(5)
+        for _ in range(50):
+            s.sendto(asked, where)
+            with contextlib.suppress(TimeoutError):
+                s.settimeout(0.1)
+                reply = s.recv(512)
+                break
+        assert reply[-4:] == socket.inet_aton("127.0.0.1")
+
+
+def test_hotspot_page(tmp_path, monkeypatch):
+    # the hotspot's page, whatever a phone asks: the networks in reach, and the box joining the one
+    # chosen; a passphrase refused said so
+    monkeypatch.setattr(hotspot, "_language", lambda: "en")
+    spot = hotspot.Hotspot("Leat-7J32", lambda r: {}, lambda: False, state=tmp_path / "s.json")
+    spot.networks = [{"name": "Office <5G>", "secure": True, "strength": 3, "known": False}]
+    joined = []
+
+    def join(name, passphrase):
+        if passphrase == "x":
+            raise ValueError("a passphrase is 8 to 63 letters, digits and signs")
+        joined.append((name, passphrase))
+
+    spot.join = join
+    server = hotspot.PageServer(spot, ("127.0.0.1", 0))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_port}"
+    with urllib.request.urlopen(f"{url}/hotspot-detect.html") as r:
+        shown = r.read().decode()
+    assert "Choose the office&#x27;s Wi-Fi" in shown or "Choose the office's Wi-Fi" in shown
+    assert "Office &lt;5G&gt;" in shown and 'value="Office &lt;5G&gt;"' in shown
+    form = urllib.parse.urlencode({"name": "Office <5G>", "passphrase": "kq7x-2mpa"}).encode()
+    with urllib.request.urlopen(urllib.request.Request(url, form)) as r:
+        assert "is joining Office &lt;5G&gt;" in r.read().decode()
+    assert joined == [("Office <5G>", "kq7x-2mpa")]
+    form = urllib.parse.urlencode({"name": "Office", "passphrase": "x"}).encode()
+    with urllib.request.urlopen(urllib.request.Request(url, form)) as r:
+        assert "a passphrase is 8 to 63" in r.read().decode()
+    server.shutdown()
+
+
+def test_screen_hotspot():
+    # the box's own hotspot, while it has no network: a QR code that joins it, and its name and
+    # passphrase to type
+    state = screen.State(NAME, None, hotspot=("Leat-7J32", "kq7x-2mpa"))
+    assert screen.said(state)[0] == "Set up over Wi-Fi" and screen.said(state)[2] is None
+    assert screen.wifi(state) == "WIFI:T:WPA;S:Leat-7J32;P:kq7x-2mpa;;"
+    assert screen.wifi(replace(state, hotspot=("Leat-7J32", 'a;b"c'))) == (
+        'WIFI:T:WPA;S:Leat-7J32;P:a\\;b\\"c;;'
+    )
+    assert screen.wifi(replace(state, address="192.168.1.20")) is None  # on a network: none
+    lines = screen.written(state, "##")
+    assert lines[-2:] == [f"Wi-Fi: {screen.BOLD}Leat-7J32{screen.PLAIN}",
+                          f"Password: {screen.BOLD}kq7x-2mpa{screen.PLAIN}"]  # fmt: skip
+    painted = screen.paint(state, (1280, 720), datetime.datetime(2026, 10, 12, 9, 0))
+    assert painted.size == (1280, 720)

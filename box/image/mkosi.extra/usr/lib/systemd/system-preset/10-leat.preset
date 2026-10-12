@@ -10,6 +10,7 @@ enable leat-proxy.service
 enable leat-address.service
 enable leat-address.timer
 enable leat-screen.service
+enable leat-hotspot.service
 enable leat-system.socket
 enable leat-system-restore.service
 # updates: looked for every few hours, booted at night, kept once Leat answers

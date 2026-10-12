@@ -25,5 +25,13 @@
 }
 
 http:// {
-	redir https://{$LEAT_NAME}{uri} 308
+	# of a phone on the box's own hotspot, whatever it asks: its page, which picks the office's
+	# Wi-Fi, as leat.box.hotspot serves it
+	@hotspot remote_ip 10.42.0.0/24
+	handle @hotspot {
+		reverse_proxy 127.0.0.1:8090
+	}
+	handle {
+		redir https://{$LEAT_NAME}{uri} 308
+	}
 }

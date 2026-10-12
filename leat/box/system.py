@@ -5,6 +5,12 @@ checked, by a helper systemd runs as root for each request, on a socket leat's g
     {"wifi": "scan"}                                       the Wi-Fi networks in reach
     {"wifi": "join", "name": "Office", "passphrase": "…"}  joins one, and again whenever in reach
     {"wifi": "forget", "name": "Office"}                   forgets one
+    {"hotspot": "status"}                                  whether it has Wi-Fi, its own hotspot's
+                                                           and the networks it knows
+    {"hotspot": "start", "name": "Leat-7J32",              opens its own Wi-Fi, a hotspot
+     "passphrase": "…"}
+    {"hotspot": "scan"}                                    the networks in reach of the hotspot
+    {"hotspot": "stop"}                                    closes it, its Wi-Fi joining networks
     {"power": "off"}                                       switches the box off, or "restart"
     {"reset": true}                                        erases the box's state, and restarts
     {"update": "status"}                                   its version, and an update ready, if one
@@ -18,7 +24,8 @@ puts back at boot, by --restore, as an update replaces the system's.
 
 Wi-Fi is iwd's, its addresses systemd-networkd's, as a wired link's are: a network joined is one of
 iwd's known networks, a file of /var/lib/iwd, which iwd joins by itself whenever it is in reach; a
-wired link stays the box's way out while it has one.
+wired link stays the box's way out while it has one. Its radio is iwd's access point instead while
+the box opens a hotspot of its own, as leat.box.hotspot does to be set up without a cable.
 """
 
 import contextlib
@@ -45,6 +52,8 @@ OS_RELEASE = Path("/etc/os-release")
 LONGEST = 4096  # bytes of a request at most
 SCANNING = 6  # seconds a scan for networks is waited for at most
 _PLAIN = re.compile(r"[A-Za-z0-9 _-]+")  # a network's name iwd names its file by, as it is
+_HOTSPOT = re.compile(r"Leat-[A-Z0-9]{4}")  # the name of the box's own hotspot
+_AP = "net.connman.iwd.AccessPoint"
 
 
 class Refused(Exception):
@@ -65,6 +74,8 @@ def handle(request: Any) -> dict[str, Any]:
             return join(request.get("name"), request.get("passphrase"))
         if wifi == "forget":
             return forget(request.get("name"))
+        if "hotspot" in request:
+            return hotspot(request["hotspot"], request.get("name"), request.get("passphrase"))
         if "power" in request:
             return power(request["power"])
         if request.get("reset") is True:
@@ -134,12 +145,7 @@ def join(name: Any, passphrase: Any = None) -> dict[str, Any]:
     if passphrase is None:
         text, kind = "[Settings]\nAutoConnect=true\n", "open"
     else:
-        if (
-            not isinstance(passphrase, str)
-            or not 8 <= len(passphrase) <= 63
-            or not all(" " <= c <= "~" for c in passphrase)
-        ):
-            raise Refused("a passphrase is 8 to 63 letters, digits and signs")
+        _checked_passphrase(passphrase)
         text, kind = f"[Security]\nPassphrase={passphrase}\n", "psk"
     forget(name)  # of another kind, if it was known
     IWD.mkdir(mode=0o700, exist_ok=True)
@@ -154,6 +160,49 @@ def forget(name: Any) -> dict[str, Any]:
     for kind in ("psk", "open", "8021x"):
         (IWD / f"{_file(name)}.{kind}").unlink(missing_ok=True)
     return {}
+
+
+def hotspot(action: Any, name: Any = None, passphrase: Any = None) -> dict[str, Any]:
+    """The box's own hotspot, of its Wi-Fi as iwd's access point: whether the box has Wi-Fi, the
+    hotspot is open, and the networks it knows, of "status"; opened as `name`, of `passphrase`, of
+    "start"; the networks in reach, as scan() has them, and whether the box knows each, of "scan";
+    closed, the radio joining networks again, of "stop"."""
+    device = _device()
+    if action == "status":
+        started = device is not None and _AP in _objects().get(device, {})
+        return {"radio": device is not None, "started": started, "known": _known()}
+    if device is None:
+        raise Refused("this box has no Wi-Fi")
+    if action == "start":
+        if not isinstance(name, str) or not _HOTSPOT.fullmatch(name):
+            raise Refused("a hotspot's name is Leat- and four letters or digits")
+        _checked_passphrase(passphrase)
+        _bus("set-property", device, "net.connman.iwd.Device", "Mode", "s", "ap")
+        for _ in range(SCANNING * 4):  # its access point's interface, once iwd has it
+            if _AP in _objects().get(device, {}):
+                break
+            time.sleep(0.25)
+        _bus("call", device, _AP, "Start", "ss", name, passphrase)
+        return {}
+    if action == "scan":
+        _bus("call", device, _AP, "Scan", check=False)
+        for _ in range(SCANNING * 4):
+            if not _bus("get-property", device, _AP, "Scanning", check=False).get("data"):
+                break
+            time.sleep(0.25)
+        ordered = _bus("call", device, _AP, "GetOrderedNetworks")["data"][0]
+        known, networks = set(_known()), list[dict[str, Any]]()
+        for found in map(_properties, ordered):
+            if (network := found.get("Name")) and network not in {n["name"] for n in networks}:
+                networks.append({"name": network, "secure": found.get("Type") != "open",
+                                 "strength": _strength(found.get("SignalStrength") or -10000),
+                                 "known": network in known})  # fmt: skip
+        return {"networks": networks}
+    if action == "stop":
+        _bus("call", device, _AP, "Stop", check=False)
+        _bus("set-property", device, "net.connman.iwd.Device", "Mode", "s", "station")
+        return {}
+    raise Refused(f"there is no hotspot request {action!r}")
 
 
 def power(how: Any) -> dict[str, Any]:
@@ -322,11 +371,36 @@ def _objects() -> dict[str, dict[str, Any]]:
 
 
 def _station() -> str | None:
-    # the path of iwd's first Wi-Fi station, or None without a Wi-Fi device
+    # the path of iwd's first Wi-Fi station, or None without a Wi-Fi device, or while it is the
+    # box's hotspot
     for path, interfaces in sorted(_objects().items()):
         if "net.connman.iwd.Station" in interfaces:
             return path
     return None
+
+
+def _device() -> str | None:
+    # the path of iwd's first Wi-Fi device, a station or an access point, or None without one
+    for path, interfaces in sorted(_objects().items()):
+        if "net.connman.iwd.Device" in interfaces:
+            return path
+    return None
+
+
+def _known() -> list[str]:
+    # the names of the Wi-Fi networks the box knows, which iwd joins whenever they are in reach
+    return sorted(_properties(i["net.connman.iwd.KnownNetwork"]).get("Name") or ""
+                  for i in _objects().values() if "net.connman.iwd.KnownNetwork" in i)  # fmt: skip
+
+
+def _checked_passphrase(passphrase: Any) -> None:
+    # raises Refused of what is no WPA2 passphrase
+    if (
+        not isinstance(passphrase, str)
+        or not 8 <= len(passphrase) <= 63
+        or not all(" " <= c <= "~" for c in passphrase)
+    ):
+        raise Refused("a passphrase is 8 to 63 letters, digits and signs")
 
 
 def _properties(interface: dict[str, Any]) -> dict[str, Any]:

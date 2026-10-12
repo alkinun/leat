@@ -2,6 +2,8 @@
 # whenever it has one; its address asked for by its link's own, as a wired link's is
 [Match]
 Type=wlan
+# not the box's own hotspot, of 82-hotspot.network
+WLANInterfaceType=station
 
 [Network]
 DHCP=yes

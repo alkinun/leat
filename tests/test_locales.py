@@ -82,6 +82,8 @@ ERRORS = {
     "too many devices ask to join now: try again in a few minutes",
     "you cannot remove yourself: ask another admin",
     "type {word} to erase everything on this Leat",
+    "a passphrase is 8 to 63 letters, digits and signs",
+    "a Wi-Fi network's name is 1 to 32 bytes",
 }
 
 
@@ -145,8 +147,10 @@ def _page() -> set[str]:
 
 
 def _said() -> set[str]:
-    # the screen's words: what said() returns, holds() and every t() of a text
-    tree = ast.parse((ROOT / "box" / "screen.py").read_text())
+    # the screen's words: what said() returns, holds() and every t() of a text; and the hotspot
+    # page's, of its every t()
+    tree = ast.parse((ROOT / "box" / "screen.py").read_text() + "\n"
+                     + (ROOT / "box" / "hotspot.py").read_text())  # fmt: skip
     found = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name in ("said", "holds"):
