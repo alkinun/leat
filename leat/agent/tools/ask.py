@@ -105,9 +105,10 @@ def tools(reader: Client, index: Index | None = None) -> list[Tool]:
                 "description": "the files or folders to ask, by their paths; leave them out to ask "
                 "every file",
             },
-            "name": {"type": "string", "description": "the spreadsheet's name, as 'Invoices.xlsx'"},
+            "name": {"type": "string", "description": "a short name of what the table holds, as "
+                     "'March invoices.xlsx'"},
         },
-        "required": ["question"],
+        "required": ["question", "name"],
     }  # fmt: skip
     return [
         Tool(

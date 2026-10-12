@@ -165,7 +165,7 @@ Internet: an admin turns it off in Settings, and the model is offered no tool th
 
 Data protection: `docs/datenschutz/` holds, in German, the papers an office's data-protection officer or chamber asks for: what leaves the box and what never does, the box's technical and organisational measures (Art. 32 GDPR), a data-protection impact assessment filled in for Leat (Art. 35), and notes on § 203 StGB, § 43e BRAO and the AI Act's AI literacy (Art. 4). Drafts, to be reviewed by a lawyer before they go to customers, and kept true to what the box does as it changes.
 
-Look: the app's is Leat's own, black on white and white on black, sharp, with lines rather than shadows, light, dark or as the system is, as Settings chooses on each device.
+Look: the app's is Leat's own, black on white and white on black, with lines rather than shadows, light, dark or as the system is, as Settings chooses on each device, in Inter, which ships with it. Every page keeps the standards the stylesheet's head writes down: one type scale, one family of buttons, one field, one row, one notice. Settings is one page of sections, a menu above them: You, and of an admin People, The box and Maintenance, of a box's own settings none where Leat runs on no box.
 
 ## Measurements
 
