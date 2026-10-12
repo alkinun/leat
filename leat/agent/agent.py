@@ -594,27 +594,21 @@ class Agent:
                 self.index.forget(_folder(None, person))
 
     def settle(self) -> None:
-        """Moves the files that are no one's into the first person's space, once the box has one:
-        those of the workspace before it had spaces, at its top, and those of a box that had no
-        people, no one's own, at people/0."""
-        if self.workspace is None:
-            return
-        root, no_one = self.workspace.root, self.workspace.root / "people" / "0"
+        """Moves the files of a box that had no people, no one's own, at people/0, into the first
+        person's space, once the box has one."""
+        no_one = self.workspace.root / "people" / "0" if self.workspace else None
         first = next((p["id"] for p in self.store.people()), None)
-        strays = [path for path in root.iterdir() if path.name not in ("people", "projects")]
-        if first is not None and no_one.is_dir():
-            strays += list(no_one.iterdir())
-        if strays:
-            home = self._space(None, first)
-            for path in strays:  # each by a name free there; a hidden one, of saved pages, once
-                if not path.name.startswith("."):
-                    path.rename(home.root / home.free(path.name))
-                elif (home.root / path.name).exists():
-                    shutil.rmtree(path, ignore_errors=True)
-                else:
-                    path.rename(home.root / path.name)
-        if first is not None and no_one.is_dir():
-            no_one.rmdir()
+        if no_one is None or first is None or not no_one.is_dir():
+            return
+        home = self._space(None, first)
+        for path in no_one.iterdir():  # each by a name free there; a hidden one, of saved pages,
+            if not path.name.startswith("."):  # once
+                path.rename(home.root / home.free(path.name))
+            elif (home.root / path.name).exists():
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                path.rename(home.root / path.name)
+        no_one.rmdir()
 
     def models(self) -> list[dict[str, Any]]:
         """The engine's models, as it lists them. Raises EngineError."""

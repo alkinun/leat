@@ -22,7 +22,7 @@ from leat.agent.agent import LAST, Agent, Busy, NotFound, Refused
 from leat.agent.client import Client, EngineError
 from leat.agent.context import message as _api
 from leat.agent.server import BODY, HSTS, POLICY, Server
-from leat.agent.store import Store
+from leat.agent.store import BASE, Store
 from leat.agent.tools import Result, Tool, strings
 from leat.box import system
 from tests.agents import HOLD, call, cookie, ended, request, until
@@ -962,33 +962,10 @@ def test_background(agent, engine, events):
     assert len(engine.requests) == 4
 
 
-def test_migration(tmp_path):
-    # a state of the first version, conversations alone, is brought up to date, keeping them
-    db = sqlite3.connect(tmp_path / "leat.db")
-    db.executescript("""
-        CREATE TABLE conversations (id TEXT PRIMARY KEY, title TEXT NOT NULL, created REAL NOT NULL,
-                                    updated REAL NOT NULL);
-        CREATE TABLE messages (conversation TEXT NOT NULL REFERENCES conversations (id)
-                               ON DELETE CASCADE, position INTEGER NOT NULL, message TEXT NOT NULL,
-                               PRIMARY KEY (conversation, position));
-        INSERT INTO conversations VALUES ('0123456789ab', 'Bulbs', 0, 0);
-        INSERT INTO messages VALUES ('0123456789ab', 0, '{"role": "system", "content": "tulips"}'),
-                                    ('0123456789ab', 1, '{"role": "user", "content": "Tulips?"}'),
-            ('0123456789ab', 2, '{"role": "assistant", "content": "", "tool_calls": [{"id": "1", '
-             || '"type": "function", "function": {"name": "search", "arguments": "{}"}}]}'),
-            ('0123456789ab', 3, '{"role": "tool", "tool_call_id": "1", "name": "search", '
-             || '"content": "{\\"name\\": \\"search\\", \\"tulips\\": 1}"}');
-    """)  # fmt: skip
-    db.close()
+def test_state(tmp_path):
+    # a state made anew is of SCHEMA, at BASE; one of BASE opened again as it is, what it holds
+    # kept; one of a Leat older than any this one reads refused, untouched
     store = Store(tmp_path / "leat.db")
-    messages = store.messages("0123456789ab")
-    assert [m["content"] for m in messages[:2]] == ["tulips", "Tulips?"]
-    # the web's search, renamed search_web, in its calls and answers, but not in what they said
-    assert messages[2]["tool_calls"][0]["function"]["name"] == "search_web"
-    assert messages[3]["name"] == "search_web"
-    assert messages[3]["content"] == '{"name": "search", "tulips": 1}'
-    assert Store(tmp_path / "leat.db").conversations()[0]["id"] == "0123456789ab"
-    # of the household's features gone, nothing is left
     tables = {
         name for (name,) in store._db.execute("SELECT name FROM sqlite_schema WHERE type = 'table'")
     }
@@ -996,11 +973,16 @@ def test_migration(tmp_path):
         "conversations", "messages", "people", "devices", "projects", "workflows", "settings",
         "activity", "members",
     }  # fmt: skip
-    columns = [row[1] for row in store._db.execute("PRAGMA table_info(conversations)")]
-    assert columns == ["id", "title", "created", "updated", "context", "named", "person", "project"]
-    # and a conversation deleted takes its messages with it, as the state's references hold
-    store.delete("0123456789ab")
+    assert store._db.execute("PRAGMA user_version").fetchone() == (BASE,)
+    id = store.create("Bulbs", [{"role": "user", "content": "Tulips?"}])["id"]
+    assert Store(tmp_path / "leat.db").messages(id)[0]["content"] == "Tulips?"
+    store.delete(id)  # and a conversation deleted takes its messages with it
     assert store._db.execute("SELECT count(*) FROM messages").fetchone() == (0,)
+    old = sqlite3.connect(tmp_path / "old.db")
+    old.executescript("CREATE TABLE conversations (id TEXT); PRAGMA user_version = 20;")
+    old.close()
+    with pytest.raises(ValueError, match="older than any"):
+        Store(tmp_path / "old.db")
 
 
 def test_clearing(agent, engine, events):

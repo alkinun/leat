@@ -371,14 +371,12 @@ def test_spaces(agent, workspace, engine, tmp_path):
 
 
 def test_settled(tmp_path):
-    # the files of the workspace before it had spaces, and those of no one's, become the owner's
+    # the files of a box of no people, no one's, become its first person's
     workspace = Workspace(tmp_path / "workspace")
-    (workspace.root / "old.txt").write_text("old")
-    (workspace.root / ".web").mkdir()
     store = Store(tmp_path / "leat.db")
     agent = Agent(store, Client("http://127.0.0.1:9"), [], workspace)
-    assert [f["name"] for f in agent.space().files()] == ["old.txt"]
-    assert (workspace.root / "people" / "0" / ".web").is_dir()
+    agent.space().path("old.txt").write_text("old")
+    agent.space().path(".web").mkdir()
     owner = store.add_person("Alkın")["id"]
     (workspace.root / "people" / str(owner)).mkdir(parents=True)
     (workspace.root / "people" / str(owner) / "old.txt").write_text("kept")

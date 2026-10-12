@@ -38,258 +38,98 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-# each takes the state from the version of its index to the next: SQLite's user_version
-_MIGRATIONS = [
-    """
-    CREATE TABLE IF NOT EXISTS conversations (
-      id TEXT PRIMARY KEY,
-      title TEXT NOT NULL,
-      created REAL NOT NULL,
-      updated REAL NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS messages (
-      conversation TEXT NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
-      position INTEGER NOT NULL,
-      message TEXT NOT NULL,
-      PRIMARY KEY (conversation, position)
-    );
-    """,
-    """
-    CREATE TABLE memories (
-      id INTEGER PRIMARY KEY,
-      text TEXT NOT NULL,
-      created REAL NOT NULL
-    );
-    CREATE VIRTUAL TABLE search USING fts5 (
-      content, conversation UNINDEXED, position UNINDEXED, role UNINDEXED,
-      tokenize = 'porter unicode61'
-    );
-    INSERT INTO search
-      SELECT message ->> '$.content', conversation, position, message ->> '$.role' FROM messages
-      WHERE message ->> '$.role' IN ('user', 'assistant') AND message ->> '$.content' != '';
-    """,
-    """
-    ALTER TABLE conversations ADD COLUMN context TEXT NOT NULL DEFAULT '{}';
-    """,
-    """
-    ALTER TABLE memories ADD COLUMN category TEXT NOT NULL DEFAULT 'about';
-    ALTER TABLE conversations ADD COLUMN reviewed INTEGER NOT NULL DEFAULT 0;
-    ALTER TABLE conversations ADD COLUMN named INTEGER NOT NULL DEFAULT 0;
-    """,
-    # a memory's number is never another's, as a conversation's prompt names the memories of when
-    # it began: one forgotten there must not be one remembered since
-    """
-    CREATE TABLE numbered (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      text TEXT NOT NULL,
-      created REAL NOT NULL,
-      category TEXT NOT NULL DEFAULT 'about'
-    );
-    INSERT INTO numbered SELECT id, text, created, category FROM memories;
-    DROP TABLE memories;
-    ALTER TABLE numbered RENAME TO memories;
-    """,
-    """
-    CREATE TABLE tasks (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      prompt TEXT NOT NULL,
-      repeat TEXT NOT NULL,
-      first REAL NOT NULL,
-      next REAL NOT NULL,
-      conversation TEXT,
-      created REAL NOT NULL
-    );
-    """,
-    """
-    CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-    """,
-    # a memory's dates: when it was last made, changed or said again, and a plan's last day; and
-    # every memory forgotten or changed, as it was, to undo
-    """
-    ALTER TABLE memories ADD COLUMN confirmed REAL;
-    UPDATE memories SET confirmed = created;
-    ALTER TABLE memories ADD COLUMN until TEXT;
-    CREATE TABLE forgotten (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      memory INTEGER NOT NULL,
-      text TEXT NOT NULL,
-      category TEXT NOT NULL,
-      until TEXT,
-      created REAL NOT NULL,
-      change TEXT NOT NULL,
-      by TEXT NOT NULL,
-      at REAL NOT NULL
-    );
-    """,
-    # the household: its people, each device paired to one, and whose each conversation, memory
-    # and task is; a memory of no one's is the household's
-    """
-    CREATE TABLE people (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      owner INTEGER NOT NULL DEFAULT 0,
-      created REAL NOT NULL
-    );
-    CREATE TABLE devices (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      person INTEGER NOT NULL REFERENCES people (id) ON DELETE CASCADE,
-      name TEXT NOT NULL,
-      token TEXT NOT NULL UNIQUE,
-      created REAL NOT NULL,
-      seen REAL NOT NULL
-    );
-    ALTER TABLE conversations ADD COLUMN person INTEGER REFERENCES people (id);
-    ALTER TABLE memories ADD COLUMN person INTEGER REFERENCES people (id);
-    ALTER TABLE forgotten ADD COLUMN person INTEGER;
-    ALTER TABLE tasks ADD COLUMN person INTEGER REFERENCES people (id);
-    """,
-    # the household's characters, each a conversation's to play; one removed is retired, its
-    # conversations its still
-    """
-    CREATE TABLE characters (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      about TEXT NOT NULL,
-      created REAL NOT NULL,
-      removed REAL
-    );
-    ALTER TABLE conversations ADD COLUMN character INTEGER REFERENCES characters (id);
-    """,
-    # the household's lists, as its shopping, and their items
-    """
-    CREATE TABLE lists (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      created REAL NOT NULL
-    );
-    CREATE TABLE items (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      list INTEGER NOT NULL REFERENCES lists (id) ON DELETE CASCADE,
-      text TEXT NOT NULL,
-      created REAL NOT NULL
-    );
-    """,
-    # a conversation in a group chat, whose words are not the user's alone
-    """
-    ALTER TABLE conversations ADD COLUMN shared INTEGER NOT NULL DEFAULT 0;
-    """,
-    # a person of the household who is a child, whose conversations keep to a child's rules
-    """
-    ALTER TABLE people ADD COLUMN child INTEGER NOT NULL DEFAULT 0;
-    """,
-    # a task that is a check, which tells the user only if its condition holds
-    """
-    ALTER TABLE tasks ADD COLUMN condition TEXT;
-    """,
-    # the household's features gone: memories, tasks, characters, lists, the search of what was said
-    # the settings, a conversation's character and group chat and how far it was reviewed, and
-    # whether a person is a child. The conversations are made anew without those columns, which
-    # SQLite drops from no table that refers to another; their messages kept, as foreign keys are
-    # not enforced while the state migrates
-    """
-    CREATE TABLE kept (
-      id TEXT PRIMARY KEY,
-      title TEXT NOT NULL,
-      created REAL NOT NULL,
-      updated REAL NOT NULL,
-      context TEXT NOT NULL DEFAULT '{}',
-      named INTEGER NOT NULL DEFAULT 0,
-      person INTEGER REFERENCES people (id)
-    );
-    INSERT INTO kept SELECT id, title, created, updated, context, named, person FROM conversations;
-    DROP TABLE conversations;
-    ALTER TABLE kept RENAME TO conversations;
-    DROP TABLE memories;
-    DROP TABLE forgotten;
-    DROP TABLE tasks;
-    DROP TABLE characters;
-    DROP TABLE items;
-    DROP TABLE lists;
-    DROP TABLE search;
-    DROP TABLE settings;
-    ALTER TABLE people DROP COLUMN child;
-    """,
-    # the projects, each a person's own or shared, and the project a conversation is held in
-    """
-    CREATE TABLE projects (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      instructions TEXT NOT NULL DEFAULT '',
-      person INTEGER REFERENCES people (id),
-      shared INTEGER NOT NULL DEFAULT 0,
-      created REAL NOT NULL,
-      updated REAL NOT NULL
-    );
-    ALTER TABLE conversations ADD COLUMN project TEXT REFERENCES projects (id);
-    """,
-    # the workflows, each a request saved by its name, a project's or a person's own
-    """
-    CREATE TABLE workflows (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      prompt TEXT NOT NULL,
-      project TEXT REFERENCES projects (id) ON DELETE CASCADE,
-      person INTEGER REFERENCES people (id) ON DELETE CASCADE,
-      created REAL NOT NULL
-    );
-    """,
-    # the box's settings, each a value of JSON by its key
-    """
-    CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-    """,
-    # what was done on the box: when, by whom, or by Leat for whom, what, in which project by its
-    # name, and of what
-    """
-    CREATE TABLE activity (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      at REAL NOT NULL,
-      person INTEGER,
-      leat INTEGER NOT NULL DEFAULT 0,
-      action TEXT NOT NULL,
-      place TEXT,
-      detail TEXT
-    );
-    CREATE INDEX activity_at ON activity (at);
-    """,
-    # the folder of the box's a project's files are synced with, if one, as a network drive's,
-    # when they last were, and why they were not, if they were not
-    """
-    ALTER TABLE projects ADD COLUMN source TEXT;
-    ALTER TABLE projects ADD COLUMN synced REAL;
-    ALTER TABLE projects ADD COLUMN unsynced TEXT;
-    """,
-    # the web's search tool renamed search_web, beside search_files: its calls and their answers.
-    # In a message's JSON '"name": "search"' is a name's alone, as the quotes of text are escaped
-    """
-    UPDATE messages SET message = replace(replace(message,
-      '"name": "search",', '"name": "search_web",'), '"name": "search"}', '"name": "search_web"}')
-    WHERE json_extract(message, '$.role') IN ('assistant', 'tool');
-    """,
-    # a workflow's schedule, if it runs by itself, the time it counts from, and who set it, whose
-    # its runs are
-    """
-    ALTER TABLE workflows ADD COLUMN schedule TEXT;
-    ALTER TABLE workflows ADD COLUMN since REAL;
-    ALTER TABLE workflows ADD COLUMN by INTEGER REFERENCES people (id) ON DELETE SET NULL;
-    """,
-    # the box's admins, of whom there may be several, as the one owner was
-    """
-    ALTER TABLE people RENAME COLUMN owner TO admin
-    """,
-    # the people a project is shared with, besides whoever made it, if it is not with everyone
-    """
-    CREATE TABLE members (
-      project TEXT NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
-      person INTEGER NOT NULL REFERENCES people (id) ON DELETE CASCADE,
-      PRIMARY KEY (project, person)
-    )
-    """,
-    # what a device is: an app's, of a browser's cookie, or a network drive's, of a password its
-    # computer keeps, which reaches the person's files alone
-    """
-    ALTER TABLE devices ADD COLUMN kind TEXT NOT NULL DEFAULT 'app'
-    """,
-]
+# the state, as a new one is made: of version BASE, SQLite's user_version, as the 25 migrations that
+# made it up to the box's first were folded into it
+SCHEMA = """
+-- the conversations, each a person's, or no one's before the box has its first person, in a
+-- project or not; its context, what its prompt keeps of it; whether the model named it
+CREATE TABLE conversations (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  created REAL NOT NULL,
+  updated REAL NOT NULL,
+  context TEXT NOT NULL DEFAULT '{}',
+  named INTEGER NOT NULL DEFAULT 0,
+  person INTEGER REFERENCES people (id),
+  project TEXT REFERENCES projects (id)
+);
+-- their messages, each a dict as JSON, in order
+CREATE TABLE messages (
+  conversation TEXT NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
+  position INTEGER NOT NULL,
+  message TEXT NOT NULL,
+  PRIMARY KEY (conversation, position)
+);
+-- the box's people, its admins among them
+CREATE TABLE people (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  admin INTEGER NOT NULL DEFAULT 0,
+  created REAL NOT NULL
+);
+-- each device paired to a person, by its secret's hash: an app's, of a browser's cookie, or a
+-- network drive's, of a password its computer keeps, which reaches the person's files alone
+CREATE TABLE devices (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  person INTEGER NOT NULL REFERENCES people (id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  token TEXT NOT NULL UNIQUE,
+  created REAL NOT NULL,
+  seen REAL NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'app'
+);
+-- the projects, each a person's own, shared with everyone or with its members; and the folder of
+-- the box's its files are synced with, if one, as a network drive's, when they last were, and why
+-- they were not, if they were not
+CREATE TABLE projects (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  instructions TEXT NOT NULL DEFAULT '',
+  person INTEGER REFERENCES people (id),
+  shared INTEGER NOT NULL DEFAULT 0,
+  created REAL NOT NULL,
+  updated REAL NOT NULL,
+  source TEXT,
+  synced REAL,
+  unsynced TEXT
+);
+-- the people a project is shared with, besides whoever made it, if it is not with everyone
+CREATE TABLE members (
+  project TEXT NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
+  person INTEGER NOT NULL REFERENCES people (id) ON DELETE CASCADE,
+  PRIMARY KEY (project, person)
+);
+-- the workflows, each a request saved by its name, a project's or a person's own; its schedule,
+-- if it runs by itself, the time it counts from, and who set it, whose its runs are
+CREATE TABLE workflows (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  project TEXT REFERENCES projects (id) ON DELETE CASCADE,
+  person INTEGER REFERENCES people (id) ON DELETE CASCADE,
+  created REAL NOT NULL,
+  schedule TEXT,
+  since REAL,
+  by INTEGER REFERENCES people (id) ON DELETE SET NULL
+);
+-- the box's settings, each a value of JSON by its key
+CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+-- what was done on the box: when, by whom, or by Leat for whom, what, in which project by its
+-- name, and of what
+CREATE TABLE activity (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at REAL NOT NULL,
+  person INTEGER,
+  leat INTEGER NOT NULL DEFAULT 0,
+  action TEXT NOT NULL,
+  place TEXT,
+  detail TEXT
+);
+CREATE INDEX activity_at ON activity (at);
+"""
+BASE = 25
+# each takes the state from the version BASE and its index to the next
+_MIGRATIONS: list[str] = []
 KEPT = 365 * 86400  # seconds the activity is kept
 # a conversation's columns as the apps list it
 _SUMMARY = "id, title, created, updated, person, project"
@@ -309,7 +149,12 @@ class Store:
         self._lock = threading.Lock()
         self._db.execute("PRAGMA journal_mode = WAL")
         (version,) = self._db.execute("PRAGMA user_version").fetchone()
-        for i, migration in enumerate(_MIGRATIONS[version:], version + 1):
+        if version == 0 and self._db.execute("SELECT 1 FROM sqlite_schema").fetchone() is None:
+            self._db.executescript(f"BEGIN; {SCHEMA}; PRAGMA user_version = {BASE}; COMMIT;")
+            version = BASE
+        if version < BASE:
+            raise ValueError(f"{path} is the state of a Leat older than any this one reads")
+        for i, migration in enumerate(_MIGRATIONS[version - BASE :], version + 1):
             with self._db:
                 self._db.execute("BEGIN")
                 for statement in migration.split(";"):
