@@ -1,5 +1,5 @@
-"""The agent's HTTP server: the app at /, its API at /api, and every change as an event, streamed to
-each app watching.
+"""The agent's HTTP server: the app at /, its API at /api, every change as an event, streamed to
+each app watching, and each person's network drive at /dav, as leat.agent.dav answers it.
 
 It answers this machine and its own network alone. A request must name the box by an address or
 a local name, which a site's page turned on the box by DNS rebinding cannot; and a write must come
@@ -12,7 +12,8 @@ is sent over HTTPS alone, to exactly that name. Every page of the app runs its o
 and images alone, framed by none, and a link followed tells no site the box's name.
 
 Every request but for the app's own files, the box's setup and a device's request to join comes
-from a device paired to one of the box's people, by the secret its cookie holds. A person sees and
+from a device paired to one of the box's people, by the secret its cookie holds, or, at /dav, by a
+drive's password, as Basic authentication sends it. A person sees and
 changes their own conversations and files, and their own projects and those shared with them, with
 their files, and lets in their own new devices; an admin looks after the box: its people and
 devices, its settings and the engine's model, never another's own conversations or files.

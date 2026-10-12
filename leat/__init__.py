@@ -2,5 +2,7 @@
 runs beside it.
 
 The engine is leat.engine's Engine, its chat templates leat.chat's, its server leat.server's; the
-agent, leat.agent, reaches the engine over HTTP alone, and imports none of it, nor tinygrad.
+agent, leat.agent, reaches the engine over HTTP alone, and imports none of it but leat.defaults'
+EFFORTS, nor tinygrad. The box's services are leat.box's, and the words of every language Leat
+speaks leat.locales'.
 """

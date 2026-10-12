@@ -78,7 +78,8 @@ auf einer Box im Büro läuft (Leat).
 
 - Die Dateien, Chats und Anfragen an das KI-Modell verlassen die Box nicht. Das Modell läuft auf der
   Box.
-- Was die Box verlässt (Websuchen, Updates, ihre private Adresse, ihr Zertifikat, die Uhrzeit), ist in
+- Was die Box verlässt (Websuchen und aufgerufene Webseiten, Updates, ihre private Adresse, ihr
+  Zertifikat, die minütliche Prüfung von Internetverbindung und Namen, die Uhrzeit), ist in
   [1-was-die-box-verlaesst.md](1-was-die-box-verlaesst.md) abschließend beschrieben. Websuchen und das
   Lesen von Webseiten lassen sich abschalten.
 - Keine Telemetrie. Eine Diagnose-Datei für den Support lädt nur ein Admin selbst herunter; sie
@@ -90,8 +91,10 @@ auf einer Box im Büro läuft (Leat).
   eine Datei hochgeladen, gelöscht oder von Leat gelesen, ein Projekt geteilt, eine Person
   hereingelassen, eine Einstellung geändert. Es enthält nie, was jemand gefragt oder Leat geantwortet
   hat. Admins sehen es in den Einstellungen. Es wird ein Jahr aufbewahrt und dann gelöscht.
-- **Frühere Versionen:** Wird eine Datei geändert oder gelöscht, bleibt ihre vorige Fassung 30 Tage
-  erhalten und lässt sich wiederherstellen.
+- **Frühere Versionen:** Wird eine Datei geändert oder gelöscht, bleibt ihre vorige Fassung erhalten
+  und lässt sich wiederherstellen: bis zu 20 Fassungen je Datei, höchstens 30 Tage.
+- **Nutzungszahlen:** Admins sehen in den Einstellungen je Person, wie viele Chats sie im laufenden
+  Monat begonnen und wie viele Nachrichten sie gesendet hat: gezählt, nicht gelesen.
 - **Zitate werden geprüft:** Zitiert Leat aus einer Quelle, prüft die Box das Zitat wörtlich gegen die
   zitierte Datei oder Seite und markiert es als gefunden oder nicht gefunden.
 
@@ -105,9 +108,8 @@ auf einer Box im Büro läuft (Leat).
   ablaufendes Zertifikat, Name im Büronetz nicht auffindbar, fehlgeschlagenes Update.
 - **Datensicherung:** Leat erstellt derzeit **keine eigene Sicherung** außerhalb der Box. Die Box ist
   für die Dateien, die Leat erstellt, und für die Chats die einzige Ablage. Das Büro sichert, was es
-  aufbewahren muss, in seiner eigenen Ablage (etwa indem es von Leat erstellte Dokumente dort
-  speichert) oder gleicht Projekte mit einem Ordner seines Netzlaufwerks ab, sodass die Akten selbst
-  dort liegen. ⟨Maßnahme des Büros eintragen.⟩
+  aufbewahren muss, in seiner eigenen Ablage, etwa indem es von Leat erstellte Dokumente über das
+  Netzlaufwerk der Box (im Explorer oder Finder) dorthin kopiert. ⟨Maßnahme des Büros eintragen.⟩
 - **Stromausfall:** Die Datenbank der Chats (SQLite mit Write-Ahead-Log) und die Einstellungen der Box
   übersteht einen Stromausfall; eine Datei, die gerade hochgeladen wurde, muss gegebenenfalls erneut
   hochgeladen werden. Nach dem Wiedereinschalten startet Leat von selbst.
@@ -115,7 +117,7 @@ auf einer Box im Büro läuft (Leat).
 ## 4. Löschung
 
 - **Chats und Dateien** löscht jede Person selbst; frühere Versionen von Dateien werden nach 30 Tagen
-  gelöscht.
+  gelöscht, mit einem gelöschten Projekt oder einer entfernten Person sofort.
 - **Eine Person entfernen** löscht ihre Chats, ihre Geräte, ihre eigenen Dateien und Projekte. Geteilte
   Projekte gehen an eine Person über, die sie schon sieht.
 - **Alles löschen** (Werkseinstellung) löscht die verschlüsselte Datenpartition und legt sie mit

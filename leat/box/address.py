@@ -4,7 +4,7 @@ day as they are, so that a name lost is had again.
 
     python -m leat.box.address [--root /etc/leat] [--state /var/lib/leat-address]
 
-A systemd timer runs it at boot and every few minutes; it asks the registry only when there is
+A systemd timer runs it at boot and every 30 s; it asks the registry only when there is
 something to tell. The box's secret comes as a systemd credential, registry-secret, or from the
 root's file of that name.
 """

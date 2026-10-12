@@ -32,7 +32,9 @@ Leat läuft vollständig auf einer Box im Büro; das KI-Modell ebenso.
   Verfahrensdaten; gegebenenfalls besondere Kategorien nach Art. 9 DSGVO (etwa Gesundheitsdaten in
   Personenschadensachen) und Daten über Straftaten nach Art. 10 DSGVO
 - Chats: Fragen der Beschäftigten und Antworten von Leat
-- Nutzungsdaten: welche Person mit welchem Gerät was getan hat (Aktivitätsprotokoll, ohne Inhalte)
+- Nutzungsdaten: welche Person wann was getan hat (Aktivitätsprotokoll, ohne Inhalte, mit Datei- und
+  Projektnamen); je Person die Zahl der im laufenden Monat begonnenen Chats und gesendeten
+  Nachrichten, die Admins in den Einstellungen sehen (gezählt, nicht gelesen)
 
 ### 1.4 Empfänger
 
@@ -45,7 +47,8 @@ Leat läuft vollständig auf einer Box im Büro; das KI-Modell ebenso.
 ### 1.5 Speicherort und -dauer
 
 - Auf der Box im Büro, verschlüsselt. Keine Übermittlung in Drittländer für Inhalte.
-- Chats und Dateien: bis die Person sie löscht; frühere Fassungen von Dateien 30 Tage.
+- Chats und Dateien: bis die Person sie löscht; frühere Fassungen von Dateien höchstens 30 Tage, bis
+  zu 20 je Datei.
 - Aktivitätsprotokoll: ein Jahr.
 - ⟨Aufbewahrungsfristen des Büros für Handakten, § 50 BRAO, beachten: Leat ist ein Arbeitsmittel,
   nicht die Handakte.⟩
@@ -78,7 +81,7 @@ Leat läuft vollständig auf einer Box im Büro; das KI-Modell ebenso.
 | Unbefugter Zugriff aus dem Netz | gering | hoch | Nur im Büronetz erreichbar; HTTPS; jedes Gerät einzeln zugelassen; kein Fernzugang (TOM 1.2) | gering |
 | Zugriff des Anbieters | gering | hoch | Kein Fernzugang, keine Inhalte beim Anbieter, signierte und quelloffene Software | gering |
 | Datenverlust (Defekt der Box) | gering | mittel | ⟨Sicherung durch das Büro, TOM 3⟩ | ⟨…⟩ |
-| Überwachung der Beschäftigten über das Aktivitätsprotokoll | gering | mittel | Protokoll ohne Inhalte, nur für Admins, ein Jahr; ⟨Information der Beschäftigten, ggf. Betriebsvereinbarung⟩ | gering |
+| Überwachung der Beschäftigten über das Aktivitätsprotokoll und die Nutzungszahlen | gering | mittel | Protokoll ohne Inhalte, nur für Admins, ein Jahr; Nutzungszahlen nur gezählt, nur für Admins; ⟨Information der Beschäftigten, ggf. Betriebsvereinbarung⟩ | gering |
 
 ## 4. Abhilfemaßnahmen
 

@@ -15,5 +15,7 @@ nicht selbst schreiben muss:
 | [3-dsfa.md](3-dsfa.md) | Vorlage einer Datenschutz-Folgenabschätzung (Art. 35 DSGVO), für Leat ausgefüllt |
 | [4-berufsrecht-und-ki-verordnung.md](4-berufsrecht-und-ki-verordnung.md) | Hinweise zu § 203 StGB, § 43e BRAO und zur KI-Kompetenz nach Art. 4 der KI-Verordnung |
 
-Stand: Leat-Version 2026.10, die Box mit Strix Halo. Ändert sich, was die Box tut, ändern sich
-diese Unterlagen mit; sie beschreiben die Software, wie sie in diesem Repository steht.
+Stand: Leat-Version 2026.10, die Box mit Strix Halo, auf der das KI-Modell selbst läuft. Ändert sich,
+was die Box tut, ändern sich diese Unterlagen mit. Sie gelten nicht für ein Testgerät, das ein
+KI-Modell auf einem anderen Rechner nutzt (`/etc/leat/engine.env`): Dessen Anfragen an das Modell
+verlassen das Gerät. ⟨Bis das Abbild der Box das Modell selbst startet, ist das bei jedem Gerät so.⟩

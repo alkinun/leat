@@ -8,7 +8,8 @@ die Leat Anfragen schickt, und der Anbieter von Leat hat keinen Zugang zur Box.
 
 ## Was die Box nie verlässt
 
-- **Die Dateien des Büros**, ob hochgeladen, aus einem Netzlaufwerk abgeglichen oder von Leat erstellt.
+- **Die Dateien des Büros**, ob hochgeladen, über das Netzlaufwerk der Box abgelegt oder von Leat
+  erstellt.
 - **Die Chats**: was jemand fragt und was Leat antwortet.
 - **Was Leat aus den Dateien liest**: der Suchindex, die Auszüge, die Antworten auf Fragen an viele
   Dateien.
@@ -28,10 +29,10 @@ Es gibt keine Telemetrie und keine Nutzungsstatistik, die an den Anbieter geht.
 | **Aufgerufene Webseiten**: ihre Adresse | Die jeweilige Webseite | Nur wenn Leat eine Seite liest | Ja, mit der Websuche |
 | **Updates**: eine Abfrage, ob es ein neues Update gibt, und sein Download | leatbox.com, der Server des Anbieters | Alle paar Stunden | Nein; die Box holt Updates nur ab, sie sendet nichts dabei |
 | **Die Adresse der Box im Büronetz**: ihre private IPv4-Adresse (etwa 192.168.1.20) und ihre lokale IPv6-Adresse, mit der Kennung der Box | api.leatbox.net, der Server des Anbieters (Hetzner, Deutschland) | Wenn sie sich ändert, sonst einmal am Tag | Nein |
-| **Das Zertifikat der Box** für HTTPS: ihr Name | Let's Encrypt (Internet Security Research Group, USA), direkt; den Nachweis, dass der Name ihr gehört, hinterlegt die Box beim Server des Anbieters | Etwa alle zwei Monate | Nein |
+| **Das Zertifikat der Box** für HTTPS: ihr Name | Let's Encrypt (Internet Security Research Group, USA), direkt; den Nachweis, dass der Name ihr gehört, hinterlegt die Box beim Server des Anbieters | Ein neues Zertifikat etwa alle zwei Monate; dazwischen fragt die Box gelegentlich, ob es früher zu erneuern ist | Nein |
 | **Prüfung dieses Nachweises**: DNS-Abfragen nach dem Namen der Box | Öffentliche DNS-Server von Cloudflare (1.1.1.1), Quad9 (9.9.9.9) und Google (8.8.8.8) | Mit jedem Zertifikat | Nein |
 | **Ob die Box das Internet erreicht**: ein Verbindungsaufbau ohne Inhalt | api.leatbox.net, der Server des Anbieters | Jede Minute | Nein |
-| **Ob die Box unter ihrem Namen gefunden wird**: DNS-Abfragen nach ihrem Namen und nach leatbox.net | Der DNS-Server, den das Büronetz der Box gibt (meist der Router) | Jede Minute | Nein |
+| **Ob die Box unter ihrem Namen gefunden wird**: DNS-Abfragen nach ihrem Namen (und, wird er nicht gefunden, nach leatbox.net) | Der DNS-Server, den das Büronetz der Box gibt (meist der Router) | Jede Minute | Nein |
 | **Die Uhrzeit** | Öffentliche Zeitserver (NTP) | Regelmäßig | Nein |
 
 **Zu den Websuchen:** Leat wird angewiesen, nach der allgemeinen Frage zu suchen, nie nach Namen oder
@@ -51,7 +52,8 @@ private Adresse ist nur im Büronetz erreichbar, und der Name sagt nicht, wem di
 
 **„Internet aus“ betrifft Leat, nicht die Box:** Ist das Internet in den Einstellungen ausgeschaltet,
 sucht und liest Leat nichts im Web. Die Box selbst holt weiter Updates, meldet ihre Adresse, erneuert
-ihr Zertifikat und prüft, ob sie erreichbar ist, wie oben beschrieben. Keine dieser Verbindungen enthält Daten des Büros.
+ihr Zertifikat und prüft, ob sie erreichbar ist, wie oben beschrieben. Keine dieser Verbindungen
+enthält Daten des Büros.
 
 ## Was der Anbieter sieht
 

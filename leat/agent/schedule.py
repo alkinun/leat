@@ -4,7 +4,8 @@
     weekdays 08:00       Monday to Friday
     weekly mon 08:00     each Monday, or tue, wed, thu, fri, sat or sun
     monthly 1 08:00      each month on its 1st, or on its last day where it has fewer days
-    files                when files arrive in its space, uploaded or synced from a folder
+    files                when files arrive in its space, uploaded, put on the network drive or
+                         synced from a folder
 
 A schedule of times counts from a time: when it was set, or the workflow last ran. It is due once
 the first time it names after that has come, so that a box that was off runs a workflow it missed

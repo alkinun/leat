@@ -27,6 +27,7 @@ browser ── https://k7x2qm.leatbox.net ──▶ Caddy (leat-proxy) ──▶
 | `systemd/leat-system.socket`, `leat-system@.service` | `python -m leat.box.system`: the few changes of the system leat agent asks for as root, each checked: time zone, fixed address, power, factory reset, updates, diagnostics |
 | `systemd/leat-system-restore.service` | puts back, at boot, the time zone and fixed address an update's new system lacks |
 | `systemd/leat-health.service`, `leat-fallback.service` | an update's trial boot kept once Leat answers, and restarted if it never does, or falls into emergency mode, until systemd-boot goes back to the system before |
+| `/etc/leat/engine.env` | the engine leat agent uses: the image runs no `leat serve` and holds no model yet, so the agent reaches `http://127.0.0.1:8080`, or the engine this file names (`LEAT_ENGINE`, and `LEAT_ENGINE_KEY` if it asks for one), as a box under test reaches one on another machine, its prompts leaving the box |
 | `image/` | the disk image, of mkosi: below |
 
 `leat.box.watch`, in leat agent, says what needs attention, on the screen and in Settings: a disk

@@ -1,6 +1,6 @@
-"""Syncing a project with a folder of the box's, as an office's network drive mounted there: a copy
-of its files kept in the project's files, in a folder of its name, one way, the folder's as they
-are, every SYNC seconds and once it is chosen.
+"""Syncing a project with a folder of the machine Leat runs on, as a network drive mounted there,
+which a box's image mounts none of yet: a copy of its files kept in the project's files, in a
+folder of its name, one way, the folder's as they are, every SYNC seconds and once it is chosen.
 
 A file new or changed in the folder, as its size and time of change tell, is copied, and one gone
 from it deleted from the copy; links out of the folder and hidden files are not copied. A copy

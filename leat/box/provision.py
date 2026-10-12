@@ -1,4 +1,4 @@
-"""Provisioning: the files a box keeps of its registration, written when we build it.
+"""Provisioning: the files a box keeps of its registration, taken in on its first boot.
 
     ssh leatbox leatbox-registry register | python -m leat.box.provision [--root /etc/leat]
     python -m leat.box.provision --take /boot/leat-box.json

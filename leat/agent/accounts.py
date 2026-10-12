@@ -18,7 +18,8 @@ of whom may cancel it.
 An admin looks after the box and its people: lets them in, renames and removes them, makes them
 admins or not; there may be several, and there is one always. No admin sees another's own
 conversations or files. A device keeps a secret, sent as a cookie, of which the box keeps the hash
-alone, so that a copy of its state lets no one in.
+alone, so that a copy of its state lets no one in. A computer's network drive is a device of its
+person's too, of a password made in Settings and shown once, which opens the drive alone.
 """
 
 import hashlib

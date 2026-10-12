@@ -78,9 +78,9 @@ CREATE TABLE devices (
   seen REAL NOT NULL,
   kind TEXT NOT NULL DEFAULT 'app'
 );
--- the projects, each a person's own, shared with everyone or with its members; and the folder of
--- the box's its files are synced with, if one, as a network drive's, when they last were, and why
--- they were not, if they were not
+-- the projects, each a person's own, shared with everyone or with its members; and the folder its
+-- files are synced with, if one, as leat.agent.sync has it, when they last were, and why they
+-- were not, if they were not
 CREATE TABLE projects (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,

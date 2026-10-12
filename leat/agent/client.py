@@ -1,6 +1,7 @@
-"""The engine as the agent reaches it: leat serve's OpenAI chat API, over HTTP, or any server's of
-the API, as llama-server's or vLLM's, which says less of its models: a model of no status is
-loaded, and one of no context has the context the client is given, if any."""
+"""The engine as the agent reaches it: leat serve's OpenAI API, its chat completions, models and
+embeddings, over HTTP, or any server's of the API, as llama-server's or vLLM's, which says less of
+its models: a model of no status is loaded, and one of no context has the context the client is
+given, if any."""
 
 import contextlib
 import http.client

@@ -2,7 +2,8 @@
 make_document makes a Word document or a PDF of the model's markdown, fill_template fills a
 template's fields, suggest_edits suggests edits as tracked changes, which the user accepts or
 rejects in Word, and compare_documents finds what changed between two versions of a document.
-Each works in the sandbox, with python-docx or fpdf2, so that a document made to attack its
+The first three work in the sandbox, with python-docx or fpdf2, and compare_documents of each
+document's text as leat.agent.documents reads it there, so that a document made to attack its
 parser attacks nothing else; a template or a document changed is read there, and left as it was.
 
 Two versions are compared by code, as a model spots the differences of two long texts less surely:

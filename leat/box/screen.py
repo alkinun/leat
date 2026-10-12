@@ -198,8 +198,9 @@ def dimmed(state: State, now: datetime.datetime) -> bool:
 
 
 def footer(state: State) -> list[str]:
-    """The screen's last line, of the box: its model, its network, whether it reaches the internet,
-    and the room left on its data's partition; each once it is known, in the box's language."""
+    """The screen's last line, of the box: its model, its network, whether Leat is kept from the
+    internet, and the room left on its data's partition; each once it is known, in the box's
+    language."""
     items, t = [], functools.partial(locales.t, language=state.language)
     if state.answering:
         if state.model is None:
