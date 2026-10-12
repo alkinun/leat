@@ -240,7 +240,7 @@ Gemma 4's instruction-tuned model does not model raw text: both engines score wi
 - Linux, Python 3.12+, [uv](https://docs.astral.sh/uv/)
 - `clang`: tinygrad compiles its GPU command submission with it
 - NVIDIA: the open kernel module and NVRTC (from the CUDA toolkit)
-- AMD: ROCm's comgr, with which tinygrad compiles the kernels' HIP C
+- AMD: ROCm's comgr, with which tinygrad compiles the kernels' HIP C; for the box's Strix Halo, and why it may take Arch's clang instead, see [docs/strix-halo.md](docs/strix-halo.md)
 
 ## Development
 
