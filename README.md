@@ -12,7 +12,8 @@ repository holds all of it:
   their index, workflows, people and devices, the network drive, in English and German. Below,
   from "leat agent".
 - **The box** (`box/`, `leat/box/`): the signed disk image that makes a machine an office's Leat,
-  its screen, HTTPS by its own name, and updates. See [box/README.md](box/README.md).
+  its screen, HTTPS by its own name, updates and backups. See [box/README.md](box/README.md), and
+  for its coming machine, [docs/strix-halo.md](docs/strix-halo.md).
 - **Data protection** (`docs/datenschutz/`): the papers an office's data-protection officer asks
   for, in German.
 
