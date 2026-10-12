@@ -69,7 +69,7 @@ def handle(request: Any) -> dict[str, Any]:
         if request.get("diagnostics") is True:
             return {"text": diagnostics()}
         if request.get("update") == "check":
-            subprocess.run(["systemctl", "--no-block", "start", "systemd-sysupdate.service"],
+            subprocess.run(["systemctl", "--no-block", "start", "systemd-sysupdate-update.service"],
                            check=True, capture_output=True, timeout=10)  # fmt: skip
             return {}
         raise Refused(f"there is no such request: {json.dumps(request)[:100]}")
@@ -210,9 +210,9 @@ def update_status() -> dict[str, Any]:
     installed = [_version(p.name) for p in ukis if "+0-" not in p.name]
     newer = max((v for v in installed if version and _order(v) > _order(version)), default=None,
                 key=_order)  # fmt: skip
-    checking = _shown("systemd-sysupdate.service", "ActiveState") in ("activating", "active")
+    checking = _shown("systemd-sysupdate-update.service", "ActiveState") in ("activating", "active")
     # of its last look, the timer's or an admin's
-    last = _shown("systemd-sysupdate.service", "ExecMainExitTimestamp").removeprefix("@")
+    last = _shown("systemd-sysupdate-update.service", "ExecMainExitTimestamp").removeprefix("@")
     return {"version": version, "ready": newer, "checking": checking,
             "checked": int(last) if last.isdigit() else None,
             "failed": max(failed, default=None, key=_order)}  # fmt: skip

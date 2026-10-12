@@ -17,7 +17,7 @@ enable leat-system-restore.service
 enable leat-backup.socket
 enable leat-backup.timer
 # updates: looked for every few hours, booted at night, kept once Leat answers
-enable systemd-sysupdate.timer
+enable systemd-sysupdate-update.timer
 enable systemd-sysupdate-reboot.timer
 enable leat-health.service
 enable leat-fallback.service

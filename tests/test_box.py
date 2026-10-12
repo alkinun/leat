@@ -465,7 +465,7 @@ def test_system_update_status(tmp_path, monkeypatch):
     ran = []
     monkeypatch.setattr(system.subprocess, "run", lambda args, **kw: ran.append(args))
     assert system.handle({"update": "check"}) == {}
-    assert ran == [["systemctl", "--no-block", "start", "systemd-sysupdate.service"]]
+    assert ran == [["systemctl", "--no-block", "start", "systemd-sysupdate-update.service"]]
 
 
 def test_system_diagnostics(monkeypatch):
@@ -667,6 +667,9 @@ def test_units():
     # a dev image's updates of its own channel, as a box's never take its SSH
     postinst = (box / "image/mkosi.postinst.chroot").read_text()
     assert "https://leatbox.com/updates/dev/" in postinst and "/usr/lib/leat/channel" in postinst
+    # updates looked for by the timer's own name, as a preset enables none of an alias's, as
+    # systemd-sysupdate.timer is now
+    assert "enable systemd-sysupdate-update.timer" in preset.read_text()
     # an update cut off removed before the next is tried, or none would be again
     dropped = box / "image/mkosi.extra/usr/lib/systemd/system/systemd-sysupdate-update.service.d"
     assert (
