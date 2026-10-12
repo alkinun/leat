@@ -461,7 +461,7 @@ function handle(event) {
     case "models":
       models = event.models;
       loading = models.find((m) => m.status === "loading")?.id ?? null;
-      if (event.error) status(t("The engine is not reachable"), true, event.error); // its why, on hover
+      if (event.error && !modelWarned) status(t("The engine is not reachable"), true, event.error); // its why, on hover
       else if (unreachable) status(""); // back
       unreachable = event.error ?? null;
       renderModels();
@@ -875,8 +875,11 @@ $("cancelRecovery").onclick = () => del("/api/recovery");
 
 // of an admin's: what of the box needs attention, as its screen says it too, each a few words and
 // what to do; looked at every few minutes
+let modelWarned = false; // whether a notice says the model is out of reach, which the header then does not
 async function watchHealth() {
   const answer = await fetch("/api/health").then((r) => r.ok ? r.json() : null).catch(() => null);
+  modelWarned = (answer?.warnings ?? []).some((w) => w.key === "model");
+  if (modelWarned && unreachable) status("");
   $("warnings").replaceChildren(...(answer?.warnings ?? []).map((w) => {
     const item = element("div", "notice"), said = element("span");
     said.append(element("b", "", w.title), " ", w.said);
