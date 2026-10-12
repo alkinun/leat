@@ -655,6 +655,9 @@ def test_units():
                if line.startswith("enable leat-")}  # fmt: skip
     units = {p.name for p in (box / "systemd").iterdir()} - {"leat-system@.service"}
     assert enabled == units
+    # a dev image's updates of its own channel, as a box's never take its SSH
+    postinst = (box / "image/mkosi.postinst.chroot").read_text()
+    assert "https://leatbox.com/updates/dev/" in postinst and "/usr/lib/leat/channel" in postinst
     # an update cut off removed before the next is tried, or none would be again
     dropped = box / "image/mkosi.extra/usr/lib/systemd/system/systemd-sysupdate-update.service.d"
     assert (

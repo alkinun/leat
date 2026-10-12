@@ -1,0 +1,15 @@
+#!/bin/sh
+# The channel the image's updates come of: a dev image's its own, updates/dev, so that a box under
+# test takes dev images alone, never a box's, which has no SSH to test it by; every other image the
+# boxes', updates. Marked in /usr/lib/leat/channel, which publish.sh reads to publish it to its own.
+set -eu
+mkdir -p /usr/lib/leat
+case " ${PROFILES:-} " in
+*" dev "*)
+    sed -i 's|https://leatbox.com/updates/|https://leatbox.com/updates/dev/|' /usr/lib/sysupdate.d/*.transfer
+    echo dev > /usr/lib/leat/channel
+    ;;
+*)
+    echo stable > /usr/lib/leat/channel
+    ;;
+esac

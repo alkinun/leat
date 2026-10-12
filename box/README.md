@@ -106,11 +106,25 @@ update cut off while it downloads, as by a power cut, is removed before the next
 systemd-sysupdate would refuse every update after it else. An admin sees the version, and an
 update ready, in Settings.
 
+Two channels: a box takes `https://leatbox.com/updates/`, of builds without the dev profile; a box
+under test, of a dev image, takes `https://leatbox.com/updates/dev/`, of dev builds alone, as a
+dev build's SSH must never reach a box, and a box under test must keep its own.
+`mkosi.postinst.chroot` points a dev image at its channel and marks each image's in
+`/usr/lib/leat/channel`, which `publish.sh` publishes it to.
+
+A release, of a commit, everything committed and its tests passing:
+
 ```bash
 box/image/keys.sh                     # once: the keys, kept in ~/.config/leat/box-keys
-cd box/image && mkosi build           # a product build, of a commit, without the dev profile
-./publish.sh --upload                 # onto leatbox.com/updates, for every box to take
+cd box/image
+mkosi --profile dev -f build          # the dev image first, for the boxes under test
+./publish.sh --upload                 # onto leatbox.com/updates/dev
+mkosi -f build                        # then the boxes'
+./publish.sh --upload                 # onto leatbox.com/updates
 ```
+
+A box under test shows it took the update in Settings, and its version on its screen; a box takes
+it within a few hours, and restarts into it at night.
 
 **Back up `~/.config/leat/box-keys`.** Its PCR key signs every UKI the boxes' TPMs unlock their
 data for, and its GPG key every update they take: lost, no box takes an update again.
