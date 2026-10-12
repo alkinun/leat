@@ -180,8 +180,7 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._json(200, shown | {"warnings": self._warnings()})
             me = self._device()
             if path == "/api/me":  # and the box's language, which the app speaks
-                self._json(200, {k: me[k] for k in ("person", "name", "admin")}
-                           | {"device": me["id"], "language": self._language()})  # fmt: skip
+                self._json(200, Accounts.me(me) | {"language": self._language()})
             elif path == "/api/events":
                 self._events(me)
             elif path == "/api/overview":  # the box, as its admins look after it
@@ -464,8 +463,7 @@ class _Handler(BaseHTTPRequestHandler):
             if not path.startswith("/api/") or not (match := _FILE.fullmatch(path)):
                 return self._error(404, f"there is no PUT {path}")
             space = agent.space(match[1], person)
-            name = space.free(urllib.parse.unquote(match[2]), folders=True)
-            space.path(name).parent.mkdir(parents=True, exist_ok=True)
+            name = space.new(urllib.parse.unquote(match[2]))
             with dav.received(self, space.path(name).parent) as partial:
                 os.replace(partial, space.path(name))
             unpacked = None

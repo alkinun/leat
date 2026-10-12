@@ -10,7 +10,7 @@ from typing import Any
 from leat.agent import documents
 from leat.agent.context import picture
 from leat.agent.index import Index
-from leat.agent.tools import Context, Result, Tool, strings
+from leat.agent.tools import Context, Result, Tool, schema, strings
 from leat.agent.workspace import Workspace
 
 READ = 12000  # characters of a file read at once
@@ -34,15 +34,10 @@ MAKE = (
 def tools(index: Index | None = None) -> list[Tool]:
     """read, with an index search_files, of the index's passages, then the tools of GENERAL:
     write, edit and run, each in its call's conversation's workspace."""
-    start = {
-        "type": "integer",
-        "description": "the character to start from, to read on in a long file",
-    }
-    path = {
-        "type": "string",
-        "description": "the file's or folder's path in the workspace, as 'notes.txt'",
-    }
-    reading = {"type": "object", "properties": {"path": path, "start": start}, "required": ["path"]}
+    reading = schema(
+        path=("string", "the file's or folder's path in the workspace, as 'notes.txt'"),
+        start=("integer", "the character to start from, to read on in a long file"),
+    )
     reading_tool = Tool(
         "read",
         "Read a file in the workspace as text, PDF, Word, Excel and PowerPoint files too, or list "
@@ -104,10 +99,8 @@ def read(
         return Result(f"The image {path}.", {"file": path, "images": [path]})
     if file.suffix.lower() in (".heic", ".heif"):
         raise ValueError(f"{path} is an image of a kind you cannot see: convert it to a PNG")
-    if skill:
-        text = file.read_text(encoding="utf-8")
-    else:  # read on in parts, below
-        text = index.text(workspace, path) if index else documents.text(workspace, path)
+    # read on in parts, below
+    text = file.read_text(encoding="utf-8") if skill else documents.read(workspace, path, index)
     part = text[start : start + READ]
     if (end := start + len(part)) < len(text):
         part += f"\n\n(characters {start} to {end} of {len(text)}; read on from start={end})"

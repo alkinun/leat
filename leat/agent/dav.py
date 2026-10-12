@@ -80,7 +80,7 @@ class Drive:
         """Answers a request of a WebDAV method. Raises NotFound, Refused, ValueError and
         FileNotFoundError of what cannot be done, as the server answers them."""
         path = urllib.parse.unquote(urllib.parse.urlsplit(self.handler.path).path)
-        parts = [p for p in path.removeprefix(PREFIX).split("/") if p]
+        parts = _parts(path)
         if method == "MKCOL" and len(parts) == 2 and parts[0] == self.projects:  # a project
             self._body()
             if parts[1] in self._folders():
@@ -98,7 +98,7 @@ class Drive:
 
     def place(self, path: str) -> Place:
         """The place of a path of the drive's. Raises NotFound of a project the person sees not."""
-        parts = [p for p in path.removeprefix(PREFIX).split("/") if p]
+        parts = _parts(path)
         if not parts:
             return Place("root")
         if parts[0] == self.own:
@@ -224,9 +224,7 @@ class Drive:
         source = space.path(name)
         if not source.exists():
             raise FileNotFoundError(f"there is no file {name}")
-        destination = urllib.parse.unquote(
-            urllib.parse.urlsplit(self.handler.headers.get("Destination", "")).path
-        )
+        destination = self._destination()
         there = self.place(destination)
         into, renamed = self._space(there)
         if not renamed:
@@ -267,10 +265,8 @@ class Drive:
         # the projects: its name the Destination's folder's
         if (project := self._folders().get(folder)) is None:
             raise NotFound(f"there is no project {folder}")
-        destination = urllib.parse.unquote(
-            urllib.parse.urlsplit(self.handler.headers.get("Destination", "")).path
-        )
-        parts = [p for p in destination.removeprefix(PREFIX).split("/") if p]
+        destination = self._destination()
+        parts = _parts(destination)
         if len(parts) != 2 or parts[0] != self.projects:
             raise Refused("a project is renamed among the projects, never moved")
         if parts[1] in self._folders():
@@ -382,6 +378,12 @@ class Drive:
             self.agent.arrived(project, self.person, [name])
         self.agent.note(self.person, action, project, detail or name)
 
+    def _destination(self) -> str:
+        # the path a MOVE or COPY names, as its Destination header gives it whole
+        return urllib.parse.unquote(
+            urllib.parse.urlsplit(self.handler.headers.get("Destination", "")).path
+        )
+
     def _body(self) -> bytes:
         return b"".join(chunks(self.handler))[: 1 << 20]
 
@@ -457,6 +459,11 @@ def received(handler: BaseHTTPRequestHandler, folder: Path) -> Iterator[Path]:
         yield partial
     finally:
         partial.unlink(missing_ok=True)
+
+
+def _parts(path: str) -> list[str]:
+    # a path of the drive's, as its folders' and file's names
+    return [p for p in path.removeprefix(PREFIX).split("/") if p]
 
 
 def _away(space: Workspace, name: str) -> bool:

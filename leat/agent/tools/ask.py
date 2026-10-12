@@ -16,7 +16,6 @@ column of amounts, each with a currency or cents, is totalled by code, read as e
 numbers, to sum and sort.
 """
 
-import base64
 import concurrent.futures
 import json
 import mimetypes
@@ -25,7 +24,7 @@ from typing import Any
 
 from leat.agent import documents
 from leat.agent.client import BACKGROUND, Client, EngineError
-from leat.agent.context import picture
+from leat.agent.context import data_url, picture
 from leat.agent.index import Index
 from leat.agent.tools import Context, Result, Tool
 from leat.agent.workspace import Workspace
@@ -204,7 +203,7 @@ def _answer(
         if picture(name):
             content = _image(space, name, f"{asked}, is this image.")
         else:
-            text = index.text(space, name) if index else documents.text(space, name)
+            text = documents.read(space, name, index)
             if not documents.said(text):  # as a scanned PDF's, while no model reads images
                 return _row(keys, "(It holds no text: a scan, which only a model that sees images "
                             "reads)")  # fmt: skip
@@ -238,7 +237,7 @@ def _row(keys: list[str], why: str) -> tuple[dict[str, str], str]:
 def _image(space: Workspace, name: str, text: str) -> list[dict[str, Any]]:
     # a message's content of an image of the space's, as a data: URL, and text after it
     kind = mimetypes.guess_type(name)[0] or "image/png"
-    url = f"data:{kind};base64,{base64.b64encode(space.path(name).read_bytes()).decode()}"
+    url = data_url(space.path(name).read_bytes(), kind)
     return [{"type": "image_url", "image_url": {"url": url}}, {"type": "text", "text": text}]
 
 
@@ -301,8 +300,7 @@ def _save(
     # free there, in the sandbox, with its libraries; returns its name, or None and why not
     if space.environment is None:
         return None, "the sandbox has no spreadsheet library"
-    name = space.free(name if name.lower().endswith(".xlsx") else f"{name}.xlsx", folders=True)
-    space.path(name).parent.mkdir(parents=True, exist_ok=True)
+    name = space.new(name if name.lower().endswith(".xlsx") else f"{name}.xlsx")
     try:
         space.given(_SAVE, {"rows": table, "total": total}, name)
     except ValueError as e:

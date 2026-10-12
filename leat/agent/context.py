@@ -12,6 +12,7 @@ and between changes every prompt extends the last. The tokens a prompt takes are
 counted for the last reply, and an estimate of the messages since.
 """
 
+import base64
 import datetime
 import json
 from collections.abc import Callable
@@ -78,6 +79,11 @@ def message(m: dict[str, Any]) -> dict[str, Any]:
     if m["role"] == "user" and (at := info.get("at")):
         api["content"] = f"{stamp(at)}\n{api['content']}"
     return api
+
+
+def data_url(data: bytes, kind: str) -> str:
+    """Bytes as a data: URL, of their type, as "image/png", as a model is given an image."""
+    return f"data:{kind};base64,{base64.b64encode(data).decode()}"
 
 
 def picture(name: str) -> bool:

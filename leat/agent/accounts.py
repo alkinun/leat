@@ -79,7 +79,7 @@ class Accounts:
         with self._lock:
             if not self.empty():
                 raise ValueError("this Leat is set up already: ask to join")
-            given = "".join(c for c in (code or "").upper() if c.isalnum())
+            given = _normal(code or "")
             if self.locked and not secrets.compare_digest(given, self.code):
                 self._wrong += 1
                 if self._wrong < TRIES:
@@ -124,7 +124,7 @@ class Accounts:
         name = _checked(name)
         holding = self.recovery()
         with self._lock:
-            given = "".join(c for c in code.upper() if c.isalnum())
+            given = _normal(code)
             if holding is None:
                 raise Refused("no recovery code holds now: press the box's power button for one")
             if not secrets.compare_digest(given, holding):
@@ -249,6 +249,12 @@ class Accounts:
         self.agent.projects_changed()  # those they shared, now another's
         self._publish()
 
+    @staticmethod
+    def me(device: dict[str, Any]) -> dict[str, Any]:
+        """A device's person, as the app is told who it is: their id, name, whether they are an
+        admin, and the device's id."""
+        return {k: device[k] for k in ("person", "name", "admin")} | {"device": device["id"]}
+
     def state(self, device: dict[str, Any]) -> dict[str, Any]:
         """What a device's app shows of the accounts: its person, and the requests to join, which
         any of the box's people may let in as their own; and the people, each whether an admin,
@@ -265,8 +271,7 @@ class Accounts:
                          and (device["admin"] or p["id"] == device["person"])]}
             for p in self.store.people()
         ]  # fmt: skip
-        me = {k: device[k] for k in ("person", "name", "admin")} | {"device": device["id"]}
-        state: dict[str, Any] = {"type": "accounts", "me": me, "people": people,
+        state: dict[str, Any] = {"type": "accounts", "me": self.me(device), "people": people,
                                  "requests": requests}  # fmt: skip
         if device["admin"]:  # and the seconds a recovery code holds for yet, if one does
             code, left = self.recovering()
@@ -298,6 +303,11 @@ class Accounts:
     def _publish(self) -> None:
         # that the accounts changed, to every device, which each stream tells as its device sees
         self.agent.events.publish({"type": "accounts"})
+
+
+def _normal(code: str) -> str:
+    # a code as it was given, of its letters and digits alone, in capitals: "k7x-2qm" as K7X2QM
+    return "".join(c for c in code.upper() if c.isalnum())
 
 
 def _checked(name: str) -> str:

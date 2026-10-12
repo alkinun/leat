@@ -2,11 +2,11 @@
 leat serve has loaded, if it sees images, as text the index keeps and searches.
 """
 
-import base64
 import threading
 import time
 
 from leat.agent.client import BACKGROUND, Client, EngineError
+from leat.agent.context import data_url
 
 CHECK = 10  # seconds the engine's word on whether its model sees images holds
 WORDS = 2000  # tokens of an image's text at most
@@ -44,7 +44,7 @@ class Transcriber:
 
     def __call__(self, image: bytes, kind: str) -> str:
         """An image's text, of its bytes and their type, as "image/png". Raises EngineError."""
-        url = f"data:{kind};base64,{base64.b64encode(image).decode()}"
+        url = data_url(image, kind)
         parts = [{"type": "image_url", "image_url": {"url": url}},
                  {"type": "text", "text": TRANSCRIBE}]  # fmt: skip
         body = {

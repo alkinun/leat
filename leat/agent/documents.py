@@ -13,8 +13,12 @@ model that sees images to read, as leat.agent.ocr has it.
 import re
 import shutil
 import uuid
+from typing import TYPE_CHECKING
 
 from leat.agent.workspace import Workspace
+
+if TYPE_CHECKING:
+    from leat.agent.index import Index
 
 # the kinds of file read by parsing them, in the sandbox
 DOCUMENTS = (".pdf", ".docx", ".xlsx", ".pptx")
@@ -129,6 +133,11 @@ _HEADING = re.compile(r"^#{1,6} (.+)$", re.M)  # a section's, of any other text
 PLACE = 60  # characters of a place's name at most, as a long heading's
 
 
+def read(workspace: Workspace, name: str, index: "Index | None" = None) -> str:
+    """A file's text, as text() reads it, or the index has it, if there is one, read once."""
+    return index.text(workspace, name) if index else text(workspace, name)
+
+
 def text(workspace: Workspace, name: str) -> str:
     """A file's text: a document's as markdown, read in the sandbox, or a text file's as it is.
     Raises FileNotFoundError if there is no such file, ValueError if it cannot be read as text."""
@@ -136,11 +145,9 @@ def text(workspace: Workspace, name: str) -> str:
     if not file.is_file():
         raise workspace.missing(name)
     if file.suffix.lower() in DOCUMENTS:
-        inside = f"/workspace/{file.relative_to(workspace.root).as_posix()}"
-        ran = workspace.run(_EXTRACT, inside, kept=None)
+        ran = workspace.run(_EXTRACT, workspace.inside(name), kept=None)
         if ran.status != 0:
-            why = (ran.output.strip().splitlines() or ["it stopped"])[-1]
-            raise ValueError(f"{name} could not be read: {why}")
+            raise ValueError(f"{name} could not be read: {ran.why}")
         return ran.output
     data = file.read_bytes()
     if b"\0" in data[:SNIFF]:
@@ -177,11 +184,10 @@ def render(workspace: Workspace, name: str, pages: list[int]) -> dict[int, bytes
     folder = f".pages-{uuid.uuid4().hex[:8]}"
     workspace.path(folder).mkdir()
     try:
-        inside = f"/workspace/{workspace.path(name).relative_to(workspace.root).as_posix()}"
-        ran = workspace.run(_RENDER, inside, f"/workspace/{folder}", *map(str, pages))
+        ran = workspace.run(_RENDER, workspace.inside(name), f"/workspace/{folder}",
+                            *map(str, pages))  # fmt: skip
         if ran.status != 0:
-            why = (ran.output.strip().splitlines() or ["it stopped"])[-1]
-            raise ValueError(f"{name}'s pages could not be rendered: {why}")
+            raise ValueError(f"{name}'s pages could not be rendered: {ran.why}")
         return {n: workspace.path(f"{folder}/page-{n}.png").read_bytes() for n in pages}
     finally:
         shutil.rmtree(workspace.path(folder), ignore_errors=True)

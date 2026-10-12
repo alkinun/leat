@@ -13,7 +13,6 @@ Every change is made, and its event published, under one lock: an app that reads
 and watches the events after misses nothing, and an event it gets twice changes nothing more.
 """
 
-import base64
 import contextlib
 import copy
 import datetime
@@ -248,8 +247,7 @@ class Agent:
         """Deletes a person's conversation, stopping its turn. Raises NotFound if it is not."""
         with self._lock:
             self._own(id, person)
-            if (turn := self._turns.pop(id, None)) is not None:
-                turn.stop()
+            self._stop(id)
             self.store.delete(id)
             self.events.publish({"type": "deleted", "id": id, "to": person})
 
@@ -299,8 +297,7 @@ class Agent:
                 raise Refused("only whoever made a project, or an admin, may delete it")
             held = self.store.conversations_in(id)
             for c in held:
-                if (turn := self._turns.pop(c["id"], None)) is not None:
-                    turn.stop()
+                self._stop(c["id"])
             self.store.delete_project(id)
             if self.workspace is not None:
                 self._space(id, person).remove()
@@ -335,8 +332,7 @@ class Agent:
         workflow of that id, and ValueError if the schedule is not one."""
         kept = schedule.normal(when) if when else None
         with self._lock:
-            if not any(w["id"] == id for w in self.store.workflows(person)):
-                raise NotFound(f"there is no workflow {id}")
+            self._seen_workflow(id, person)
             self.store.schedule_workflow(id, kept, person)
             self._publish_workflows()
         return _shown_workflow(self.store.workflow(id) or {})
@@ -396,8 +392,7 @@ class Agent:
     def delete_workflow(self, id: int, person: int | None = None) -> None:
         """Deletes a workflow a person sees. Raises NotFound if they see none of that id."""
         with self._lock:
-            if not any(w["id"] == id for w in self.store.workflows(person)):
-                raise NotFound(f"there is no workflow {id}")
+            self._seen_workflow(id, person)
             self.store.delete_workflow(id)
             self._publish_workflows()
 
@@ -593,8 +588,7 @@ class Agent:
 
     def files_event(self, project: str | None = None, person: int | None = None) -> Event:
         """A space's files, a project's or a person's own, as an event."""
-        files = self._listing(project, person) if self.workspace else []
-        return {"type": "files", "project": project, "files": files}
+        return _files_event(project, self._listing(project, person) if self.workspace else [])
 
     def clear(self, person: int) -> None:
         """Deletes a person's own files, as their removal does."""
@@ -705,12 +699,22 @@ class Agent:
         if changed and self._files.get(folder) == files:
             return
         self._files[folder] = files
-        event: Event = {"type": "files", "project": project, "files": files}
+        event = _files_event(project, files)
         if project is None:
             event["to"] = person
         elif not (held := self.store.project(project) or {}).get("shared"):
             event["to"] = [held.get("person"), *held.get("members", [])]
         self.events.publish(event)
+
+    def _seen_workflow(self, id: int, person: int | None) -> None:
+        # raises NotFound if the person sees no workflow of that id
+        if not any(w["id"] == id for w in self.store.workflows(person)):
+            raise NotFound(f"there is no workflow {id}")
+
+    def _stop(self, id: str) -> None:
+        # stops a conversation's turn, if one runs
+        if (turn := self._turns.pop(id, None)) is not None:
+            turn.stop()
 
     def _project(self, id: str, person: int | None) -> dict[str, Any]:
         # a project the person sees, or NotFound if they see none of that id
@@ -994,7 +998,7 @@ class _Turn:
         except (OSError, ValueError):
             return None
         kind = mimetypes.guess_type(name)[0] or "image/png"
-        return f"data:{kind};base64,{base64.b64encode(data).decode()}"
+        return context.data_url(data, kind)
 
     def _call(self, calls: list[dict[str, Any]]) -> None:
         # runs the calls at once, each on a thread, and keeps their answers once all have answered,
@@ -1080,7 +1084,7 @@ class _Turn:
             name = next(filter(None, named), None) or url.removeprefix("file:").split("#")[0]
             with contextlib.suppress(Exception):  # a file gone, or one that can't be read
                 if space is not None:
-                    return [a.index.text(space, name) if a.index else documents.text(space, name)]
+                    return [documents.read(space, name, a.index)]
             return []
         texts = []
         for m in messages:
@@ -1227,6 +1231,11 @@ def _sees(project: dict[str, Any] | None, person: int | None) -> bool:
     return project is not None and (
         bool(project["shared"]) or project["person"] == person or person in project["members"]
     )
+
+
+def _files_event(project: str | None, files: list[dict[str, Any]]) -> Event:
+    # a space's files, as the apps are told them
+    return {"type": "files", "project": project, "files": files}
 
 
 def _shown_workflow(w: dict[str, Any]) -> dict[str, Any]:

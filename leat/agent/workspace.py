@@ -94,6 +94,11 @@ class Ran:
     status: int | None
     output: str
 
+    @property
+    def why(self) -> str:
+        """Why it failed, as it said last."""
+        return (self.output.strip().splitlines() or ["it stopped"])[-1]
+
 
 class Workspace:
     """The files at `root`, and Python run among them by the interpreter of `environment`, a
@@ -201,6 +206,10 @@ class Workspace:
             raise ValueError(f"{name} is outside the workspace")
         return path
 
+    def inside(self, name: str) -> str:
+        """A file's path as the sandbox's code sees it, at /workspace."""
+        return f"/workspace/{self.path(name).relative_to(self.root).as_posix()}"
+
     def files(self) -> list[dict[str, Any]]:
         """Every file, by its name in the workspace, the latest changed first; hidden ones not, nor
         links out of it, as the sandbox's code may make to any path."""
@@ -246,6 +255,12 @@ class Workspace:
             candidate = f"{stem} ({n}){suffix}"
         return "/".join([*within, candidate])
 
+    def new(self, name: str) -> str:
+        """A name for a new file, as free() gives it of `folders`, its folders made."""
+        made = self.free(name, folders=True)
+        self.path(made).parent.mkdir(parents=True, exist_ok=True)
+        return made
+
     def delete(self, name: str) -> None:
         """Deletes a file, or a folder with every file in it, each kept as an earlier version.
         Raises FileNotFoundError if there is none."""
@@ -266,12 +281,11 @@ class Workspace:
         file = self.path(name)
         stem = file.relative_to(self.root).as_posix().removesuffix(file.suffix)
         folder = self.free(stem, folders=True)
-        inside = f"/workspace/{file.relative_to(self.root).as_posix()}"
-        ran = self.run(_UNPACK, inside, f"/workspace/{folder}", str(UNPACKED), str(MEMBERS))
+        ran = self.run(_UNPACK, self.inside(name), f"/workspace/{folder}", str(UNPACKED),
+                       str(MEMBERS))  # fmt: skip
         if ran.status != 0:
             shutil.rmtree(self.path(folder), ignore_errors=True)
-            why = (ran.output.strip().splitlines() or ["it stopped"])[-1]
-            raise ValueError(f"{file.name} could not be unpacked: {why}")
+            raise ValueError(f"{file.name} could not be unpacked: {ran.why}")
         file.unlink()
         return folder, int(ran.output.strip().splitlines()[-1])
 
@@ -282,7 +296,7 @@ class Workspace:
         inside = f".given-{uuid.uuid4().hex[:8]}.json"
         self.path(inside).write_text(json.dumps(given, ensure_ascii=False), encoding="utf-8")
         try:
-            paths = [f"/workspace/{self.path(n).relative_to(self.root).as_posix()}" for n in names]
+            paths = [self.inside(n) for n in names]
             ran = self.run(code, f"/workspace/{inside}", *paths, timeout=timeout, kept=None)
         finally:
             self.path(inside).unlink(missing_ok=True)

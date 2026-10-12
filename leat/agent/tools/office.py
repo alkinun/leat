@@ -489,8 +489,7 @@ def make(context: Context, name: str, content: str, template: str | None = None)
     if not laid:
         raise ValueError("the document has no text: give its content, in markdown")
     letterhead = _docx(space, template) if template else None
-    made = space.free(name if pdf else _named(name), folders=True)
-    space.path(made).parent.mkdir(parents=True, exist_ok=True)
+    made = space.new(name if pdf else _named(name))
     space.given(_PDF if pdf else _WORD, laid, made, *([letterhead] if letterhead else []))
     styled = f", in the styles, headers and footers of {letterhead}" if letterhead else ""
     return Result(f"Made {made}{styled}.", {"files": [made]})
@@ -518,8 +517,7 @@ def compare(context: Context, original: str, revised: str) -> Result:
 def fill(context: Context, path: str, values: dict[str, Any], name: str) -> Result:
     space = context.space()
     template = _docx(space, path)
-    made = space.free(_named(name), folders=True)
-    space.path(made).parent.mkdir(parents=True, exist_ok=True)
+    made = space.new(_named(name))
     said = space.given(_FILL, values, template, made)
     filled, missing, unused = said["filled"], said["missing"], said["unused"]
     lines = [f"Made {made}, of {template}: {len(filled)} fields filled."]
@@ -539,8 +537,7 @@ def suggest(context: Context, path: str, edits: list[dict[str, Any]], name: str)
     if not edits or not all(e["find"] for e in edits):
         raise ValueError('edits must be a list of objects, each {"find": "the passage, as it is '
                          'written", "replace": "what replaces it", "comment": "why"}')  # fmt: skip
-    made = space.free(_named(name), folders=True)
-    space.path(made).parent.mkdir(parents=True, exist_ok=True)
+    made = space.new(_named(name))
     found = space.given(_SUGGEST, edits, document, made)
     done = sum(n == 1 for n in found)
     lines = [f"Made {made}, of {document}: {done} of {len(edits)} edits suggested, as tracked "
