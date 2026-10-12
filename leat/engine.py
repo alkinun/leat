@@ -331,7 +331,7 @@ class Engine:
         # decode steps of several, each at a slot's first position, and of one where speculative
         # steps take its place
         for n in self._batches[0 if self.drafter else 1 :]:
-            options = Tensor([[0.0] * 5] * n), Tensor([0] * n, dtype=dtypes.uint32)
+            options = Tensor([GREEDY.values()] * n), Tensor([0] * n, dtype=dtypes.uint32)
             rows = [
                 x for i in range(n) for x in (self._slot_vars[i].bind(i), self._pos_vars[i].bind(0))
             ]
@@ -339,8 +339,10 @@ class Engine:
             self._decode[n](_ids([0] * n, n), *options, *rows, live=live)
         # speculative steps of several, each from a slot's second position
         for n in self._speculated[1:]:
-            sampling = [
-                t for _ in range(n) for t in (Tensor([[0.0] * 5]), Tensor([0], dtype=dtypes.uint32))
+            sampling = [  # each row's own, as a graph takes no buffer twice
+                t
+                for _ in range(n)
+                for t in (Tensor([GREEDY.values()]), Tensor([0], dtype=dtypes.uint32))
             ]
             slots = [self._draft_slots[n][i].bind(i) for i in range(n)]
             starts = [self._draft_vars[n][i].bind(1) for i in range(n)]
@@ -378,15 +380,19 @@ class Engine:
         vector = None
         for pos in range(0, len(prompt), self.prefill_chunk):
             chunk = prompt[pos : pos + self.prefill_chunk]
-            few = len(chunk) <= FEW_TOKENS
-            graph, length = (
-                (self._few_embedding, self._few) if few else (self._embedding, self._len)
-            )
-            tokens = _ids(chunk, int(length.vmax)).shrink(((0, 1), (0, length.bind(len(chunk)))))
+            few, tokens = self._tokens(chunk)
+            graph = self._few_embedding if few else self._embedding
             vector = graph(tokens, self._slot_vars[0].bind(0), self._pos_vars[0].bind(pos))
             self._wrote(0, pos + len(chunk))
         assert vector is not None
         return cast(list[float], vector[0].tolist())
+
+    def _tokens(self, chunk: list[int]) -> tuple[bool, Tensor]:
+        # whether a prompt's chunk is of FEW_TOKENS at most, which the graphs bound to so few take,
+        # and its tokens, as those graphs or the others take them
+        few = len(chunk) <= FEW_TOKENS
+        length = self._few if few else self._len
+        return few, _ids(chunk, int(length.vmax)).shrink(((0, 1), (0, length.bind(len(chunk)))))
 
     def image(self, data: bytes) -> Image:
         """An image of its file's bytes, for a prompt: its tokens show it there, and start()
@@ -491,10 +497,8 @@ class Engine:
                 size = min(size, mark - pos)
             chunk = sequence.prompt[pos : pos + size]
             chunk = chunk[: next((i for i, t in enumerate(chunk) if t < 0), len(chunk))]
-            few = (n := len(chunk)) <= FEW_TOKENS
-            graph, length = (self._few_chunk, self._few) if few else (self._chunk, self._len)
-            tokens = _ids(chunk, int(length.vmax)).shrink(((0, 1), (0, length.bind(n))))
-            token = graph(tokens, *sequence.options, *row)
+            few, tokens = self._tokens(chunk)
+            token = (self._few_chunk if few else self._chunk)(tokens, *sequence.options, *row)
         self._wrote(sequence.slot, pos + len(chunk))
         cached += chunk
         if self._recurrent and len(cached) == mark:
@@ -562,7 +566,7 @@ class Engine:
         else:
             pad = [0] * (n - k)
             tokens = _ids([s.tokens[-1] for s in sequences] + pad, n)
-            values = [s.sampling.values() for s in sequences] + [[0.0] * 5] * (n - k)
+            values = [s.sampling.values() for s in sequences] + [GREEDY.values()] * (n - k)
             seed = Tensor([s.seed for s in sequences] + pad, dtype=dtypes.uint32)
             options = Tensor(values, dtype=dtypes.float32), seed
         rows = [(s.slot, len(self._cached[s.slot])) for s in sequences]
