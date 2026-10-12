@@ -80,6 +80,12 @@ select {
   border: none; border-radius: var(--round); background: none; font-weight: 600; cursor: pointer;
 }
 #status { color: var(--muted); font-size: 0.875rem; }
+/* an admin told what of the box needs attention */
+#warnings .warning {
+  margin: 8px 16px 0; padding: 10px 14px; border: 1px solid #f5a524; border-radius: var(--round);
+  font-size: 0.875rem;
+}
+#warnings .warning:last-child { margin-bottom: 16px; }
 /* an admin told that the box's power button was pressed, its recovery code shown */
 #recovering {
   display: flex; gap: 12px; align-items: center; margin: 8px 16px 16px; padding: 10px 14px;

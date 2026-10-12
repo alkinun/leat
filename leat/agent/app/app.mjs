@@ -135,6 +135,7 @@ async function start() {
   }
   me = await response.json();
   renderAccounts();
+  if (me.admin) watchHealth();
   const events = new EventSource("/api/events");
   events.onmessage = (event) => handle(JSON.parse(event.data));
   events.onerror = async () => {
@@ -781,6 +782,18 @@ function renderRecovering() {
   }, 15000);
 }
 $("cancelRecovery").onclick = () => del("/api/recovery");
+
+// of an admin's: what of the box needs attention, as its screen says it too, each a few words and
+// what to do; looked at every few minutes
+async function watchHealth() {
+  const answer = await fetch("/api/health").then((r) => r.ok ? r.json() : null).catch(() => null);
+  $("warnings").replaceChildren(...(answer?.warnings ?? []).map((w) => {
+    const item = element("div", "warning");
+    item.append(element("b", "", w.title), " ", w.said);
+    return item;
+  }));
+  setTimeout(watchHealth, 300000);
+}
 
 // a device's row: its name, when it was last seen, and a button that unpairs it; this device's
 // signs it out

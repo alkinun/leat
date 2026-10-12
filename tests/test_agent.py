@@ -726,6 +726,13 @@ def test_update(server, monkeypatch):
     assert ada("/api/update")[0] == 403 and ada("/api/update", "POST", {})[0] == 403
 
 
+def test_health(server):
+    # what of the box needs attention, the admins' to see: nothing of a Leat that is no box
+    assert json.loads(request(f"{server}/api/health")[1]) == {"warnings": []}
+    _, ada = joining(server, "Ada", paired(server))
+    assert ada("/api/health")[0] == 403
+
+
 def test_reset(server, agent, monkeypatch):
     # the box's state erased by an admin once they typed the office's name, of any case, or
     # "reset" of a box of none; anyone else may not
@@ -773,7 +780,7 @@ def test_box(agent, engine):
             assert status == 200 and json.loads(body) == {
                 "empty": True, "offline": False, "office": None, "address": True,
                 "timezone": ZONE, "model": {"id": "fake", "status": "loaded"},
-                "setup": server.accounts.code,
+                "setup": server.accounts.code, "warnings": [],
             }  # fmt: skip
             assert request(url, Host="k7x2qm.leatbox.net")[0] == 404
         finally:

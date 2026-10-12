@@ -41,6 +41,7 @@ from leat.agent.agent import Agent, Busy, NotFound, Refused
 from leat.agent.client import EngineError
 from leat.agent.workspace import Workspace
 from leat.box import system
+from leat.box.health import Watch
 from leat.chat import EFFORTS
 
 APP = Path(__file__).parent / "app"
@@ -114,6 +115,10 @@ class Server(ThreadingHTTPServer):
         self.name = name.lower() if name else None
         # a box's, set up by the code its screen shows
         self.agent, self.accounts = agent, Accounts(agent, locked=self.name is not None)
+        # what of a box needs attention, which its screen and its admins are told
+        self.watch = (
+            Watch(self.name, agent.workspace.root) if self.name and agent.workspace else None
+        )
         self.cookie = SECURE_COOKIE if self.name else COOKIE
         super().__init__((host, port), _Handler)
 
@@ -162,7 +167,7 @@ class _Handler(BaseHTTPRequestHandler):
                 recovery, left = accounts.recovering()
                 if recovery:
                     shown |= {"recovery": recovery, "recovery_left": left}
-                return self._json(200, shown)
+                return self._json(200, shown | {"warnings": self._warnings()})
             me = self._device()
             if path == "/api/me":
                 self._json(
@@ -179,6 +184,9 @@ class _Handler(BaseHTTPRequestHandler):
             elif path == "/api/update":  # the box's version, and an update ready, if one is
                 _admin(me)
                 self._json(200, _system({"update": "status"}))
+            elif path == "/api/health":  # what of the box needs attention, the admins' to see
+                _admin(me)
+                self._json(200, {"warnings": self._warnings()})
             elif path == "/api/activity":  # what was done, the latest first, before ?before
                 _admin(me)
                 query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
@@ -493,6 +501,11 @@ class _Handler(BaseHTTPRequestHandler):
         except _Unpaired:
             return None
         return device if device["person"] == person else None
+
+    def _warnings(self) -> list[dict[str, str]]:
+        # what of the box needs attention, of a box's; none of a Leat that is no box
+        agent, watch = self.server.agent, self.server.watch
+        return watch.warnings(lambda: agent.models_event().get("error")) if watch else []
 
     def _person(self, id: int, body: dict[str, Any], me: dict[str, Any]) -> dict[str, Any]:
         # a person changed: renamed, of themselves or an admin; made an admin or not, of an admin;

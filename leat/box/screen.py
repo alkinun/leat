@@ -63,6 +63,7 @@ FONTS = Path("/usr/share/fonts/inter")  # Inter, the app's own font but for Geis
 # the app's colours, dark: its page, text, muted text and lines; and the QR code's card, white, as
 # phones read dark codes on light best
 PAGE, TEXT, MUTED, LINE, CARD = "#0a0a0a", "#ededed", "#8f8f8f", "#262626", "#ffffff"
+WARNING = "#f5a524"  # of what needs attention
 BOLD, PLAIN = "\033[1;97m", "\033[0m"  # of the words that matter, written as text
 _TIOCLINUX, _KMSG_REDIRECT = 0x541C, 11  # the ioctl that sends the kernel's messages to a console
 _KDSETMODE, _KD_GRAPHICS = 0x4B3A, 1  # the ioctl that keeps the console's text off the display
@@ -100,6 +101,9 @@ class State:
     recovery: str | None = None
     recovery_left: int = 0  # seconds the recovery code holds for yet
     switching: bool = False
+    warnings: tuple[
+        tuple[str, str], ...
+    ] = ()  # what needs attention: each its title, and what to do
 
 
 def look(root: Path = ROOT) -> State:
@@ -119,6 +123,7 @@ def look(root: Path = ROOT) -> State:
         model=(model["id"], model["status"]) if model else None, offline=bool(told.get("offline")),
         setup=told.get("setup"), recovery=told.get("recovery"),
         recovery_left=int(told.get("recovery_left") or 0),
+        warnings=tuple((w["title"], w["said"]) for w in told.get("warnings", [])),
     )  # fmt: skip
 
 
@@ -220,6 +225,12 @@ def paint(state: State, size: tuple[int, int], now: datetime.datetime) -> Image.
         *((line, font(round(2.8 * u)), MUTED, 1.0 * u)
           for line in _wrapped(sentence, font(round(2.8 * u)), right - margin, pen)),
     ]  # fmt: skip
+    advice = font(round(2.4 * u))
+    for title, what in state.warnings[:2]:  # what needs attention, below what the box says
+        lines[-1] = (*lines[-1][:3], 3.0 * u)
+        lines += [(title, font(round(2.8 * u), "SemiBold"), WARNING, 0.6 * u),
+                  *((line, advice, WARNING, 0.6 * u)
+                    for line in _wrapped(what, advice, right - margin, pen))]  # fmt: skip
     if url:
         lines += [(url.removeprefix("https://"), font(round(3.2 * u), "Medium"), TEXT, 1.1 * u),
                   ("or type leat.local", font(round(2.4 * u)), MUTED, 0.0)]  # fmt: skip
@@ -261,6 +272,8 @@ def written(state: State, qr: str = "") -> list[str]:
     headline, sentence, url = said(state)
     title = f"Leat · {state.office}" if state.office else "Leat"
     lines = [f"{BOLD}{title}{PLAIN}", "", f"{BOLD}{headline}{PLAIN}", "", sentence]
+    for warned, what in state.warnings[:2]:
+        lines += ["", f"{BOLD}{warned}{PLAIN}: {what}"]
     if url:
         lines += ["", url, "", *qr.splitlines(), "", "or type leat.local"]
     if url and state.recovery:

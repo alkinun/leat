@@ -211,6 +211,10 @@ def test_said():
     assert screen.written(recovering, "##")[-3:] == [
         f"Recovery code, for 5 more minutes: {screen.BOLD}P4W R8N{screen.PLAIN}",
         "", "Press the power button again to switch the box off."]  # fmt: skip
+    # what needs attention, written below what the box says
+    warned = replace(READY, warnings=(("The box is nearly full", "5 GB are left."),))
+    assert f"{screen.BOLD}The box is nearly full{screen.PLAIN}: 5 GB are left." in screen.written(
+        warned, "##")  # fmt: skip
     asking = screen.said(screen.State(None, None, switching=True))
     assert asking == ("Switch off?", "Press the power button again to switch the box off.", None)
 
@@ -424,8 +428,8 @@ def test_system_power(tmp_path, monkeypatch):
 
 
 def test_system_update_status(tmp_path, monkeypatch):
-    # the box's version, and the newest UKI an update installed past it, whatever its tries; whether
-    # it looks for one now, and when it last did
+    # the box's version, and the newest UKI an update installed past it, whatever its tries, or one
+    # that failed, its tries spent; whether it looks for one now, and when it last did
     monkeypatch.setattr(system, "OS_RELEASE", tmp_path / "os-release")
     monkeypatch.setattr(system, "UKIS", tmp_path)
     (tmp_path / "os-release").write_text('ID=arch\nIMAGE_VERSION="2026.10.11.2241-fe75bd0"\n')
@@ -434,16 +438,18 @@ def test_system_update_status(tmp_path, monkeypatch):
     monkeypatch.setattr(system, "_shown", lambda unit, name: shown[name])
     assert system.handle({"update": "status"}) == {
         "version": "2026.10.11.2241-fe75bd0", "ready": None, "checking": False,
-        "checked": 1791760000}  # fmt: skip
+        "checked": 1791760000, "failed": None,
+    }  # fmt: skip
     (tmp_path / "leat_2026.10.12.0300-abc1234+3-0.efi").write_bytes(b"")
     (tmp_path / "leat_2026.10.11.1900-0000000.efi").write_bytes(b"")  # older: none to boot into
     shown.update(ActiveState="activating", LastTriggerUSecRealtime="")
-    assert system.update_status() | {"version": None} == {
-        "version": None,
-        "ready": "2026.10.12.0300-abc1234",
-        "checking": True,
-        "checked": None,
-    }
+    status = system.update_status()
+    assert (status["ready"], status["checking"], status["checked"], status["failed"]) == (
+        "2026.10.12.0300-abc1234", True, None, None)  # fmt: skip
+    (tmp_path / "leat_2026.10.12.0300-abc1234+3-0.efi").rename(
+        tmp_path / "leat_2026.10.12.0300-abc1234+0-3.efi")  # fmt: skip
+    status = system.update_status()  # its tries spent: failed, and none ready
+    assert (status["ready"], status["failed"]) == (None, "2026.10.12.0300-abc1234")
     ran = []
     monkeypatch.setattr(system.subprocess, "run", lambda args, **kw: ran.append(args))
     assert system.handle({"update": "check"}) == {}
@@ -553,6 +559,38 @@ def test_health(tmp_path, monkeypatch):
     with pytest.raises(SystemExit):
         health.main()
     assert ran == [["systemctl", "--no-block", "reboot"]]
+
+
+def test_watch(tmp_path, monkeypatch):
+    # what needs attention: the name unfound, said once it has gone so for ten minutes, as a new
+    # address takes some; the disk nearly full; the model out of reach; an update failed. Looked at
+    # once a minute at most
+    now = [0.0]
+    found = {"addresses": [], "ipv4": "192.168.1.20", "free": 50e9, "failed": None}
+    monkeypatch.setattr(health.socket, "getaddrinfo", lambda name, port, family: [
+        (2, 1, 6, "", (a, port)) for a in found["addresses"]])  # fmt: skip
+    monkeypatch.setattr(health, "ipv4", lambda: found["ipv4"])
+    monkeypatch.setattr(
+        health.shutil, "disk_usage", lambda path: SimpleNamespace(total=100e9, free=found["free"])
+    )
+    monkeypatch.setattr(health.system, "ask", lambda r: {"failed": found["failed"]})
+    watch = health.Watch("k7x2qm.leatbox.net", tmp_path, clock=lambda: now[0])
+    assert watch.warnings() == []  # unfound just now
+    now[0] = 599
+    assert watch.warnings() == []
+    now[0] = 660
+    assert [w["key"] for w in watch.warnings()] == ["name"]
+    found.update(addresses=["192.168.1.20"], free=5e9, failed="2026.10.12.0300-abc1234")
+    assert [w["key"] for w in watch.warnings()] == ["name"]  # looked at a minute ago: as then
+    now[0] = 720
+    warned = watch.warnings(lambda: "the engine is not reachable")
+    assert [w["key"] for w in warned] == ["disk", "model", "update"]
+    assert "5 GB" in warned[0]["said"] and "2026.10.12.0300-abc1234" in warned[2]["said"]
+    found.update(addresses=["192.168.1.30"], free=50e9, failed=None)  # the name, of another
+    now[0] = 780
+    assert watch.warnings() == []  # unfound again, from now
+    now[0] = 1380
+    assert [w["key"] for w in watch.warnings()] == ["name"]
 
 
 def test_units():

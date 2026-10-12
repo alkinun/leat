@@ -174,17 +174,21 @@ def reset() -> dict[str, Any]:
 
 def update_status() -> dict[str, Any]:
     """The box's version; the newer one an update installed, which the box boots into as it next
-    restarts, at night by systemd-sysupdate-reboot.timer, if one is; whether it is looking for an
-    update now; and when it last looked, in seconds since the epoch, if it has."""
+    restarts, at night by systemd-sysupdate-reboot.timer, if one is; one that failed, its tries
+    spent, the box back on the one before, if one did; whether it is looking for an update now; and
+    when it last looked, in seconds since the epoch, if it has."""
     version = next((line.split("=", 1)[1].strip('"') for line in OS_RELEASE.read_text().splitlines()
                     if line.startswith("IMAGE_VERSION=")), None)  # fmt: skip
-    installed = [_version(p.name) for p in UKIS.glob("leat_*.efi")]
+    ukis = list(UKIS.glob("leat_*.efi"))
+    failed = [_version(p.name) for p in ukis if "+0-" in p.name]  # of no tries left
+    installed = [_version(p.name) for p in ukis if "+0-" not in p.name]
     newer = max((v for v in installed if version and _order(v) > _order(version)), default=None,
                 key=_order)  # fmt: skip
     checking = _shown("systemd-sysupdate.service", "ActiveState") in ("activating", "active")
     last = _shown("systemd-sysupdate.timer", "LastTriggerUSecRealtime").removeprefix("@")
     return {"version": version, "ready": newer, "checking": checking,
-            "checked": int(last) if last.isdigit() else None}  # fmt: skip
+            "checked": int(last) if last.isdigit() else None,
+            "failed": max(failed, default=None, key=_order)}  # fmt: skip
 
 
 def zone() -> str | None:
