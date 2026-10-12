@@ -25,18 +25,15 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-
-from leat.agent.agent import Agent  # noqa: E402
-from leat.agent.client import Client  # noqa: E402
-from leat.agent.embeddings import Embedder  # noqa: E402
-from leat.agent.index import Index  # noqa: E402
-from leat.agent.ocr import Transcriber  # noqa: E402
-from leat.agent.store import Store  # noqa: E402
-from leat.agent.tools import every  # noqa: E402
-from leat.agent.workspace import Workspace  # noqa: E402
-from leat.chat import EFFORTS  # noqa: E402
+from leat.agent.agent import Agent
+from leat.agent.client import Client
+from leat.agent.embeddings import Embedder
+from leat.agent.index import Index
+from leat.agent.ocr import Transcriber
+from leat.agent.store import Store
+from leat.agent.tools import every
+from leat.agent.workspace import Workspace
+from leat.chat import EFFORTS
 
 TIMEOUT = 300  # seconds a turn may take
 

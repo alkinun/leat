@@ -28,7 +28,10 @@ Es gibt keine Telemetrie und keine Nutzungsstatistik, die an den Anbieter geht.
 | **Aufgerufene Webseiten**: ihre Adresse | Die jeweilige Webseite | Nur wenn Leat eine Seite liest | Ja, mit der Websuche |
 | **Updates**: eine Abfrage, ob es ein neues Update gibt, und sein Download | leatbox.com, der Server des Anbieters | Alle paar Stunden | Nein; die Box holt Updates nur ab, sie sendet nichts dabei |
 | **Die Adresse der Box im Büronetz**: ihre private IPv4-Adresse (etwa 192.168.1.20) und ihre lokale IPv6-Adresse, mit der Kennung der Box | api.leatbox.net, der Server des Anbieters (Hetzner, Deutschland) | Wenn sie sich ändert, sonst einmal am Tag | Nein |
-| **Das Zertifikat der Box** für HTTPS | Let's Encrypt, über den Server des Anbieters | Etwa alle zwei Monate | Nein |
+| **Das Zertifikat der Box** für HTTPS: ihr Name | Let's Encrypt (Internet Security Research Group, USA), direkt; den Nachweis, dass der Name ihr gehört, hinterlegt die Box beim Server des Anbieters | Etwa alle zwei Monate | Nein |
+| **Prüfung dieses Nachweises**: DNS-Abfragen nach dem Namen der Box | Öffentliche DNS-Server von Cloudflare (1.1.1.1), Quad9 (9.9.9.9) und Google (8.8.8.8) | Mit jedem Zertifikat | Nein |
+| **Ob die Box das Internet erreicht**: ein Verbindungsaufbau ohne Inhalt | api.leatbox.net, der Server des Anbieters | Jede Minute | Nein |
+| **Ob die Box unter ihrem Namen gefunden wird**: DNS-Abfragen nach ihrem Namen und nach leatbox.net | Der DNS-Server, den das Büronetz der Box gibt (meist der Router) | Jede Minute | Nein |
 | **Die Uhrzeit** | Öffentliche Zeitserver (NTP) | Regelmäßig | Nein |
 
 **Zu den Websuchen:** Leat wird angewiesen, nach der allgemeinen Frage zu suchen, nie nach Namen oder
@@ -47,14 +50,15 @@ erreichbar. Dieser Name und die private Adresse der Box sind öffentlich (jedes 
 private Adresse ist nur im Büronetz erreichbar, und der Name sagt nicht, wem die Box gehört.
 
 **„Internet aus“ betrifft Leat, nicht die Box:** Ist das Internet in den Einstellungen ausgeschaltet,
-sucht und liest Leat nichts im Web. Die Box selbst holt weiter Updates, meldet ihre Adresse und
-erneuert ihr Zertifikat, wie oben beschrieben. Keine dieser Verbindungen enthält Daten des Büros.
+sucht und liest Leat nichts im Web. Die Box selbst holt weiter Updates, meldet ihre Adresse, erneuert
+ihr Zertifikat und prüft, ob sie erreichbar ist, wie oben beschrieben. Keine dieser Verbindungen enthält Daten des Büros.
 
 ## Was der Anbieter sieht
 
 Der Anbieter von Leat sieht nur, was sein Server ohnehin erhält: die Kennung der Box, ihre private
-Adresse im Büronetz, die öffentliche IP-Adresse des Büros, von der sie sich meldet und Updates abholt,
-und wann sie das tut. Er hat keinen Zugang zur Box: Es gibt kein Fernwartungskonto, keinen
+Adresse im Büronetz, die öffentliche IP-Adresse des Büros, von der sie sich meldet, Updates abholt
+und jede Minute prüft, ob sie das Internet erreicht, und wann sie das tut. Let's Encrypt sieht den
+Namen der Box und die öffentliche IP-Adresse des Büros, wenn die Box ihr Zertifikat erneuert. Er hat keinen Zugang zur Box: Es gibt kein Fernwartungskonto, keinen
 Schlüssel und keine Hintertür. Hilfe bei Problemen gibt es nur über eine Diagnose-Datei, die ein Admin
 des Büros selbst herunterlädt und weitergibt; sie enthält nur Angaben zum System der Box, keine
 Dateien, Chats oder Namen von Personen.

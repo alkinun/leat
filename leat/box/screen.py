@@ -31,8 +31,6 @@ import json
 import re
 import select
 import shutil
-import socket
-import ssl
 import struct
 import subprocess
 import sys
@@ -46,7 +44,7 @@ from pathlib import Path
 from PIL import Image, ImageColor, ImageDraw, ImageFont
 
 from leat import locales
-from leat.box import system
+from leat.box import system, watch
 from leat.box.address import ipv4
 from leat.box.provision import ROOT
 
@@ -117,7 +115,7 @@ def look(root: Path = ROOT) -> State:
     """The box's state, as it is now."""
     name, address = _name(root), _address()
     booting = time.clock_gettime(time.CLOCK_BOOTTIME) < BOOTING
-    state = State(name, address, booting=booting, free=_free(), version=_version(),
+    state = State(name, address, booting=booting, free=_free(), version=system.image_version(),
                   language=LANGUAGE, local=_local())  # fmt: skip
     if name is None or address is None:
         return state
@@ -480,25 +478,9 @@ def _free() -> int | None:
     return None
 
 
-def _version() -> str | None:
-    # the box's image's version, as os-release says it
-    with contextlib.suppress(OSError):
-        for line in Path("/usr/lib/os-release").read_text().splitlines():
-            if line.startswith("IMAGE_VERSION="):
-                return line.split("=", 1)[1].strip('"') or None
-    return None
-
-
 def _certified(name: str) -> bool:
     # whether the box's own HTTPS, on this machine, has a certificate a browser takes for its name
-    context = ssl.create_default_context()
-    with (
-        contextlib.suppress(OSError),
-        socket.create_connection(("127.0.0.1", 443), timeout=3) as raw,
-        context.wrap_socket(raw, server_hostname=name),
-    ):
-        return True
-    return False
+    return bool(watch.days_left(name))
 
 
 def box() -> dict | None:

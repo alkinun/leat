@@ -29,7 +29,8 @@ elif [ "$(echo "$internal" | grep -c .)" = 1 ]; then
 else
     refuse "name the disk of these to install onto: $(echo $internal)"
 fi
-room=$(lsblk -bdno SIZE "$disk")
+room=$(lsblk -bdno SIZE "$disk")  # its 18.5 GB of partitions, as flash.sh's stick, and room for
+# the office's files and a model, which a stick for a test has not
 [ "$room" -ge $((32 * 1024 * 1024 * 1024)) ] || refuse "$disk holds $((room >> 30)) GB, and a box needs 32"
 
 echo "$disk: $(lsblk -dno MODEL "$disk" | xargs), $((room >> 30)) GB. Everything on it is erased."

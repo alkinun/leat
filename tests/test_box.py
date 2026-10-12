@@ -560,7 +560,7 @@ def test_watch(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(watch.system, "ask", lambda r: {"failed": found["failed"]})
     monkeypatch.setattr(watch, "_reached", lambda: found["reached"])
-    monkeypatch.setattr(watch, "_days_left", lambda name: found["left"])
+    monkeypatch.setattr(watch, "days_left", lambda name: found["left"])
     seen = watch.Watch("k7x2qm.leatbox.net", tmp_path, lambda: found["model"],
                        clock=lambda: now[0])  # fmt: skip
     assert seen.look() == [] and seen.warnings == []  # unfound just now
@@ -595,7 +595,7 @@ def test_watch(tmp_path, monkeypatch):
     assert [w["key"] for w in seen.look()] == ["name"]
 
 
-def test_watch_days_left(tmp_path, monkeypatch):
+def test_watchdays_left(tmp_path, monkeypatch):
     # the days left of the certificate the box serves its name with, as a browser trusting its CA
     # sees it: 0 once expired; none of one it does not trust, nor while it serves none
     name = "k7x2qm.leatbox.net"
@@ -618,7 +618,7 @@ def test_watch_days_left(tmp_path, monkeypatch):
 
         threading.Thread(target=serve, daemon=True).start()
         try:
-            return watch._days_left(name)
+            return watch.days_left(name)
         finally:
             listening.close()
 
@@ -634,7 +634,7 @@ def test_watch_days_left(tmp_path, monkeypatch):
     monkeypatch.setattr(watch.ssl, "create_default_context", default)
     assert serving("-days", "10") is None  # of a CA no browser trusts
     monkeypatch.setattr(watch, "HTTPS", ("127.0.0.1", 9))
-    assert watch._days_left(name) is None  # none served
+    assert watch.days_left(name) is None  # none served
 
 
 def test_units():
@@ -648,6 +648,13 @@ def test_units():
     assert "-m leat.box.address" in updater
     shown = (box / "systemd/leat-screen.service").read_text()
     assert "TTYPath=/dev/tty2" in shown and "-m leat.box.screen --take" in shown
+    # and each unit is enabled by the image's preset, as each the preset enables is one of these,
+    # but the helper's, of its socket, and systemd's own
+    preset = box / "image/mkosi.extra/usr/lib/systemd/system-preset/10-leat.preset"
+    enabled = {line.split()[1] for line in preset.read_text().splitlines()
+               if line.startswith("enable leat-")}  # fmt: skip
+    units = {p.name for p in (box / "systemd").iterdir()} - {"leat-system@.service"}
+    assert enabled == units
 
 
 def test_screen_look(tmp_path, monkeypatch):
@@ -655,8 +662,8 @@ def test_screen_look(tmp_path, monkeypatch):
     # a box of none yet
     monkeypatch.setattr(screen, "_name", lambda root: NAME)
     monkeypatch.setattr(screen, "_certified", lambda name: True)
-    for helper in ("_free", "_version"):
-        monkeypatch.setattr(screen, helper, lambda: None)
+    monkeypatch.setattr(screen, "_free", lambda: None)
+    monkeypatch.setattr(system, "image_version", lambda: None)
     warned = {"key": "model", "title": "Leat can't reach its model",
               "said": "Chats get no answer until it is back. Restart the box."}  # fmt: skip
     monkeypatch.setattr(screen, "box", lambda: {"empty": True, "warnings": [warned]})

@@ -1,6 +1,7 @@
 [Unit]
-Description=Put back what the box's system helper set, as an update replaced the system's partition
-# the time zone, kept on the state's partition, before anything tells the time by it
+Description=Put back what the box's system helper set: its time zone and fixed address
+# kept on the state's partition, as an update replaced the system's and /run is lost at each boot:
+# before anything tells the time by them
 RequiresMountsFor=/var/lib
 Before=leat-agent.service leat-screen.service
 ConditionPathExists=/var/lib/leat-system

@@ -68,7 +68,7 @@ class Watch:
                                   "Leat works in the office, but web searches, updates and its "
                                   "certificate wait. Check the box's cable, and the office's "
                                   "firewall."))  # fmt: skip
-        left = _days_left(self.name)
+        left = days_left(self.name)
         if left is not None and left <= EXPIRING:
             title = (f"Leat's certificate expires in {left} days" if left > 1 else
                      "Leat's certificate expires within a day" if left == 1 else
@@ -136,10 +136,10 @@ def _reached() -> bool:
         return False
 
 
-def _days_left(name: str) -> int | None:
-    # the days the certificate the box serves its name with has left, 0 once expired; None if it
-    # serves none yet, as Caddy has its first some seconds after the box's first boot, or another
-    # that browsers do not trust, as of Let's Encrypt's staging CA, which a box under test has
+def days_left(name: str) -> int | None:
+    """The days the certificate the box serves its name with has left, 0 once expired; None if it
+    serves none yet, as Caddy has its first some seconds after the box's first boot, or another
+    that browsers do not trust, as of Let's Encrypt's staging CA, which a box under test has."""
     context = ssl.create_default_context()
     try:
         with (socket.create_connection(HTTPS, TIMEOUT) as connection,

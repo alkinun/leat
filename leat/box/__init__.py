@@ -6,5 +6,8 @@ leat agent, serves the app at that name over HTTPS, with a certificate it has fr
 DNS-01, through the box's acme-dns account; leat.box.address keeps the name pointing at the box as
 its address changes. Nothing of the office's work leaves the box for either.
 
-The box keeps what registration gave it in /etc/leat, as leat.box.provision writes it.
+The box keeps what registration gave it in /etc/leat, as leat.box.provision writes it. Its screen,
+leat.box.screen, says whether it is ready and where; leat.box.system makes the few changes of the
+system leat agent asks for, as root; leat.box.watch says what needs attention; and
+leat.box.health keeps an update's boot once Leat answers.
 """

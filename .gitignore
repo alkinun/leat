@@ -11,3 +11,4 @@ dist/
 .claude/worktrees/
 .coverage*
 reports/
+/leat-caddy

@@ -222,7 +222,7 @@ def test_warnings_translated(tmp_path, monkeypatch):
     now = [0.0]
     monkeypatch.setattr(watch, "_found", lambda name: False)
     monkeypatch.setattr(watch, "_reached", lambda: False)
-    monkeypatch.setattr(watch, "_days_left", lambda name: 3)
+    monkeypatch.setattr(watch, "days_left", lambda name: 3)
     monkeypatch.setattr(
         watch.shutil, "disk_usage", lambda path: SimpleNamespace(total=100e9, free=5e9)
     )
@@ -242,7 +242,7 @@ def test_warnings_translated(tmp_path, monkeypatch):
     for w in warned:
         for text in (w["title"], w["said"]):
             assert locales.translated(text, "de") != text, text
-    monkeypatch.setattr(watch, "_days_left", lambda name: 0)
+    monkeypatch.setattr(watch, "days_left", lambda name: 0)
     assert (
         locales.translated(seen.look()[2]["title"], "de")
         == "Das Zertifikat von Leat ist abgelaufen"

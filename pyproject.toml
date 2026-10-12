@@ -1,7 +1,7 @@
 [project]
 name = "leat"
 version = "0.0.1"
-description = "A minimal, fast LLM inference engine built on tinygrad."
+description = "A private AI assistant that runs on a box in the office, and its LLM inference engine, built on tinygrad."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"

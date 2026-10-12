@@ -18,11 +18,12 @@ Each secret is root's alone to read; the services are given them by systemd, as 
 
 import argparse
 import json
-import os
 import re
 import sys
 from pathlib import Path
 from typing import Any
+
+from leat.box.system import write
 
 ROOT = Path("/etc/leat")
 # an ID as the registry gives one
@@ -40,18 +41,9 @@ def provision(box: dict[str, Any], root: Path = ROOT) -> None:
     if not _ID.fullmatch(id) or not name.startswith(f"{id}."):
         raise ValueError(f"not a box's ID and name: {id!r}, {name!r}")
     root.mkdir(parents=True, exist_ok=True)
-    _write(root / "box.env", f"LEAT_ID={id}\nLEAT_NAME={name}\nLEAT_REGISTRY={registry}\n", 0o644)
-    _write(root / "registry-secret", secret, 0o600)
-    _write(root / "acme-dns.json", json.dumps(account, indent=2) + "\n", 0o600)
-
-
-def _write(path: Path, text: str, mode: int) -> None:
-    # a file whole, of its mode from the start, so that a secret is never another's to read
-    temporary = path.with_name(f".{path.name}.new")
-    temporary.unlink(missing_ok=True)
-    with os.fdopen(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode), "w") as f:
-        f.write(text)
-    temporary.replace(path)
+    write(root / "box.env", f"LEAT_ID={id}\nLEAT_NAME={name}\nLEAT_REGISTRY={registry}\n", 0o644)
+    write(root / "registry-secret", secret, 0o600)
+    write(root / "acme-dns.json", json.dumps(account, indent=2) + "\n", 0o600)
 
 
 def main(argv: list[str] | None = None) -> None:

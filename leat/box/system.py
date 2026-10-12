@@ -15,8 +15,9 @@ checked, by a helper systemd runs as root for each request, on a socket leat's g
 
 Each answer is a JSON object: {} or what was asked, or {"error": why}. The agent asks by ask().
 
-What it sets that the system's partition holds, as the time zone, it keeps on the state's too, and
-puts back at boot, by --restore, as an update replaces the system's.
+What it sets that the system's partition holds, as the time zone, or /run, as the fixed address, it
+keeps on the state's too, and puts back at boot, by --restore, as an update replaces the system's
+and a boot clears /run.
 """
 
 import contextlib
@@ -83,7 +84,7 @@ def set_timezone(zone: Any) -> dict[str, Any]:
     subprocess.run(["timedatectl", "set-timezone", zone], check=True, capture_output=True,
                    timeout=10)  # fmt: skip
     KEPT.mkdir(exist_ok=True)  # systemd's StateDirectory, on a box
-    _write(KEPT / "timezone", f"{zone}\n", 0o644)
+    write(KEPT / "timezone", f"{zone}\n", 0o644)
     return {}
 
 
@@ -114,7 +115,7 @@ def network(how: Any) -> dict[str, Any]:
         return {}
     fixed = _checked_network(how)
     KEPT.mkdir(exist_ok=True)
-    _write(kept, json.dumps(fixed) + "\n", 0o644)
+    write(kept, json.dumps(fixed) + "\n", 0o644)
     _fix(fixed)
     subprocess.run(["systemctl", "stop", "leat-network-check.timer"], capture_output=True,
                    timeout=10)  # an earlier check's, of an address set again since  # fmt: skip
@@ -150,15 +151,16 @@ def reset() -> dict[str, Any]:
     a flag on the ESP, of which systemd-repart, on the boot the box restarts to, deletes the state's
     partition and makes it anew, of a new key, before anything unlocks it. systemd's own factory
     reset is none of the box's, as it marks itself done in the initrd, which makes no partitions."""
-    _write(RESET, "", 0o600)
+    write(RESET, "", 0o600)
     return power("restart")
 
 
 # the system's services, whose logs say nothing of anyone's work, as leat agent's errors might of a
 # file's name, and Caddy's requests of the path asked for: Caddy's own of its certificate alone
 LOGGED = ["leat-address", "leat-screen", "leat-health", "leat-fallback", "leat-provision",
-          "leat-system@*", "systemd-sysupdate*", "systemd-repart", "systemd-cryptsetup@*",
-          "systemd-networkd", "systemd-timesyncd"]  # fmt: skip
+          "leat-system@*", "leat-system-restore", "leat-network-check", "systemd-sysupdate*",
+          "systemd-repart", "systemd-cryptsetup@*", "systemd-networkd",
+          "systemd-timesyncd"]  # fmt: skip
 DIAGNOSED = [
     ("Version", ["cat", "/etc/os-release"]),
     ("Up", ["uptime"]),
@@ -202,8 +204,7 @@ def update_status() -> dict[str, Any]:
     restarts, at night by systemd-sysupdate-reboot.timer, if one is; one that failed, its tries
     spent, the box back on the one before, if one did; whether it is looking for an update now; and
     when it last looked, in seconds since the epoch, if it has."""
-    version = next((line.split("=", 1)[1].strip('"') for line in OS_RELEASE.read_text().splitlines()
-                    if line.startswith("IMAGE_VERSION=")), None)  # fmt: skip
+    version = image_version()
     ukis = list(UKIS.glob("leat_*.efi"))
     failed = [_version(p.name) for p in ukis if "+0-" in p.name]  # of no tries left
     installed = [_version(p.name) for p in ukis if "+0-" not in p.name]
@@ -215,6 +216,15 @@ def update_status() -> dict[str, Any]:
     return {"version": version, "ready": newer, "checking": checking,
             "checked": int(last) if last.isdigit() else None,
             "failed": max(failed, default=None, key=_order)}  # fmt: skip
+
+
+def image_version() -> str | None:
+    """The box's image's version, as os-release says it, or None off a box."""
+    with contextlib.suppress(OSError):
+        for line in OS_RELEASE.read_text().splitlines():
+            if line.startswith("IMAGE_VERSION="):
+                return line.split("=", 1)[1].strip('"') or None
+    return None
 
 
 def zone() -> str | None:
@@ -246,9 +256,10 @@ def asked(request: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("this Leat runs on no box of its own, so it cannot do that") from e
 
 
-def _write(path: Path, text: str, mode: int) -> None:
-    # a file whole, of its mode from the start, on the disk before it takes its name, as a power cut
-    # just after left a file written but not yet on the disk empty
+def write(path: Path, text: str, mode: int) -> None:
+    """Writes a file whole, of its mode from the start, so that a secret is never another's to
+    read, and on the disk before it takes its name, as a power cut just after left a file written
+    but not yet on the disk empty."""
     temporary = path.with_name(f".{path.name}.new")
     with open(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode), "w") as f:
         f.write(text)
@@ -306,7 +317,7 @@ def _fix(fixed: dict[str, Any] | None) -> None:
     else:
         dns = "".join(f"DNS={d}\n" for d in fixed["dns"])
         FIXED.parent.mkdir(parents=True, exist_ok=True)
-        _write(FIXED, f"# leat.box.system's, of an admin's fixed address\n[Match]\nType=ether\n\n"
+        write(FIXED, f"# leat.box.system's, of an admin's fixed address\n[Match]\nType=ether\n\n"
                f"[Network]\nAddress={fixed['address']}\nGateway={fixed['gateway']}\n{dns}"
                "MulticastDNS=yes\n", 0o644)  # fmt: skip
     subprocess.run(["networkctl", "reload"], check=True, capture_output=True, timeout=10)

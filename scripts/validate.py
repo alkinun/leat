@@ -24,11 +24,10 @@ import time
 import urllib.request
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
+from leat.draft import mtp, own_drafter
+from leat.gguf import GGUF
 
-from leat.draft import mtp, own_drafter  # noqa: E402
-from leat.gguf import GGUF  # noqa: E402
+ROOT = Path(__file__).resolve().parent.parent
 
 # a reply to this, streamed from the server, shows the model loads, generates and detokenizes
 SERVER_PROMPT = "Name three primary colors, one per line."

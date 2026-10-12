@@ -15,17 +15,13 @@ import argparse
 import datetime
 import shutil
 import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-
-from leat.agent.agent import Agent  # noqa: E402
-from leat.agent.client import Client  # noqa: E402
-from leat.agent.store import Store  # noqa: E402
-from leat.agent.workspace import Workspace  # noqa: E402
+from leat.agent.agent import Agent
+from leat.agent.client import Client
+from leat.agent.store import Store
+from leat.agent.workspace import Workspace
 
 
 def _march(day: int) -> datetime.date:

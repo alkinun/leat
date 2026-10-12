@@ -16,25 +16,46 @@ browser ── https://k7x2qm.leatbox.net ──▶ Caddy (leat-proxy) ──▶
 
 | | |
 |---|---|
-| `build-caddy.sh` | builds `leat-caddy`, Caddy of a pinned release with the acme-dns module, which goes to `/usr/local/bin/leat-caddy` |
 | `Caddyfile` | the front door, at `/usr/share/leat/box/Caddyfile`: the app at the box's name over HTTPS, HTTP/2 and 3; plain HTTP, as `http://leat.local`, redirected there |
-| `systemd/leat-proxy.service` | runs it, as a user of its own, on 80 and 443 |
+| `build-caddy.sh` | builds `leat-caddy`, Caddy of a pinned release with the acme-dns module; the image's build runs it |
+| `systemd/leat-provision.service` | `python -m leat.box.provision`: on the first boot, takes in the registration a stick or VM put on the boot partition, into `/etc/leat` |
+| `systemd/leat-proxy.service` | Caddy, as a user of its own, on 80 and 443 |
+| `systemd/leat-agent.service` | leat agent, with `--name <id>.leatbox.net`, on loopback alone, behind Caddy |
+| `systemd/leat-searxng.service` | SearXNG, the web's search, for Leat alone, on loopback |
 | `systemd/leat-address.service`, `.timer` | `python -m leat.box.address`: at boot and every 30 s, the registry is told the box's address on the office's network, when it changed or a day went by |
-| `leat/box/provision.py` | writes a box's registration into `/etc/leat`, when we build it |
+| `systemd/leat-screen.service` | `python -m leat.box.screen`: what a display plugged into the box shows, and its power button |
+| `systemd/leat-system.socket`, `leat-system@.service` | `python -m leat.box.system`: the few changes of the system leat agent asks for as root, each checked: time zone, fixed address, power, factory reset, updates, diagnostics |
+| `systemd/leat-system-restore.service` | puts back, at boot, the time zone and fixed address an update's new system lacks |
+| `systemd/leat-health.service`, `leat-fallback.service` | an update's trial boot kept once Leat answers, and restarted if it never does, or falls into emergency mode, until systemd-boot goes back to the system before |
+| `image/` | the disk image, of mkosi: below |
 
-leat agent runs with `--name <id>.leatbox.net`, on loopback alone, behind Caddy.
+`leat.box.watch`, in leat agent, says what needs attention, on the screen and in Settings: a disk
+nearly full, the model or the internet out of reach, a certificate about to expire, the name not
+found, an update that failed.
 
 ## Making a box
 
 ```bash
-box/build-caddy.sh leat-caddy                                    # needs Go
-ssh leatbox leatbox-registry register | sudo python -m leat.box.provision
+box/image/keys.sh                                       # once: the keys that sign the images
+cd box/image && mkosi --profile dev -f build            # mkosi.output/leat-box.raw
+ssh leatbox leatbox-registry register > leat-box.json   # a box's registration: its name, keys
 ```
 
-Provisioning writes `/etc/leat/box.env` (its ID, name and the registry's address), and, root's
-alone, `registry-secret` and `acme-dns.json`, which systemd gives the services as credentials.
-On its first boot the box tells the registry its address and Caddy has its certificate, in some
-ten seconds.
+Then one of:
+
+- `box/image/vm.sh leat-box.json`: a VM of it, with a TPM, as below.
+- `sudo box/image/flash.sh /dev/sdX leat-box.json`: a USB stick a machine boots as a box, the
+  registration on its boot partition.
+- `box/image/serve.sh`, then, on a machine booted on a live system,
+  `curl -s http://ADDRESS:8099/install | bash`: the image installed onto its internal disk. It has
+  no registration yet: put `leat-box.json` on its boot partition before it first boots, or it
+  says "Not set up".
+
+The dev profile adds an SSH key, of the git-ignored `mkosi.local.conf`; a box we ship has none. On
+its first boot, `leat-provision` writes `/etc/leat/box.env` (its ID, name and the registry's
+address) and, root's alone, `registry-secret` and `acme-dns.json`, which systemd gives the
+services as credentials. The box tells the registry its address and Caddy has its certificate, in
+some ten seconds. `box/image/initrd.py` lists the initrd's files, as when a driver is missing.
 
 ## What the box reaches on the internet, for this
 
@@ -93,7 +114,8 @@ data for, and its GPG key every update they take: lost, no box takes an update a
 
 ## Trying it on a machine of your own
 
-On ports 8443 and 8088, without root, its state in a folder of its own:
+On ports 8443 and 8088, without root, its state in a folder of its own, of `box/build-caddy.sh
+leat-caddy`'s Caddy, which needs Go:
 
 ```bash
 D=~/.local/share/leat-devbox
@@ -103,7 +125,7 @@ N=$(sed -n 's/^LEAT_NAME=//p' $D/etc/box.env)
 uv run leat agent --name $N --data $D/data &
 LEAT_NAME=$N CREDENTIALS_DIRECTORY=$D/etc LEAT_HTTPS_PORT=8443 LEAT_HTTP_PORT=8088 \
     XDG_DATA_HOME=$D/caddy XDG_CONFIG_HOME=$D/caddy \
-    leat-caddy run --config box/Caddyfile --adapter caddyfile
+    ./leat-caddy run --config box/Caddyfile --adapter caddyfile
 ```
 
 `LEAT_ACME_CA=https://acme-staging-v02.api.letsencrypt.org/directory` has its certificate of Let's

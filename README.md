@@ -2,7 +2,21 @@
 
 # leat
 
-A minimal, fast LLM inference engine built on [tinygrad](https://github.com/tinygrad/tinygrad).
+Leat is a private AI assistant for law firms and other offices bound to secrecy. It runs entirely on
+a box in the office: the model, the files, the chats and everything read from them stay there. This
+repository holds all of it:
+
+- **The engine**, `leat serve` (`leat/`, `leat/kernels/`): a minimal, fast LLM inference engine
+  built on [tinygrad](https://github.com/tinygrad/tinygrad), serving the OpenAI API. Below.
+- **The assistant and its app**, `leat agent` (`leat/agent/`): conversations, projects, files and
+  their index, workflows, people and devices, the network drive, in English and German. Below,
+  from "leat agent".
+- **The box** (`box/`, `leat/box/`): the signed disk image that makes a machine an office's Leat,
+  its screen, HTTPS by its own name, and updates. See [box/README.md](box/README.md).
+- **Data protection** (`docs/datenschutz/`): the papers an office's data-protection officer asks
+  for, in German.
+
+## The engine
 
 leat runs GGUF models with their weights kept in the quantized storage format. The goal is single-stream decode limited by memory bandwidth, not by the engine. It was developed on an NVIDIA RTX 3090 and is moving to AMD's Strix Halo.
 
@@ -247,7 +261,7 @@ Without an AMD GPU, the kernels run on tinygrad's emulated RDNA 3 GPU, as [tests
 PYTHONPATH=path/to/tinygrad DEV=MOCK+AMD uv run pytest -m gpu -n auto
 ```
 
-CI runs all but the real-model tests on every push: lint and types, the CPU suite on Python 3.12 and 3.14, and the GPU tests on the emulator. It fails if together they run less than 80% of leat; most of what they leave is NVIDIA's alone, the tensor cores' mma.sync, which the GPU run above covers.
+CI runs all but the real-model tests on every push: lint and types, the CPU suite on Python 3.12 and 3.14, the GPU tests on the emulator, and the tokenizers compared with llama.cpp's. It fails if together they run less than 80% of leat; most of what they leave is NVIDIA's alone, the tensor cores' mma.sync, which the GPU run above covers.
 
 ## License
 

@@ -142,7 +142,12 @@ auf einer Box im Büro läuft (Leat).
 | Dienst | Wofür | Daten |
 |---|---|---|
 | Hetzner Online GmbH, Deutschland | Server des Anbieters (Updates, Adressmeldung, Zertifikat) | Kennung der Box, ihre private Adresse, die öffentliche IP-Adresse des Büros |
-| Let's Encrypt (Internet Security Research Group, USA) | Zertifikat der Box | Der Name der Box (öffentlich) |
+| Let's Encrypt (Internet Security Research Group, USA) | Zertifikat der Box, von der Box direkt angefragt | Der Name der Box (öffentlich), die öffentliche IP-Adresse des Büros |
+
+Die Box fragt außerdem öffentliche DNS-Server (Cloudflare, Quad9, Google) nach ihrem eigenen Namen,
+wenn sie ihr Zertifikat erneuert; diese erfahren den Namen der Box und die öffentliche IP-Adresse des
+Büros. ⟨Ob Let's Encrypt und diese DNS-Server als Unterauftragnehmer gelten, obwohl die Box sie
+direkt anfragt, prüft die Anwältin oder der Anwalt.⟩
 
 ## 8. Was Leat nicht tut
 
