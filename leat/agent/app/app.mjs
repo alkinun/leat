@@ -1644,14 +1644,16 @@ const DID = {
   edit: ["edited a file", (n) => `edited ${n} files`],
 };
 
-// what a turn's calls did, in a few words, in the order it began them; those that failed not
+// what a turn's calls did, in a few words, in the order it began them; those that failed not, nor
+// a web search not made, of what must not leave the box, but that it was kept out
 function summary(all) {
-  const calls = all.filter((m) => !m.info?.error);
+  const calls = all.filter((m) => !m.info?.error && !m.info?.kept);
   const parts = [...new Set(calls.map((m) => m.name))].map((name) => {
     const n = calls.filter((m) => m.name === name).length;
     const [one, many] = own(DID, name) ?? [`used ${name}`, () => `used ${name}`];
     return n > 1 ? many(n) : one;
   });
+  if (all.some((m) => m.info?.kept)) parts.push("kept names out of a web search");
   const said = parts.join(", ") || "worked";
   return said[0].toUpperCase() + said.slice(1);
 }
