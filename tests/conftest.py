@@ -1,5 +1,6 @@
 import gc
 import os
+import resource
 from collections.abc import Callable
 from pathlib import Path
 
@@ -14,6 +15,19 @@ if worker := os.environ.get("PYTEST_XDIST_WORKER"):
     # sharing one crash now and then
     cache = Path(os.environ.get("XDG_CACHE_HOME", "~/.cache")).expanduser() / "tinygrad"
     os.environ.setdefault("CACHEDB", str(cache / f"cache-{worker}.db"))
+    # and its kernels lowered and compiled in its own process, as the workers are the parallelism:
+    # tinygrad's pool of processes beneath each, of the cores over the workers, is of one process
+    # on 4 cores and 4 workers, as CI's, and hangs there now and then, worker and pool each
+    # waiting on the other
+    os.environ.setdefault("PARALLEL", "0")
+else:
+    # a stack for the workers xdist starts, which take this process's limit, deep enough for
+    # tinygrad's rewrites of a model's whole graph, which recurse past the usual 8 MB, as the pool's
+    # processes did them
+    stack, most = resource.getrlimit(resource.RLIMIT_STACK)
+    if stack != resource.RLIM_INFINITY and stack < 64 << 20:
+        wanted = 64 << 20 if most == resource.RLIM_INFINITY else min(64 << 20, most)
+        resource.setrlimit(resource.RLIMIT_STACK, (wanted, most))
 if os.environ["DEV"].split(":")[0] == "MOCK+AMD":
     # tinygrad's emulated RDNA 3 GPU, whose kernels the system's clang compiles: see tests/hip.py.
     # Compiles run in this process, where the compiler is replaced, not in a pool of workers.

@@ -37,6 +37,7 @@ for old in $(ls leat_*.efi | sort -V | head -n -2); do
 done
 sha256sum leat_* > SHA256SUMS
 gpg --homedir "$keys/gnupg" --batch --yes --detach-sign --output SHA256SUMS.gpg SHA256SUMS
+gpgconf --homedir "$keys/gnupg" --kill gpg-agent  # which signing started, and which outlives it else
 echo "the $channel update $version, in $updates"
 [ "${1:-}" = --upload ] || exit 0
 case $version in *-dirty) echo "refused: $version is of changes not committed" >&2; exit 1 ;; esac

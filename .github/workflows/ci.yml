@@ -23,9 +23,10 @@ jobs:
       - run: uv run mypy
 
   test:
-    # the hermetic suite on the CPU, on the oldest Python leat supports and the newest
+    # the hermetic suite on the CPU, on the oldest Python leat supports and the newest: about 45
+    # minutes on a runner's 4 cores, which here take 10; the slowest tests named at the end
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
@@ -36,7 +37,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: uv sync --locked
-      - run: uv run pytest -n auto --cov --cov-report=
+      - run: uv run pytest -n auto --cov --cov-report= --durations=20
         env:
           DEV: CPU
           COVERAGE_FILE: .coverage.cpu-${{ matrix.python }}
@@ -49,9 +50,10 @@ jobs:
   kernels:
     # the GPU tests, the warp-level kernels' and every tiny model through them, on tinygrad's
     # emulated RDNA 3 GPU, as tests/hip.py sets up: their HIP C compiled by the runner's clang,
-    # and the emulator from tinygrad's source tree, of the commit pyproject.toml pins
+    # and the emulator from tinygrad's source tree, of the commit pyproject.toml pins: about 95
+    # minutes on a runner's 4 cores
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v7
       - run: sudo apt-get update -q && sudo apt-get install -y -q clang lld
@@ -61,7 +63,7 @@ jobs:
           git -C "$RUNNER_TEMP/tinygrad" checkout --quiet "$commit"
       - uses: astral-sh/setup-uv@v10.2.0
       - run: uv sync --locked
-      - run: uv run pytest -m gpu -n auto --cov --cov-report=
+      - run: uv run pytest -m gpu -n auto --cov --cov-report= --durations=20
         env:
           DEV: MOCK+AMD
           PYTHONPATH: ${{ runner.temp }}/tinygrad
