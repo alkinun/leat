@@ -103,10 +103,10 @@ def wikitext() -> Path:
 
 @pytest.fixture
 def engine():
-    # leat agent's tests' fake of leat serve, scripted reply by reply: see tests/test_agent.py
+    # leat agent's tests' fake of leat serve, scripted reply by reply: see tests/agents.py
     import threading
 
-    from tests.test_agent import FakeEngine
+    from tests.agents import FakeEngine
 
     engine = FakeEngine()
     threading.Thread(target=engine.serve_forever, args=(0.01,), daemon=True).start()
@@ -114,3 +114,21 @@ def engine():
     engine.released.set()
     engine.shutdown()
     engine.server_close()
+
+
+@pytest.fixture
+def server(agent):
+    # leat agent's server, of the test's agent, its owner set up: see tests/agents.py
+    from tests.agents import serving
+
+    with serving(agent) as url:
+        yield url
+
+
+@pytest.fixture
+def workspace(tmp_path):
+    # a workspace of leat agent's, its sandbox of LEAT_SANDBOX's environment, if given
+    from leat.agent.workspace import Workspace
+    from tests.agents import SANDBOX
+
+    return Workspace(tmp_path / "workspace", Path(SANDBOX) if SANDBOX else None)

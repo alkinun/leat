@@ -1,11 +1,10 @@
 """ask_files: every file asked the same by a reader, the answers a table, each row citing its file,
 saved as a spreadsheet; how far it is told as it goes, and a stop heeded. Saving the spreadsheet
-needs LEAT_SANDBOX, as tests/test_files.py's documents do."""
+needs LEAT_SANDBOX: see tests/agents.py."""
 
 import json
 import os
 import threading
-from pathlib import Path
 
 import pytest
 
@@ -15,16 +14,14 @@ from leat.agent.index import Index
 from leat.agent.store import Store
 from leat.agent.tools import Context, ask, files
 from leat.agent.workspace import Workspace
-from tests.test_agent import call, ended, until
-from tests.test_files import documents as needs_sandbox
+from tests.agents import call, ended, needs_sandbox, until
 
 SANDBOX = os.environ.get("LEAT_SANDBOX")
 
 
 @pytest.fixture
-def space(tmp_path) -> Workspace:
-    root = Workspace(tmp_path / "workspace", Path(SANDBOX) if SANDBOX else None)
-    return root.space("people/1")
+def space(workspace) -> Workspace:
+    return workspace.space("people/1")
 
 
 @pytest.fixture(autouse=True)

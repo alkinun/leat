@@ -1,23 +1,21 @@
 """Documents made and changed as an office does, in the sandbox: made of markdown, a template's
-fields filled, and edits suggested. Those made need LEAT_SANDBOX, as tests/test_files.py's
-documents do."""
+fields filled, and edits suggested. Those made need LEAT_SANDBOX: see tests/agents.py."""
 
 import json
 import os
-from pathlib import Path
 
 import pytest
 
 from leat.agent.tools import Context, files, office
 from leat.agent.workspace import Workspace
-from tests.test_files import documents as needs_sandbox
+from tests.agents import needs_sandbox
 
 SANDBOX = os.environ.get("LEAT_SANDBOX")
 
 
 @pytest.fixture
-def space(tmp_path) -> Workspace:
-    return Workspace(tmp_path / "workspace", Path(SANDBOX) if SANDBOX else None)
+def space(workspace) -> Workspace:
+    return workspace
 
 
 def make(space: Workspace, code: str) -> None:

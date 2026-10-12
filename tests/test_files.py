@@ -9,7 +9,6 @@ import shutil
 import socket
 import urllib.error
 import urllib.request
-from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -22,8 +21,8 @@ from leat.agent.context import message as _api
 from leat.agent.store import Store
 from leat.agent.tools import files
 from leat.agent.workspace import Workspace
-from tests.test_agent import call as calling
-from tests.test_agent import cookie, ended, serving, until
+from tests.agents import call as calling
+from tests.agents import cookie, ended, needs_sandbox, until
 
 
 def _sandboxes() -> bool:
@@ -33,14 +32,7 @@ def _sandboxes() -> bool:
     return Workspace(Path("/tmp")).run("print(1)", timeout=30).output.strip() == "1"
 
 
-SANDBOX = os.environ.get("LEAT_SANDBOX")
 sandboxed = pytest.mark.skipif(not _sandboxes(), reason="needs bubblewrap, and its namespaces")
-documents = pytest.mark.skipif(not SANDBOX, reason="needs LEAT_SANDBOX, the sandbox's environment")
-
-
-@pytest.fixture
-def workspace(tmp_path) -> Workspace:
-    return Workspace(tmp_path / "workspace", Path(SANDBOX) if SANDBOX else None)
 
 
 def test_paths(workspace, tmp_path):
@@ -163,7 +155,7 @@ except OSError:
     assert len(printed.output) < workspace_module.OUTPUT + 100
 
 
-@documents
+@needs_sandbox
 def test_documents(workspace):
     # what the libraries make, read back
     files.run(
@@ -261,12 +253,6 @@ def test_system_prompt(agent, tmp_path):
     assert "with run. The skills:\n  - skills/docx/SKILL.md: Word documents" in with_workspace
     assert "workspace" not in without and "skills" not in without
     assert "skills" not in _system(True)["content"]  # without run
-
-
-@pytest.fixture
-def server(agent) -> Iterator[str]:
-    with serving(agent) as url:
-        yield url
 
 
 def call(url: str, method: str = "GET", data: bytes | None = None):
@@ -621,7 +607,7 @@ def test_api_folders(server, agent):
 def test_activity(server, agent, engine, tmp_path):
     # what people do, and what Leat does for them, noted as it is done, never what was asked;
     # the admins' alone to see, the latest first, in pages
-    from tests.test_agent import request
+    from tests.agents import request
 
     agent.engine = Client(engine.url)
     agent.tools = {t.name: t for t in files.tools()}

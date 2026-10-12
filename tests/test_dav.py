@@ -5,7 +5,7 @@ import os
 import socket
 import urllib.parse
 import xml.etree.ElementTree as ET
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -14,7 +14,7 @@ from leat.agent.agent import Agent
 from leat.agent.client import Client
 from leat.agent.store import Store
 from leat.agent.workspace import Workspace
-from tests.test_agent import cookie, request, serving
+from tests.agents import cookie, request
 
 D = "{DAV:}"
 Asking = Callable[..., tuple[int, dict[str, str], bytes]]
@@ -24,12 +24,6 @@ Asking = Callable[..., tuple[int, dict[str, str], bytes]]
 def agent(tmp_path) -> Agent:
     workspace = Workspace(tmp_path / "workspace")
     return Agent(Store(tmp_path / "leat.db"), Client("http://127.0.0.1:9"), [], workspace)
-
-
-@pytest.fixture
-def server(agent) -> Iterator[str]:
-    with serving(agent) as url:
-        yield url
 
 
 def drive(server: str, password: str | None = None) -> Asking:

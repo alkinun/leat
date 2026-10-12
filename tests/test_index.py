@@ -1,10 +1,9 @@
 """The index: documents' places, passages, the matching of words, German's too, reading files as
 they change, and searching them, through search_files as the model does. Reading PDFs needs
-LEAT_SANDBOX, as tests/test_files.py's documents do."""
+LEAT_SANDBOX: see tests/agents.py."""
 
 import functools
 import os
-from pathlib import Path
 
 import pytest
 
@@ -16,16 +15,9 @@ from leat.agent.embeddings import GEMMA2, QWEN3, Embedder
 from leat.agent.index import COMMON, PASSAGE, Index, _match, fold, passages
 from leat.agent.store import Store
 from leat.agent.tools import Context, files
-from leat.agent.workspace import Workspace
-from tests.test_agent import call, ended, until
-from tests.test_files import documents as needs_sandbox
+from tests.agents import call, ended, needs_sandbox, until
 
 SANDBOX = os.environ.get("LEAT_SANDBOX")
-
-
-@pytest.fixture
-def workspace(tmp_path) -> Workspace:
-    return Workspace(tmp_path / "workspace", Path(SANDBOX) if SANDBOX else None)
 
 
 @pytest.fixture

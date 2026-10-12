@@ -5,7 +5,6 @@ or not a folder of a name; the owner's alone to set, through the API."""
 import json
 import os
 import time
-from collections.abc import Iterator
 
 import pytest
 
@@ -15,19 +14,13 @@ from leat.agent.client import Client
 from leat.agent.store import Store
 from leat.agent.sync import mirror
 from leat.agent.workspace import Workspace
-from tests.test_agent import request, serving
+from tests.agents import request
 
 
 @pytest.fixture
 def agent(tmp_path) -> Agent:
     return Agent(Store(tmp_path / "leat.db"), Client("http://127.0.0.1:9"), [],
                  Workspace(tmp_path / "workspace"))  # fmt: skip
-
-
-@pytest.fixture
-def server(agent) -> Iterator[str]:
-    with serving(agent) as url:
-        yield url
 
 
 def test_mirror(tmp_path, monkeypatch):
