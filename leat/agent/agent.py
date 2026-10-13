@@ -68,9 +68,10 @@ in the file."""
 CITE = """\
 ## Sources
 Cite each source you use, a page or a passage of a file, by the number its tool gave it, as [1] or \
-[2][3], after the words it supports. Quote a source word for word, in quotation marks, its number \
-right after, as "…" [1]: each quote is checked against its source, and one not found there is \
-flagged to the user."""
+[2][3], after the words it supports: in every answer of what you searched or read, however long, \
+and as you tell of a file you made of it. Quote a source word for word, in quotation marks, its \
+number right after, as "…" [1]: each quote is checked against its source, and one not found there \
+is flagged to the user."""
 # of the system prompt, of a conversation in a project
 PROJECT = """\
 ## This project
