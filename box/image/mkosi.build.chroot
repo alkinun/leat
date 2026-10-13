@@ -44,6 +44,7 @@ cp -a /opt/leat /opt/searxng "$DESTDIR/opt/"
 # box/'s files
 install -Dm644 -t "$DESTDIR/usr/lib/systemd/system" "$src"/box/systemd/*
 install -Dm644 "$src/box/Caddyfile" "$DESTDIR/usr/share/leat/box/Caddyfile"
+install -Dm644 "$src/box/reach.html" "$DESTDIR/usr/share/leat/box/reach/index.html"
 install -Dm644 "$src/box/searxng.yml" "$DESTDIR/usr/share/leat/searxng.yml"
 install -Dm755 "$src/box/searxng" "$DESTDIR/usr/lib/leat/searxng"
 install -Dm644 "$src/box/sysusers.d/leat.conf" "$DESTDIR/usr/lib/sysusers.d/leat.conf"

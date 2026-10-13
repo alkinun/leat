@@ -1,6 +1,8 @@
 # The box's front door: the app at https://{$LEAT_NAME}, the box's name, with a certificate Caddy
 # has from Let's Encrypt by DNS-01, through the box's acme-dns account; and every plain HTTP request,
-# as of http://leat.local or the box's address, sent there. leat agent listens on loopback behind it.
+# as of http://leat.local or the box's address, a page that sends the browser there once the name
+# answers, and says why not while it does not, as box/reach.html. leat agent listens on loopback
+# behind it.
 {
 	admin off
 	auto_https disable_redirects
@@ -25,5 +27,8 @@
 }
 
 http:// {
-	redir https://{$LEAT_NAME}{uri} 308
+	root * /usr/share/leat/box/reach
+	rewrite * /index.html
+	templates
+	file_server
 }

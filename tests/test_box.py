@@ -667,6 +667,19 @@ def test_units():
     # a dev image's updates of its own channel, as a box's never take its SSH
     postinst = (box / "image/mkosi.postinst.chroot").read_text()
     assert "https://leatbox.com/updates/dev/" in postinst and "/usr/lib/leat/channel" in postinst
+    # plain HTTP's page, the box's name of Caddy's templates, in the image where Caddy serves it;
+    # its German the screen's, as the locales have it
+    assert "root * /usr/share/leat/box/reach" in (box / "Caddyfile").read_text()
+    build = (box / "image/mkosi.build.chroot").read_text()
+    assert '"$src/box/reach.html" "$DESTDIR/usr/share/leat/box/reach/index.html"' in build
+    reach = (box / "reach.html").read_text()
+    assert '{{env "LEAT_NAME"}}' in reach
+    german = json.loads((Path(__file__).parent.parent / "leat/locales/de.json").read_text())
+    for said in ("Leat can't be found by its name",
+                 "The router hides addresses inside the office from the devices here. On a "
+                 "FRITZ!Box, add leatbox.net under {where}."):  # fmt: skip
+        for text in (said, german[said]):
+            assert text.replace("{where}", "${where}") in reach, text
     # updates looked for by the timer's own name, as a preset enables none of an alias's, as
     # systemd-sysupdate.timer is now
     assert "enable systemd-sysupdate-update.timer" in preset.read_text()
