@@ -16,7 +16,7 @@ browser ── https://k7x2qm.leatbox.net ──▶ Caddy (leat-proxy) ──▶
 
 | | |
 |---|---|
-| `Caddyfile` | the front door, at `/usr/share/leat/box/Caddyfile`: the app at the box's name over HTTPS, HTTP/2 and 3; plain HTTP, as `http://leat.local`, redirected there |
+| `Caddyfile`, `reach.html` | the front door, at `/usr/share/leat/box/Caddyfile`: the app at the box's name over HTTPS, HTTP/2 and 3; plain HTTP, as `http://leat.local`, a page that goes on there once the name answers, and says what to change on the router while it does not |
 | `build-caddy.sh` | builds `leat-caddy`, Caddy of a pinned release with the acme-dns module; the image's build runs it |
 | `systemd/leat-provision.service` | `python -m leat.box.provision`: on the first boot, takes in the registration a stick or VM put on the boot partition, into `/etc/leat` |
 | `systemd/leat-enroll.service` | `python -m leat.box.enroll`: on the first boot of a box with no registration, registers it of its TPM, as its maker's fingerprint of it allows |
